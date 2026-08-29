@@ -387,10 +387,19 @@ router.post('/assess', async (req, res, next) => {
       city: scheduledService.service_address_city,
       zip: scheduledService.service_address_zip,
     } : null;
-    const assessedElsewhere = !!(svcPremise
+    const svcPremiseUsable = !!(svcPremise
       && fanoutPremise.addressMatchKey(svcPremise.address_line1)
-      && fanoutPremise.addressMatchKey(customer.address_line1)
-      && fanoutPremise.homesDiffer(svcPremise, { address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip }));
+      && fanoutPremise.addressMatchKey(customer.address_line1));
+    const assessedElsewhere = svcPremiseUsable
+      && fanoutPremise.homesDiffer(svcPremise, { address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip });
+    // After a RECORDED move, absence of premise evidence is not innocence:
+    // photos backfilled against an unstamped legacy service could be of the
+    // former lawn — confirmation then requires a usable service premise that
+    // positively matches the current home (codex gh-r46). With no move on
+    // record, an unstamped service stays confirmable as before.
+    const premiseProven = preAnalysisMoveStamp
+      ? (svcPremiseUsable && !assessedElsewhere)
+      : !assessedElsewhere;
 
     // Photo quality gating — runs in parallel with a small cap so a
     // 3-photo upload doesn't pay 3× the latency of a 1-photo upload.
@@ -699,7 +708,7 @@ router.post('/assess', async (req, res, next) => {
           const stampNow = (await trx('property_preferences')
             .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
           const stampMs = (v) => (v ? new Date(v).getTime() : null);
-          const grassFresh = !assessedElsewhere && stampMs(stampNow) === stampMs(preAnalysisMoveStamp);
+          const grassFresh = premiseProven && stampMs(stampNow) === stampMs(preAnalysisMoveStamp);
           if (!prior?.grass_type && grassFresh) {
             const { GRASS_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
             await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);

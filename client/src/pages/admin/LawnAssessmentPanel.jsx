@@ -1287,6 +1287,14 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   </div>{" "}
                   <select
                     value={turfProfile[key] || ""}
+                    // Reviewing the grass without changing it (Bahia → Bahia
+                    // move) must still count as a review — a native select
+                    // fires no change event when the shown value is re-picked
+                    // (codex #3565 gh-r46), so focusing the field marks it
+                    // reviewed; a value with no review stays unconfirmed.
+                    onFocus={() => {
+                      if (key === "grass_type" && (turfProfile[key] || "")) setGrassTouched(true);
+                    }}
                     onChange={(e) => {
                       if (key === "grass_type") setGrassTouched(true);
                       updateProfileField(key, e.target.value);

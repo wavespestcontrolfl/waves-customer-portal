@@ -1097,6 +1097,11 @@ async function updateCustomer(customerId, updates) {
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      // Coords cleared atomically with the address/move-stamp write — never
+      // the former home's lat/lng beside the new address (codex #3565 gh-r46).
+      if (addressSubmitted) {
+        await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      }
       if (clean.monthly_rate !== undefined
         && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
           !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -1167,9 +1172,9 @@ async function updateCustomer(customerId, updates) {
       .catch((err) => logger.error(`[ib] deferred DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
   }
   if (addressSubmitted) {
-    // Coords may point at the old address — clear + re-geocode, then re-mirror the
-    // fresh coords onto the primary property (syncPrimaryAddress nulled them).
-    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+    // lat/lng were cleared inside the update transaction (gh-r46) —
+    // re-geocode, then re-mirror the fresh coords onto the primary property
+    // (syncPrimaryAddress nulled them).
     void require('../geocoder').ensureCustomerGeocoded(customerId)
       .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
       .catch(() => {});
@@ -1415,6 +1420,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
             .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
         if (addressSubmitted) {
+          // Coords cleared atomically with the address/move-stamp write (gh-r46).
+          await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
           await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
           await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
         }
@@ -1446,7 +1453,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
-      await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      // lat/lng cleared in-transaction (gh-r46) — re-geocode only.
       void require('../geocoder').ensureCustomerGeocoded(customerId)
         .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
         .catch(() => {});

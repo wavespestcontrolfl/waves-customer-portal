@@ -108,7 +108,9 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     const assess = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
     // The auto-capture confirms only when it actually SET the grass (blank before) AND the photos
     // describe the current home: linked visit not stamped elsewhere, no move since analysis began (gh-r45).
-    expect(assess).toMatch(/const grassFresh = !assessedElsewhere && stampMs\(stampNow\) === stampMs\(preAnalysisMoveStamp\);/);
+    // gh-r46: after a recorded move, confirmation needs a POSITIVE premise match (unstamped service ≠ innocence).
+    expect(assess).toMatch(/const premiseProven = preAnalysisMoveStamp\s*\? \(svcPremiseUsable && !assessedElsewhere\)\s*: !assessedElsewhere;/);
+    expect(assess).toMatch(/const grassFresh = premiseProven && stampMs\(stampNow\) === stampMs\(preAnalysisMoveStamp\);/);
     expect(assess).toMatch(/if \(!prior\?\.grass_type && grassFresh\) \{[\s\S]*?confirmIrrigationFields\(trx, customerId, \[GRASS_CONFIRMED_FIELD\]\)/);
     expect(assess).toMatch(/homesDiffer\(svcPremise, \{ address_line1: customer\.address_line1/);
   });

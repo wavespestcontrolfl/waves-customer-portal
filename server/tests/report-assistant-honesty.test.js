@@ -158,6 +158,8 @@ describe('watering questions answer with the weekly plan when the report carries
     for (const q of ['How long should I run each zone?', 'How many minutes per zone?']) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
+    // gh-r46: "time zone" is not watering intent — the appointment router answers it.
+    expect(answerServiceReportQuestion({ question: 'What time zone is my next appointment?', data })).not.toBe(`${plan.title} ${plan.detail}`);
     // Unrelated questions keep their routing.
     expect(answerServiceReportQuestion({ question: 'When can my dog go outside?', data })).not.toMatch(/check the rain/);
   });
