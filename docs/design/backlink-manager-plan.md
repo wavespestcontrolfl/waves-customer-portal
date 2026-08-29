@@ -278,9 +278,9 @@ alone, nor send on an outreach approval alone.
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // CHECK (provider IN ('deterministic_runner','openai_cua','claude_cu','stagehand','grok','hermes','human')) — `hermes` = the legacy shared HERMES_SERVICE_TOKEN identity (§12): investigation/draft reports only, no payment/credential capability
-t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and — because a DB row cannot prove whether the external call took effect — treats it as **`mutation_ambiguous`** (outcome, added to the enum): the runner first RECONCILES per action before anything is re-sent (`create_account`: probe the login/‘email already registered’ path or the inbox for the welcome mail; verification activation: reload the account and read its verified state; `submit`: the existing profile/listing probe the Judge uses) and only retries the external call when reconciliation PROVES the first one did not take effect; an unprovable state stays `mutation_ambiguous` for the owner card — a crashed mutation is therefore never repeated blindly
+t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`, `accept_terms`): `${prospect_id}:${action}:${instance_key}` where `instance_key` is the §3.3b action-instance identity (`-:1`, `annual:1`, `2027:1`, `followup:1`, `terms:1`) — so an initial acquisition submit and a renewal submit never share a key; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and — because a DB row cannot prove whether the external call took effect — treats it as **`mutation_ambiguous`** (outcome, added to the enum): the runner first RECONCILES per action before anything is re-sent (`create_account`: probe the login/‘email already registered’ path or the inbox for the welcome mail; verification activation: reload the account and read its verified state; `submit`: the existing profile/listing probe the Judge uses) and only retries the external call when reconciliation PROVES the first one did not take effect; an unprovable state stays `mutation_ambiguous` for the owner card — a crashed mutation is therefore never repeated blindly
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
-t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered) | accept_terms (the guarded legal-acceptance mutation: its own idempotency_key `${prospect_id}:accept_terms:${generation}` — never aliased to resume; outcomes `terms_accepted` on success, `mutation_ambiguous` on an unproven crash (reconciled by re-reading the account's agreement state), `terms_changed` when the live hash ≠ legal_terms_hash)
+t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered) | accept_terms (the guarded legal-acceptance mutation: its own idempotency_key `${prospect_id}:accept_terms:terms:${generation}` — never aliased to resume; outcomes `terms_accepted` on success, `mutation_ambiguous` on an unproven crash (reconciled by re-reading the account's agreement state), `terms_changed` when the live hash ≠ legal_terms_hash)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back on lease expiry (ET-day rollover re-slots the same row in place, §13) — audit-only, NEVER counted by the cap query; the same row returns to slot_reserved on the instance's next lease
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
@@ -653,8 +653,11 @@ preferred_provider           = 'deterministic_runner'   (CHECK against the provi
 **Payment and communication are independent authorities.** The decision returns a SET of
 required authorities, one per dimension the path touches: `payment` (when
 `payment_required`), `communication` (when the path is an outreach/content type), and
-`execution` (every non-outreach type: free/account/claim/membership/human-step — never
-both communication and execution on one placement). A paid guest post therefore needs
+`execution` (every non-outreach type: free/account/claim/membership/human-step — an outreach
+placement carries an execution row ONLY as the `accept_terms` instance when
+`legal_attestation=true`, §3.3b: the function then emits BOTH the communication decision AND
+an execution decision of `OWNER_LEGAL` for that instance — never the general `acquire`
+execution row). A paid guest post therefore needs
 BOTH an `AUTO_PAID_WITHIN_POLICY`/`OWNER_PAYMENT` decision AND an
 `AUTO_OUTREACH`/`OWNER_OUTREACH` decision with its exact-draft approval; the claim,
 reservation and send/submit steps require every dimension's gate/approval to be satisfied
@@ -1144,10 +1147,10 @@ together:
   when the settlement itself completes the acquisition) so it continues toward verification
   instead of stranding; the placement's non-payment dimensions proceed
   normally), and
-  `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
+  `OWNER_HUMAN_STEP`, which is never leasable to an automated provider WHILE UNSATISFIED: its row stays
   `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
-  which the bridge re-decides THAT placement only, with the human step recorded as satisfied on the placement's own authority instance/session (`human_step_done` attempt + `satisfied_at`) — the shared path-level `agent_completable` flag is NEVER changed by a checkpoint (a sibling location's session has not completed it, and a recurring human-only step must recur); only an independent investigator pass may re-mark the path itself; the path's lane
+  which the bridge re-decides THAT placement only: §6.3 receives the placement's satisfied human-step instance as a durable prerequisite (`satisfied_at` on the `OWNER_HUMAN_STEP` authority row), treats the human part as done, and decides the REMAINING execution as if `agent_completable=true` for this placement alone (`AUTO_*` or `OWNER_*` per policy, new instance `-:2`), so the claim predicate can lease it — the human step recorded as satisfied on the placement's own authority instance/session (`human_step_done` attempt + `satisfied_at`) — the shared path-level `agent_completable` flag is NEVER changed by a checkpoint (a sibling location's session has not completed it, and a recurring human-only step must recur); only an independent investigator pass may re-mark the path itself; the path's lane
   gate is on (**`GATE_LINK_AUTHORITY` for EVERY automated claim, `AUTO_*` and owner-approved alike — the kill switch is checked at
   claim and again immediately before EVERY irreversible external action — submit, send, mint, account creation, verification-link activation, and accepting/signing legal terms — under the same locked revalidation (authority row + approval + gate), never
   only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach
@@ -1236,7 +1239,7 @@ phase** — `submit()`, and, for the deterministic runner alone, `createAccount(
 `activateVerification()` (the verification link's GET is treated as mutating and allowed
 only here) — each of which is entered only after the locked authority/approval/gate recheck,
 a durable attempt row (`slot_reserved → submitting` for submit; `create_account`/`resume`
-attempts with their own persisted `idempotency_key` `${prospect_id}:${action}:${generation}` (§3.4, partial UNIQUE) for the
+attempts with their own persisted `idempotency_key` `${prospect_id}:${action}:${instance_key}` (§3.4, partial UNIQUE) for the
 credentialed operations, so a crash mid-phase resumes the existing row rather than repeats the external call), and is re-blocked
 when the phase returns — so a mis-click or page script during `completeForm` can never POST
 around the submission guard or the daily cap, and account creation cannot be blocked by the
@@ -1472,7 +1475,7 @@ unset its gate; budget kill = the issuer program's limit.
   checked inside the send claim against every real contact source — `customers.email` plus
   **every** slot in `SERVICE_CONTACT_SLOTS` from `services/customer-contact.js` (today
   `service_contact_email`, `service_contact2_email`, `service_contact3_email`; the lookup is
-  BUILT from that export so a new slot is covered automatically), and `leads.email` — the check runs
+  BUILT from that export so a new slot is covered automatically), `notification_prefs.billing_email` (a sendable customer address per `customer-email-fanout.js`), and `leads.email` — the check runs
   inside EVERY send claim — auto-send, owner-approved send, follow-up — not only before an
   auto-send: an identified customer recipient is a **hard block** (`skipped`,
   `reason='customer_recipient'`, row parked with the reason; no approval can send it), while a
@@ -1510,8 +1513,7 @@ unset its gate; budget kill = the issuer program's limit.
   re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
   the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released (→ `slot_released`). The runner's
   `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
-  one conversation per inbox
-  (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
+  one conversation per inbox — enforced by a durable RECIPIENT-level guard, not the domain lock: `claimProspectDomain` locks only the canonical domain, so the send claim additionally takes `pg_advisory_xact_lock(hashtext('link_outreach_inbox:' || lower(recipient)))` and refuses when any other placement with that recipient is `contacted`/`negotiating`/in a send in-flight (a partial unique index on `lower(recipient_email)` over those statuses makes it durable across pods); signup lanes coexist per location by design; no templated blasts.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
   `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
   with `expected_rel='sponsored'` and scored accordingly.
