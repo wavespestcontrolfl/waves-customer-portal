@@ -10,9 +10,9 @@ dashboard's secret-redactor mangles secrets interpolated into shell commands):
     url = f"{PORTAL_URL}/api/integrations/backlink-worker/claim?type=outreach&n=5"
     r = requests.get(url, headers=signed_headers("GET", url))
 
+    url2 = f"{PORTAL_URL}/api/integrations/backlink-worker/report"
     body = json.dumps(payload).encode()          # sign EXACTLY the bytes you send
-    r = requests.post(f"{PORTAL_URL}/api/integrations/backlink-worker/report",
-                      data=body,
+    r = requests.post(url2, data=body,
                       headers={**signed_headers("POST", url2, body),
                                "Content-Type": "application/json"})
 

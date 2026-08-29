@@ -148,6 +148,14 @@ describe('link-worker-auth HMAC', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  test('a chunked body (no content-length) without captured raw bytes is rejected', async () => {
+    const url = '/api/integrations/backlink-worker/report';
+    const body = Buffer.from('a=1');
+    const req = makeReq({ method: 'POST', url, headers: { ...signedHeaders({ method: 'POST', url, body }), 'transfer-encoding': 'chunked', 'content-type': 'application/x-www-form-urlencoded' } });
+    const { res } = await drive(req, 'report');
+    expect(res.statusCode).toBe(401);
+  });
+
   test('a replayed nonce is rejected by the insert-first consumption', async () => {
     const url = '/api/integrations/backlink-worker/claim';
     const headers = signedHeaders({ url });

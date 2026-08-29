@@ -137,8 +137,13 @@ async function verifyHmac(req, endpoint) {
 
   // A body-bearing request must have its raw bytes captured; without them the
   // hash cannot be proven over the original bytes, so the request is rejected.
-  const contentLength = Number(req.headers['content-length'] || 0);
-  if (contentLength > 0 && !(req.rawBody && req.rawBody.length)) {
+  // Body presence is indicated by content-length > 0 OR any transfer-encoding
+  // (a chunked request carries no content-length) — a chunked or non-JSON body
+  // the express.json verify hook never captured must not authenticate, or a
+  // later parser (express.urlencoded) would hand the handler bytes the
+  // signature never covered.
+  const hasBody = Number(req.headers['content-length'] || 0) > 0 || Boolean(req.headers['transfer-encoding']);
+  if (hasBody && !(req.rawBody && req.rawBody.length)) {
     return { status: 401, error: 'raw request body unavailable for signing' };
   }
 
