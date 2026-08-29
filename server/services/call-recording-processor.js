@@ -14583,7 +14583,21 @@ function analyzeLeadAddress(line1, line2) {
   // overlong unit would otherwise consume the whole 255 budget as the
   // protected tail and drop the street (codex r4 P2).
   let unit = clampUnit(line2);
-  if (!unit) return { address: formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH), unitConflict: false };
+  // Rebuild from the PARSED parts — street, its inline unit, and the place
+  // tail a full-address line1 may carry ("100 Main St, Apt 4, Sarasota, FL
+  // 34236") — so the unit and the place are the protected tail of the
+  // bound, never the first thing a long street's truncation eats, and a
+  // full-address line1 never loses its city/ZIP (codex r3 + r6 P2). The
+  // no-line2 shape takes the same path: an inline-only unit is a supported
+  // legacy shape and must survive the bound too (codex r8 P2).
+  const parts = splitStreetLineUnitParts(street);
+  const embedded = clampUnit(parts.unit);
+  if (!unit) {
+    return {
+      address: formatAddressBounded({ line1: parts.street, line2: embedded || null, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict: false,
+    };
+  }
   // A BARE unit ("4B", "102") gains its designator ("Unit 4B") before it is
   // stored: the shared parser and the ownership key only recognize a
   // comma-separated unit that leads with a designator or '#', so a bare
@@ -14593,13 +14607,6 @@ function analyzeLeadAddress(line1, line2) {
   // the caller said them.
   const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
   if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
-  // Rebuild from the PARSED parts — street, its inline unit, and the place
-  // tail a full-address line1 may carry ("100 Main St, Apt 4, Sarasota, FL
-  // 34236") — so the unit and the place are the protected tail of the
-  // bound, never the first thing a long street's truncation eats, and a
-  // full-address line1 never loses its city/ZIP (codex r3 + r6 P2).
-  const parts = splitStreetLineUnitParts(street);
-  const embedded = clampUnit(parts.unit);
   const key = (u) => unitLineValueKey(normalizeUnitLine(u));
   const duplicate = !!embedded && key(embedded) === key(unit);
   const unitConflict = !!embedded && !duplicate;

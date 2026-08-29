@@ -27,6 +27,15 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St', '   ')).toBe('100 Main St');
   });
 
+  test('no line2: an inline-only unit and a place tail are parsed and protected', () => {
+    expect(composeLeadAddress('100 Main St Apt 4', null)).toBe('100 Main St, Apt 4');
+    expect(composeLeadAddress('100 Main St Apt 4, Sarasota, FL 34236', null)).toBe('100 Main St, Apt 4, Sarasota, FL 34236');
+    const longStreet = `100 ${'Verylongstreetname '.repeat(20)}Blvd`;
+    const out = composeLeadAddress(`${longStreet} Apt 4, Sarasota, FL 34236`, null);
+    expect(out.length).toBeLessThanOrEqual(255);
+    expect(out.endsWith(', Apt 4, Sarasota, FL 34236')).toBe(true);
+  });
+
   test('null when no street (fill-if-empty guard upstream never writes a bare unit)', () => {
     expect(composeLeadAddress('', 'Apt 4')).toBeNull();
     expect(composeLeadAddress(null, null)).toBeNull();
