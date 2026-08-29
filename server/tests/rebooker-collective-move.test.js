@@ -1053,6 +1053,12 @@ describe('caller wiring (source)', () => {
     expect(rainOut).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(rainOut).toContain('notify: false,');
     expect(rainOut).toContain('notifyRequested: notifyCustomer === true,');
+    // r15: accepted overlaps ride on the operation (result.overlapDates, counted in conflict_count) and the shared card rings them; the anchor's reminder close precedes the Quick Move text's conclusion.
+    expect(reb).toContain('overlapDates: [...overlapWarnDates].sort(),');
+    expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,');
+    expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {");
+    expect(rainOut).not.toContain('Rain-out series shift overlaps other visits');
+    expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id]);');
     expect(rainOut).toContain('result: { ...seriesResultForEffects, notifyRequested: false },');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
     expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");

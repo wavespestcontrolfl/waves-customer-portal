@@ -1783,32 +1783,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
             memberWarnings.push(...seriesResult.warnings);
-            // A series shift that COMMITTED onto occupied windows on other
-            // dates (advisory) is not visible from today's board — file the
-            // same durable schedule_conflict card the unassigned-sibling
-            // path uses (existing mechanism), naming every clashing date,
-            // so those assigned double-bookings stay actionable after the
-            // sheet closes.
-            const clashDates = [...new Set(seriesResult.warnings
-              .map((w) => (String(w).match(/\d{4}-\d{2}-\d{2}/) || [])[0])
-              .filter(Boolean))].sort();
-            if (clashDates.length) {
-              try {
-                const NotificationService = require('./notification-service');
-                const card = await NotificationService.notifyAdmin(
-                  'schedule_conflict',
-                  'Rain-out series shift overlaps other visits',
-                  `A rain-out shifted a recurring series with its moved visit; ${clashDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${clashDates.join(', ')}). Check those days' routes from dispatch.`,
-                  { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, overlapDates: clashDates, targetDate: target.date, reasonCode } },
-                );
-                if (!card) {
-                  logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series overlaps on ${clashDates.join(', ')} with no admin card`);
-                }
-              } catch (notifyErr) {
-                logger.error(`[rain-out] schedule_conflict (series overlap) notification failed for ${job.id}: ${notifyErr.message}`);
-              }
-            }
           }
+          // Accepted advisory overlaps ride on the operation itself
+          // (result.overlapDates) and the shared effects pass rings their
+          // schedule_conflict card, marker-fenced and reconciled — never an
+          // in-memory alert this pass could die before filing (codex r15).
         } catch (err) {
           logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
         }
@@ -1991,6 +1970,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
       if (seriesMoveId && ownsSeriesText) {
         try {
+          if (sms.sent) {
+            // The anchor's reminder close is PART of this claimed effect —
+            // before the text concludes — so a pass that dies here leaves
+            // the claim (retried), never a concluded text beside a still-
+            // armed due reminder (codex r15 P1). The routes' later cover/
+            // close is idempotent over this.
+            const AppointmentReminders = require('./appointment-reminders');
+            await AppointmentReminders.markRescheduleNoticeSent([job.id]);
+          }
           if (sms.sent || sms.reason === 'QUIET_HOURS_HOLD') {
             // Sent — or QUEUED: a quiet-hours hold is a deferral the sender
             // delivers itself once the window opens, so the text is OWNED

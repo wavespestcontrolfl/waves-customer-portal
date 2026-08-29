@@ -14067,6 +14067,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)
     .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+  // Advisory overlaps the move accepted (staff surfaces) — same card, same
+  // marker: the operator learns about every double-booking the sweep
+  // committed, and a dying pass leaves it for the reconciler.
+  const overlapDates = Array.isArray(result.overlapDates) ? result.overlapDates.map((d) => String(d).split('T')[0]) : [];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
   // the CURRENT lease can stamp or release.
@@ -14137,14 +14141,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if (dueConflicts.length && !markers.conflict_card_at) {
+    if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
+        const parts = [];
+        if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
+        if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          'Series move left visits without a time window',
-          `A series move shifted ${dueConflicts.length} future visit(s) onto already-booked windows; they kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
-          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts } }
+          dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
+          `A series move shifted a recurring plan: ${parts.join('; ')}.`,
+          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
         );
         if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

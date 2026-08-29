@@ -13,6 +13,7 @@ jest.mock('../services/notification-service', () => ({
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue(undefined),
+  markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
 }));
 jest.mock('../services/dispatch-assignment', () => ({
   emitDispatchJobUpdate: jest.fn().mockResolvedValue(undefined),
@@ -876,6 +877,10 @@ describe('rain-out service', () => {
       const result = await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
       expect(result.ok).toBe(true);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      // The anchor's reminder close is part of the same claimed effect, BEFORE the text concludes.
+      const AppointmentReminders = require('../services/appointment-reminders');
+      expect(AppointmentReminders.markRescheduleNoticeSent).toHaveBeenCalledWith(['svc-1']);
+      expect(AppointmentReminders.markRescheduleNoticeSent.mock.invocationCallOrder[0]).toBeLessThan(stamp.update.mock.invocationCallOrder[0]);
       expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true });
     });
 
@@ -939,12 +944,14 @@ describe('rain-out service', () => {
         ],
       });
 
-      await RainOut.commit(DAY_MOVE_ARGS);
+      const result = await RainOut.commit(DAY_MOVE_ARGS);
 
-      const cards = NotificationService.notifyAdmin.mock.calls.filter((c) => c[0] === 'schedule_conflict');
-      expect(cards).toHaveLength(1);
-      expect(cards[0][2]).toContain('2026-09-12, 2026-12-12');
-      expect(cards[0][3].metadata).toMatchObject({ scheduledServiceId: 'svc-1', overlapDates: ['2026-09-12', '2026-12-12'] });
+      // The overlap card is a marker-fenced effect of the operation itself
+      // (result.overlapDates, rung by the shared pass) — nothing in-memory here.
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+      expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-09-12'), expect.stringContaining('2026-12-12')]);
     });
 
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {

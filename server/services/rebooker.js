@@ -2269,6 +2269,11 @@ class SmartRebooker {
         // The notification intent this operation was recorded with — every
         // effects pass (live, replay, reconciler) drives its text from it.
         notifyRequested: options.notifyRequested === true,
+        // Advisory overlaps this staff move accepted (dates whose landing
+        // window is already booked) — recorded WITH the operation so the
+        // operator card is a marker-fenced, reconciled effect (codex r15
+        // P1), never an in-memory alert a dying pass can lose.
+        overlapDates: [...overlapWarnDates].sort(),
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
         rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],
@@ -2280,7 +2285,9 @@ class SmartRebooker {
         movable_count: touched.length,
         skipped_count: skippedCount,
         exception_count: exceptionCount,
-        conflict_count: touched.filter((t) => t.conflicted).length,
+        // Windowless landings AND accepted advisory overlaps both owe the
+        // operator a card — the reconciler selects on this count.
+        conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,
         status: 'committed',
         rows: JSON.stringify(moveRows),
         result: JSON.stringify(committedResult),
