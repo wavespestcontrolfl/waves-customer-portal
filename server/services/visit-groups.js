@@ -1030,35 +1030,81 @@ function siblingEligibleFor(toStatus, siblingStatus) {
  * ungrouped row costs no query at all.
  */
 /**
- * Visit-scoped notification claim (doc §2 handoff rule; codex #3603 r4):
- * taken by a member's tracker path BEFORE its per-row customer send. The
+ * Visit-scoped notification claim (doc §2 handoff rule; codex #3603 r4/r5):
+ * taken by a member's tracker path BEFORE its per-row customer send, UNDER
+ * the stop lock with the row's membership re-verified — a row a split just
+ * detached never claims (and never blocks) the old visit's notice. The
  * visit_effects row for (visit, tracker_*) is inserted `claimed` on the
- * unique key — exactly one concurrent member wins and sends; every other
- * member sees 'taken' and stamps itself covered. Customer texts are
- * at-most-once: a claim that later fails is recorded failed for the office,
- * never re-sent automatically. Returns 'owner' | 'taken' | 'error'.
+ * unique key: exactly one concurrent member wins and sends; the others see
+ * 'taken' and stamp themselves covered. Customer texts are at-most-once —
+ * an unknown claim state ('error') never sends and is reported to the
+ * caller as an incomplete stop, never silently swallowed.
+ * Returns 'owner' | 'taken' | 'detached' | 'error' | null (no visit).
  */
-async function claimVisitNotification(visitId, kind) {
-  if (!visitId) return null;
+async function claimVisitNotification(row, kind) {
+  if (!row || !row.visit_id) return null;
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const logger = require('./logger');
   try {
-    const rows = await db('visit_effects')
+    return await db.transaction(async (t) => {
+      const visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return 'detached';
+      await lockStop(t, visit.stop_base_key);
+      const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate().first('id', 'visit_id');
+      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return 'detached';
+      const rows = await t('visit_effects')
+        .insert({
+          visit_id: visit.id,
+          effect_type: effectType,
+          dedupe_key: `${visit.id}:${effectType}`,
+          status: 'claimed',
+          attempts: 0,
+          claimed_at: new Date(),
+        })
+        .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
+        .ignore()
+        .returning('id');
+      return rows && rows.length ? 'owner' : 'taken';
+    });
+  } catch (err) {
+    logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
+    return 'error';
+  }
+}
+
+/**
+ * Advance the claimed ledger row with the owner's ACTUAL attempt outcome
+ * (codex r4/r5): sent / suppressed / failed; attempts counted; a sent row
+ * is never downgraded. Non-attempt outcomes are a no-op. Its own checked
+ * step: a failure here leaves the row `claimed`, so the caller reports the
+ * stop incomplete instead of advertising a status that was never written.
+ */
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date()) {
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
+  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  try {
+    await db('visit_effects')
       .insert({
         visit_id: visitId,
         effect_type: effectType,
         dedupe_key: `${visitId}:${effectType}`,
-        status: 'claimed',
-        attempts: 0,
-        claimed_at: new Date(),
+        status,
+        attempts: 1,
+        sent_at: status === 'sent' ? at : null,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
-      .ignore()
-      .returning('id');
-    return rows && rows.length ? 'owner' : 'taken';
+      .merge({
+        status,
+        attempts: db.raw('?? + 1', ['visit_effects.attempts']),
+        sent_at: status === 'sent' ? at : null,
+        updated_at: at,
+      })
+      .where('visit_effects.status', '<>', 'sent');
+    return { ok: true, effectType, status };
   } catch (err) {
-    // Unknown claim state ⇒ do NOT send (at-most-once), log for the office.
-    require('./logger').warn(`[visit-groups] notification claim ${effectType} for visit ${visitId} failed: ${err.message}`);
-    return 'error';
+    require('./logger').warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects finalize failed: ${err.message}`);
+    return { ok: false, effectType, status, reason: `effect finalize failed: ${err.message}` };
   }
 }
 
@@ -1131,7 +1177,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       }
       const stampCol = toStatus === 'en_route' ? 'en_route_at' : 'arrived_at';
       await t('service_visits').where({ id: visit.id }).whereNull(stampCol).update({ [stampCol]: lifecycleAt });
-      return { visitId: visit.id, moved, trackers, covered, skipped };
+      return { visitId: visit.id, visitDate: dateOnly(visit.scheduled_date), moved, trackers, covered, skipped };
     });
   } catch (err) {
     // Surfaced, not swallowed (codex #3603 r2): the caller reports the
@@ -1170,7 +1216,16 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   const smsCol = kind === 'en_route' ? 'track_sms_sent_at' : 'arrival_sms_sent_at';
   if (fan.covered.length) {
     try {
-      await db('scheduled_services').whereIn('id', fan.covered).whereNull(smsCol).update({ [smsCol]: lifecycleAt });
+      // Fenced to THIS visit attempt (codex r5): a sibling force-rescheduled
+      // after the transaction (guards cleared, new date, new row identity)
+      // must not be stamped covered by its old stop.
+      await db('scheduled_services')
+        .whereIn('id', fan.covered)
+        .where({ visit_id: fan.visitId })
+        .where('scheduled_date', fan.visitDate)
+        .where('track_state', targetTrack)
+        .whereNull(smsCol)
+        .update({ [smsCol]: lifecycleAt });
     } catch (err) {
       // A sibling left without its covered stamp could still text later
       // (codex r4) — that is an incomplete stop, reported as such.
@@ -1179,42 +1234,18 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
     }
   }
   // The visit's one-shot ledger row, advanced ONLY by the notification
-  // owner's actual attempt (codex r4): 'sent' for a delivered text; opt-out /
-  // gate-off are 'suppressed'; a retryable miss is 'failed'. Non-attempts
-  // (already handled, covered, idempotent re-entry) never touch the row, so
-  // a recorded failure stays visible to the office.
-  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
-  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  // owner's actual attempt (codex r4/r5) — its own checked step.
   const recordEffect = notificationOwner && NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome));
-  try {
-    if (!recordEffect) throw Object.assign(new Error('skip'), { skip: true });
-    // Upsert (codex r2): a later attempt that DELIVERS advances a
-    // suppressed/failed row to sent; a row already sent is never
-    // downgraded; attempts count every reconciliation.
-    await db('visit_effects')
-      .insert({
-        visit_id: fan.visitId,
-        effect_type: effectType,
-        dedupe_key: `${fan.visitId}:${effectType}`,
-        status,
-        attempts: 1,
-        sent_at: status === 'sent' ? lifecycleAt : null,
-      })
-      .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
-      .merge({
-        status,
-        attempts: db.raw('?? + 1', ['visit_effects.attempts']),
-        sent_at: status === 'sent' ? lifecycleAt : null,
-        updated_at: lifecycleAt,
-      })
-      .where('visit_effects.status', '<>', 'sent');
-  } catch (err) {
-    if (!err.skip) logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: visit_effects record failed: ${err.message}`);
+  let effect = null;
+  if (recordEffect) {
+    const fin = await finalizeVisitNotification(fan.visitId, kind, smsOutcome, lifecycleAt);
+    if (fin.ok) effect = { effectType: fin.effectType, status: fin.status };
+    else trackerFailures.push({ id: 'effect_finalize', reason: fin.reason });
   }
   if (fan.skipped.length) {
     logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);
   }
-  const base = { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: recordEffect ? { effectType, status } : null };
+  const base = { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect };
   if (trackerFailures.length) {
     return { ...base, ok: false, trackerFailures, reason: `tracker write failed for ${trackerFailures.map((f) => `${f.id}: ${f.reason}`).join('; ')}` };
   }
@@ -1266,6 +1297,7 @@ module.exports = {
   visitActivity,
   fanOutLiveTransition,
   claimVisitNotification,
+  finalizeVisitNotification,
   visitSummariesForRows,
   _test: {
     siblingEligibleFor,

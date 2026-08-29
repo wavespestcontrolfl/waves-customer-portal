@@ -51,11 +51,11 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
-const { fanOutLiveTransition, claimVisitNotification } = require('../services/visit-groups');
+const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
 const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', ...over });
-const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30' };
+const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30' };
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
 
@@ -99,7 +99,11 @@ describe('fanOutLiveTransition', () => {
     expect(trackTransitions.markEnRoute).toHaveBeenCalledWith('s5', expect.objectContaining({ suppressCustomerSms: true, _visitSibling: true }));
     // covered stamps on every reconciled sibling
     const covered = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.track_sms_sent_at);
-    expect(covered.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['s1', 's5']], ['whereNull', 'track_sms_sent_at']]));
+    // fenced to THIS visit attempt: visit id, date, target tracker state, guard null
+    expect(covered.ops).toEqual(expect.arrayContaining([
+      ['whereIn', 'id', ['s1', 's5']], ['where', { visit_id: 'v1' }], ['where', 'scheduled_date', '2026-08-30'],
+      ['where', 'track_state', 'en_route'], ['whereNull', 'track_sms_sent_at'],
+    ]));
     const effect = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
     expect(effect.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'sent' });
     // upsert: a later delivered attempt advances a non-sent row; never downgrades a sent one
@@ -213,18 +217,58 @@ describe('fanOutLiveTransition', () => {
   });
 });
 
-describe('claimVisitNotification (visit-scoped at-most-once claim)', () => {
-  test('first claimant owns the send; a concurrent member sees taken', async () => {
-    db.__script = { visit_effects: { returning: () => [{ id: 'e1' }] } };
-    expect(await claimVisitNotification('v1', 'en_route')).toBe('owner');
+describe('claimVisitNotification (visit-scoped at-most-once claim, under the stop lock)', () => {
+  const ROW = { id: 'p', visit_id: 'v1' };
+  test('first claimant owns the send; a concurrent member sees taken; the stop lock is held', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    expect(await claimVisitNotification(ROW, 'en_route')).toBe('owner');
+    expect(db.__rawCalls[0][1]).toEqual(['visit.stop', 'p1:2026-08-30']);
     const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
     expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0 });
-    db.__script = { visit_effects: { returning: () => [] } };
-    expect(await claimVisitNotification('v1', 'on_site')).toBe('taken');
+    db.__script.visit_effects = { returning: () => [] };
+    expect(await claimVisitNotification(ROW, 'on_site')).toBe('taken');
   });
-  test('an unknown claim state never sends (error) and no visit means no claim', async () => {
-    db.__script = { visit_effects: { returning: () => { throw new Error('db down'); } } };
-    expect(await claimVisitNotification('v1', 'en_route')).toBe('error');
-    expect(await claimVisitNotification(null, 'en_route')).toBe(null);
+  test('a row a split just detached (or a visit no longer open) never claims', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v2' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
+    expect(db.__calls.some((c) => c.table === 'visit_effects')).toBe(false);
+    db.__script = { service_visits: { first: () => ({ ...VISIT, status: 'closing' }) } };
+    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
+  });
+  test('an unknown claim state is error (never sends) and no visit means no claim', async () => {
+    db.__script = { service_visits: { first: () => { throw new Error('db down'); } } };
+    expect(await claimVisitNotification(ROW, 'en_route')).toBe('error');
+    expect(await claimVisitNotification({ id: 'p', visit_id: null }, 'en_route')).toBe(null);
+  });
+});
+
+describe('finalizeVisitNotification', () => {
+  test('advances the claimed row only for an actual attempt; never downgrades sent', async () => {
+    db.__script = {};
+    const fin = await finalizeVisitNotification('v1', 'en_route', 'retry');
+    expect(fin).toMatchObject({ ok: true, effectType: 'tracker_en_route', status: 'failed' });
+    const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
+    expect(merge.values).toMatchObject({ status: 'failed', attempts: { sql: '?? + 1' } });
+    db.__calls.length = 0;
+    expect(await finalizeVisitNotification('v1', 'en_route', 'already_handled')).toMatchObject({ ok: true, skipped: true });
+    expect(db.__calls.length).toBe(0);
+  });
+  test('a finalize failure is reported (the row stays claimed for the office)', async () => {
+    const origDb = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'visit_effects') throw new Error('ledger down'); return origDb(table); });
+    const fin = await finalizeVisitNotification('v1', 'on_site', 'sent');
+    db.mockImplementation(origDb);
+    expect(fin).toMatchObject({ ok: false, status: 'sent' });
+    expect(fin.reason).toContain('ledger down');
+  });
+  test('fan-out reports a finalize failure as an incomplete stop', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => [] } };
+    const origDb = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'visit_effects') throw new Error('ledger down'); return origDb(table); });
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'sent', notificationOwner: true });
+    db.mockImplementation(origDb);
+    expect(out.ok).toBe(false);
+    expect(out.effect).toBe(null);
+    expect(out.trackerFailures[0]).toMatchObject({ id: 'effect_finalize' });
   });
 });

@@ -11582,16 +11582,6 @@ router.put('/:id/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
-        if (result && result.visitFanOut && result.visitFanOut.ok === false) {
-          // Visit fan-out did not complete — durable office surface via the
-          // existing transition-failure recorder (codex #3603 r2).
-          await recordTrackTransitionFailure({
-            jobId: svc.id,
-            action: 'visit_fanout',
-            actorId: req.technicianId,
-            error: new Error(result.visitFanOut.reason || 'visit fan-out incomplete'),
-          });
-        }
       } catch (e) {
         logger.error(`[en-route] markEnRoute failed: ${e.message}`);
         await recordTrackTransitionFailure({
@@ -11628,16 +11618,6 @@ router.put('/:id/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
-        if (result && result.visitFanOut && result.visitFanOut.ok === false) {
-          // Visit fan-out did not complete — durable office surface via the
-          // existing transition-failure recorder (codex #3603 r2).
-          await recordTrackTransitionFailure({
-            jobId: svc.id,
-            action: 'visit_fanout',
-            actorId: req.technicianId,
-            error: new Error(result.visitFanOut.reason || 'visit fan-out incomplete'),
-          });
-        }
       } catch (e) {
         logger.error(`[on-site] markOnProperty failed: ${e.message}`);
         await recordTrackTransitionFailure({

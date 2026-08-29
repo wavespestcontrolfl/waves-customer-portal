@@ -155,6 +155,16 @@ async function autoConfirmOutboundReviewBooking(req, svc) {
   const { runOfficeConfirmActivation } = require('../services/outbound-review-confirm');
   await runOfficeConfirmActivation(db, hookRow || svc, 'tech-track', { skipCardRequest: true });
 
+  // Visit group (codex #3603 r5): a field-confirmed office-review booking
+  // becomes join-eligible NOW and the live advance follows immediately —
+  // group it here, AWAITED, so the tracker's row load sees its visit_id and
+  // the first tap moves the whole stop. Idempotent; best-effort by contract.
+  try {
+    await require('../services/visit-groups').maybeGroupRow(svc.id, { createdBy: 'dispatch' });
+  } catch (vgErr) {
+    logger.warn(`[tech-track] visit-group regroup after field confirm failed for ${svc.id}: ${vgErr.message}`);
+  }
+
   // Post-hook reminder repair (Codex P1 rounds 4–5): an office action can
   // commit between the hookRow snapshot and registerAppointment's insert —
   // that writer saw no reminder row to move/close, so the just-armed row
@@ -418,18 +428,18 @@ router.post('/:id/en-route', async (req, res, next) => {
     });
 
     if (!result.ok) {
+      if (result.reason === 'visit_fanout_incomplete') {
+        // The primary moved; its linked services did not fully sync (codex
+        // #3603 r2/r5). Honest, retryable: the re-tap / Sync Stop runs the
+        // tracker writer again, whose fan-out is idempotent.
+        return res.status(409).json({
+          error: 'Your stop moved, but its linked services did not sync — tap again.',
+          code: 'visit_fanout_incomplete',
+          visitId: result.visitFanOut && result.visitFanOut.visitId,
+        });
+      }
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
-    }
-    if (result.visitFanOut && result.visitFanOut.ok === false) {
-      // The primary moved; its linked services did not sync (codex #3603
-      // r2). Honest, retryable: the re-tap / Sync Stop runs the tracker
-      // writer again, whose fan-out is idempotent.
-      return res.status(409).json({
-        error: 'Your stop moved, but its linked services did not sync — tap again.',
-        code: 'visit_fanout_incomplete',
-        visitId: result.visitFanOut.visitId,
-      });
     }
 
     // Delegated stale heal: markEnRoute's operational sync is best-effort
@@ -534,18 +544,18 @@ router.post('/:id/on-site', async (req, res, next) => {
 
     const result = await trackTransitions.markOnProperty(svc.id, { actingTechId: req.technicianId });
     if (!result.ok) {
+      if (result.reason === 'visit_fanout_incomplete') {
+        // The primary moved; its linked services did not fully sync (codex
+        // #3603 r2/r5). Honest, retryable: the re-tap / Sync Stop runs the
+        // tracker writer again, whose fan-out is idempotent.
+        return res.status(409).json({
+          error: 'Your stop moved, but its linked services did not sync — tap again.',
+          code: 'visit_fanout_incomplete',
+          visitId: result.visitFanOut && result.visitFanOut.visitId,
+        });
+      }
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
-    }
-    if (result.visitFanOut && result.visitFanOut.ok === false) {
-      // The primary moved; its linked services did not sync (codex #3603
-      // r2). Honest, retryable: the re-tap / Sync Stop runs the tracker
-      // writer again, whose fan-out is idempotent.
-      return res.status(409).json({
-        error: 'Your stop moved, but its linked services did not sync — tap again.',
-        code: 'visit_fanout_incomplete',
-        visitId: result.visitFanOut.visitId,
-      });
     }
 
     logger.info(

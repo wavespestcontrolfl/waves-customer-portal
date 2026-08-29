@@ -337,15 +337,45 @@ async function markEnRoute(serviceId, opts = {}) {
   // stop follows from here — on the idempotent re-tap too, which is what
   // repairs a sibling left behind by a transient failure (codex #3603 r1).
   if (result && result.ok && !opts._visitSibling && result._row) {
-    const fan = await require('./visit-groups').fanOutLiveTransition({
-      primary: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
-      smsOutcome: result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled'),
-      notificationOwner: result.visitNotificationOwner === true,
+    const smsOutcome = result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled');
+    const fan = await applyVisitFanOut({
+      row: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
+      smsOutcome, notificationOwner: result.visitNotificationOwner === true,
     });
-    if (fan) result.visitFanOut = fan;
+    if (fan) {
+      result.visitFanOut = fan;
+      // The canonical result carries the stop's truth (codex r5): an
+      // incomplete fan-out is NOT ok — routes 409 ("tap again"), the admin
+      // alert recorder fires, and automatic callers (geofence / GPS / time
+      // clock) do not record success, so their next signal re-runs it.
+      if (fan.ok === false) { result.ok = false; result.reason = 'visit_fanout_incomplete'; }
+    }
   }
   if (result) delete result._row;
   return result;
+}
+
+/**
+ * Fan the transition out to the visit and reconcile the notification claim
+ * (shared by both tracker writers). Returns the fan-out result, or a
+ * synthetic { ok:false } when the claim itself failed or an owned claim
+ * could not be finalized because the fan-out did not run.
+ */
+async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, notificationOwner }) {
+  const visitGroups = require('./visit-groups');
+  let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner });
+  if (!row.visit_id) return fan;
+  if (smsOutcome === 'claim_error') {
+    return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: 'notification claim failed' };
+  }
+  if (notificationOwner && !fan) {
+    // Owned claim but the fan-out did not run (primary detached / visit no
+    // longer open between claim and lock): finalize the ledger row anyway —
+    // the text this row sent was for that stop.
+    const fin = await visitGroups.finalizeVisitNotification(row.visit_id, kind, smsOutcome);
+    if (!fin.ok) fan = { ok: false, visitId: row.visit_id, reason: fin.reason, siblingIds: [], trackerIds: [], skipped: [] };
+  }
+  return fan;
 }
 
 async function markEnRouteCore(serviceId, opts = {}) {
@@ -599,20 +629,28 @@ async function markEnRouteCore(serviceId, opts = {}) {
   let visitClaim = null;
   if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling
       && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
-    visitClaim = await require('./visit-groups').claimVisitNotification(svc.visit_id, 'en_route');
-    if (visitClaim !== 'owner') {
-      smsOutcome = visitClaim === 'taken' ? 'covered' : 'claim_error';
+    // Claimed under the stop lock with membership verified (r5): 'detached'
+    // means this row is no longer in the visit — it texts as a plain row.
+    visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
+    if (visitClaim === 'taken') {
+      smsOutcome = 'covered';
       try {
-        await db('scheduled_services').where({ id: serviceId }).whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+        await db('scheduled_services').where({ id: serviceId, visit_id: svc.visit_id })
+          .whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
       } catch (err) {
         logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
       }
+    } else if (visitClaim === 'error') {
+      // Unknown claim state: never send, leave the guard NULL so the next
+      // signal retries; the wrapper reports the stop incomplete.
+      smsOutcome = 'claim_error';
     }
   }
+  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
   // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
   // way" text came from the visit's primary row; the visit stamps this row
   // as covered afterwards (visit-groups.fanOutLiveTransition).
-  if (!opts.suppressCustomerSms && (visitClaim === null || visitClaim === 'owner')
+  if (!opts.suppressCustomerSms && mayText
       && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
     try {
       const tech = svc.technician_id
@@ -655,19 +693,25 @@ async function markEnRouteCore(serviceId, opts = {}) {
         // stamp the old attempt's guard onto the new attempt, suppressing
         // its notification. The SMS did go out; if the guard write misses,
         // the fresh attempt re-sending is the intended behavior.
-        await db('scheduled_services')
-          .where({
-            id: serviceId,
-            track_state: 'en_route',
-            en_route_at: now,
-            scheduled_date: svc.scheduled_date ?? null,
-          })
-          .update({ track_sms_sent_at: new Date() });
         smsSent = true;
+        try {
+          await db('scheduled_services')
+            .where({
+              id: serviceId,
+              track_state: 'en_route',
+              en_route_at: now,
+              scheduled_date: svc.scheduled_date ?? null,
+            })
+            .update({ track_sms_sent_at: new Date() });
+        } catch (guardErr) {
+          // The text DID go out — keep 'sent'; the guard stamp failure is its
+          // own log line (codex r5).
+          logger.error(`[track-transitions] en-route SMS guard stamp failed for ${serviceId}: ${guardErr.message}`);
+        }
       }
     } catch (err) {
       logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
-      smsOutcome = 'retry';
+      if (smsOutcome !== 'sent') smsOutcome = 'retry';
       // Leave track_sms_sent_at NULL so a retap can retry.
     }
   }
@@ -1025,19 +1069,23 @@ async function markOnProperty(serviceId, opts = {}) {
   let arrivalSms = 'not_attempted';
   let visitClaim = null;
   if (arrivalRow && !opts.suppressArrivalSms) {
-    // Visit-scoped claim before the per-row arrival sender (codex r4).
+    // Visit-scoped claim before the per-row arrival sender, taken under the
+    // stop lock with membership verified (codex r4/r5).
     if (svc.visit_id && !opts._visitSibling && !arrivalRow.arrival_sms_sent_at) {
-      visitClaim = await require('./visit-groups').claimVisitNotification(svc.visit_id, 'on_site');
+      visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'on_site');
     }
-    if (visitClaim === null || visitClaim === 'owner') {
+    if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
       arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
-    } else {
-      arrivalSms = visitClaim === 'taken' ? 'covered' : 'claim_error';
+    } else if (visitClaim === 'taken') {
+      arrivalSms = 'covered';
       try {
-        await db('scheduled_services').where({ id: serviceId }).whereNull('arrival_sms_sent_at').update({ arrival_sms_sent_at: new Date() });
+        await db('scheduled_services').where({ id: serviceId, visit_id: svc.visit_id })
+          .whereNull('arrival_sms_sent_at').update({ arrival_sms_sent_at: new Date() });
       } catch (err) {
         logger.error(`[track-transitions] arrival covered stamp failed for ${serviceId}: ${err.message}`);
       }
+    } else {
+      arrivalSms = 'claim_error'; // unknown claim state: never send, guard stays NULL
     }
   }
   if (result && result.ok) {
@@ -1045,17 +1093,19 @@ async function markOnProperty(serviceId, opts = {}) {
     // Visit group: this is the canonical arrival path for every signal
     // (manual, admin, geofence, GPS, time clock), so the whole stop follows
     // from here (visit-group-scope.md §3; codex #3603 r1). Siblings re-enter
-    // with _visitSibling and never fan out again.
+    // with _visitSibling and never fan out again. Audit actor: opts.actorId
+    // (admin flips pass the authenticated admin here, NOT as actingTechId —
+    // that one names the tech in the customer text).
     if (!opts._visitSibling) {
-      // Audit actor: opts.actorId (admin flips pass the authenticated admin
-      // here, NOT as actingTechId — that one names the tech in the customer
-      // text) falls back to the acting tech for tech/geofence/GPS signals.
-      const fan = await require('./visit-groups').fanOutLiveTransition({
-        primary: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
+      const fan = await applyVisitFanOut({
+        row: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
         actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
         notificationOwner: visitClaim === 'owner',
       });
-      if (fan) result.visitFanOut = fan;
+      if (fan) {
+        result.visitFanOut = fan;
+        if (fan.ok === false) { result.ok = false; result.reason = 'visit_fanout_incomplete'; }
+      }
     }
   }
   return result;
