@@ -199,7 +199,7 @@ t.boolean('recurring_merchant').notNullable().defaultTo(false);
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal),
 **`watching`** (unactionable today, rechecked) and **`ready_for_credentials`** (a
 model-observed provider handed off at the credential boundary, §12; leasable ONLY by the
-`deterministic_runner` via `claim(?mode=credentials)`). `PROSPECT_STATUSES` in
+`deterministic_runner` via `claim(?mode=credentials)`) and **`ready_for_payment`** (the card boundary on a paid EXECUTION path — `paid_listing`/`membership`/… — reached by any provider: a durable handoff status, leasable ONLY by the `deterministic_runner` via `claim(?mode=payment)`, which for execution paths accepts this status exactly as it accepts `contacted`/`negotiating` for paid outreach, reserves the `initial` purchase at that moment and resumes the persisted session; the four statuses ship together). `PROSPECT_STATUSES` in
 `admin-backlink-agent-v2.js` is the contract — all three are added there, in the step-1
 status migration/constraint, the domain guard (`ready_for_credentials` joins
 `IN_FLIGHT_STATUSES` beside `watching` AND `ACTIVE_OUTREACH_STATUSES` beside `awaiting_owner`, so an outreach placement parked at the credential boundary still holds the domain's one conversation against a second writer — covered in `prospect-domain-lock.test.js`; signup lanes keep their location-aware coexistence), the board's status filters and the tests; the
@@ -345,7 +345,7 @@ t.unique(['domain_id', 'touch_key']);
 (including a repeat of the first) inserts a row here. §8 reports and learns per source from
 this table (a domain discovered by three feeders credits all three; "first-touch" and
 "any-touch" are both reportable) — **but only touches recorded BEFORE the placement was
-acquired** (`seen_at` < the timestamp of the successful acquisition attempt — the same `seo_link_attempts` row the §8 learning join uses; `first_live_at` is only the fallback when no attempt exists, i.e. never for executed placements — and never `existing_backlink`, which is observational):
+acquired** (`seen_at` < the timestamp of the placement's FIRST successful acquisition attempt — the original conversion, never a later recovery cycle's attempt, so a feeder that noticed the link while it was already live earns nothing even after a loss and reacquisition; a recovery cycle's touches are attributed only to touches recorded between the verified loss and that cycle's successful attempt — the §8 learning join uses the same attempt rows; `first_live_at` is only the fallback when no attempt exists, i.e. never for executed placements — and never `existing_backlink`, which is observational):
 a feeder that merely notices a link after it converted earns no attribution and cannot
 bias `P(live at D30 | source, path)`. §8 learning joins DISTINCT `(placement, source)` — a
 placement counts once per source however many touch rows that source recorded (the rows stay
@@ -638,7 +638,7 @@ auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; fre
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
-auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions for that `slot_day` (in-flight and unresolved work holds its slot until a terminal, reconciled outcome; `slot_released` rows never count); re-checked before submit; 0 ⇒ no automated submissions)
+auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + `mutation_ambiguous` rows with `action='submit'` + completed submissions for that `slot_day` (in-flight and unresolved work holds its slot until a terminal, reconciled outcome; `slot_released` rows never count); re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
 presentment_window_days      = 10        (minimum wait after last card exposure — `card_exposed_at` — before an ambiguous purchase may be reconciled as not charged; may only be raised)
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
@@ -934,7 +934,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
   final total is `0` (waived/discounted fee), the row is `voided` with
   `outcome='no_payment_required'` BEFORE any mint (no card exists), and — atomically in that
-  same transaction — the placement's payment authority instance is marked `satisfied_at`
+  same transaction — EVERY payment authority row covered by that purchase (the placement's own, and for an `account_wide` fee every sibling row whose `group_purchase_id` = this purchase — the same set the settlement path satisfies) is marked `satisfied_at`
   with `satisfied_reason='no_payment_required'` (no generation is opened; a $0 total is a
   successful terminal outcome for the payment dimension, not a failure) so later
   irreversible steps see the payment prerequisite as met; the placement proceeds
@@ -1166,7 +1166,7 @@ together:
   only on prospect status/type. From step 4 it always joins the registry — no gate turns the
   old predicate back on; `GATE_LINK_AUTHORITY` is the GLOBAL automation kill switch — required for EVERY automated claim and every irreversible automated action whatever the stamped level (`AUTO_*` or owner-approved `OWNER_*` alike; only the human settlement form and owner-side UI actions are outside it) — and leases a row only when ALL hold inside the same locked select: placement status matches the
   CLAIM MODE — `prospect` for initial acquisition / `mode=draft` / the initial `mode=send`;
-  `contacted`/`negotiating` for `mode=payment` and `mode=followup`; `placed`/`live`/`indexed`
+  `contacted`/`negotiating` (paid outreach) or `ready_for_payment` (paid execution paths) for `mode=payment`, `contacted` for `mode=followup`; `placed`/`live`/`indexed`
   for `mode=renewal` (each mode's extra predicate is defined where the mode is) — the
   `prospect` restriction is never applied to the later-stage modes; registry
   `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — `mode=draft` ALSO accepts `qualified` (an owner-gated outreach placement without a draft stays `qualified` until the draft exists; the draft-lease bullet below is the authority on that mode's predicate) — claimability is a
@@ -1244,7 +1244,7 @@ together:
   non-pending `placed` report, exactly as today.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
   gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `ready_for_credentials`,
-  `price_changed`, `captcha`); `ready_for_credentials` atomically sets the placement
+  `price_changed`, `captcha`); `ready_for_payment` on a paid execution path atomically sets `status='ready_for_payment'` (§3.3; outreach paths keep `contacted`/`negotiating` and only flag the checkout) and releases the lease; `ready_for_credentials` atomically sets the placement
   `status='ready_for_credentials'` (a §3.3 status; `parked_from_status` kept), releases the
   lease, and is reclaimed ONLY through `claim(?mode=credentials)` whose predicate accepts
   that status, requires the provider to be the `deterministic_runner`, and re-runs the
