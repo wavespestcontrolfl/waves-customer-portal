@@ -274,9 +274,10 @@ what when where whether which while who why wish with would yes you your you're 
 // Jennings, Sanders, Collins or Harding from an ordinary plural or gerund
 // (three pre-push hook rounds). Pest / lawn nouns (PLURAL / mass only — the
 // singulars Roach, Palm, Ant and some plurals such as Moles are surnames),
-// common gerunds, sentence adverbs — exactly the shapes the dry run produced.
-// Abstract nouns (communication, reliability …) are deliberately absent: they
-// have no safe syntax path without a dictionary (r5–r8). Nothing that is also
+// common gerunds — exactly the shapes the dry run produced. Abstract nouns
+// (communication, reliability …) and sentence adverbs (honestly, …) are
+// deliberately absent: they have no safe syntax path without a dictionary or
+// a comma grammar (r5–r10). Nothing that is also
 // a personal name (Trust, Peace, Grace, Hope, Will, May, Going, Walking, Grass,
 // Trees, Weeds stay out). Added after the 2026-08-29 dry run
 // ("Ants are relentless", "Finding a company you can count on", "Skipping the
@@ -286,99 +287,21 @@ ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice 
 wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
 armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
 being knowing hearing seeing looking making taking staying protecting treating helping showing
-coming letting giving working watching checking honestly thankfully hopefully truly really
-luckily fortunately clearly obviously usually typically sometimes
+coming letting giving working watching checking
 `.split(/\s+/).filter(Boolean));
-// …and a listed opener is exempt only with POSITIVE ordinary-word syntax after
-// it (codex #3580 r2 + hook: "Going and Marcus", "Truly says thanks", "Truly,
-// alongside Marcus"): a plural-only verb ("Ants are / love / need"), a
-// determiner or preposition ("Finding a", "Skipping the"), a pronoun, a
-// conjunction — and / or / with / as well as / along with / plus / as / than —
-// followed by a lowercase word that is not a possessive / role phrase ("Truly
-// and his team" fails; "Ants and roaches" passes), or a comma
-// followed by a lowercase word that opens neither an appositive (", our
-// technician") nor a coordination (", alongside Marcus"). Nothing a single person's name takes —
-// singular copula / auxiliary / possessive, modal, adverb, present- or
-// past-tense verb, capitalised word — is on the list, so adverb openers need
-// adverb syntax ("Honestly, we…") and surnames the list audit missed still
-// fail on shape. There is deliberately NO singular-predicate path ("Treatment
-// is glad…" must fail; codex #3580 r7): an abstract noun opener passes with a
-// determiner / preposition ("Communication with you matters") and a bare
-// "Communication matters" costs one retry of the drafter's ladder.
-const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them)\b|(?:and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
-// …and when the evidence went through a conjunction or comma, the word after
-// it must itself be ordinary and may not be a name in ANY case (codex #3580
-// r3 "Roaches and marcus"; hook "Roaches and tasha").
-// Words that may sit between a conjunction / comma and the coordinated word
-// without changing what it is ("and even Marcus", "and not just the ants").
-const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
-// Where a coordinated noun phrase ends: punctuation or a plural-only verb.
-// Determiners / prepositions are ordinary continuation tokens ("and some of
-// our team" must be scanned through to "our team" — codex #3580 r9).
-const PHRASE_STOP_WORDS = new Set("are were have aren't weren't haven't do don't love hate need tend come go get keep make take know seem look stay find want like thrive show mean matter help".split(' '));
-// A possessive or role noun ANYWHERE in the coordinated phrase is an
-// attribution (codex #3580 r9: "and some of our team").
-const PHRASE_ATTRIBUTION_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
-const POSSESSIVE_ROLE_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'its', 'the', 'a', 'an', 'one', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
-function ordinaryFollows(w, rest, names, allowed, reviewWords) {
-  if (!ORDINARY_FOLLOWER_RE.test(rest)) {
-    // An -ly adverb opener, a comma, then a name the reviewer wrote
-    // ("Honestly, Marcus made this easy") is ordinary adverb syntax (codex
-    // #3580 r4 P2). Noun openers get no such pass ("Roaches, Marcus and…").
-    const adv = /^\s*,\s+(\p{Lu}[\p{Ll}'-]+)\b/u.exec(rest);
-    return !!(adv && /ly$/.test(w) && allowed.has(adv[1].toLowerCase()));
-  }
-  // A serial comma and its conjunction (", and even Marcus") are ONE coordinator.
-  const COORD_RE = /^\s*(?:[,;:]\s*(?:and|or|but|nor|with|plus|as\s+well\s+as|along\s+with|together\s+with)?|and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than)\s+([\s\S]*)$/u;
-  let coord = COORD_RE.exec(rest);
-  if (!coord) return true;
-  // Walk the WHOLE coordination chain (hook: "Roaches and ants and tasha") and
-  // judge every item after its modifiers (codex #3580 r4: "and even Marcus"):
-  // a capitalised item is name shape; a lowercase item must itself be
-  // positively ordinary — a starter, a listed opener, or the reviewer's own
-  // word — and never a name in any case (hook: "and tasha").
-  let tail = coord[1];
-  for (let guard = 0; guard < 8; guard++) {
-    let m;
-    while ((m = COORD_MODIFIER_RE.exec(tail)) !== null) tail = tail.slice(m[0].length);
-    const nextM = /^([\p{L}'-]+)/u.exec(tail);
-    if (!nextM) return false;
-    if (/^\p{Lu}/u.test(nextM[1])) return false;
-    const next = nextM[1].toLowerCase();
-    if (names.has(next) || COMMON_FIRST_NAMES.has(next)) return false;
-    // A possessive / determiner / role item is an attribution phrase ("and even
-    // his team", "and the crew") — the same exclusion the follower regex applies
-    // before modifiers (hook).
-    if (POSSESSIVE_ROLE_ITEMS.has(next)) return false;
-    if (!(SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next))) return false;
-    tail = tail.slice(nextM[0].length);
-    // Scan on through the coordinated phrase (codex #3580 r8: "and very
-    // talented Marcus"): a capitalised or name-like token before a clause stop
-    // — punctuation, a plural-only verb, a determiner / preposition / pronoun —
-    // is a name riding on an adjective run.
-    let tok;
-    let scanned = 0;
-    while (scanned++ < 12 && (tok = /^\s*([\p{L}'-]+|[.,;:!?])/u.exec(tail)) !== null) {
-      const t = tok[1];
-      if (/^[.,;:!?]$/.test(t)) break;
-      if (COORD_RE.test(tail)) break;
-      if (/^\p{Lu}/u.test(t)) return false;
-      const lt = t.toLowerCase();
-      if (names.has(lt) || COMMON_FIRST_NAMES.has(lt)) return false;
-      if (PHRASE_ATTRIBUTION_ITEMS.has(lt)) return false;
-      if (PHRASE_STOP_WORDS.has(lt)) break;
-      // …and an UNKNOWN lowercase word is not evidence either (hook: "and very
-      // talented tasha", "and very tasha"): without a dictionary it cannot be
-      // told from a name, so every scanned token must be positively ordinary.
-      if (!(SENTENCE_STARTERS.has(lt) || ORDINARY_OPENERS.has(lt) || reviewWords.has(lt) || COORD_MODIFIER_RE.test(`${t} `))) return false;
-      tail = tail.slice(tok[0].length);
-    }
-    coord = COORD_RE.exec(tail);
-    if (!coord) return true;
-    tail = coord[1];
-  }
-  return false;
-}
+// …and a listed opener is exempt only with POSITIVE ordinary-word syntax
+// directly after it: a plural-only verb ("Ants are / love / need"), a
+// determiner or preposition ("Finding a", "Skipping the"), or a pronoun.
+// Nothing a single person's name takes — singular copula / auxiliary /
+// possessive, modal, adverb, past-tense verb, capitalised word — is on the
+// list, AND no coordination of any kind: codex #3580 r1–r10 showed that
+// every conjunction / comma path ("Davis and Marcus", "Truly and his team",
+// "and even we", "and some of our team", "and some who are on our team",
+// "and very talented tasha") can carry a hallucinated staff name and needs
+// a grammar to close, so "Ants and roaches …" simply costs one retry of the
+// drafter ladder instead. There is deliberately NO singular-predicate path
+// ("Treatment is glad …" must fail).
+const ORDINARY_FOLLOWER_RE = /^\s*(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them)\b/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
@@ -647,7 +570,6 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
     return 'unlisted_name';
   }
-  const nameWords = new Set([...allowedNames, ...knownNames]);
   // Title-case words AND all-caps words ("KEVIN") both need provenance.
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;
@@ -663,7 +585,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ordinaryFollows(w, body.slice(pn.index + pn[0].length), nameWords, allowedNames, reviewWords)) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
