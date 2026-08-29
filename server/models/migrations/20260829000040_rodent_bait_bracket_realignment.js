@@ -97,12 +97,34 @@ exports.up = async function up(knex) {
   }
 
   // 2. WaveGuard membership flags — preserve any other keys on the row.
-  await updateRow(knex, 'rodent_waveguard', (data) => ({
-    ...data,
-    tier_qualifier: true,
-    exclude_from_pct_discount: false,
-    note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.',
-  }), UP_REASON);
+  //    Prod pre-read 2026-08-29: the row does NOT exist in prod (only the
+  //    admin seed path ever wrote it in fresh envs), so an update-only
+  //    branch would silently no-op and leave the admin panel without the
+  //    knob — insert it when absent.
+  const waveguardRow = await knex('pricing_config').where({ config_key: 'rodent_waveguard' }).first();
+  if (waveguardRow) {
+    await updateRow(knex, 'rodent_waveguard', (data) => ({
+      ...data,
+      tier_qualifier: true,
+      exclude_from_pct_discount: false,
+      note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.',
+    }), UP_REASON);
+  } else {
+    const waveguardData = {
+      tier_qualifier: true,
+      exclude_from_pct_discount: false,
+      setup_credit: 0,
+      note: 'Owner directive 2026-08-29: rodent bait is a full WaveGuard member — counts toward the tier and receives the tier discount.',
+    };
+    await knex('pricing_config').insert({
+      config_key: 'rodent_waveguard',
+      name: 'Rodent WaveGuard Rules',
+      category: 'rodent',
+      sort_order: 10,
+      data: JSON.stringify(waveguardData),
+    });
+    await audit(knex, 'rodent_waveguard', null, waveguardData, UP_REASON);
+  }
 
   // 3. Setup fee $99, non-members only.
   await updateRow(knex, 'rodent_setup_fee', (data) => {
@@ -187,13 +209,20 @@ exports.down = async function down(knex) {
     await audit(knex, 'rodent_bait_brackets', BRACKETS_DATA, null, DOWN_REASON);
   }
 
-  // Restore waveguard/setup rows from their audit snapshots.
+  // Restore waveguard/setup rows from their audit snapshots. A null
+  // old_value means up() INSERTED the row (prod had none) — rollback
+  // deletes it instead of restoring.
   for (const configKey of ['rodent_waveguard', 'rodent_setup_fee']) {
     const auditRow = await knex('pricing_config_audit')
       .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
       .orderBy('id', 'desc')
       .first();
-    if (!auditRow || !auditRow.old_value) continue;
+    if (!auditRow) continue;
+    if (!auditRow.old_value) {
+      await knex('pricing_config').where({ config_key: configKey }).del();
+      await audit(knex, configKey, JSON.parse(auditRow.new_value || 'null'), null, DOWN_REASON);
+      continue;
+    }
     await knex('pricing_config')
       .where({ config_key: configKey })
       .update({ data: auditRow.old_value, updated_at: knex.fn.now() });
