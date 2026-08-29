@@ -396,7 +396,11 @@ export default function TechHomePage() {
   const stopOutOfSync = Boolean(
     nextVisitStop && nextVisitStop.isVisit && nextStop
       && ['en_route', 'on_site'].includes(nextStop.status)
-      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status) && s.status !== nextStop.status),
+      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status)
+        && (s.status !== nextStop.status
+          // Status matches but the customer-visible tracker lags (a sibling
+          // tracker write failed after the status commit — codex r3).
+          || (s.trackState && nextStop.trackState && s.trackState !== nextStop.trackState))),
   );
   const handleSyncStop = () => {
     if (!nextStop) return;

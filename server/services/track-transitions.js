@@ -1014,8 +1014,12 @@ async function markOnProperty(serviceId, opts = {}) {
     // from here (visit-group-scope.md §3; codex #3603 r1). Siblings re-enter
     // with _visitSibling and never fan out again.
     if (!opts._visitSibling) {
+      // Audit actor: opts.actorId (admin flips pass the authenticated admin
+      // here, NOT as actingTechId — that one names the tech in the customer
+      // text) falls back to the acting tech for tech/geofence/GPS signals.
       const fan = await require('./visit-groups').fanOutLiveTransition({
-        primary: svc, kind: 'on_site', actorType: opts.actorType || 'tech', actorId: opts.actingTechId || null, smsOutcome: arrivalSms,
+        primary: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
+        actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
       });
       if (fan) result.visitFanOut = fan;
     }

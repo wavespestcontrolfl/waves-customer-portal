@@ -1111,13 +1111,22 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   // text came from the primary). _visitSibling stops the tracker from
   // fanning out again from inside the fan-out.
   const trackTransitions = require('./track-transitions');
+  // Collected, not just logged (codex #3603 r3): a sibling whose tracker
+  // write failed after the status commit leaves a stale customer-visible
+  // tracker with every operational status already matching — the caller
+  // must report the stop as not fully synced so the next signal repairs it.
+  const trackerFailures = [];
   for (const id of fan.trackers) {
     try {
       const r = kind === 'en_route'
         ? await trackTransitions.markEnRoute(id, { actorType, actorId, suppressCustomerSms: true, _visitSibling: true })
-        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, suppressArrivalSms: true, _visitSibling: true });
-      if (!r || !r.ok) logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
+        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, actorType, actorId, suppressArrivalSms: true, _visitSibling: true });
+      if (!r || !r.ok) {
+        trackerFailures.push({ id, reason: (r && r.reason) || 'tracker returned ok=false' });
+        logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
+      }
     } catch (err) {
+      trackerFailures.push({ id, reason: err.message });
       logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} failed: ${err.message}`);
     }
   }
@@ -1163,7 +1172,11 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   if (fan.skipped.length) {
     logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);
   }
-  return { ok: true, visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: { effectType, status } };
+  const base = { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: { effectType, status } };
+  if (trackerFailures.length) {
+    return { ...base, ok: false, trackerFailures, reason: `tracker write failed for ${trackerFailures.map((f) => `${f.id}: ${f.reason}`).join('; ')}` };
+  }
+  return { ...base, ok: true };
 }
 
 /**

@@ -142,6 +142,30 @@ describe('fanOutLiveTransition', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
   });
 
+  test('a sibling tracker write failure after the status commit is SURFACED as ok:false with the failures listed', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [
+        { id: 's1', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
+        { id: 's2', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
+      ] },
+    };
+    trackTransitions.markEnRoute.mockResolvedValueOnce({ ok: false, reason: 'concurrent_update' }).mockRejectedValueOnce(new Error('pool timeout'));
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'sent' });
+    expect(out.ok).toBe(false);
+    expect(out.trackerFailures).toEqual([{ id: 's1', reason: 'concurrent_update' }, { id: 's2', reason: 'pool timeout' }]);
+    expect(out.reason).toContain('s2: pool timeout');
+  });
+
+  test('on_site siblings carry the audit actor separately from the acting tech', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ id: 's1', status: 'on_site', technician_id: 't1', track_state: 'en_route' }] },
+    };
+    await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorType: 'admin', actorId: 'admin-1' });
+    expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('s1', expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', _visitSibling: true }));
+  });
+
   test.each([
     ['detached (split committed under the lock)', { visit_id: 'v2' }],
     ['reassigned technician', { technician_id: 't9' }],

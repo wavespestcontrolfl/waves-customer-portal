@@ -3667,6 +3667,7 @@ router.get('/', async (req, res, next) => {
         // Visit group identity (visit-group-scope.md §3): rows sharing a
         // visit render as ONE stop card; `visit` summary attached below.
         visitId: s.visit_id || null,
+        trackState: s.track_state || null,
       };
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
@@ -11614,7 +11615,13 @@ router.put('/:id/status', async (req, res, next) => {
 
     if (toStatus === 'on_site') {
       try {
-        const result = await trackTransitions.markOnProperty(svc.id);
+        const result = await trackTransitions.markOnProperty(svc.id, {
+          // Audit provenance for the grouped fan-out (codex #3603 r3): the
+          // admin is the actor; the assigned tech stays the one named to
+          // the customer (actingTechId deliberately NOT set).
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_on_property',
