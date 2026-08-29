@@ -188,9 +188,23 @@ function snapshotMatchesLine1(snapshot, line1) {
 // Never touches the settings themselves. Returns the row count.
 async function markSprinklerSettingsMoved(customerId, conn = db) {
   if (!customerId) return 0;
-  return conn('property_preferences')
-    .where({ customer_id: customerId })
-    .update({ irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) });
+  // Same customer-scoped lock the prefs PUT serializes on: an autosave begun
+  // for the old home cannot commit after this reset and re-add a stale field
+  // (callers pass their transaction; the lock is transaction-scoped).
+  await conn.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['property-preferences', String(customerId)],
+  );
+  const stamp = { irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) };
+  const n = await conn('property_preferences').where({ customer_id: customerId }).update(stamp);
+  if (n) return n;
+  // No preferences row (tech-only irrigation readings are common): the guard
+  // must still exist — upsert a minimal row carrying only the stamp.
+  await conn('property_preferences')
+    .insert({ customer_id: customerId, ...stamp })
+    .onConflict('customer_id')
+    .merge(stamp);
+  return 1;
 }
 
 // Two customer rows describe DIFFERENT homes (normalized street, unit, zip,

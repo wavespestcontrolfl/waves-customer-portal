@@ -37,10 +37,14 @@ function makeConn(rowsByTable) {
         updates.push({ table, ids: updateIds, patch, whereRaw: qb.__whereRaw || [] });
         return Promise.resolve((updateIds || []).length);
       },
+      // Upsert shape used by the sprinkler-settings move guard.
+      insert: (row) => { qb.__insert = row; return qb; },
+      onConflict: (col) => { qb.__conflict = col; return qb; },
+      merge: (patch) => { updates.push({ table, kind: 'upsert', row: qb.__insert, conflict: qb.__conflict, patch }); return Promise.resolve([1]); },
     };
     return qb;
   };
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  conn.raw = (sql, bindings) => { (conn.__raw ||= []).push({ sql, bindings }); return { __raw: sql, bindings }; };
   conn.__updates = updates;
   return conn;
 }
@@ -563,7 +567,7 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     // The move stamp + a reset of the per-field confirmation set — never the settings themselves.
     expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields']);
     expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
-    expect(counts.property_preferences).toBe(0); // mock: no prefs row
+    expect(counts.property_preferences).toBe(1); // mock: no prefs row → the guard is upserted
   });
   test('clearing the primary address stamps the move (no lead/estimate propagation, as before)', async () => {
     const conn = makeConn({ leads: [{ id: 'l1', address: BEFORE.address_line1 }], estimates: [] });
@@ -583,9 +587,15 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     const { markSprinklerSettingsMoved } = require('../services/customer-address-fanout');
     const conn = makeConn({});
     await markSprinklerSettingsMoved('cust-1', conn);
-    const w = conn.__updates.find((u) => u.table === 'property_preferences');
+    // Takes the prefs PUT's customer-scoped advisory lock first…
+    expect(conn.__raw[0]).toEqual({ sql: 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', bindings: ['property-preferences', 'cust-1'] });
+    const w = conn.__updates.find((u) => u.table === 'property_preferences' && !u.kind);
     expect(w.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
     expect(w.patch.irrigation_confirmed_fields).toBe('[]');
+    // …and, with no preferences row (the mock's update matched 0), upserts a minimal one carrying only the stamp.
+    const up = conn.__updates.find((u) => u.table === 'property_preferences' && u.kind === 'upsert');
+    expect(up.conflict).toBe('customer_id');
+    expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at']);
     const fs = require('fs');
     const path = require('path');
     expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);

@@ -105,7 +105,13 @@ describe('renderWeekPlanEmail', () => {
   test('cool-season cadence hold says WHY (you watered last week); an unconfirmed schedule after a move gets the reconfirm note, not the head-type ask (codex gh-r19)', () => {
     const cadence = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: ONE_DAY, priorWeekEvents: 1, ...SPRAY });
     expect(cadence.reasons).toContain('cool_season_cadence');
-    expect(renderWeekPlanEmail(cadence, CTX).week_plan).toContain('You watered last week, and December through March your St. Augustine is barely growing — every 10–14 days if needed is plenty');
+    // Conditional on what the customer did — never "you watered last week" (a sent plan is not proof).
+    const cadenceCopy = renderWeekPlanEmail(cadence, CTX).week_plan;
+    expect(cadenceCopy).toContain("if you ran last week's watering, skip your turf watering — December through March your St. Augustine is barely growing, and every 10–14 days if needed is plenty. If you didn't, run");
+    expect(cadenceCopy).not.toMatch(/You watered last week/);
+    const cadenceReport = renderWeekPlanReport(cadence, { restriction: ONE_DAY });
+    expect(cadenceReport.title).toBe('This week: skip if you watered last week');
+    expect(cadenceReport.detail).toContain("If you ran last week's watering, skip this week; if you didn't, run");
     const eventsOnly = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY });
     expect(eventsOnly.minutesPerEvent).toBe(null);
     const moved = renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null, scheduleUnconfirmed: true });

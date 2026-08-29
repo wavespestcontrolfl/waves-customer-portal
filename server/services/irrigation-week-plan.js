@@ -225,16 +225,19 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action === 'hold') {
     subject = `Skip your turf watering this week, ${name}`;
     heading = `Your lawn is set for the week, ${name}`;
-    const why = plan.reasons.includes('cool_season_cadence')
-      ? `You watered last week, and December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
-      : plan.reasons.includes('prior_week_rain_surplus')
+    const why = plan.reasons.includes('prior_week_rain_surplus')
       ? `Last week's rain alone left more in the soil than your ${grassLabel} can use this week`
       : overwatered
       ? `Last week's rain and irrigation left more in the soil than your ${grassLabel} can use this week`
       : cool
         ? `December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
         : `Your ${grassLabel} doesn't need a full watering this week`;
-    actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on ${permittedDayPhrase(plan, restriction)}.`;
+    // Cadence hold: a SENT plan proves the email went out, not that the
+    // irrigation ran — the copy is conditional on what the customer did,
+    // never "you watered last week" (hook P1 on 246b5bfc8).
+    actionLine = plan.reasons.includes('cool_season_cadence')
+      ? `This week: if you ran last week's watering, skip your turf watering — December through March your ${grassLabel} is barely growing, and every 10–14 days if needed is plenty. If you didn't, run ${fallbackCycle} on ${permittedDayPhrase(plan, restriction)}.`
+      : `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on ${permittedDayPhrase(plan, restriction)}.`;
   } else if (plan.conditionalOnForecast) {
     // Timing-neutral: a 7-day total can't promise the rain comes BEFORE the
     // permitted day, so the subject asks for the check, not the wait.
@@ -318,6 +321,12 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     const fallback = plan.fallbackMinutesPerEvent != null
       ? `one cycle of ${plan.rateSource === 'measured' ? '' : 'about '}${plan.fallbackMinutesPerEvent} minutes per turf zone`
       : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
+    if (plan.reasons.includes('cool_season_cadence')) {
+      return {
+        title: 'This week: skip if you watered last week',
+        detail: `In the cool season every 10–14 days is plenty. If you ran last week's watering, skip this week; if you didn't, run ${fallback} on ${permittedDayPhrase(plan, restriction)}.`,
+      };
+    }
     return {
       title: 'This week: skip your turf watering',
       detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on ${permittedDayPhrase(plan, restriction)}.`,
