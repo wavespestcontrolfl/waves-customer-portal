@@ -118,4 +118,7 @@ describe('strict plan pin outranks the live gate/premise visibility checks (code
     expect(block).toMatch(/if \(!featureGates\.isEnabled\('irrigationWeekPlan'\)\) throw new PinnedWeekPlanUnavailable\('gate_off'\);/);
     expect(block).toMatch(/if \(service\.stamped_address_diverges === true\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
   });
+  test('a string pin whose snapshot no longer binds to this premise (mirror moved, no stamp) refuses too (codex gh-r18)', () => {
+    expect(src).toMatch(/if \(servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string'\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
+  });
 });

@@ -2652,6 +2652,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // Full PREMISE identity, unit included (planBindsToService — the same
     // predicate the cache signature applies).
     const servicedElsewhere = !!snapshot && !planBindsToService(snapshot, service);
+    // A pinned render whose snapshot no longer binds to this premise (the
+    // customer mirror moved between the signature and this lookup, with no
+    // stamp to flag it) is a refusal, never a plan-less payload under the
+    // plan-present key (codex gh-r18).
+    if (servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });

@@ -879,6 +879,7 @@ describe('executeMerge', () => {
       };
       const trx = (table) => qb(table);
       trx.transaction = async (fn) => fn(trx);
+      trx.fn = { now: () => 'NOW()' };
       trx.rows = rows;
       return trx;
     };
@@ -915,8 +916,35 @@ describe('executeMerge', () => {
         { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'failed', categories: JSON.stringify(['irrigation', 'plan:hash-w']) },
       ]);
       const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
-      expect(out).toMatch(/replaced 1/);
-      expect(trx.rows.map((r) => [r.id, r.customer_id])).toEqual([['l1', WINNER]]);
+      expect(out).toMatch(/replaced 1 .* stamped 1/);
+      // The accepted-but-unstamped survivor is stamped so the report can render it.
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()']]);
+    });
+
+    it('both provider-accepted, winner UNSTAMPED + loser STAMPED → the stamped (renderable) row survives (codex gh-r18)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z', decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-w']) },
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1 .* stamped 0/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, '2026-08-24T10:01:00Z']]);
+    });
+
+    it('both provider-accepted and both UNSTAMPED → the winner row stays and is stamped', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-w']) },
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1 duplicate row\(s\), stamped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['w1', WINNER, 'NOW()']]);
     });
 
     it('a delivery record naming a DIFFERENT decision does not make an unsent row delivered', async () => {

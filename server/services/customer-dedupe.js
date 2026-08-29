@@ -684,6 +684,14 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
   let moved = 0;
   let replaced = 0;
   let dropped = 0;
+  let stamped = 0;
+  // Rank: stamped (sent_at) > provider-accepted but unstamped > undelivered.
+  // The higher rank survives; ties keep the winner's row. A retained row that
+  // is accepted-but-unstamped is stamped here — once the two customers'
+  // delivery records share one identity, weekPlanDeliveryState may name the
+  // deleted row's hash, so the survivor could otherwise never be stamped
+  // and the report plan would stay absent (codex gh-r18).
+  const rank = async (row, customerId) => (row ? (row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -695,22 +703,28 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
       if (!(e && e.code === '23505')) throw e;
     }
     const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'week_ending', 'decision_hash');
-    // A delivered row beats an undelivered one; both delivered or neither →
-    // the winner's stays.
-    const loserDelivered = await weekPlanDelivered(trx, row, loserId);
-    const winnerDelivered = await weekPlanDelivered(trx, winnerRow, winnerId);
-    if (winnerRow && loserDelivered && !winnerDelivered) {
+    const loserRank = await rank(row, loserId);
+    const winnerRank = await rank(winnerRow, winnerId);
+    let kept;
+    let keptRank;
+    if (winnerRow && loserRank > winnerRank) {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id: winnerRow.id }).del();
         await sp(table).where({ id: row.id }).update({ [column]: winnerId });
       });
       replaced += 1;
+      kept = row; keptRank = loserRank;
     } else {
       await trx(table).where({ id: row.id }).del();
       dropped += 1;
+      kept = winnerRow; keptRank = winnerRank;
+    }
+    if (kept && keptRank === 1) {
+      await trx(table).where({ id: kept.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
+      stamped += 1;
     }
   }
-  return `moved ${moved}, replaced ${replaced} undelivered winner row(s) with the delivered snapshot, dropped ${dropped} duplicate row(s)`;
+  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's better-delivered snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
 }
 
 // collections_flags: at most one ACTIVE row per (customer, flag) — both

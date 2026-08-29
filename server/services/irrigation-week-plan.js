@@ -53,6 +53,20 @@ function permittedDayPhrase(plan, restriction = null) {
   return withHours(day, restriction);
 }
 
+// Multi-run plans: when the plan prescribes FEWER runs than the law allows
+// (legalMaxEvents 7 under a 2-event seasonal cap), the runs are a choice
+// among the customer's permitted days — "two of your permitted watering
+// days" — never a redefinition of the legal schedule as "each of your 2"
+// (codex gh-r18). Equal counts keep "each of your N".
+const COUNT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'];
+function multiDayPhrase(plan, restriction = null) {
+  const n = Number(plan?.events || 0);
+  const phrase = Number(plan?.legalMaxEvents) > n
+    ? `${COUNT_WORDS[n] || n} of your permitted watering days`
+    : `each of your ${n} permitted watering days`;
+  return withHours(phrase, restriction);
+}
+
 // The policy's hour restriction rides EVERY instruction (email and report
 // alike), not just the footnote — a run on the right day at the wrong hour
 // is still illegal.
@@ -221,13 +235,13 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     // Multi-day: each run is judged on the rain since the PREVIOUS run, so one
     // early soaking cancels one run, not the whole week's water.
     actionLine = plan.events > 1
-      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
+      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On ${multiDayPhrase(plan, restriction)}: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
       : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When ${permittedDayPhrase(plan, restriction)} comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
     heading = `Your watering plan for this week, ${name}`;
     const dayClause = plan.events > 1
-      ? ` on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}`
+      ? ` on ${multiDayPhrase(plan, restriction)}`
       : ` on ${permittedDayPhrase(plan, restriction)}`;
     const depth = fmtInches(plan.depthInches);
     actionLine = minutes
@@ -304,7 +318,7 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     return {
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
-        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}, run ${cycle} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
+        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${multiDayPhrase(plan, restriction)}, run ${cycle} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
         : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan, restriction)}, run ${cycle} only if less than ½" has fallen so far this week.`,
     };
   }
@@ -312,11 +326,11 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
   // carries the same safeguard); the no-forecast case just says why.
   const rainLead = plan.reasons.includes('forecast_unavailable') ? ' No rain forecast was available for this plan — ' : ' If the forecast is wrong: ';
   const noForecastNote = rainLead + (plan.events > 1
-    ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not), skip that run.'
+    ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
     : 'if ½" or more of rain falls before your run, skip it.');
   return {
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
-    detail: `${plan.events > 1 ? `On ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}` : `On ${permittedDayPhrase(plan, restriction)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
+    detail: `${plan.events > 1 ? `On ${multiDayPhrase(plan, restriction)}` : `On ${permittedDayPhrase(plan, restriction)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
   };
 }
 
@@ -679,5 +693,5 @@ module.exports = {
   planBindsToService,
   planCategory,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase, withHours, failedIsAmbiguous, CLAIM_LEASE_SECONDS },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase, multiDayPhrase, withHours, failedIsAmbiguous, CLAIM_LEASE_SECONDS },
 };

@@ -86,6 +86,22 @@ describe('renderWeekPlanEmail', () => {
     expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous permitted watering day (skipped or not');
   });
 
+  test('fewer prescribed runs than the law allows → "two of your permitted watering days", never "each of your 2" (codex gh-r18)', () => {
+    const wide = { ...ONE_DAY, maxDaysPerWeek: 7 };
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 7 }, ...SPRAY });
+    expect(plan.events).toBe(2);
+    expect(plan.legalMaxEvents).toBe(7);
+    expect(renderWeekPlanEmail(plan, { ...CTX, restriction: wide }).week_plan).toContain('on two of your permitted watering days (on your assigned day');
+    expect(renderWeekPlanReport(plan, { restriction: wide }).detail).toContain('On two of your permitted watering days (on your assigned day');
+    const cond = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 7 }, ...SPRAY });
+    expect(renderWeekPlanEmail(cond, { ...CTX, restriction: wide }).week_plan).toContain('On two of your permitted watering days');
+    expect(renderWeekPlanReport(cond, { restriction: wide }).detail).toContain('on two of your permitted watering days');
+    // Equal counts keep "each of your N".
+    expect(_private.multiDayPhrase({ events: 2, legalMaxEvents: 2 })).toBe('each of your 2 permitted watering days');
+    // The report's unconditional multi-run rain note defines the first run's interval like the email.
+    expect(renderWeekPlanReport(plan).detail).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
+  });
+
   test('a single run under a multi-day policy says "one of your permitted watering days" everywhere', () => {
     const two = { maxDaysPerWeek: 2 };
     const run = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'peak', restriction: two, ...SPRAY });
@@ -148,7 +164,7 @@ describe('renderWeekPlanEmail', () => {
     const one = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: null, ...SPRAY });
     expect(renderWeekPlanReport(one).detail).toContain('No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.');
     const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
-    expect(renderWeekPlanReport(two).detail).toContain('since your previous permitted watering day (skipped or not), skip that run');
+    expect(renderWeekPlanReport(two).detail).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
     // A dry forecast still gets the override — an under-predicted storm is still ½" in the ground.
     const withForecast = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: 0.1, ...SPRAY });
     expect(renderWeekPlanReport(withForecast).detail).toContain('If the forecast is wrong: if ½" or more of rain falls before your run, skip it.');
