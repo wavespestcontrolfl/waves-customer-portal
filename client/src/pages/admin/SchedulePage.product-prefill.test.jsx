@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { isPerBasisUnit, resolveRatePrefill } from "../../lib/product-rate-prefill";
+import {
+  isAdjuvantProduct,
+  isPerBasisUnit,
+  resolveRatePrefill,
+} from "../../lib/product-rate-prefill";
+import {
+  isPestDefaultMixVisit,
+  pestDefaultMixSelections,
+} from "../../lib/pest-default-mix";
 import {
   PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
@@ -82,6 +90,8 @@ const CATALOG_TARGETS = [
   "Driveway & sidewalk crack weeds",
   // Cytogro (cytokinin biostimulant, EPA 90022-1) — turf section on label.
   "Turf root development & nutrient uptake",
+  // Talstar P's spider list, written by 20260830000020 (owner 2026-08-29).
+  "Orb-weaver spiders", "Jumping spiders",
 ];
 
 describe("defaultApplicationMethod", () => {
@@ -472,6 +482,9 @@ const lines = (serviceType) => allowedTargetLinesForServiceType(serviceType);
 
 describe("filterLabelTargetsForLine", () => {
   // Real catalog rows (products_catalog.target_pests, prod 2026-08-01).
+  // TALSTAR is the pre-20260830000020 list, kept as a mixed-line
+  // classification fixture; the row's live targets are now the spider list
+  // covered below.
   const TALSTAR = [
     "Ghost ants",
     "Big-headed ants",
@@ -494,6 +507,27 @@ describe("filterLabelTargetsForLine", () => {
       "Big-headed ants",
       "Fire ants",
     ]);
+  });
+
+  it("splits Talstar P's 20260830000020 list: spiders on pest, chinch/fire ants on lawn", () => {
+    // Owner 2026-08-29 + codex P1 on #3611: the spiders lead the list so a
+    // pest visit's 3-target cap keeps exactly them, while the preserved
+    // lawn targets keep the chinch-curative prefill alive on lawn visits.
+    const talstarNext = [
+      "Widow spiders",
+      "Orb-weaver spiders",
+      "Jumping spiders",
+      "Southern chinch bugs",
+      "Fire ants",
+    ];
+    const spiders = talstarNext.slice(0, 3);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Quarterly Pest Control"))).toEqual(spiders);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Pest Re-Service"))).toEqual(spiders);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Lawn Care Program"))).toEqual([
+      "Southern chinch bugs",
+      "Fire ants",
+    ]);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Tree & Shrub Care"))).toEqual([]);
   });
 
   it("keeps only lawn-relevant targets on a lawn visit (fire ants are both)", () => {
@@ -668,6 +702,113 @@ describe("catalogUnitOption", () => {
     expect(catalogUnitOption("oz", ["oz", "fl_oz"])).toBeNull();
     expect(catalogUnitOption("", ["oz", "fl_oz"])).toBeNull();
     expect(catalogUnitOption(null, ["oz", "fl_oz"])).toBeNull();
+  });
+});
+
+describe("default pest tank mix (owner 2026-08-29)", () => {
+  const CATALOG = [
+    { id: 1, name: "Advion Ant Bait Gel" },
+    { id: 2, name: "LESCO 90/10 Nonionic Surfactant" },
+    { id: 3, name: "Taurus SC" },
+    { id: 4, name: "Talstar P" },
+    { id: 5, name: "Non-ionic Surfactant", category: "adjuvant" },
+  ];
+
+  it("seeds every canonical recurring general-pest alias and pest re-services", () => {
+    // The recurring vocabulary mirrors the 20260514000009 alias set —
+    // all three naming generations plus the legacy forms (codex P1 on
+    // #3611: Semiannual and "Recurring Pest Control" were missed).
+    [
+      "General Pest Control",
+      "General Pest Control (Monthly)",
+      "General Pest Control (Bi-Monthly)",
+      "General Pest Control (Quarterly)",
+      "General Pest Control (Semiannual)",
+      "General Pest Control Service (Bi-Monthly)",
+      "General Pest Control Service (Semiannual)",
+      "Monthly Pest Control Service",
+      "Bi-Monthly Pest Control Service",
+      "Quarterly Pest Control Service",
+      "Semiannual Pest Control Service",
+      "Monthly Pest Control",
+      "Bi-Monthly Pest Control",
+      "Quarterly Pest Control",
+      "Recurring Pest Control",
+      "Pest Re-Service",
+      "Pest Control Re-Service",
+    ].forEach((serviceType) =>
+      expect(isPestDefaultMixVisit({ serviceType }), serviceType).toBe(true),
+    );
+    // The callback FLAG counts even when the cloned visit keeps its
+    // recurring display name.
+    expect(isPestDefaultMixVisit({ serviceType: "Pest Control Service", isCallback: true })).toBe(true);
+  });
+
+  it("stays off one-time and specialty pest lanes, and off other lines", () => {
+    [
+      "Pest Control Service", // bare = the one-time job (alias-list exclusion)
+      "General Pest Control (Initial)", // initial scope differs (alias-list exclusion)
+      "General Pest Control + Lawn Care", // combo (alias-list exclusion)
+      "Initial Pest Cleanout",
+      "Rodent Monitoring (Monthly)",
+      "Bed Bug Treatment",
+      "Flea & Tick Yard Treatment",
+      "German Roach Cleanout",
+      "Mosquito Control (Monthly)",
+      "Lawn Care Re-Service",
+      "Quarterly Termite Active Bait Station Service",
+      "WDO Inspection (Termite Letter)",
+    ].forEach((serviceType) =>
+      expect(isPestDefaultMixVisit({ serviceType }), serviceType).toBe(false),
+    );
+  });
+
+  it("resolves Taurus SC, Talstar P, and the pest surfactant with the house totals", () => {
+    const selections = pestDefaultMixSelections(CATALOG);
+    expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
+      ["Taurus SC", 4],
+      ["Talstar P", 4],
+      // Exact identity only — the LESCO lawn surfactant is never eligible.
+      ["Non-ionic Surfactant", 0.25],
+    ]);
+  });
+
+  it("skips a missing entry instead of substituting another product", () => {
+    expect(
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Taurus SC"))
+        .map((s) => s.product.name),
+    ).toEqual(["Talstar P", "Non-ionic Surfactant"]);
+    // With the intended surfactant retired, the LESCO lawn surfactant must
+    // NOT be auto-recorded in its place (codex P1 on #3611) — the entry is
+    // skipped.
+    expect(
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Non-ionic Surfactant"))
+        .map((s) => s.product.name),
+    ).toEqual(["Taurus SC", "Talstar P"]);
+  });
+});
+
+describe("isAdjuvantProduct — no 4-oz house default for surfactants", () => {
+  it("screens adjuvants by category and by name", () => {
+    expect(isAdjuvantProduct({ name: "Non-ionic Surfactant", category: "adjuvant" })).toBe(true);
+    expect(isAdjuvantProduct({ name: "LESCO 90/10 Nonionic Surfactant" })).toBe(true);
+    expect(isAdjuvantProduct({ name: "Talstar P", category: "insecticide" })).toBe(false);
+  });
+
+  it("keeps the surfactant's rate blank instead of the pest 4-oz insecticide default", () => {
+    const resolved = resolveRatePrefill(
+      { name: "Non-ionic Surfactant", category: "adjuvant" },
+      { applicationMethod: "perimeter_spray", serviceLine: "pest" },
+    );
+    expect(resolved.usePestSprayDefault).toBe(false);
+    expect(resolved.rate).toBe("");
+    // A liquid insecticide with no catalog rate still gets the house default.
+    const insecticide = resolveRatePrefill(
+      { name: "Adjourn SC", category: "insecticide" },
+      { applicationMethod: "perimeter_spray", serviceLine: "pest" },
+    );
+    expect(insecticide.usePestSprayDefault).toBe(true);
+    expect(insecticide.rate).toBe(4);
   });
 });
 

@@ -224,7 +224,7 @@ function areaKey(areaName) {
   if (/\bstation|bait\b/.test(text)) return 'station';
   if (/\bfront lawn|back lawn|side yard|turf|yard|lawn\b/.test(text)) return 'lawn';
   if (/\bweed\b/.test(text)) return 'weed';
-  if (/\bplant|shrub|tree|palm|hedge|landscape\b/.test(text)) return 'plant';
+  if (/\bplant|shrub|tree|palm|hedge|landscape|ornamental|bedding\b/.test(text)) return 'plant';
   return 'generic';
 }
 

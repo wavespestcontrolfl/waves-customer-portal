@@ -56,7 +56,7 @@ function categoryForLabel(label) {
   if (/\b(perimeter|foundation|exterior|fence|fenceline)\b/.test(text)) return 'perimeter';
   if (/\b(station|bait)\b/.test(text)) return 'station';
   if (/\b(turf|yard|lawn)\b/.test(text)) return 'lawn';
-  if (/\b(plant|shrub|tree|palm|hedge|landscape)\b/.test(text)) return 'plant';
+  if (/\b(plant|shrub|tree|palm|hedge|landscape|ornamentals?|bedding)\b/.test(text)) return 'plant';
   if (/\b(kitchen|bath|bathroom|garage|interior|attic|lanai|trash)\b/.test(text)) return 'interior';
   return 'generic';
 }
