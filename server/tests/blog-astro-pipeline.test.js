@@ -4082,6 +4082,50 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(await committedImageBuffer('public/images/2024/empty.jpg', async () => ({ content: '', sha: 'e', raw: { sha: 'e', content: '' } }))).toBeNull();
   });
 
+  test('bodyImageRefs: an inline destination with trailing junk is literal text, not an image; a wrapped (multi-line) label is still one image on its first line (GH r12)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1 }]);
+    const wrapped = '## A\n\nProse.\n\n![Technician\nworking](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7 }]);
+    expect((await validateBodyImageRefs({ body: wrapped, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
+    // The section scanner sees the wrapped image under its heading.
+    const { sections } = AstroPublisher._internals.scanBodySections(wrapped, { title: 'T' });
+    expect(sections.find((sec) => sec.heading === 'A').images).toEqual(['/images/blog/x/hero.webp', '/images/blog/x/body-2.webp']);
+  });
+
+  test('bodyImageSlots: a `---` nested in a quote or list under a paragraph is not a setext underline — no fabricated section (GH r12)', () => {
+    const body = ['Intro one.', '> ---', '', 'Intro two.', '- ---', '', 'Intro three.', '', '## Real', '', 'Real prose.'].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Real']);
+    expect(bodyImageSlots(body, 1, { title: 'T' }).map((sl) => sl.heading)).toEqual(['Real']);
+  });
+
+  test('refresh lane: a REUSED body picture is pinned to its blob — a replacement on main by commit time throws transient and deletes the branch (GH r12)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const bodySrc = '/images/blog/shrub-diseases-sarasota-fl/body-1.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Live hibiscus alt](${bodySrc})\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    const bodyWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // body-1 on main is reusable (same heading + lead); the fresh branch already carries a REPLACED blob.
+      if (path === `public${bodySrc}`) return { content: '', sha: ref ? 'b1-replaced' : 'b1', raw: { content: bodyWebp.toString('base64') } };
+      return null;
+    });
+    // Draft keeps the Hibiscus section verbatim but drops the picture → the publisher REUSES body-1.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace(`![Live hibiscus alt](${bodySrc})\n\n`, '').replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/body-1\.webp \(reused picture changed: expected b1, found b1-replaced\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![detail](</images/blog/foo/body-1.webp>)\n![spaced](</images/blog/foo/body 2.webp> "t")\n![plain](/images/blog/foo/body-3.webp)');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-1.webp', '/images/blog/foo/body 2.webp', '/images/blog/foo/body-3.webp']);

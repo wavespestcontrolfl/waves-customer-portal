@@ -4696,6 +4696,14 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankMarkdownLinkDestinations(src)).toBe('![pic       and [link       and  text      ');
   });
 
+  test('parseLinkDestination: one grammar for definitions and inline destinations — optional quoted/parenthesized title, nothing else', () => {
+    expect(guardrails.parseLinkDestination('/a.webp')).toBe('/a.webp');
+    expect(guardrails.parseLinkDestination('  /a.webp "t"  ')).toBe('/a.webp');
+    expect(guardrails.parseLinkDestination("</a b.webp> 't'")).toBe('/a b.webp');
+    expect(guardrails.parseLinkDestination('/a.webp (t)')).toBe('/a.webp');
+    for (const bad of ['/a.webp trailing-junk', '/a.webp "t" junk', '', '   ', '<>']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+  });
+
   test('eachMarkdownLink: nested and escaped brackets in labels, inline/reference/none/malformed kinds, escape parity on `!` and `[`', () => {
     const spans = (t) => [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.isImage, sp.kind, t.slice(sp.labelStart + 1, sp.labelEnd), sp.kind === 'inline' ? t.slice(sp.destStart, sp.destEnd + 1) : sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
     expect(spans('![Technician [close-up]](/x.webp) and ![a \\] b](/y.webp)')).toEqual([[true, 'inline', 'Technician [close-up]', '/x.webp'], [true, 'inline', 'a \\] b', '/y.webp']]);

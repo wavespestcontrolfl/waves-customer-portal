@@ -287,7 +287,18 @@ const REF_DEFINITION_LABEL_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*/;
 // parenthesized title — trailing junk (`/dest.webp trailing-junk`) makes the
 // line an ordinary paragraph in CommonMark, so its label defines nothing and
 // `![alt][label]` renders as literal text, not a picture.
-const REF_DESTINATION_RE = /^(?:<([^<>\n]*)>|(\S+))(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/;
+const LINK_DESTINATION_RE = /^\s*(?:<([^<>\n]*)>|(\S+))(?:\s+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?\s*$/;
+// ONE destination grammar for reference definitions and inline links/images:
+// the text after `[label]:` or inside `(...)` must be a destination plus an
+// optional quoted/parenthesized title and nothing else. Returns the
+// destination, or null when the text is not a valid destination (it then
+// renders as literal text).
+function parseLinkDestination(text) {
+  const m = String(text || '').match(LINK_DESTINATION_RE);
+  if (!m) return null;
+  const dest = (m[1] !== undefined ? m[1] : m[2]).trim();
+  return dest || null;
+}
 function normalizeReferenceLabel(label) {
   return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
@@ -299,11 +310,11 @@ function markdownReferenceDefinitions(str) {
     if (!m) continue;
     let rest = lines[i].slice(m[0].length);
     if (rest.trim() === '') { rest = String(lines[i + 1] || '').trim(); i += 1; } // continuation line
-    const d = rest.match(REF_DESTINATION_RE);
-    if (!d) continue;
+    const dest = parseLinkDestination(rest);
+    if (!dest) continue;
     const label = normalizeReferenceLabel(m[1]);
     if (!label || defs.has(label)) continue;
-    defs.set(label, (d[1] !== undefined ? d[1] : d[2]).trim());
+    defs.set(label, dest);
   }
   return defs;
 }
@@ -4756,6 +4767,7 @@ module.exports = {
   blankMarkdownLinkDestinations,
   markdownReferenceDefinitions,
   normalizeReferenceLabel,
+  parseLinkDestination,
   eachMarkdownLink,
   isThematicBreak,
   blankHiddenContent,

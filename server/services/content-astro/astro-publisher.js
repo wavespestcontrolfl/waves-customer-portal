@@ -1835,26 +1835,32 @@ function normalizeAngleDestinations(text) {
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }
 }
-// Every image a rendered line shows — inline (`![alt](dest "title")`),
+// Every image the rendered body shows — inline (`![alt](dest "title")`),
 // full/collapsed/shortcut reference (`![alt][label]`, `![alt][]`, `![alt]`)
-// — found with the guardrails' balanced scanner (labels may nest and escape
-// brackets), inline destinations normalized, reference labels resolved
-// through `defs` (markdownReferenceDefinitions). A malformed image is text.
-function imageRefsInLine(line, defs) {
+// — found with the guardrails' balanced scanner run over the WHOLE
+// newline-preserving text (a label may wrap across a soft line break), each
+// tagged with the line its `![` sits on. An inline destination must satisfy
+// the full destination-plus-optional-title grammar (parseLinkDestination) or
+// the construct is literal text, not a picture; reference labels resolve
+// through `defs` (markdownReferenceDefinitions); a malformed image is text.
+function imageRefsInText(text, defs) {
   const out = [];
-  const str = String(line || '');
+  const str = String(text || '');
+  let line = 0;
+  let cursor = 0;
   for (const span of contentGuardrails.eachMarkdownLink(str)) {
     if (!span.isImage) continue;
-    const alt = str.slice(span.labelStart + 1, span.labelEnd).trim();
+    for (; cursor < span.start; cursor += 1) if (str[cursor] === '\n') line += 1;
+    const alt = str.slice(span.labelStart + 1, span.labelEnd).replace(/\s+/g, ' ').trim();
     if (span.kind === 'inline') {
-      const dest = str.slice(span.destStart, span.destEnd + 1).trim().split(/\s/)[0] || '';
-      out.push({ alt, src: decodeDestination(dest) });
+      const dest = contentGuardrails.parseLinkDestination(str.slice(span.destStart, span.destEnd + 1));
+      if (dest) out.push({ alt, src: decodeDestination(dest), line });
       continue;
     }
     if (span.kind === 'malformed') continue;
     const tail = span.kind === 'reference' ? str.slice(span.refStart, span.refEnd + 1) : '';
     const label = contentGuardrails.normalizeReferenceLabel(tail || alt);
-    if (label && defs && defs.has(label)) out.push({ alt, src: defs.get(label) });
+    if (label && defs && defs.has(label)) out.push({ alt, src: defs.get(label), line });
   }
   return out;
 }
@@ -1895,22 +1901,18 @@ function renderedBodyView(body) {
   // visibility walker — the same judgement the attribution rules use.
   const visible = normalizeAngleDestinations(contentGuardrails.blankHiddenContent(text));
   const defs = contentGuardrails.markdownReferenceDefinitions(visible);
-  const lines = blankJsxAndExpressions(
+  const rendered = blankJsxAndExpressions(
     contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),
-  ).split('\n');
-  return { lines, depths, inList: inList || [], defs };
+  );
+  return { text: rendered, lines: rendered.split('\n'), depths, inList: inList || [], defs };
 }
 function renderedBodyLines(body) {
   return renderedBodyView(body).lines;
 }
 
 function bodyImageRefs(body) {
-  const out = [];
-  const { lines, defs } = renderedBodyView(body);
-  lines.forEach((line, index) => {
-    for (const ref of imageRefsInLine(line, defs)) out.push({ ...ref, line: index });
-  });
-  return out;
+  const { text, defs } = renderedBodyView(body);
+  return imageRefsInText(text, defs);
 }
 
 function countBodyImages(body) {
@@ -1956,8 +1958,13 @@ function scanBodySections(body, { title = '' } = {}) {
   // land outside the quote or break the list). A top-level block with 1–3
   // leading spaces is still top-level (CommonMark). Raw lines feed the
   // lead text.
-  const { lines: rendered, depths, inList, defs } = renderedBodyView(body);
+  const { text: renderedText, lines: rendered, depths, inList, defs } = renderedBodyView(body);
   const topLevel = (i) => (depths[i] || 0) === 0 && !inList[i];
+  const refsByLine = new Map();
+  for (const ref of imageRefsInText(renderedText, defs)) {
+    if (!refsByLine.has(ref.line)) refsByLine.set(ref.line, []);
+    refsByLine.get(ref.line).push(ref);
+  }
   const sections = [];
   let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
   let paraStart = -1;
@@ -1984,13 +1991,15 @@ function scanBodySections(body, { title = '' } = {}) {
       }
       continue;
     }
-    for (const ref of imageRefsInLine(line, defs)) { cur.hasImage = true; cur.images.push(ref.src); }
+    for (const ref of refsByLine.get(i) || []) { cur.hasImage = true; cur.images.push(ref.src); }
     if (line.trim() === '') { closePara(i); continue; }
     // A dashes-only or equals-only underline DIRECTLY under a top-level
     // paragraph is a SETEXT heading (CommonMark): the paragraph is heading
     // text, not prose, and — like its ATX twin — `---` opens an H2 section
-    // while `===` (H1) closes the current range.
-    const setext = paraStart >= 0 && topLevel(paraStart) ? line.match(/^ {0,3}(-+|=+)[ \t]*$/) : null;
+    // while `===` (H1) closes the current range. The underline must sit in
+    // the same (top-level) container as the paragraph: `> ---` or `- ---`
+    // under a paragraph is a nested break, not its underline.
+    const setext = paraStart >= 0 && topLevel(paraStart) && topLevel(i) ? line.match(/^ {0,3}(-+|=+)[ \t]*$/) : null;
     if (setext) {
       const text = rendered.slice(paraStart, i).join(' ').replace(/\s+/g, ' ').trim();
       paraStart = -1;
@@ -2251,7 +2260,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           // duplicates the (possibly new) hero or a sibling, a NEW picture is
           // generated under the next free name instead.
           const dup = await nearDuplicateOf(committed, seen);
-          if (!dup.label) { reuse = { alt: vettedAlt, hash: dup.hash }; break; }
+          if (!dup.label) { reuse = { alt: vettedAlt, hash: dup.hash, sha: onMain.sha || null }; break; }
           logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — generating a new picture under the next name instead of reusing`);
         }
       }
@@ -2259,7 +2268,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     }
     if (reuse) {
       seen.push({ label: `body-${n}`, hash: reuse.hash });
-      images.push({ src, alt: reuse.alt, reused: true });
+      images.push({ src, alt: reuse.alt, reused: true, repoPath, sha: reuse.sha });
       newAlts.push(reuse.alt);
       placements.push({ insertAt: slot.insertAt, src, alt: reuse.alt });
       continue;
@@ -2324,6 +2333,30 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     throw err;
   }
   return { body: nextBody, files, images, newAlts };
+}
+
+// Paths a body-image commit depends on, re-checked on the FRESH branch just
+// before the commit: every generated asset must still be absent (allocated
+// as absent — a committed picture is never overwritten) and every REUSED
+// asset must still carry the blob its alt and section verdict were judged
+// on (a replacement landing on main mid-run would otherwise ship under a
+// stale alt). Returns conflict descriptions (empty = clean).
+async function bodyImageCommitConflicts(bodyImages, branch) {
+  const conflicts = [];
+  for (const f of bodyImages.files || []) {
+    if (await gh.getFile(f.path, branch)) conflicts.push(`${f.path} (appeared since it was allocated)`);
+  }
+  for (const img of (bodyImages.images || []).filter((i) => i.reused && i.repoPath)) {
+    const onBranch = await gh.getFile(img.repoPath, branch);
+    if (!onBranch || (img.sha && onBranch.sha !== img.sha)) conflicts.push(`${img.repoPath} (reused picture changed: expected ${img.sha}, found ${onBranch?.sha || 'missing'})`);
+  }
+  return conflicts;
+}
+// Drop a branch no PR references yet (a retry cuts a fresh one).
+async function dropUnreferencedBranch(branch, why) {
+  try { await gh.deleteRef(branch); } catch (cleanupErr) {
+    logger.warn(`[astro-publisher] could not delete branch ${branch} after ${why}: ${cleanupErr.message}`);
+  }
 }
 
 async function publishOrUpdatePage(draft, brief = {}) {
@@ -2520,6 +2553,16 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
 
   await gh.createBranch(branch);
+  // Reused body pictures are pinned to the blob they were judged on; a
+  // generated path must still be free. Any conflict is transient: the
+  // branch is dropped and the runner retries against the live repo.
+  {
+    const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
+    if (conflicts.length) {
+      await dropUnreferencedBranch(branch, 'a body-image lock mismatch');
+      throw new Error(`body images for ${slug} changed since they were resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+    }
+  }
   // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero
   // still ships on the same branch as the frontmatter that references it
   // (mirrors publishAstro), but atomically: the multi-commit version of this
@@ -2915,19 +2958,15 @@ async function publishRefresh(draft, brief = {}) {
   // the SHA it was diffed against, and each generated asset path (allocated
   // as ABSENT from main — resolveBodyImages never overwrites a committed
   // picture) must still be absent, or a concurrent write would be lost.
-  if (refreshImages.files.length) {
+  if (refreshImages.files.length || (refreshImages.images || []).some((i) => i.reused)) {
     const conflicts = [];
     const onBranch = await gh.getFile(filePath, branch);
     if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
-    for (const f of refreshImages.files) {
-      if (await gh.getFile(f.path, branch)) conflicts.push(`${f.path} (appeared since it was allocated)`);
-    }
+    conflicts.push(...await bodyImageCommitConflicts(refreshImages, branch));
     if (conflicts.length) {
       // No PR references the branch yet — drop it, or every collision
       // (the runner retries with a fresh shortId) leaves an orphan ref.
-      try { await gh.deleteRef(branch); } catch (cleanupErr) {
-        logger.warn(`[astro-publisher] could not delete refresh branch ${branch} after a lock mismatch: ${cleanupErr.message}`);
-      }
+      await dropUnreferencedBranch(branch, 'a refresh lock mismatch');
       throw new Error(`refresh target changed since it was read on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
     }
   }
@@ -4023,7 +4062,7 @@ module.exports = {
     validateBodyImageRefs,
     scanBodySections,
     renderedBodyView,
-    imageRefsInLine,
+    imageRefsInText,
     assertBodyImagesAtHead,
     legacyHeroRefs,
     imageDHash,
