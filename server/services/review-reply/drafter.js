@@ -272,11 +272,13 @@ what when where whether which while who why wish with would yes you your you're 
 // their own SENTENCE_STARTERS exemption — codex #3580 r1). An explicit,
 // bounded allowlist on purpose: a suffix / morphology heuristic cannot tell
 // Jennings, Sanders, Collins or Harding from an ordinary plural or gerund
-// (three pre-push hook rounds). Pest / lawn nouns, common gerunds, sentence
-// adverbs, abstract nouns — PLURAL / mass nouns only, because the singulars
-// (Roach, Palm, Ant) and some plurals (Moles) are surnames; nothing that is
-// also a personal name (Trust, Peace, Grace, Hope, Will, May, Going, Walking,
-// Grass, Trees, Weeds stay out). Added after the 2026-08-29 dry run
+// (three pre-push hook rounds). Pest / lawn nouns (PLURAL / mass only — the
+// singulars Roach, Palm, Ant and some plurals such as Moles are surnames),
+// common gerunds, sentence adverbs — exactly the shapes the dry run produced.
+// Abstract nouns (communication, reliability …) are deliberately absent: they
+// have no safe syntax path without a dictionary (r5–r8). Nothing that is also
+// a personal name (Trust, Peace, Grace, Hope, Will, May, Going, Walking, Grass,
+// Trees, Weeds stay out). Added after the 2026-08-29 dry run
 // ("Ants are relentless", "Finding a company you can count on", "Skipping the
 // contract" were half of all verifier rejections).
 const ORDINARY_OPENERS = new Set(`
@@ -285,9 +287,7 @@ wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gn
 armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
 being knowing hearing seeing looking making taking staying protecting treating helping showing
 coming letting giving working watching checking honestly thankfully hopefully truly really
-luckily fortunately clearly obviously usually typically sometimes between without within whatever
-whenever wherever neither none plus dependability reliability consistency communication service
-treatment treatments visits results protection prevention nothing something everything anything
+luckily fortunately clearly obviously usually typically sometimes
 `.split(/\s+/).filter(Boolean));
 // …and a listed opener is exempt only with POSITIVE ordinary-word syntax after
 // it (codex #3580 r2 + hook: "Going and Marcus", "Truly says thanks", "Truly,
@@ -363,6 +363,10 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
       const lt = t.toLowerCase();
       if (names.has(lt) || COMMON_FIRST_NAMES.has(lt)) return false;
       if (PHRASE_STOP_WORDS.has(lt)) break;
+      // …and an UNKNOWN lowercase word is not evidence either (hook: "and very
+      // talented tasha", "and very tasha"): without a dictionary it cannot be
+      // told from a name, so every scanned token must be positively ordinary.
+      if (!(SENTENCE_STARTERS.has(lt) || ORDINARY_OPENERS.has(lt) || reviewWords.has(lt) || COORD_MODIFIER_RE.test(`${t} `))) return false;
       tail = tail.slice(tok[0].length);
     }
     coord = COORD_RE.exec(tail);

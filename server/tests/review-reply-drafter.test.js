@@ -471,10 +471,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nFinding as well as Marcus are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches along with marcus are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches as Marcus will tell you are relentless.'))).toBe('unlisted_name');
-    // (no singular-predicate path — codex r7: "Treatment is glad…" must fail; an abstract
-    // noun opener passes with a determiner / preposition instead)
+    // (abstract nouns are NOT openers — codex r5–r8 showed no safe syntax path)
     expect(verify(good('Hi Dana,\n\nTreatment is glad Marcus handled the ants.'))).toBe('unlisted_name');
-    expect(verify(good('Hi Dana,\n\nCommunication with you matters, and we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nCommunication matters, and we are glad Marcus could help.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nAnts as well as roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex #3580 r6/r7: a mass-noun opener with any verb predicate reads as a speaker.
     expect(verify(good('Hi Dana,\n\nTreatment says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
@@ -490,6 +489,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoaches and very talented Marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches and our wonderfully patient marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
+    // hook: an unknown lowercase word inside the coordinated phrase is not evidence.
+    expect(verify(good('Hi Dana,\n\nRoaches and very talented tasha are glad the kitchen is quiet. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches and very tasha are glad the kitchen is quiet. Marcus says thanks.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
