@@ -1301,6 +1301,36 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Autopay texts that actually went out (kill: AUTOPAY_SMS_DIGEST_DISABLED=1)
+  // — 9:41am + 10:41am ET, after the 8:00 charge, 9:00 pre-charge, 9:17
+  // card-expiry and 10:07 retry jobs. Marker-based window, so the second
+  // tick is a no-op unless new texts landed. FIX: when any recipient is not
+  // a monthly member (the 2026-08-29 incident shape), FYI: otherwise.
+  for (const expr of ['30 41 9 * * *', '30 41 10 * * *']) {
+    cron.schedule(expr, async () => {
+      try {
+        const lockRes = await runExclusive('autopay-sms-digest', async () => {
+          const { runAutopaySmsDigest } = require('./autopay-sms-digest');
+          const result = await runAutopaySmsDigest();
+          logger.info(`[autopay-sms-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, mismatches: result.mismatches || 0 })}`);
+          if (result?.skipped === 'query_failed' || result?.error
+              || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+            throw new Error(`autopay SMS digest did not complete (${result.skipped || 'send_failed'})`);
+          }
+        });
+        if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+          const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+          const t0 = Date.now();
+          await recordJobStart('autopay-sms-digest').catch(() => {});
+          await recordJobEnd('autopay-sms-digest', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+          throw new Error(`autopay SMS digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+        }
+      } catch (err) {
+        logger.error(`Autopay SMS digest failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
+
   // Stripe webhook events the app failed to apply (ledger rows with error /
   // abandoned claims in the last 48h — the lookback deliberately exceeds
   // the daily interval + in-flight grace windows) plus Stripe-side delivery
