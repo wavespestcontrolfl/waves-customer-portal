@@ -8,6 +8,8 @@
  * promote to `live`/`indexed` ("verify, don't trust").
  */
 const db = require('../../models/db');
+// Lazy: prospect-domain-lock requires this module (SIGNUP_TYPES) — resolve at call time.
+const locationKeyOf = (v) => require('./prospect-domain-lock').locationKeyOf(v);
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 
@@ -168,6 +170,10 @@ function mapReportToPatch(outcome, body = {}, existingQuality = null) {
       if (body.location) quality.location = String(body.location);
       patch.quality_signals = JSON.stringify(quality);
     }
+    // v2 identity (plan §3.3): the placement's location_key — the third column
+    // of the board's unique key and what the runner's alreadyPlacedAt keys on.
+    // quality.location stays as the display signal; 'default' = not scoped.
+    if (body.location) patch.location_key = locationKeyOf(body.location);
     return patch;
   }
   if (outcome === 'drafted') {

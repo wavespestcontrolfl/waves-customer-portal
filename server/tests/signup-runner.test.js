@@ -8,6 +8,8 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
   ] }),
 }));
 jest.mock('../services/seo/browser-form-filler', () => ({ fillCitationForm: jest.fn() }));
+// v2 step 1: run() starts with the idempotent legacy-attempts catch-up (expand/contract).
+jest.mock('../services/seo/link-registry-backfill', () => ({ backfillLegacyAttempts: jest.fn(async () => ({ copied: 0, scanned: 0 })), backfillLegacyBoard: jest.fn(async () => ({})) }));
 jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(async () => 'backlink-evidence/x.png') }));
 // Stub the SSRF helpers so URL validation is deterministic + offline (no real DNS).
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
@@ -52,7 +54,16 @@ jest.mock('../models/db', () => {
 const worker = require('../services/seo/link-prospect-worker');
 const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
-const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify } = runner._internals;
+const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify, LOCATION_MATCH_SQL } = runner._internals;
+
+describe('alreadyPlacedAt location predicate (v2 identity + rolling-deploy fallback)', () => {
+  test('compiles with exactly two bindings (no bare ? eaten by knex) and keeps the legacy quality_signals fallback only for unstamped rows', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const c = knex('seo_link_prospects').whereRaw(LOCATION_MATCH_SQL, ['bradenton', 'bradenton']).toSQL().toNative();
+    expect(c.bindings).toEqual(['bradenton', 'bradenton']);
+    expect(c.sql).toMatch(/location_key = \$1 OR \(location_key = '-' AND COALESCE\(quality_signals->>'location', ''\) = \$2\)/);
+  });
+});
 
 const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
@@ -132,6 +143,36 @@ describe('run — safety gates', () => {
     expect(r.note).toBe('no_allowlist');
     expect(worker.claim).not.toHaveBeenCalled();
   });
+  test('dry-run skips both registry catch-ups (no writes of any kind); a live run performs board→registry, then attempts, BEFORE claiming', async () => {
+    const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
+    backfillLegacyAttempts.mockClear(); backfillLegacyBoard.mockClear();
+    worker.claim.mockResolvedValue([]);
+    await runner.run({ dryRun: true, allow: ['citysquares.com'] });
+    expect(backfillLegacyAttempts).not.toHaveBeenCalled();
+    expect(backfillLegacyBoard).not.toHaveBeenCalled();
+    await runner.run({ dryRun: false, allow: ['citysquares.com'] });
+    expect(backfillLegacyBoard).toHaveBeenCalledTimes(1);
+    expect(backfillLegacyAttempts).toHaveBeenCalledTimes(1);
+    expect(backfillLegacyBoard.mock.invocationCallOrder[0]).toBeLessThan(backfillLegacyAttempts.mock.invocationCallOrder[0]);
+    expect(backfillLegacyAttempts.mock.invocationCallOrder[0]).toBeLessThan(worker.claim.mock.invocationCallOrder.at(-1));
+    // the attempt row carries the prospect's path (linked by the catch-up above)
+    expect(runner._internals.attemptRowFor({ id: 'p', path_id: 'path-9' }, { outcome: 'blocked_phone_verification' }, null)).toMatchObject({ path_id: 'path-9', outcome: 'needs_owner' });
+  });
+  test('a failing board→registry catch-up ABORTS the run before any claim (no unlinked prospect is ever submitted)', async () => {
+    const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
+    backfillLegacyAttempts.mockClear(); backfillLegacyBoard.mockClear();
+    backfillLegacyBoard.mockRejectedValueOnce(new Error('boom'));
+    const r = await runner.run({ dryRun: false, allow: ['citysquares.com'] });
+    expect(r).toEqual({ claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, aborted: 'registry_catchup_failed' });
+    expect(worker.claim).not.toHaveBeenCalled();
+    expect(backfillLegacyAttempts).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+    // an attempts catch-up failure only logs
+    backfillLegacyAttempts.mockRejectedValueOnce(new Error('boom'));
+    worker.claim.mockResolvedValue([]);
+    await expect(runner.run({ dryRun: false, allow: ['citysquares.com'] })).resolves.toMatchObject({ claimed: 0 });
+    expect(worker.claim).toHaveBeenCalledTimes(1);
+  });
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });
@@ -168,7 +209,7 @@ describe('run — safety gates', () => {
     expect(r.skipped).toBe(1); // the durable duplicate is parked (reclassified skip), never resubmitted
     // p2 is reclassified to skip (so it's never re-claimed) + a skipped attempt is logged
     expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null }));
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', error_code: 'duplicate_placement' }));
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', provider: 'deterministic_runner', detail: expect.stringContaining('"error_code":"duplicate_placement"') }));
   });
   test('same directory, DIFFERENT locations → both submit (per-location listings are allowed)', async () => {
     worker.claim.mockResolvedValue([
@@ -188,7 +229,9 @@ describe('run — outcomes', () => {
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.placed).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', live_url: 'https://citysquares.com/biz/waves', evidence_url: 'backlink-evidence/x.png' }));
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', mode: 'auto' }));
+    // v2 ledger (seo_link_attempts): CHECKed enum outcome, provider + action, verbatim engine outcome in detail
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', provider: 'deterministic_runner', action: 'submit', path_id: null, detail: expect.stringContaining('"legacy_outcome":"placed"') }));
+    expect(require('../services/seo/link-registry-backfill').backfillLegacyAttempts).toHaveBeenCalled();
   });
   test('blocked_captcha → RECLASSIFIES (needs_account) + releases, no retry report', async () => {
     worker.claim.mockResolvedValue([prospect()]);

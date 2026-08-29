@@ -25,6 +25,9 @@ const { uploadEvidence } = require('./signup-evidence');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 const { CITY_TO_LOCATION } = require('../../config/locations'); // canonical city/service-area → GBP locId
+const { mapLegacyOutcome } = require('./link-registry');
+const { backfillLegacyAttempts, backfillLegacyBoard } = require('./link-registry-backfill');
+const { locationKeyOf } = require('./prospect-domain-lock');
 
 // Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
 // prospect and NOT the prospect's fault — a misconfigured/degraded run must abort the
@@ -111,8 +114,14 @@ function buildNap(profile, prospect = null) {
 // this directory domain + GBP location? A multi-location business gets one listing per
 // location on a directory, so a SECOND prospect row for the SAME (domain, location) is a
 // duplicate — even across runs. Earlier same-run placements are already reported, so this
-// one check covers both the in-batch and cross-run cases. quality_signals.location is
-// stamped on every runner placement (see the placed report below).
+// one check covers both the in-batch and cross-run cases. Identity = the board's
+// location_key (plan v2 §3.3; '-' = not scoped), stamped on every runner placement by
+// the worker's placed report (see below) and backfilled from quality_signals.location.
+// ROLLING-DEPLOY FALLBACK (temporary; removed with step 2's contract migration, which
+// re-runs the location_key backfill): an OLD pod placing after the migration stamps only
+// quality_signals.location and leaves location_key at '-', so a row at '-' whose legacy
+// location matches still counts as the durable duplicate.
+const LOCATION_MATCH_SQL = "(location_key = ? OR (location_key = '-' AND COALESCE(quality_signals->>'location', '') = ?))";
 async function alreadyPlacedAt(domain, locId) {
   const dom = normDomain(domain);
   if (!dom) return false;
@@ -120,25 +129,44 @@ async function alreadyPlacedAt(domain, locId) {
     .whereIn('status', ['placed', 'live', 'indexed'])
     // https{0,1} not https? — a literal ? inside a knex whereRaw is parsed as a positional binding.
     .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [dom])
-    .whereRaw("COALESCE(quality_signals->>'location','') = ?", [String(locId || 'default')])
+    .whereRaw(LOCATION_MATCH_SQL, [locationKeyOf(locId), String(locId || 'default')])
     .first();
   return !!row;
 }
 
-async function recordAttempt(p, result, evidenceKey) {
-  try {
-    await db('seo_signup_attempts').insert({
-      prospect_id: p.id,
-      outcome: result.outcome,
+/**
+ * The runner's ledger row (plan v2 §3.4): seo_link_attempts, provider
+ * deterministic_runner, the engine's verbatim outcome kept in detail.legacy_outcome
+ * and mapped onto the CHECKed enum (blocked_* → needs_owner/captcha/price_changed;
+ * placed without a live URL → pending). Never credentials, never page bodies.
+ */
+function attemptRowFor(p, result, evidenceKey) {
+  const placedPending = result.outcome === 'placed' && (!!result.pending || !result.liveUrl);
+  return {
+    prospect_id: p.id,
+    path_id: p.path_id || null,
+    provider: 'deterministic_runner',
+    action: 'submit',
+    outcome: placedPending ? 'pending' : mapLegacyOutcome(result.outcome),
+    cost_cents: 0,
+    duration_ms: Number.isFinite(result.durationMs) ? Math.round(result.durationMs) : null,
+    sandbox: false,
+    evidence_url: evidenceKey || null,
+    detail: JSON.stringify({
+      legacy_outcome: result.outcome == null ? null : String(result.outcome),
       mode: 'auto',
       live_url: result.liveUrl || null,
-      evidence_url: evidenceKey || null,
-      screenshot_url: evidenceKey || null,
-      cost_usd: 0,
       link_rel: p.offered_link_rel || 'unknown',
       error_code: result.errorCode || null,
       error_message: result.notes || null,
-    });
+      screenshot_url: evidenceKey || null,
+    }),
+  };
+}
+
+async function recordAttempt(p, result, evidenceKey) {
+  try {
+    await db('seo_link_attempts').insert(attemptRowFor(p, result, evidenceKey));
   } catch (err) { logger.warn(`[signup-runner] attempt-ledger write failed for ${p.target_domain}: ${err.message}`); }
 }
 
@@ -168,6 +196,24 @@ async function leaseGuardedReclassify(p, patch) {
  * no writes) and releases its leases. Returns { claimed, placed, blocked, failed, skipped }.
  */
 async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, anthropic } = {}) {
+  // Registry catch-up before claiming (plan v2 §3.4 / §4), skipped on dryRun (a dry
+  // run writes nothing; the migration + boot catch-up cover it):
+  //  (a) board rows inserted since the last catch-up get their domain_id/path_id,
+  //      so every attempt recorded below carries its path (never a permanent NULL);
+  //  (b) a legacy seo_signup_attempts row written by an old pod during the rolling
+  //      deploy is copied forward, never lost.
+  // Both idempotent. (a) failing ABORTS the run before any claim — an unlinked
+  // prospect would otherwise be submitted with a permanent path_id=NULL attempt;
+  // (b) failing only logs (nothing this run writes depends on it).
+  if (!dryRun) {
+    try { await backfillLegacyBoard(db, { log: (m) => logger.info(m) }); }
+    catch (err) {
+      logger.error(`[signup-runner] board→registry catch-up failed — aborting before claim: ${err.message}`);
+      return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, aborted: 'registry_catchup_failed' };
+    }
+    await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
+  }
+
   const allowlist = (allow && allow.length ? allow : String(process.env.SIGNUP_RUNNER_ALLOWLIST || '').split(','))
     .map((d) => normDomain(d)).filter(Boolean);
 
@@ -287,4 +333,4 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 }
 
 module.exports = { run };
-module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify };
+module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify, attemptRowFor, LOCATION_MATCH_SQL };
