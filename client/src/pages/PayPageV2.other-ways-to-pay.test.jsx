@@ -85,7 +85,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     stubFetch(payload());
     renderPage();
     await screen.findByText('Pay securely');
-    expect(screen.queryByRole('button', { name: /Prefer to pay by/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Other ways to pay/ })).not.toBeInTheDocument();
   });
 
   it('shows a collapsed link that expands into Zelle + Venmo + PayPal rows with pre-filled pay links', async () => {
@@ -95,13 +95,14 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
       paypal: { handle: 'WavesPest' },
     } }));
     renderPage();
-    const toggle = await screen.findByRole('button', { name: 'Prefer to pay by Zelle, Venmo or PayPal?' });
+    const toggle = await screen.findByRole('button', { name: /Other ways to pay/ });
+    expect(toggle).toHaveTextContent('Other ways to pay — Zelle, Venmo or PayPal');
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByText('Other ways to pay')).not.toBeInTheDocument();
+    expect(document.getElementById('waves-other-ways-to-pay')).toBeNull();
 
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByText('Other ways to pay')).toBeInTheDocument();
+    expect(document.getElementById('waves-other-ways-to-pay')).not.toBeNull();
     // Zelle phone → tap-to-call link, formatted for display.
     expect(screen.getByRole('link', { name: '(941) 555-1234' })).toHaveAttribute('href', 'tel:+19415551234');
     // Zelle has no pay-link — "Open Zelle" goes to Zelle's find-your-bank page.
@@ -124,7 +125,9 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
     stubFetch(payload({ manualPayOptions: { venmo: { handle: '@WavesPest' } } }));
     renderPage();
-    fireEvent.click(await screen.findByRole('button', { name: 'Prefer to pay by Venmo?' }));
+    const toggle = await screen.findByRole('button', { name: /Other ways to pay/ });
+    expect(toggle).toHaveTextContent('Other ways to pay — Venmo');
+    fireEvent.click(toggle);
     expect(screen.queryByText('Zelle')).not.toBeInTheDocument();
     expect(screen.queryByText('PayPal')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Copy Venmo address' }));
