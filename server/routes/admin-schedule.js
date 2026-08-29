@@ -7753,6 +7753,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // Visit stop lock for a slot change on a row that sat in a ONE-member
+      // visit at the unlocked pre-read (local codex audit): a sibling can
+      // join that visit between the pre-read's member count and this
+      // transaction while the row's own visit_id stays unchanged, so the
+      // membership CAS below cannot see it. Taken right after rung 1 and
+      // BEFORE every row lock — the same relative position the rebooker's
+      // single-row path uses, so the two writers never invert — and the
+      // open member set is re-counted under it before any slot write.
+      if (preReadVisitId) {
+        try {
+          await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          throw lockErr;
+        }
+      }
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
@@ -7982,6 +8004,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 isOperational: true,
                 code: 'VISIT_CHANGED_RETRY',
               });
+            }
+            // Same visit_id is not the same membership: under the stop lock
+            // taken above, a one-member visit that gained another live
+            // member since the pre-read is a grouped stop this editor must
+            // not move alone (local codex audit).
+            if (preReadVisitId && occRow.visit_id) {
+              const liveMembers = await require('../services/visit-groups').openMembers(trx, occRow.visit_id);
+              if (liveMembers.length >= 2) {
+                throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_CHANGED_RETRY',
+                });
+              }
             }
             if (preReadWindowRow && (
               dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)

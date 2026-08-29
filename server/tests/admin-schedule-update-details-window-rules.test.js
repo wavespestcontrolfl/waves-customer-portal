@@ -267,6 +267,21 @@ describe('start-only edit derives its end from the stored span, else estimated_d
     expect(windowDurationMinutes(null, null, 0)).toBe(60);
   });
 
+  test('a one-member visit at the pre-read takes the stop lock right after rung 1 and re-counts open members under it before the slot write (local codex audit)', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    const rung1 = ud.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);');
+    const stopLock = ud.indexOf("lockStopForRow(trx, req.params.id)");
+    const firstRowLock = ud.indexOf('.forUpdate()', rung1);
+    const recount = ud.indexOf("openMembers(trx, occRow.visit_id)");
+    const slotCas = ud.indexOf("String(occRow.visit_id || '') !== String(preReadVisitId || '')");
+    expect(rung1).toBeGreaterThan(-1);
+    expect(stopLock).toBeGreaterThan(rung1);          // after rung 1 ...
+    expect(stopLock).toBeLessThan(firstRowLock);      // ... and before every row lock
+    expect(recount).toBeGreaterThan(slotCas);         // membership re-count sits with the CAS, before the slot write
+    expect(ud.slice(stopLock, stopLock + 400)).toMatch(/VISIT_STOP_MOVED[\s\S]*VISIT_CHANGED_RETRY/);
+    expect(ud.slice(recount, recount + 700)).toMatch(/liveMembers\.length >= 2[\s\S]*VISIT_CHANGED_RETRY/);
+  });
+
   test('the pre-read selects estimated_duration_minutes and passes it as the fallback', () => {
     const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
     expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id'\)/);

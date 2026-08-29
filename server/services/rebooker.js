@@ -1145,29 +1145,6 @@ class SmartRebooker {
     let overlapWarned = false;
 
     await db.transaction(async (trx) => {
-      if (soloVisitRecheck) {
-        // Under the row's stop lock (serializes with createOrJoinVisit), an
-        // OPEN visit that now has another live member is a whole-visit
-        // move: surface it like the ungrouped membership miss so
-        // reschedule() re-enters through the unit mover. A stop that
-        // moved under us gets the same remedy (re-read + re-enter).
-        const vg = require('./visit-groups');
-        try {
-          await vg.lockStopForRow(trx, serviceId);
-        } catch (lockErr) {
-          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
-            throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
-          }
-          throw lockErr;
-        }
-        const visit = await trx('service_visits').where({ id: service.visit_id }).first('status');
-        if (visit && String(visit.status) === 'open') {
-          const members = await vg.openMembers(trx, service.visit_id);
-          if (members.some((m) => String(m.id) !== String(serviceId))) {
-            throw Object.assign(new Error('Cannot reschedule — another service joined this visit concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
-          }
-        }
-      }
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1193,6 +1170,32 @@ class SmartRebooker {
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
+      }
+      if (soloVisitRecheck) {
+        // AFTER rung 1 / the tech lock and BEFORE every row lock (the
+        // 'visit.stop' key is outside the occupancy ORDERING CONTRACT; the
+        // admin editor takes it in the same relative position, so the two
+        // writers never invert). Under the row's stop lock (serializes with
+        // createOrJoinVisit), an OPEN visit that now has another live
+        // member is a whole-visit move: surface it like the ungrouped
+        // membership miss so reschedule() re-enters through the unit
+        // mover. A stop that moved under us gets the same remedy.
+        const vg = require('./visit-groups');
+        try {
+          await vg.lockStopForRow(trx, serviceId);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+          throw lockErr;
+        }
+        const visit = await trx('service_visits').where({ id: service.visit_id }).first('status');
+        if (visit && String(visit.status) === 'open') {
+          const members = await vg.openMembers(trx, service.visit_id);
+          if (members.some((m) => String(m.id) !== String(serviceId))) {
+            throw Object.assign(new Error('Cannot reschedule — another service joined this visit concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+        }
       }
       // Unit-move exclusion contract (codex #3609 r5): the rows a batch
       // mover hides from the occupancy probes (excludeServiceIds) must
@@ -1427,8 +1430,9 @@ class SmartRebooker {
         .count('* as count').first();
 
       if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
-        const customer = await db('customers').where({ id: service.customer_id }).first();
-        logger.warn(`Service ${serviceId} for ${customer ? `${customer.first_name} ${customer.last_name}` : service.customer_id} has been rescheduled ${count.count} times — needs manual review`);
+        // IDs only — never the customer's name in plaintext logs (AGENTS.md
+        // non-card PII rule; local codex audit).
+        logger.warn(`[rebooker] service ${serviceId} (customer ${service.customer_id}) has been rescheduled ${count.count} times — needs manual review`);
         await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
           .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
       }
