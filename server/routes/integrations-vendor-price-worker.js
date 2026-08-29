@@ -14,9 +14,12 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { hermesAuth } = require('../middleware/hermes-auth');
+const { linkWorkerAuth } = require('../middleware/link-worker-auth');
 
-router.use(hermesAuth);
+// Same signed-auth successor as the backlink worker (bearer accepted during
+// the §14 ordered rollout); audit rows are this route's bearer-retirement
+// evidence, so rows here stay result='authenticated'.
+router.use(linkWorkerAuth('vendor_price'));
 
 // Enum values are CHECK-constrained in migration 20260528000006; an invalid
 // value would make the insert fail, so we validate before writing.
