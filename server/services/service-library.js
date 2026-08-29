@@ -562,10 +562,17 @@ function refreshAfterCatalogWrite(row) {
  */
 async function deactivateService(id, { audit } = {}) {
   // Reference guard and archive write share ONE transaction with the catalog
-  // row locked (codex #3581): a booking/add-on/package/discount created
-  // between an unlocked pre-check and the UPDATE could otherwise leave a
-  // live reference to an archived service. Writers that reference a service
-  // read it first, so the row lock serializes them behind this check.
+  // row locked (codex #3581). What the lock guarantees: concurrent archives
+  // of the same row serialize, and the check + write see one consistent
+  // snapshot instead of a pre-check that could go stale before the UPDATE.
+  // What it does NOT guarantee: a writer that inserts a reference WITHOUT
+  // reading this row under the same lock (name-based bookings, add-ons) can
+  // still land after the check — full atomicity would need an advisory lock
+  // taken by every reference writer, which is out of this change's scope.
+  // Residual exposure is bounded: catalog resolution only links rows with
+  // is_active = true (slot-reservation, estimate-converter), so an archived
+  // row cannot be newly LINKED; a text-only late reference is a display
+  // label, not a lane.
   return db.transaction(async (trx) => {
     const before = await trx('services').where({ id }).forUpdate().first();
     if (!before) return null;
