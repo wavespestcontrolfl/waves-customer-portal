@@ -598,7 +598,7 @@ describe('rescheduleSeries — one recorded operation', () => {
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
     const lockedDays = trx.raw.mock.calls.filter(([, b]) => Array.isArray(b) && String(b[1]).startsWith('occupancy:')).map(([, b]) => b[1]);
     expect(lockedDays).toContain(`occupancy:${dayOffset(26)}`);
-    expect(shiftCallFollowUpsForParentMove.mock.calls[0][0]).toMatchObject({ occupancyHeld: true });
+    expect(shiftCallFollowUpsForParentMove.mock.calls[0][0]).toMatchObject({ occupancyHeld: true, plan: [expect.objectContaining({ id: 'kid-1', new_day: dayOffset(26) })] });
     expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining(`follow-up visit on ${dayOffset(24)} kept its date`)]));
   });
 
@@ -994,6 +994,8 @@ describe('caller wiring (source)', () => {
     expect(preview).toContain('cadenceSlotDate(i);');
     expect(reb).toContain("if (options.clearAnchorWindow !== true\n      && sameDayWindowElapsed(seriesDateStr");
     expect(reb).toContain('rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],');
+    // The live weekend-preference verdict is re-judged under the lock alongside the recurrence config.
+    expect(reb).toContain('|| lockedSkipWeekends !== seriesSkipWeekends) {');
   });
 
   test('the dispatch explicit series path fences on the FULL pin the resolution read; a retryable provider failure keeps the series text pending; a partial guard map never closes an uncovered id', () => {

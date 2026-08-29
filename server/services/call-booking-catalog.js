@@ -629,12 +629,19 @@ function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
 // options.occupancyHeld: the caller already holds rung-1 date-occupancy
 // locks for every destination day (a series move locks its whole date set
 // up front, BEFORE its row locks — taking them here would invert the
-// order). Otherwise the shift takes them itself at the start of its own
-// transaction. options.report (optional out-param): { skipped: [{ id, day,
-// newDay }] } — children whose destination slot is already booked; they
-// keep their date (best-effort contract) instead of being written onto an
-// occupied slot (AGENTS.md booking conflict-check rule; hook r20 P1).
-async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, report = null }) {
+// order); options.plan is then REQUIRED — the very rows the caller locked
+// for (planCallFollowUpShift, pre-lock), so a child that changed since is
+// judged against the locked set, never against a fresher unlocked read
+// (codex r12 P1). Otherwise the shift plans and takes the locks itself at
+// the start of its own transaction. options.report (optional out-param):
+// { skipped: [{ id, day, newDay }] } — children whose destination slot is
+// already booked; they keep their date (best-effort contract) instead of
+// being written onto an occupied slot (AGENTS.md booking conflict-check
+// rule; hook r20 P1). A caller that passes no report cannot surface those,
+// so the helper rings the durable schedule_conflict admin card itself
+// (codex r12 P2) — a follow-up that silently lost its spacing is an
+// operator problem either way.
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
@@ -646,8 +653,11 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   // membership read, and its carried sequence number would interleave into
   // the new day's run. Every matched row changes day (delta is non-zero by
   // the guard above), so clearing route_order is correct for all of them.
+  if (occupancyHeld && !Array.isArray(plan)) {
+    throw new Error('shiftCallFollowUpsForParentMove: occupancyHeld requires the plan the caller locked for');
+  }
   const run = async (trx) => {
-    const kids = await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate });
+    const kids = occupancyHeld ? plan : await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate });
     if (!kids.length) return 0;
     const { acquireOccupancyLocks, findConflictingVisits } = require('./scheduling/occupancy');
     // Rung 1 for every destination day, before the tech-day fence (rung 3)
@@ -668,6 +678,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     // instead of moving an unprobed block.
     const lockedById = new Map((await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate })).map((k) => [String(k.id), k]));
     let shifted = 0;
+    const skipped = [];
     for (const planned of kids) {
       const k = lockedById.get(String(planned.id));
       if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) continue;
@@ -688,7 +699,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           })
           : [{ unprobed: true }];
         if (clash.length) {
-          if (report && typeof report === 'object') (report.skipped = report.skipped || []).push({ id: k.id, day: k.day, newDay: k.new_day });
+          skipped.push({ id: k.id, day: k.day, newDay: k.new_day });
           continue;
         }
       }
@@ -708,6 +719,25 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           route_order: null,
           updated_at: trx.fn.now(),
         });
+    }
+    if (skipped.length) {
+      if (report && typeof report === 'object') {
+        report.skipped = (report.skipped || []).concat(skipped);
+      } else {
+        // No caller to surface it: durable operator card (best-effort, own
+        // connection — a rolled-back caller trx leaves at worst a stale card).
+        try {
+          const NotificationService = require('./notification-service');
+          await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Call-booked follow-up visit kept its date',
+            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date because the shifted slot is already booked (${skipped.map((k) => `${k.day} → ${k.newDay}`).join(', ')}). Re-space them from dispatch.`,
+            { metadata: { parentServiceId, skipped } },
+          );
+        } catch (err) {
+          logger.error(`[call-booking] follow-up kept-date card failed for parent ${parentServiceId}: ${err.message}`);
+        }
+      }
     }
     return shifted;
   };

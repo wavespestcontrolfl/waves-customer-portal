@@ -1181,6 +1181,9 @@ describe('extraction plumbing for the new booking fields', () => {
   });
 });
 
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }),
+}));
 jest.mock('../services/scheduling/occupancy', () => ({
   ...jest.requireActual('../services/scheduling/occupancy'),
   acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
@@ -1259,7 +1262,7 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(occupancy.acquireOccupancyLocks).toHaveBeenCalledWith(expect.anything(), ['2026-07-19']);
     occupancy.acquireOccupancyLocks.mockClear();
-    await shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true });
+    await shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19' }] });
     expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
   });
 
@@ -1298,6 +1301,35 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     await shiftCallFollowUpsForParentMove({ conn: conn2, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
     expect(log2.wheres).toContainEqual({ technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
     expect(log2.update).toMatchObject({ route_order: null });
+  });
+
+  test('occupancyHeld consumes the caller\'s locked plan (no pre-lock read of its own) and requires it; a child that differs from the plan under the locks is skipped', async () => {
+    await expect(shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true }))
+      .rejects.toThrow(/requires the plan/);
+    const planned = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: null, window_end: null, estimated_duration_minutes: null };
+    // Locked re-read: the child moved to a different destination since the plan → skipped.
+    let selects = 0;
+    const { conn, log } = fakeConn({ kids: [{ ...planned, new_day: '2026-07-20' }] });
+    const counting = (table) => { const c = conn(table); const sel = c.select; c.select = () => { selects += 1; return sel(); }; return c; };
+    counting.raw = conn.raw; counting.fn = conn.fn; counting.transaction = (cb) => cb(counting);
+    const report = {};
+    const shifted = await shiftCallFollowUpsForParentMove({ conn: counting, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [planned], report });
+    expect(selects).toBe(1);
+    expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
+    expect(shifted).toBe(0);
+    expect(log.update).toBeNull();
+    expect(report.skipped).toBeUndefined(); // changed-under-lock is not a booked-slot skip
+  });
+
+  test('a booked-slot skip with NO report rings the durable schedule_conflict card itself', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const kids = [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 }];
+    const { conn } = fakeConn({ kids });
+    occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(shifted).toBe(0);
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({ metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }) }));
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {

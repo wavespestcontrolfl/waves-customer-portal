@@ -1419,8 +1419,12 @@ class SmartRebooker {
       }
     }
     const {
-      isMonthBasedPattern, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate,
+      isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate,
     } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
+    // The call-created follow-ups this move shifts — planned before the
+    // locks (their destination days join rung 1) and handed to the shift
+    // as the locked set.
+    let followUpPlan = [];
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
     // (skipped) must NOT be steamrolled back to 'confirmed' by a series
@@ -1633,9 +1637,10 @@ class SmartRebooker {
           // below) land on days of their own — rung 1 must cover those too,
           // acquired HERE with the sibling dates (sorted, deduped by the
           // helper), never later behind a row lock (hook r20 P1).
-          const followUpDays = (await planCallFollowUpShift({
+          followUpPlan = await planCallFollowUpShift({
             conn: trx, parentServiceId: serviceId, fromDate: dateOnly(service.scheduled_date), toDate: seriesDateStr,
-          })).map((k) => k.new_day);
+          });
+          const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
           // Rung 1 → the per-parent recurring-series maintenance lock, the
           // order update-details already takes (occupancy, then
@@ -1681,7 +1686,14 @@ class SmartRebooker {
             .first('recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday', 'skip_weekends', 'weekend_shift');
           const cadenceConfig = (row) => ['recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday', 'skip_weekends', 'weekend_shift']
             .map((col) => String(row?.[col] ?? '')).join('|');
-          if (!lockedParent || cadenceConfig(lockedParent) !== cadenceConfig(parent)) {
+          // The projector also honored the customer's LIVE weekday preference
+          // (customerPrefersNoWeekends) — re-judged here as well: a preference
+          // set or cleared while this move waited must not commit weekend
+          // siblings (or needlessly shifted ones) from the stale verdict
+          // (codex r12 P2).
+          const lockedSkipWeekends = !!(lockedParent && lockedParent.skip_weekends)
+            || await customerPrefersNoWeekends(db, service.customer_id);
+          if (!lockedParent || cadenceConfig(lockedParent) !== cadenceConfig(parent) || lockedSkipWeekends !== seriesSkipWeekends) {
             throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
               statusCode: 409,
               isOperational: true,
@@ -2163,6 +2175,10 @@ class SmartRebooker {
         fromDate: dateOnly(service.scheduled_date),
         toDate: seriesDateStr,
         occupancyHeld: true,
+        // The exact rows rung 1 was taken for — a child that changed since
+        // is judged against THIS set and skipped, never re-planned onto an
+        // unlocked day (codex r12 P1).
+        plan: followUpPlan,
         report: followUpReport,
       });
       if (followUpsShifted > 0) {
