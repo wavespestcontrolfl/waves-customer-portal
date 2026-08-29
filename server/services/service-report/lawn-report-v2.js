@@ -184,21 +184,26 @@ function mapWater(waterContext, waterSnapshot = null) {
   if (!clientRainKnown && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
+    // Sprinkler settings follow the home: after a move the STORED snapshot's
+    // irrigation and total describe the former property too — withheld the
+    // same way the live path withholds them (rain-only total, no schedule).
+    const unconfirmed = !!(waterContext && waterContext.scheduleUnconfirmed);
     return {
       rainInches: num(rain),
-      irrigationInches: num(waterSnapshot.irrigation_inches_per_week),
-      totalInches: num(waterSnapshot.total_water_7day_inches),
+      irrigationInches: unconfirmed ? null : num(waterSnapshot.irrigation_inches_per_week),
+      totalInches: unconfirmed ? num(rain) : num(waterSnapshot.total_water_7day_inches),
       targetInches: num(waterSnapshot.target_water_inches_per_week),
       status: SNAP_STATUS[waterSnapshot.status] || 'unknown',
       confidence: waterSnapshot.confidence || 'medium',
-      explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
+      explanation: unconfirmed ? null : snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
       rainProvider: 'area',
       // A POSITIVE stored per-week irrigation figure means the customer has a real
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
-      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleOnFile: !unconfirmed && (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleUnconfirmed: unconfirmed,
       // The sent plan is independent of which rainfall source the card uses.
       weekPlan: (waterContext && waterContext.weekPlan) || null,
     };
@@ -224,6 +229,8 @@ function mapWater(waterContext, waterSnapshot = null) {
     // `irrigationInchesPerWeek != null` would wrongly count 0 and hide the CTA
     // while the card still shows the "no schedule on file" copy.
     scheduleOnFile: advice.profileMissing === false,
+    // The card says WHY the irrigation figure is not on file after a move.
+    scheduleUnconfirmed: !!waterContext.scheduleUnconfirmed,
     // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
     // { title, detail } or null — rendered as its own callout on the card.
     weekPlan: waterContext.weekPlan || null,
@@ -682,4 +689,4 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, grassLabelFor };
+module.exports = { buildLawnReportV2, grassLabelFor, mapWater };

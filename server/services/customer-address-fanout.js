@@ -211,7 +211,16 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   if (!customerId) return counts;
   // An address REMOVAL is not propagated — blanking a lead/estimate snapshot
   // would destroy the only remaining record of where service was requested.
-  if (!addressMatchKey(after && after.address_line1)) return counts;
+  // The sprinkler-settings move guard still applies: the settings described
+  // the home that was just cleared (hook P1 on a40e19f53).
+  if (!addressMatchKey(after && after.address_line1)) {
+    if (addressMatchKey(before && before.address_line1)) {
+      counts.property_preferences = await conn('property_preferences')
+        .where({ customer_id: customerId })
+        .update({ irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) });
+    }
+    return counts;
+  }
 
   const matchesCustomerAddress = (snapshot) =>
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);

@@ -565,6 +565,15 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
     expect(counts.property_preferences).toBe(0); // mock: no prefs row
   });
+  test('clearing the primary address stamps the move (no lead/estimate propagation, as before)', async () => {
+    const conn = makeConn({ leads: [{ id: 'l1', address: BEFORE.address_line1 }], estimates: [] });
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: { ...BEFORE, address_line1: '' } }, conn);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
+    expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
+    expect(fanout(conn)).toHaveLength(0);
+  });
   test('a unit-to-unit move in the same building stamps too (a unit is a distinct premise)', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);

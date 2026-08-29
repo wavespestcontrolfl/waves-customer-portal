@@ -144,3 +144,26 @@ describe('report water context withholds every irrigation source after a move (c
     expect(src).toMatch(/:moved=\$\{prefs\?\.irrigation_home_changed_at/);
   });
 });
+
+describe('lawn-report-v2 mapWater carries the moved-home flag and withholds snapshot totals (hook P1 on a40e19f53)', () => {
+  const { mapWater } = require('../services/service-report/lawn-report-v2');
+  const snapshot = { status: 'high', rain_7day_inches: 0.4, irrigation_inches_per_week: 1.2, total_water_7day_inches: 1.6, target_water_inches_per_week: 0.75, confidence: 'medium' };
+  test('area-snapshot path: unconfirmed → no irrigation, rain-only total, no schedule, no snapshot prose', () => {
+    const w = mapWater({ rainfallInches7d: null, scheduleUnconfirmed: true, weekPlan: { title: 'p' } }, snapshot);
+    expect(w.source).toBe('area_snapshot');
+    expect(w.irrigationInches).toBe(null);
+    expect(w.totalInches).toBe(0.4);
+    expect(w.scheduleOnFile).toBe(false);
+    expect(w.scheduleUnconfirmed).toBe(true);
+    expect(w.explanation).toBe(null);
+    expect(w.weekPlan).toEqual({ title: 'p' });
+    const ok = mapWater({ rainfallInches7d: null }, snapshot);
+    expect(ok.irrigationInches).toBe(1.2);
+    expect(ok.totalInches).toBe(1.6);
+    expect(ok.scheduleUnconfirmed).toBe(false);
+  });
+  test('advice path carries the flag', () => {
+    expect(mapWater({ rainfallInches7d: 0.3, irrigationAdvice: { profileMissing: true }, scheduleUnconfirmed: true }).scheduleUnconfirmed).toBe(true);
+    expect(mapWater({ rainfallInches7d: 0.3, irrigationAdvice: { profileMissing: false } }).scheduleUnconfirmed).toBe(false);
+  });
+});
