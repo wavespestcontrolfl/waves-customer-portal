@@ -7,6 +7,7 @@
 
 const {
   buildTermiteReportV2,
+  attachTermiteReportV2,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   resolveTermiteStatus,
@@ -374,6 +375,46 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
       typedReportType: 'termite_bait_station',
     });
     expect(out.status).toEqual({ key: 'monitoring', tone: 'watch', label: 'Bait feeding noted — monitoring continues' });
+  });
+});
+
+describe('attachTermiteReportV2 — the one composer shared by the route and the queued PDF renderer', () => {
+  const original = process.env.TERMITE_REPORT_V2;
+  afterEach(() => {
+    if (original === undefined) delete process.env.TERMITE_REPORT_V2;
+    else process.env.TERMITE_REPORT_V2 = original;
+  });
+  const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+  const payload = () => ({
+    serviceLine: 'termite',
+    typedReport: { type: 'termite_bait_station', visitSequence: 2, todaysResult: { nextStep: 'Recheck sooner.' } },
+    stationMap: { available: true, summary: { total: 12, checked: 12, activity: 0, serviced: 1, inaccessible: 0 } },
+    termiteNextMonitoringVisit: { scheduledDate: '2026-11-16', windowStart: '09:00', serviceType: 'Termite Bait Station Service' },
+    summarySource: 'technician_report',
+    summary: 'Reviewed copy.',
+  });
+
+  it('attaches the dashboard from the frozen snapshot + map summary and consumes the live-only next-visit field', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const data = attachTermiteReportV2(payload(), service);
+    expect(data.termiteReportV2.status.label).toBe('No termite activity observed');
+    expect(data.termiteReportV2.visitSequence).toBe(2);
+    expect(data.termiteReportV2.nextStep).toBe('Recheck sooner.');
+    expect(data.termiteReportV2.nextVisit.scheduledDate).toBe('2026-11-16');
+    expect(data.termiteReportV2.aiSummary).toEqual({ headline: null, body: 'Reviewed copy.' });
+    expect(data.termiteReportV2.metrics[2].value).toBe('1');
+    expect(data).not.toHaveProperty('termiteNextMonitoringVisit');
+  });
+
+  it('is a no-op (and still removes the live-only field) when the gate is off, on another line, or on a non-bait typed type', () => {
+    process.env.TERMITE_REPORT_V2 = 'false';
+    const off = attachTermiteReportV2(payload(), service);
+    expect(off.termiteReportV2).toBeUndefined();
+    expect(off).not.toHaveProperty('termiteNextMonitoringVisit');
+    process.env.TERMITE_REPORT_V2 = 'true';
+    expect(attachTermiteReportV2({ ...payload(), serviceLine: 'pest' }, service).termiteReportV2).toBeUndefined();
+    expect(attachTermiteReportV2({ ...payload(), typedReport: { type: 'termite_liquid' } }, service).termiteReportV2).toBeUndefined();
+    expect(attachTermiteReportV2(null, service)).toBeNull();
   });
 });
 

@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, parseJsonObject } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -164,7 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
-const { buildTermiteReportV2, termiteReportV2PdfSignature, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
+const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -537,48 +537,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   }
 
   // Termite Report V2 — station-protection dashboard for termite BAIT
-  // STATION visits (flag-gated). Keyed on the typed report type, not the
-  // service name: liquid/trench/spot termite treatments and inspections keep
-  // their typed cards — only bait-station completions speak station
-  // language. The builder consumes the frozen typed snapshot values plus the
-  // station-map summary (both immutable per record). Best-effort, never
-  // blocks; the client mounts purely on payload presence.
-  if (
-    process.env.TERMITE_REPORT_V2 === 'true'
-    && data.serviceLine === 'termite'
-    && data.typedReport?.type === TERMITE_BAIT_TYPED_TYPE
-  ) {
-    try {
-      const serviceData = parseJsonObject(service.service_data);
-      const typedSnapshot = serviceData?.typedReportSnapshot;
-      const termiteReportV2 = buildTermiteReportV2({
-        typedSnapshotValues: typedSnapshot?.values || null,
-        typedReportType: data.typedReport.type,
-        stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
-        visitSequence: data.typedReport.visitSequence || 1,
-        // The dashboard replaces the typed Today's Result card, so it must
-        // carry the tech's required next-step commitment itself.
-        nextStep: data.typedReport.todaysResult?.nextStep || null,
-        // First upcoming BAIT-STATION appointment, selected by report-data
-        // over the full candidate window (the top-level nextAppointment may
-        // be an earlier liquid/trench visit or a cross-line fallback).
-        // Already null in pdf/static modes (stripLiveOnlyScheduleFields).
-        nextVisit: data.termiteNextMonitoringVisit || null,
-        // The dashboard suppresses BOTH legacy summary surfaces (Visit
-        // Summary + typed Today's Result), so the approved narrative rides
-        // the hero instead: the accepted technician-report body or the live
-        // typed narrative (report-data sets summarySource for each).
-        technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
-          && typeof data.summary === 'string'
-          ? data.summary
-          : null,
-      });
-      if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
-    } catch { /* best-effort — never block the report */ }
-  }
-  // Consumed by the dashboard payload above; the customer surface carries it
-  // as termiteReportV2.nextVisit only.
-  delete data.termiteNextMonitoringVisit;
+  // STATION visits (flag-gated). ONE composer shared with the queued PDF
+  // renderer (pdf-queue.js) — see attachTermiteReportV2.
+  attachTermiteReportV2(data, service);
 
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1

@@ -430,14 +430,65 @@ function buildTermiteReportV2({
   };
 }
 
-function typedSnapshotType(service = {}) {
+function typedSnapshotOf(service = {}) {
   const raw = service.service_data;
   let data = raw;
   if (typeof raw === 'string') {
     try { data = JSON.parse(raw); } catch { data = null; }
   }
   const snapshot = data && typeof data === 'object' ? data.typedReportSnapshot : null;
-  return snapshot && typeof snapshot === 'object' ? snapshot.type || null : null;
+  return snapshot && typeof snapshot === 'object' ? snapshot : null;
+}
+
+function typedSnapshotType(service = {}) {
+  return typedSnapshotOf(service)?.type || null;
+}
+
+/**
+ * Attach the Termite V2 payload to a built report payload — the ONE
+ * composition point shared by the public route (live / direct PDF) and the
+ * queued PDF renderer (pdf-queue.js), which builds its payload outside the
+ * route helper. Both cache keys carry termiteReportV2PdfSignature, so both
+ * renders must carry the dashboard (codex P1 #3600 r11). Gate + typed-type
+ * predicate live here so the two callers cannot drift. Best-effort: never
+ * throws, never blocks a report. Consumes and removes the live-only
+ * `termiteNextMonitoringVisit` field (the customer surface carries it as
+ * termiteReportV2.nextVisit only).
+ */
+function attachTermiteReportV2(data, service = {}) {
+  if (!data || typeof data !== 'object') return data;
+  const nextVisit = data.termiteNextMonitoringVisit || null;
+  delete data.termiteNextMonitoringVisit;
+  if (
+    process.env.TERMITE_REPORT_V2 !== 'true'
+    || data.serviceLine !== 'termite'
+    || data.typedReport?.type !== TERMITE_BAIT_TYPED_TYPE
+  ) return data;
+  try {
+    const typedSnapshot = typedSnapshotOf(service);
+    const termiteReportV2 = buildTermiteReportV2({
+      typedSnapshotValues: typedSnapshot?.values || null,
+      typedReportType: data.typedReport.type,
+      stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
+      visitSequence: data.typedReport.visitSequence || 1,
+      // The dashboard replaces the typed Today's Result card, so it must
+      // carry the tech's required next-step commitment itself.
+      nextStep: data.typedReport.todaysResult?.nextStep || null,
+      // First upcoming BAIT-STATION appointment, selected by report-data
+      // over the full candidate window; null in pdf/static builds.
+      nextVisit,
+      // The dashboard suppresses BOTH legacy summary surfaces (Visit
+      // Summary + typed Today's Result), so the approved narrative rides
+      // the hero: the accepted technician-report body or the live typed
+      // narrative (report-data sets summarySource for each).
+      technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
+        && typeof data.summary === 'string'
+        ? data.summary
+        : null,
+    });
+    if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
+  } catch { /* best-effort — never block the report */ }
+  return data;
 }
 
 /**
@@ -457,6 +508,7 @@ function termiteReportV2PdfSignature(service = {}) {
 module.exports = {
   TERMITE_BAIT_TYPED_TYPE,
   buildTermiteReportV2,
+  attachTermiteReportV2,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   // exported for tests

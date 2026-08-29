@@ -17,7 +17,7 @@ const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-p
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
-const { termiteReportV2PdfSignature } = require('./termite-report-v2');
+const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -192,6 +192,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // direct route would then serve that stale render as current (codex P2
     // #3197 r6).
     applyLawnReportReconciliation(data, data.dynamicContext);
+    // Termite V2 rides the SAME composer the public route uses — this key
+    // carries termiteReportV2PdfSignature, so the render must carry the
+    // dashboard or the direct route would serve a legacy PDF as current
+    // (codex P1 #3600 r11).
+    attachTermiteReportV2(data, service);
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
