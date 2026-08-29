@@ -504,5 +504,7 @@ module.exports = {
   formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,
+  snapshotTailPlace,
+  placeCorroborates,
   propagateCustomerAddressChange,
 };

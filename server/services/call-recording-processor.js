@@ -2586,10 +2586,29 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     const supplied = norm(f, suppliedValues[f]);
     if (!supplied) continue;
     const same = supplied === norm(f, lockedVal)
-      || (f === 'address' && leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal));
+      || (f === 'address'
+        && leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal)
+        && leadAddressPlaceCorroborates(suppliedValues, lockedLead));
     if (same) out[f] = lockedVal;
   }
   return out;
+}
+
+// A same street+unit key is NOT the same property when the call names a
+// different place (two "100 Main St, Apt 4" in different cities/ZIPs — the
+// same rule addressKey identity and the fan-out's snapshot match apply,
+// codex r4 P1). Reuses the fan-out's placeCorroborates against BOTH place
+// sources the locked lead carries: its city/zip columns and any city/ZIP
+// tail inside its address string. ZIP wins when both sides have one; city
+// only when no ZIP compare is possible; a call that names no place cannot
+// corroborate a lead that does (no claim, so the predecessor's rollback
+// stays authoritative — conservative by design).
+function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
+  const { placeCorroborates, snapshotTailPlace } = require('./customer-address-fanout');
+  const contact = { city: suppliedValues.city, zip: suppliedValues.zip };
+  if (!placeCorroborates(contact, { city: lockedLead.city, zip: lockedLead.zip })) return false;
+  const tail = snapshotTailPlace(lockedLead.address);
+  return !tail || placeCorroborates(contact, tail);
 }
 
 // Canonical street|unit key for a leads.address value, tolerant of every
@@ -14525,13 +14544,17 @@ CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
  */
 function composeLeadAddress(line1, line2) {
   const street = String(line1 || '').trim();
-  const unit = String(line2 || '').trim();
+  // Same 100-char unit clamp as the customer insert / booking linkage —
+  // the extraction schema bounds street_line_2 by type only, and an
+  // overlong unit would otherwise consume the whole 255 budget as the
+  // protected tail and drop the street (codex r4 P2).
+  const unit = String(line2 || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
   if (!street) return null;
   const { formatAddressBounded } = require('./customer-address-fanout');
   if (!unit) return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
   const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
   const split = splitStreetLineUnit(street);
-  const embedded = String(split?.unit || '').trim();
+  const embedded = String(split?.unit || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
   if (embedded && unitLineValueKey(normalizeUnitLine(embedded)) === unitLineValueKey(normalizeUnitLine(unit))) {
     // Bound from the PARSED parts so the embedded unit is the protected
     // tail, not the first thing a long street's truncation eats.
@@ -14543,6 +14566,7 @@ function composeLeadAddress(line1, line2) {
 // varchar(255)); a longer composed value makes Postgres reject the whole
 // enrichment update and fails the call-processing attempt.
 const LEAD_ADDRESS_MAX_LENGTH = 255;
+const LEAD_UNIT_MAX_LENGTH = 100;
 
 CallRecordingProcessor._test = {
   composeLeadAddress,

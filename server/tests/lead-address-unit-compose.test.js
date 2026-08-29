@@ -62,6 +62,12 @@ describe('composeLeadAddress', () => {
     expect(out.length).toBeLessThanOrEqual(255);
     expect(out.endsWith(', Apt 4')).toBe(true);
     expect(composeLeadAddress(longStreet, null).length).toBeLessThanOrEqual(255);
+    // An overlong unit is clamped to 100 (same as the customer insert) so
+    // the street is never dropped for the tail.
+    const longUnit = `Suite ${'A'.repeat(300)}`;
+    const clamped = composeLeadAddress('100 Main St', longUnit);
+    expect(clamped.length).toBeLessThanOrEqual(255);
+    expect(clamped.startsWith('100 Main St, Suite ')).toBe(true);
     // An EMBEDDED unit on an over-long street is the protected tail too.
     const embedded = composeLeadAddress(`${longStreet} Apt 4`, 'Apt 4');
     expect(embedded.length).toBeLessThanOrEqual(255);
@@ -108,6 +114,29 @@ describe('reaffirmedFilledLeadFields — address', () => {
     const locked = { address: '100 Main St, Apt 4' };
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 5' }, locked)).toEqual({});
     expect(reaffirmedFilledLeadFields({ address: '100 Main St' }, locked)).toEqual({});
+  });
+
+  test('same street+unit in a DIFFERENT place claims no address ownership (place corroboration)', () => {
+    const locked = { address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
+    // ZIP is the discriminator when both sides have one.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: '34211' }, locked).address).toBeUndefined();
+    // City-only compare when no ZIP compare is possible.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Bradenton', zip: null }, { address: '100 Main St, Apt 4', city: 'Sarasota', zip: null }).address).toBeUndefined();
+    // A call that names no place cannot corroborate a lead that does.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: null, zip: null }, locked).address).toBeUndefined();
+    // The fan-out's city/ZIP tail inside the address string counts too.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: '34211' }, { address: '100 Main St, Apt 4, Sarasota, FL 34236', city: null, zip: null }).address).toBeUndefined();
+  });
+
+  test('same street+unit in the SAME place reaffirms', () => {
+    const locked = { address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Apt 4');
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: null }, locked).address).toBe('100 Main St, Apt 4');
+    // Postal-city aliases (Lakewood Ranch / Bradenton share a ZIP): ZIP wins.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Lakewood Ranch', zip: '34211' }, { address: '100 Main St, Apt 4', city: 'Bradenton', zip: '34211' }).address).toBe('100 Main St, Apt 4');
+    // A place-less lead is corroborated by anything.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: '34236' }, { address: '100 Main St, Apt 4' }).address).toBe('100 Main St, Apt 4');
   });
 
   test('exact case-insensitive match still reaffirms', () => {
