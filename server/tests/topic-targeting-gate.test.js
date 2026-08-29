@@ -1000,6 +1000,25 @@ describe('PR codex r22 (b4db7a542)', () => {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
     }
   });
+  test('Wi-Fi is not Wisconsin; "The Villages" counts only with geo / service context (03:02Z round on 864fcd91a)', () => {
+    for (const t of ['Wi-Fi Pest Monitoring for Termites', 'wifi pest monitors for sarasota homes', 'we serve the villages around lakewood ranch', 'the villages of palmetto']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    for (const t of ['WI pest control', 'The Villages pest control', 'pest control in The Villages', 'The Villages, FL termite bond']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
+  test("an owner's sentence-start brand mentions are ownership evidence; a Title-Case common word with lowercase uses is not (03:02Z round on 864fcd91a)", () => {
+    const owner = { url: '/pest-control/taexx-system-guide/', body: '---\ntitle: Taexx System Guide\nslug: /pest-control/taexx-system-guide/\nprimary_keyword: taexx system\ncategory: pest-control\n---\n\nTaexx routes product inside the walls. Taexx ports sit outside the home. Taexx service visits are quick.\n\n## How Taexx works\n' };
+    const idx = gate.indexCorpus([owner]);
+    expect(idx.properNouns.has('taexx')).toBe(true);
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'taexx new home', title: 'Your New Home Came With Taexx', slug: '/pest-control/taexx-new-home/', category: 'pest-control' }, { index: idx });
+    expect(r.ok).toBe(false);
+    expect(r.findings.map((f) => f.code)).toContain(gate.CODES.CANNIBALIZES_EXISTING);
+    // A targeting token that is an ordinary word: capitalized at sentence starts but lowercase mid-sentence → not a proper noun.
+    const bond = { url: '/termite/termite-bond-warranty/', body: '---\ntitle: Termite Bond Warranty Guide\nslug: /termite/termite-bond-warranty/\nprimary_keyword: termite bond warranty\ncategory: termite\n---\n\nWarranty terms vary. Warranty renewals are yearly. Warranty transfers happen at sale. Most owners read the warranty once, and the warranty covers retreatment.\n' };
+    expect(gate.indexCorpus([bond]).properNouns.has('warranty')).toBe(false);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

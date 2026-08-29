@@ -1718,7 +1718,7 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Zephyrhills', 'Wesley Chapel', 'New Port Richey', 'Dunedin', 'Pinellas Park', 'Palm Harbor', 'Tarpon Springs', 'Oldsmar', 'Temple Terrace',
   'Valrico', 'Fort Walton Beach', 'Crestview',
   'Panama City Beach', 'Lake City', 'Palatka', 'Fernandina Beach',
-  'Jacksonville Beach', 'Ponte Vedra', 'The Villages', 'Leesburg', 'Mount Dora',
+  'Jacksonville Beach', 'Ponte Vedra', 'Leesburg', 'Mount Dora', // The Villages → topic-targeting-gate CONTEXT_PLACE_NAMES (ordinary phrase in prose)
   'Crystal River', 'Homosassa', 'Dade City', 'Wauchula',
   'Avon Park', 'Okeechobee', 'Clewiston', 'Belle Glade', 'Jensen Beach',
   'Hobe Sound', 'Key West', 'Key Largo', 'Islamorada', 'Everglades City',

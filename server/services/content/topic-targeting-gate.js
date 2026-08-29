@@ -202,6 +202,9 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   // those footprint forms are scrubbed from the context scan only — and St.
   // Augustine vs the grass (scrubbed by the shared metro-compound list).
   'Charlotte', 'St. Augustine',
+  // "The Villages" is an ordinary phrase in prose ("the villages around
+  // Lakewood Ranch") — the town only with geo / service context.
+  'The Villages',
   // Major metros that are also names / words (PR #3549 codex r11).
   'Jackson', 'Lincoln', 'Madison', 'Aurora', 'Mesa', 'Buffalo',
   'Arlington', 'Springfield', 'Salem', 'Eugene', 'Tyler', 'Garland', 'Irving',
@@ -309,6 +312,8 @@ const NATIONWIDE_RE = new RegExp(
 // with postal codes (Ca, Mg, K, GA = gibberellic acid, CT values, …) — scrubbed
 // before the abbreviation matchers when they carry that context.
 const SCIENCE_EXEMPT_RE = /\b(?:(?:low|high|soil|leaf|tissue|available|excess|deficient|deficiency|deficiencies|adequate|optimal|foliar|calcium|magnesium|potassium|nitrogen|phosphorus|sulfur|iron|ppm|mg\/l|percent|%)\s+(?:ca|mg|k|n|p|s|fe|mn|zn|cu|b|mo|al|na|cl|co|ni)|(?:ca|mg|k|n|p|fe|mn|zn|cu|na|al|co|ni)\s+(?:levels?|deficienc(?:y|ies)|ratios?|content|uptake|availability|toxicity|sufficiency|in\s+(?:soil|soils|turf|lawns?|grass|leaves|plants?|tissue))|ga(?:3)?\s+(?:applications?|treatments?|sprays?|levels?|rates?|concentrations?|sensitivity)|ct\s+(?:values?|scans?|products?|calculations?|concentration))\b/gi;
+// Tech terms that read as a leading postal abbreviation ("Wi-Fi" → WI).
+const TECH_EXEMPT_RE = /\bwi-?fi\b/gi;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico|district of columbia)\b/i;
 
@@ -504,7 +509,7 @@ function classifyGeoScope(text) {
   // compounds ("San Jose scale", "Portland cement") and formulations are not
   // markets — scrubbed for BOTH the served-city and the out-of-area scans
   // ("Texas Mountain Laurel" is a plant, not Laurel, FL).
-  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(SCIENCE_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(SCIENCE_EXEMPT_RE, ' ').replace(TECH_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
   const footprint = [
     ...findAll(cityRe(footprintCities()), tg.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
     ...findAll(footprintContextRe(), tg),
@@ -843,20 +848,25 @@ function proseOf(body) {
 // mid-sentence (sentence starts and list bullets are skipped) across the
 // whole corpus' prose.
 const PROSE_WORD_RE = /(^|[.!?]\s+|\n\s*|[^\w'’-])([A-Za-z][A-Za-z0-9'’-]{2,})/g;
-function accumulateProperNounStats(prose, stats) {
+// `targeting`: the post's own targeting-token counts. A sentence-start
+// occurrence is casing-blind for every other token, but for a token the
+// post is BUILT AROUND it is evidence — an owner that opens its sentences
+// with the brand ("Taexx routes… Taexx ports…") must still read as the
+// entity's owner. A lowercase mid-sentence use still breaks the ratio.
+function accumulateProperNounStats(prose, stats, targeting = null) {
   const re = new RegExp(PROSE_WORD_RE.source, 'g');
   let m;
   while ((m = re.exec(prose)) !== null) {
     const pre = m[1];
     const word = m[2];
     const sentenceStart = pre === '' || /[.!?]\s+$/.test(pre) || /\n\s*$/.test(pre) || /[-*]\s$/.test(pre);
-    if (sentenceStart) continue;
     // Same normalization as tokenize(): possessive stripped, a hyphenated
     // brand ("Pestie-Pro") counted per part, short/stop parts dropped — so
     // the proper-noun keys are the tokens the targeting counts intersect.
     for (const part of word.split(/-+/)) {
       const tok = part.toLowerCase().replace(/[’']s$/, '').replace(/[’']/g, '');
       if (tok.length <= 2 || STOP_WORDS.has(tok)) continue;
+      if (sentenceStart && !(targeting && targeting.has(tok))) continue;
       const s = stats.get(tok) || { cap: 0, low: 0 };
       if (/^[A-Z]/.test(part)) s.cap++; else s.low++;
       stats.set(tok, s);
@@ -884,7 +894,7 @@ function indexCorpus(corpus = []) {
     const url = normalizeSlug(item.url || fields.slug);
     const category = String(fields.category || categoryFromSlug(url) || '').toLowerCase() || null;
     posts.push({ url, title: fields.title, path: item.path || item.file || null, category, counts });
-    accumulateProperNounStats(proseOf(item.body), nounStats);
+    accumulateProperNounStats(proseOf(item.body), nounStats, counts);
   }
   return { posts, df: documentFrequency(posts), dfByCategory: new Map(), properNouns: properNounsFrom(nounStats) };
 }
