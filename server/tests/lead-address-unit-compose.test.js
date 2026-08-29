@@ -80,6 +80,11 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('123 State Road #64', '')).toBe('123 State Road #64');
     expect(leadAddressCompareKey('123 State Road #64, Apt 4')).toBe(leadAddressCompareKey('123 State Road #64 Apt 4'));
     expect(analyzeLeadAddress('100 Main Rd #4', 'Apt 5')).toEqual({ address: '100 Main Rd, #4', unitConflict: true });
+    // Route number followed by a real unit: only the number goes back to the street.
+    expect(analyzeLeadAddress('123 State Road #64 Apt 4', 'Apt 4')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: false });
+    expect(analyzeLeadAddress('123 State Road #64 Apt 4', 'Apt 5')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: true });
+    expect(analyzeLeadAddress('123 State Road #64 Apt 4', '')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: false });
+    expect(leadAddressCompareKey('123 State Road #64 Apt 4')).toBe(leadAddressCompareKey('123 State Road #64, Apt 4'));
     // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed into one, never stored as two.
     expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toEqual({ address: '100 Main St, Bldg 2 Apt 4', unitConflict: true });
     // Designator words inside a street name are not a unit.

@@ -14805,11 +14805,15 @@ function splitLeadStreetParts(street) {
   // route word it is the road's number ("123 State Road #64", "500 Hwy
   // #41") — put it back on the street so a real "Apt 4" is not a conflict
   // and the road is not rewritten as "State Road, #64" (pre-push audit P1).
-  if (/^#\s*\S+$/.test(unit || '')) {
+  // The route number may LEAD a longer unit ("#64 Apt 4" for "123 State
+  // Road #64 Apt 4"): only that leading hash token moves; the rest stays
+  // the unit.
+  const leadingHash = String(unit || '').match(/^(#\s*\S+)(?:\s+(.*))?$/);
+  if (leadingHash) {
     const streetTokens = String(streetPart || '').replace(/[.,]/g, '').toLowerCase().split(/\s+/).filter(Boolean);
     if (isRouteNumberContext(streetTokens[streetTokens.length - 1] || '', streetTokens[streetTokens.length - 2] || '')) {
-      streetPart = `${streetPart} ${unit}`.trim();
-      unit = '';
+      streetPart = `${streetPart} ${leadingHash[1]}`.trim();
+      unit = String(leadingHash[2] || '').trim();
     }
   }
   return {
