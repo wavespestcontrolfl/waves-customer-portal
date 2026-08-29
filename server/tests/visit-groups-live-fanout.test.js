@@ -199,6 +199,20 @@ describe('fanOutLiveTransition', () => {
     expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('s1', expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', _visitSibling: true }));
   });
 
+  test('the stop is the primary\'s CONNECTED COMPONENT: a 09-10 · 10-11 · 11-12 chain all follows the 09-10 tap', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '11:00', window_end: '12:00' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's2', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '10:00', window_end: '11:00' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's3', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '14:00', window_end: '15:00' },
+      ] },
+    };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.siblingIds.sort()).toEqual(['s1', 's2']);
+    expect(out.skipped).toEqual([{ id: 's3', reason: 'stop_changed' }]);
+  });
+
   test('a sibling whose stop tuple changed (reschedule committed, detach seam not yet run) is skipped', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
@@ -250,8 +264,11 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
     // a `failed` row is RECLAIMED (the retry); sent/suppressed/claimed are taken
     const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
     expect(merge.values).toMatchObject({ status: 'claimed' });
-    db.__script.visit_effects = { returning: () => [] };
+    // no row won: a terminal (sent/suppressed) row ⇒ taken; a LIVE claimed row ⇒ in_flight (lease, r8)
+    db.__script.visit_effects = { returning: () => [], first: () => ({ status: 'sent' }) };
     expect(await claimVisitNotification(ROW, 'on_site')).toBe('taken');
+    db.__script.visit_effects = { returning: () => [], first: () => ({ status: 'claimed' }) };
+    expect(await claimVisitNotification(ROW, 'on_site')).toBe('in_flight');
   });
   test('a row a split just detached (or a visit no longer open) never claims', async () => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v2' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };

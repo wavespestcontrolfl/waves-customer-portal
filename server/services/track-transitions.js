@@ -365,8 +365,9 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
   const visitGroups = require('./visit-groups');
   let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner });
   if (!row.visit_id) return fan;
-  if (smsOutcome === 'claim_error') {
-    return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: 'notification claim failed' };
+  if (smsOutcome === 'claim_error' || smsOutcome === 'claim_in_flight') {
+    const reason = smsOutcome === 'claim_error' ? 'notification claim failed' : 'notification claim in flight';
+    return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason };
   }
   // Owned claim whose ledger row the fan-out did not finalize — because it
   // did not run (primary detached / visit no longer open) OR because it
@@ -420,10 +421,11 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
       } catch (err) {
         logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
       }
-    } else if (visitClaim === 'error') {
-      // Unknown claim state: never send, leave the guard NULL so the next
-      // signal retries; the wrapper reports the stop incomplete.
-      smsOutcome = 'claim_error';
+    } else if (visitClaim === 'error' || visitClaim === 'in_flight') {
+      // Unknown claim state, or another member's claim still in flight (a
+      // lease, r8): never send, leave the guard NULL so the next signal
+      // retries; the wrapper reports the stop incomplete.
+      smsOutcome = visitClaim === 'error' ? 'claim_error' : 'claim_in_flight';
     }
   }
   const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
@@ -1106,7 +1108,8 @@ async function markOnProperty(serviceId, opts = {}) {
         logger.error(`[track-transitions] arrival covered stamp failed for ${serviceId}: ${err.message}`);
       }
     } else {
-      arrivalSms = 'claim_error'; // unknown claim state: never send, guard stays NULL
+      // unknown claim state, or a live claim in flight: never send, guard stays NULL
+      arrivalSms = visitClaim === 'in_flight' ? 'claim_in_flight' : 'claim_error';
     }
   }
   if (result && result.ok) {

@@ -1057,9 +1057,14 @@ async function claimVisitNotification(row, kind) {
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate().first('id', 'visit_id');
       if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return 'detached';
       // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
-      // miss) is RECLAIMED — that is the retry the ledger promised (codex
-      // r6); sent / suppressed / claimed (in flight, or an orphan for the
-      // office) ⇒ taken.
+      // miss) is RECLAIMED — the retry the ledger promised (codex r6) — and
+      // so is a STALE `claimed` row (a claim whose finalize failed or whose
+      // process died: the claim is a short lease, codex r8). A live
+      // `claimed` row is 'in_flight' (another member is sending — or the
+      // lease has not expired yet): never send, never stamp covered, the
+      // caller reports the stop incomplete and the next signal retries.
+      // sent / suppressed ⇒ 'taken' (this row is covered).
+      const leaseCutoff = new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS);
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
@@ -1071,9 +1076,18 @@ async function claimVisitNotification(row, kind) {
         })
         .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
         .merge({ status: 'claimed', claimed_at: new Date() })
-        .where('visit_effects.status', '=', 'failed')
+        .where(function reclaimable() {
+          this.where('visit_effects.status', '=', 'failed')
+            .orWhere(function staleClaim() {
+              this.where('visit_effects.status', '=', 'claimed').where('visit_effects.claimed_at', '<', leaseCutoff);
+            });
+        })
         .returning('id');
-      return rows && rows.length ? 'owner' : 'taken';
+      if (rows && rows.length) return 'owner';
+      const existing = await t('visit_effects')
+        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: `${visit.id}:${effectType}` })
+        .first('status');
+      return existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken';
     });
   } catch (err) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
@@ -1118,6 +1132,9 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
 }
 
 const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off']);
+// A claim is a lease: a `claimed` row older than this is reclaimable (its
+// owner's finalize failed or its process died). Sends complete in seconds.
+const NOTIFICATION_CLAIM_LEASE_MS = 2 * 60 * 1000;
 
 async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId = null, smsOutcome = null, notificationOwner = false }) {
   const toStatus = kind === 'en_route' ? 'en_route' : kind === 'on_site' ? 'on_site' : null;
@@ -1165,6 +1182,33 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       const trackers = [];
       const covered = [];
       const skipped = [];
+      // The stop = the primary's CONNECTED COMPONENT over member windows
+      // (codex r8): 09-10 · 10-11 · 11-12 is one stop even though 11-12
+      // never touches the tapped 09-10 row — the same chain rule
+      // windowedMembersConnected applies at creation. Windowless members
+      // join anything. Only same-tuple, same-tech members can chain.
+      const sameStopTuple = (s) => dateOnly(s.scheduled_date) === dateOnly(visit.scheduled_date)
+        && String(s.customer_id) === String(visit.customer_id)
+        && String(s.property_id || '') === String(visit.property_id || '')
+        && String(s.technician_id || '') === String(primary.technician_id || '');
+      // Bridges are WINDOWED, join-eligible members only — a windowless row
+      // joins the stop but never links two disjoint windows (mirrors
+      // windowedMembersConnected), and a withdrawn/terminal row bridges
+      // nothing.
+      const component = new Set([lockedPrimary.id]);
+      const bridges = [lockedPrimary];
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const s of siblings) {
+          if (component.has(s.id) || !sameStopTuple(s)) continue;
+          if (bridges.some((m) => windowsOverlap(s.window_start, s.window_end, m.window_start, m.window_end))) {
+            component.add(s.id);
+            if (s.window_start && !JOIN_INELIGIBLE_STATUSES.includes(String(s.status || ''))) bridges.push(s);
+            grew = true;
+          }
+        }
+      }
       for (const s of siblings) {
         // Exact technician equality — an unassigned sibling is NOT the
         // primary's tech's to advance (codex r1): the visit owns assignment,
@@ -1177,13 +1221,11 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         // reschedule that committed before its post-commit detach seam ran
         // still carries the old visit_id — never advance a row that is no
         // longer physically at this stop.
-        // Same window rule handleChildStopChanged applies (r7): a same-day
-        // window move that no longer overlaps the primary's window is a
-        // separate stop, whatever its stale visit_id still says.
-        if (dateOnly(s.scheduled_date) !== dateOnly(visit.scheduled_date)
-            || String(s.customer_id) !== String(visit.customer_id)
-            || String(s.property_id || '') !== String(visit.property_id || '')
-            || !windowsOverlap(s.window_start, s.window_end, lockedPrimary.window_start, lockedPrimary.window_end)) {
+        // Stop identity (r6/r7/r8): a row outside the primary's connected
+        // component — date/customer/property changed, or its window no
+        // longer chains to the stop — is a separate stop, whatever its stale
+        // visit_id still says.
+        if (!component.has(s.id)) {
           skipped.push({ id: s.id, reason: 'stop_changed' });
           continue;
         }
