@@ -606,6 +606,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
+    services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -667,6 +668,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
     services.bedBug ? 'Bed Bug' : null,
+    services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
 }
 
@@ -724,6 +726,9 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
   'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
   'lawnPestControl', 'bedBug',
+  // Rodent Inspection: flat $75, instant on the website (owner ruling
+  // 2026-08-29, quote-to-estimate alignment C2).
+  'rodentInspection',
 ];
 
 const quoteLimiter = rateLimit({
@@ -966,6 +971,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.rodentBait) {
       engineInput.services.rodentBait = {};
+    }
+    if (services.rodentInspection) {
+      engineInput.services.rodentInspection = {};
     }
     if (services.treeShrub) {
       // Only forward a real count. An explicit treeCount: 0 (the old ?? 0

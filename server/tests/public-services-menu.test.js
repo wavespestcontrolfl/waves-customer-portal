@@ -73,3 +73,32 @@ describe('keyed leads', () => {
     expect(await publicSelectableService('pest_re_service', fakeConn(rows))).toBeNull();
   });
 });
+
+describe('instant-quote set stays in step with the public quote engine', () => {
+  const { PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
+  // service_key → the /calculate service key that prices it
+  const PATH_FOR = {
+    pest_general_quarterly: 'pest', pest_general_bimonthly: 'pest', pest_general_monthly: 'pest', pest_general_semiannual: 'pest',
+    one_time_pest_control: 'oneTimePest', pest_initial_cleanout: 'oneTimePest',
+    lawn_care_quarterly: 'lawn', lawn_care_recurring: 'lawn', lawn_care_6week: 'lawn', lawn_care_monthly: 'lawn', lawn_care_one_time: 'oneTimeLawn',
+    dethatching: 'dethatching', plugging: 'plugging', top_dressing: 'topDressing',
+    mosquito_monthly: 'mosquito', mosquito_seasonal: 'mosquito',
+    tree_shrub_quarterly: 'treeShrub', tree_shrub_program: 'treeShrub', tree_shrub_6week: 'treeShrub', palm_injection: 'palm',
+    rodent_bait_quarterly: 'rodentBait', rodent_trapping: 'rodentTrapping', rodent_exclusion_only: 'exclusion',
+    rodent_sanitation_light: 'sanitation', rodent_sanitation_standard: 'sanitation', rodent_sanitation_heavy: 'sanitation',
+    flea_tick: 'flea', bed_bug_treatment: 'bedBug', bee_wasp_removal: 'stinging',
+    termite_bait: 'termite', termite_trenching: 'trenching', termite_slab_pretreat: 'preSlab',
+    rodent_inspection: 'rodentInspection',
+  };
+  test('every instant service_key maps to a /calculate service key the route accepts', () => {
+    for (const key of PUBLIC_INSTANT_QUOTE_KEYS) {
+      const path = PATH_FOR[key];
+      expect({ key, path }).toEqual({ key, path: expect.any(String) });
+      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(path) }).toEqual({ key, accepted: true });
+    }
+  });
+  test('a product with no public engine path is never advertised as instant', () => {
+    expect(PUBLIC_INSTANT_QUOTE_KEYS.has('mosquito_one_time')).toBe(false);
+    expect(PUBLIC_INSTANT_QUOTE_KEYS.has('wdo_inspection')).toBe(false);
+  });
+});

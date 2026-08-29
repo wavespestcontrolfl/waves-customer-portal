@@ -36,14 +36,18 @@ const CADENCE_LABELS = {
 
 // Products the PUBLIC quote engine can price without an office pass — a
 // property of the pricing engine, not of the catalog, so it lives here in
-// code. Everything else is quote-on-request (a keyed lead the office
-// estimates). Rodent Inspection is a flat $75 (owner ruling 2026-08-29).
+// code and MUST stay in step with routes/public-quote.js
+// PUBLIC_QUOTE_SERVICE_KEYS (asserted by public-services-menu.test.js).
+// Everything else is quote-on-request (a keyed lead the office estimates).
+// Rodent Inspection is a flat $75 (owner ruling 2026-08-29).
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set([
   'pest_general_quarterly', 'pest_general_bimonthly', 'pest_general_monthly', 'pest_general_semiannual',
   'one_time_pest_control', 'pest_initial_cleanout',
   'lawn_care_quarterly', 'lawn_care_recurring', 'lawn_care_6week', 'lawn_care_monthly', 'lawn_care_one_time',
   'dethatching', 'plugging', 'top_dressing',
-  'mosquito_monthly', 'mosquito_seasonal', 'mosquito_one_time',
+  // mosquito_one_time: NOT instant — /api/public/quote/calculate has no
+  // oneTimeMosquito path; it stays quote-on-request until one exists.
+  'mosquito_monthly', 'mosquito_seasonal',
   'tree_shrub_quarterly', 'tree_shrub_program', 'tree_shrub_6week', 'palm_injection',
   'rodent_bait_quarterly', 'rodent_trapping', 'rodent_exclusion_only',
   'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
