@@ -429,6 +429,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nCollins knows his stuff, and Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nJennings will be glad to help alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHarding never misses a spot, and Marcus says thanks.'))).toBe('unlisted_name');
+    // codex #3580 r1: openers are sentence-start only — never a lowercase
+    // name slot — and carry no personal names (Trust / Peace).
+    expect(verify(good('Hi Dana, we will pass this along to roaches, who handled the kitchen with Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hello there, we are glad our technician roaches could help with your ants.'), grounding({ firstName: null, mentionedTechNames: [] }))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nPeace is glad Marcus handled the ants.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nTrust is glad Marcus handled the ants.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt whatever follows it.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.

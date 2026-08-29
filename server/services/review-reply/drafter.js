@@ -252,13 +252,7 @@ const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit
 // Capitalized words a reply may carry without provenance from the review.
 // Words that legitimately open a sentence in a short thank-you reply (name-
 // like words such as Will/May/Hope are deliberately absent — "Will handled
-// the ants" must fail provenance). The second group is an EXPLICIT allowlist
-// of ordinary reply openers — pest / lawn nouns, common gerunds, adverbs,
-// abstract nouns — added after the 2026-08-29 dry run ("Ants are relentless",
-// "Finding a company you can count on", "Skipping the contract" were half of
-// all verifier rejections). It is a list on purpose: a suffix / morphology
-// heuristic cannot tell Jennings, Sanders, Collins or Harding from an
-// ordinary plural or gerund (three pre-push hook rounds). A
+// the ants" must fail provenance). A
 // sentence-initial capitalized word outside this list (and outside the
 // review / allowed names / location words) has no provenance — "Kevin was
 // glad to help" with no Kevin in the review is a false staff attribution.
@@ -272,17 +266,30 @@ on once one only or other our ours out over own please same see seeing should si
 some sounds still stop such sure take thank thanks that that's the their them then there there's
 these they this those though to too up us very was we we'll we're we've welcome well were
 what when where whether which while who why wish with would yes you your you're yours
+`.split(/\s+/).filter(Boolean));
+// Ordinary reply OPENERS — consulted ONLY by the sentence-initial proper-noun
+// check (never by the lowercase role-name / attribution slots, which keep
+// their own SENTENCE_STARTERS exemption — codex #3580 r1). An explicit,
+// bounded allowlist on purpose: a suffix / morphology heuristic cannot tell
+// Jennings, Sanders, Collins or Harding from an ordinary plural or gerund
+// (three pre-push hook rounds). Pest / lawn nouns, common gerunds, sentence
+// adverbs, abstract nouns; nothing that is also a personal name (Trust,
+// Peace, Grace, Hope, Will, May stay out). Added after the 2026-08-29 dry run
+// ("Ants are relentless", "Finding a company you can count on", "Skipping the
+// contract" were half of all verifier rejections).
+const ORDINARY_OPENERS = new Set(`
 ants ant roaches roach cockroaches spiders spider termites termite mosquitoes mosquitos mosquito
 bugs bug pests pest rodents rodent rats rat mice fleas ticks wasps bees hornets silverfish
 earwigs millipedes centipedes scorpions bedbugs gnats flies moles armadillos grubs weeds fungus
-chinch sod grass lawns lawn yards yard turf shrubs shrub trees tree palms palm mulch mosquitoes
+chinch sod grass lawns lawn yards yard turf shrubs shrub trees tree palms palm mulch
 finding keeping skipping having getting being knowing hearing seeing looking making taking staying
 protecting treating helping walking showing going coming letting giving working watching checking
 honestly thankfully hopefully truly really luckily fortunately clearly obviously usually typically
 sometimes between without within whatever whenever wherever neither none plus
-dependability reliability consistency communication trust service treatment treatments visits
-results protection prevention peace nothing something everything anything
+dependability reliability consistency communication service treatment treatments visits
+results protection prevention nothing something everything anything
 `.split(/\s+/).filter(Boolean));
+
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
@@ -563,7 +570,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // Sentence starts get the common-word exemption only; a capitalized
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
-    if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
+    if (sentenceInitial && (SENTENCE_STARTERS.has(w) || ORDINARY_OPENERS.has(w))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
