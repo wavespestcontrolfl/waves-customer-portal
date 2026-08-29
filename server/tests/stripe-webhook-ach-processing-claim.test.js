@@ -177,9 +177,12 @@ test('customerInitiated provenance threads through to the send; absent by defaul
   expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ customerInitiated: true }));
 });
 
-test('machine-initiated PI discriminator: autopay and no-show fee charges are machine; pay-page PIs are not', () => {
+test('machine-initiated PI discriminator: autopay, card-on-file and no-show charges are machine; pay-page PIs are not', () => {
   const { _isMachineInitiatedPaymentIntent: isMachine } = require('../routes/stripe-webhook');
   expect(isMachine({ metadata: { type: 'monthly_autopay' } })).toBe(true);
+  // chargeInvoiceWithSavedCard's stamp — completion/balance sweeps and the
+  // admin card-on-file rails (Codex round-2 P1).
+  expect(isMachine({ metadata: { source: 'admin_card_on_file' } })).toBe(true);
   expect(isMachine({ metadata: { purpose: 'appointment_card_no_show_fee' } })).toBe(true);
   expect(isMachine({ metadata: { purpose: 'card_hold_no_show_fee' } })).toBe(true);
   expect(isMachine({ metadata: { waves_invoice_id: 'inv-1', save_card_opt_in: 'true' } })).toBe(false);

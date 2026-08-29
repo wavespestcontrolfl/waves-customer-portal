@@ -203,7 +203,6 @@ describe('checkSendWindow validator', () => {
       'estimate_accept_onetime_booking',
       'estimate_accept_onetime_confirmed',
       'estimate_deposit_receipt',
-      'invoice_receipt_sms',
       'lead_response_auto_reply',
       'lead_webhook_auto_reply',
       'promotions_upsell_interest',
@@ -218,16 +217,19 @@ describe('checkSendWindow validator', () => {
     }
   });
 
-  test('stripe_webhook splits on customerInitiated provenance — autopay stays fenced', () => {
-    // The shared webhook entry point serves both the customer's own
-    // payments and machine-initiated off-session charges (autopay ACH
-    // debits, no-show fees). Only sends the handler marked
-    // customerInitiated pass at night; unmarked ones — the autopay
-    // collection notices — hold and ride the scheduled rail.
-    expect(checkSendWindow({ ...SMS, entryPoint: 'stripe_webhook', customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
-    const machine = checkSendWindow({ ...SMS, entryPoint: 'stripe_webhook' }, null, null, EVENING_ET);
-    expect(machine.ok).toBe(false);
-    expect(machine.code).toBe('QUIET_HOURS_HOLD');
+  test('shared payment entry points split on customerInitiated provenance — machine charges stay fenced', () => {
+    // stripe_webhook and invoice_receipt_sms serve both the customer's
+    // own payments and machine-initiated off-session charges (autopay
+    // debits, card-on-file sweeps, no-show fees). Only sends the handler
+    // marked customerInitiated pass at night; unmarked ones — the
+    // machine-charge notices and receipts — hold and ride their retry
+    // rails to the window open.
+    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms']) {
+      expect(checkSendWindow({ ...SMS, entryPoint, customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
+      const machine = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
+      expect(machine.ok).toBe(false);
+      expect(machine.code).toBe('QUIET_HOURS_HOLD');
+    }
   });
 });
 

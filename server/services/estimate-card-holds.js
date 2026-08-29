@@ -1948,9 +1948,11 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   let emailDelivered = false;
   if (!receiptOptOut && !emailDeterministicMiss && (channel === 'email' || channel === 'both' || (smsChannel && smsOptedOut))) {
     try {
-      // Same idempotency key as the receipt-delivery queue's email leg, so
-      // any queue-driven re-attempt for this invoice dedupes against this
-      // delivered email instead of sending a second copy of the receipt.
+      // Same idempotency key as the receipt-delivery queue's email leg — a
+      // held SMS below hands this invoice to that queue, and its 8:00 AM
+      // job re-attempts BOTH legs; the shared key makes its email leg
+      // dedupe against this delivered one instead of emailing a second
+      // copy of the receipt.
       const emailResult = await require('./invoice-email').sendReceiptEmail(invoice.id, { idempotencyKey: `receipt_email_auto:${invoice.id}` });
       if (emailResult?.ok) {
         emailDelivered = true;
@@ -1963,14 +1965,31 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // payment_receipt template/policy (kill switch, per-location number,
   // opt-out — a texts opt-out is enforced by the policy, so the doomed
   // fallback attempt for an opted-out customer is skipped up-front).
-  // No quiet-hours branch: invoice_receipt_sms is a customer-action entry
-  // point (owner ruling 2026-08-29) — receipts send at any hour, so
-  // QUIET_HOURS_HOLD cannot surface from sendReceipt.
+  let smsQueuedForWindow = false;
   if (!receiptOptOut && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))) {
     try {
       await require('./invoice').sendReceipt(invoice.id);
     } catch (e) {
-      logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message });
+      // Send-window hold: the money and paid invoice are already committed
+      // and this path has no retry — hand the receipt to the durable
+      // receipt-delivery queue at the window open (idempotent per invoice)
+      // so an SMS-only customer still gets their no-show fee receipt.
+      if (e.code === 'QUIET_HOURS_HOLD' && e.nextAllowedAt) {
+        try {
+          const { enqueueReceiptDelivery } = require('./receipt-delivery-queue');
+          const queued = await enqueueReceiptDelivery({
+            invoiceId: invoice.id,
+            source: 'no_show_fee_window_hold',
+            nextAttemptAt: new Date(e.nextAllowedAt),
+          });
+          smsQueuedForWindow = true;
+          logger.info('[estimate-card-holds] no-show fee receipt held (send window) — handed to the receipt queue', { invoiceId: invoice.id, enqueued: queued.enqueued, deduped: queued.deduped });
+        } catch (queueErr) {
+          logger.error('[estimate-card-holds] held no-show receipt enqueue failed', { invoiceId: invoice.id, error: queueErr.message });
+        }
+      } else {
+        logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message });
+      }
     }
   }
   // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
@@ -1980,7 +1999,12 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // a delivered/deduped result: stamping a no-recipient / provider failure
   // would wrongly drop the paid fee invoice from the admin needs-receipt
   // retry path. Idempotent via whereNull (the SMS leg may have stamped).
-  if (emailDelivered) {
+  // NOT while a window-held SMS sits on the receipt queue: the queue's 8 AM
+  // job calls unforced sendReceipt, so stamping off tonight's email would
+  // make that leg read 'already-sent' and drop the text a channel='both'
+  // customer asked for — the queue stamps when its SMS actually sends (and
+  // its email leg dedupes on the shared idempotency key above).
+  if (emailDelivered && !smsQueuedForWindow) {
     await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
       .update({ receipt_sent_at: db.fn.now() }).catch(() => {});
   }

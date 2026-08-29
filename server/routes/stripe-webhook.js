@@ -46,18 +46,23 @@ function customerLabel(customer) {
   return name || customer.phone || 'customer';
 }
 
-// Machine-initiated off-session PaymentIntents (Codex P1 on PR #3598): the
-// charge fired with no customer at the keyboard — an autopay debit or a
-// no-show fee — so its payment-lifecycle SMS stays behind the 8AM-8PM
-// send window like every other schedule-driven send, riding the requeue
-// below. Everything else reaching these handlers is the customer's own
-// payment (Pay page, portal, estimate/deposit flows), whose notices carry
-// customerInitiated and send at any hour (owner ruling 2026-08-29).
-// Failure direction: an unlisted future machine flow would text at night,
-// so any new off-session charge mint MUST stamp metadata this recognizes.
+// Machine-initiated off-session PaymentIntents (Codex P1s on PR #3598):
+// the charge fired with no customer at the keyboard — an autopay debit, a
+// card/bank-on-file collection (completion + balance sweeps, admin
+// card-on-file rails via chargeInvoiceWithSavedCard's 'admin_card_on_file'
+// stamp), or a no-show fee — so its payment-lifecycle SMS and receipt stay
+// behind the 8AM-8PM send window like every other schedule-driven send,
+// riding the requeue/receipt-queue rails. Everything else reaching these
+// handlers is the customer's own payment (Pay page, portal,
+// estimate/deposit flows), whose notices carry customerInitiated and send
+// at any hour (owner ruling 2026-08-29). Failure direction: an unlisted
+// future machine flow would text at night, so any new off-session charge
+// mint MUST stamp metadata this recognizes (type, source, or purpose).
+const MACHINE_PI_SOURCES = new Set(['admin_card_on_file']);
 const MACHINE_PI_PURPOSES = new Set(['appointment_card_no_show_fee', 'card_hold_no_show_fee']);
 function isMachineInitiatedPaymentIntent(pi) {
   if (pi?.metadata?.type === 'monthly_autopay') return true;
+  if (MACHINE_PI_SOURCES.has(String(pi?.metadata?.source || ''))) return true;
   return MACHINE_PI_PURPOSES.has(String(pi?.metadata?.purpose || ''));
 }
 
@@ -1989,6 +1994,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       invoiceId: paidInvoice.id,
       stripePaymentIntentId: piId,
       source: 'stripe_webhook',
+      // Receipt provenance from the PI's machine markers: customer
+      // payments' receipts send at any hour; autopay/sweep/no-show
+      // receipts hold for the window (owner ruling 2026-08-29 + Codex P1).
+      customerInitiated: !isMachineInitiatedPaymentIntent(paymentIntent),
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
     // Fire-and-forget: a settled invoice may be gating a payment-held WDO

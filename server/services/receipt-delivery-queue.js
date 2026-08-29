@@ -23,6 +23,13 @@ async function enqueueReceiptDelivery({
   stripePaymentIntentId = null,
   source = 'stripe_webhook',
   nextAttemptAt = new Date(),
+  // Payment provenance for the receipt SMS's quiet-hours decision (owner
+  // ruling 2026-08-29 + Codex P1 on PR #3598): true only when the enqueue
+  // site KNOWS the payment was the customer's own action (Pay routes; the
+  // succeeded webhook checks the PI's machine markers). Default false is
+  // fail-closed — unstamped rows are treated as machine charges and their
+  // receipt text waits for the 8AM window.
+  customerInitiated = false,
 } = {}) {
   if (!invoiceId) return { enqueued: false, reason: 'missing_invoice_id' };
 
@@ -34,6 +41,7 @@ async function enqueueReceiptDelivery({
     next_attempt_at: nextAttemptAt,
     attempts: 0,
     max_attempts: DEFAULT_MAX_ATTEMPTS,
+    customer_initiated: customerInitiated === true,
     updated_at: db.fn.now(),
   };
 
@@ -146,10 +154,29 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 }
 
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
-  // No send-window branch: invoice_receipt_sms is a customer-action entry
-  // point (owner ruling 2026-08-29) — receipts send at any hour, so
-  // QUIET_HOURS_HOLD cannot surface here and every retry rides the
-  // generic backoff ladder.
+  // Send-window hold: not a delivery failure. Schedule the retry exactly at
+  // the window open and REFUND the claimed attempt — an after-8PM payment's
+  // receipt must go out at 8:00 AM, not burn the whole backoff ladder
+  // overnight and land permanently 'failed' before the window ever opens.
+  const holdAt = smsResult?.code === 'QUIET_HOURS_HOLD' && smsResult?.nextAllowedAt
+    ? new Date(smsResult.nextAllowedAt)
+    : null;
+  if (holdAt && !Number.isNaN(holdAt.getTime()) && holdAt.getTime() > Date.now()) {
+    await db('receipt_delivery_jobs')
+      .where({ id: job.id })
+      .update({
+        status: 'retry_scheduled',
+        sms_result: smsResult,
+        email_result: emailResult,
+        last_error: err?.message || 'receipt SMS held for send window',
+        attempts: db.raw('GREATEST(attempts - 1, 0)'),
+        next_attempt_at: holdAt,
+        locked_at: null,
+        locked_by: null,
+        updated_at: db.fn.now(),
+      });
+    return;
+  }
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;
@@ -183,7 +210,13 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = await InvoiceService.sendReceipt(invoice.id, { hasEmailLeg: true })
+    smsResult = await InvoiceService.sendReceipt(invoice.id, {
+      hasEmailLeg: true,
+      // Persisted payment provenance (see enqueueReceiptDelivery): a
+      // customer-initiated payment's receipt sends at any hour; a machine
+      // charge's receipt holds for the window and reschedules below.
+      customerInitiated: job.customer_initiated === true,
+    })
       .catch((err) => ({
         sent: false,
         reason: err.message,

@@ -3306,7 +3306,7 @@ const InvoiceService = {
     return { amount, cardLine, receiptUrl };
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false } = {}) {
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -3370,11 +3370,16 @@ const InvoiceService = {
       customerId: customer.id,
       invoiceId,
       entryPoint: "invoice_receipt_sms",
-      // Operator marker from the admin manual-resend routes. Redundant for
-      // the send window since invoice_receipt_sms became a customer-action
-      // entry point (owner ruling 2026-08-29 — receipts send at any hour),
-      // but kept as send provenance in the audit log.
+      // Send-window operator marker: only the admin manual-resend routes
+      // set it (an operator chose to text THIS receipt now).
       ...(operatorInitiated ? { operatorInitiated: true } : {}),
+      // Payment provenance (owner ruling 2026-08-29 + Codex P1 on
+      // PR #3598): a receipt for the customer's OWN payment sends at any
+      // hour; machine charges (autopay, sweeps, no-show fees) leave this
+      // unset and stay fenced, riding the receipt queue to the window
+      // open. Callers assert it only from verified provenance (the
+      // receipt queue's persisted flag; Pay-route enqueues).
+      ...(customerInitiated ? { customerInitiated: true } : {}),
       metadata: { original_message_type: "receipt" },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -3418,6 +3423,11 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
+      // Send-window hold: carry the window-open time so the receipt queue
+      // schedules its retry there instead of burning generic backoff
+      // attempts overnight (an after-8PM payment's receipt must go out at
+      // 8:00 AM, not fail permanently ~75 minutes in).
+      if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
       throw err;
     }
     logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);

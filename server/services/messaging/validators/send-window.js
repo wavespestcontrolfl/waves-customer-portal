@@ -27,7 +27,7 @@
  *   - customer-action entry points (CUSTOMER_ACTION_ENTRY_POINTS) — sends
  *     that answer an action the customer just took themselves (self-serve
  *     estimate extension, estimate/quote request, estimate acceptance,
- *     portal service request, payment receipts, the lead-response agent's
+ *     portal service request, deposit receipts, the lead-response agent's
  *     reply, referral invites). Owner rulings 2026-08-29: a customer
  *     acting at night chose the moment, and our communication back must
  *     not be held to 8 AM. This supersedes the 2026-08-07 fencing of the
@@ -38,9 +38,9 @@
  *   - input `customerInitiated: true` — explicit customer-provenance for
  *     SHARED entry points serving both customer-initiated and
  *     machine-initiated sends (the Stripe webhook's payment-lifecycle
- *     notices). Same trust model as operatorInitiated / the allowlists:
- *     only a handler that verified the upstream action was the customer's
- *     may set it.
+ *     notices; invoice payment receipts). Same trust model as
+ *     operatorInitiated / the allowlists: only a handler that verified
+ *     the upstream action was the customer's may set it.
  *
  * Blocked results carry { retryable, deferred, nextAllowedAt } so callers
  * that already understand deferral (review requests, card-request nudges)
@@ -98,17 +98,20 @@ const OPERATOR_ENTRY_POINTS = new Set([
 // a portal click, a tokened-page acceptance or payment — and the send goes
 // out immediately, at any hour: the customer chose the moment. That
 // includes the responses that ride a customer action indirectly: the
-// lead-response agent's reply to a fresh estimate request, payment
-// receipts, and the invite a customer sends a friend (owner-confirmed
-// 2026-08-29: the friend gets it immediately, not at 8 AM). Same
-// fail-closed posture as OPERATOR_ENTRY_POINTS: new customer-action
-// surfaces must opt in here. Deliberately ABSENT:
-//   - stripe_webhook — that entry point serves BOTH the customer's own
-//     payments AND machine-initiated off-session charges (autopay ACH
-//     debits, no-show fees), and a night autopay failure is exactly the
-//     schedule-driven collection text the window fences (Codex P1 on
-//     PR #3598). Its handlers pass the customerInitiated marker below
-//     when the PaymentIntent's provenance is the customer's own payment.
+// lead-response agent's reply to a fresh estimate request, deposit
+// receipts (deposits are always paid by the customer on the tokened
+// estimate page), and the invite a customer sends a friend
+// (owner-confirmed 2026-08-29: the friend gets it immediately, not at
+// 8 AM). Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
+// customer-action surfaces must opt in here. Deliberately ABSENT:
+//   - stripe_webhook and invoice_receipt_sms — those entry points serve
+//     BOTH the customer's own payments AND machine-initiated off-session
+//     charges (autopay debits, completion/balance-sweep card-on-file
+//     collections, no-show fees), and a night autopay failure notice or
+//     machine-charge receipt is exactly the schedule-driven text the
+//     window fences (Codex P1s on PR #3598). Their senders pass the
+//     customerInitiated marker below when the payment's provenance is the
+//     customer's own action (the receipt queue persists it per job).
 //   - every purely schedule-driven entry point — crons, reminders,
 //     follow-up sequences, abandon recovery, autopay retries, referral
 //     reward/milestone notices — where a machine, not a person, picks
@@ -120,7 +123,6 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
-  'invoice_receipt_sms',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
   'promotions_upsell_interest',

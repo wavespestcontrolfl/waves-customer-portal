@@ -846,6 +846,9 @@ router.post('/:token/confirm', async (req, res, next) => {
           invoiceId: invoice.id,
           stripePaymentIntentId: paymentIntentId,
           source: 'pay_confirm',
+          // The Pay page is always the customer's own payment — the
+          // receipt sends at any hour (owner ruling 2026-08-29).
+          customerInitiated: true,
         });
         ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
       }
