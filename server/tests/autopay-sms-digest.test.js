@@ -14,6 +14,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const {
   runAutopaySmsDigest,
   AUTOPAY_EXTRA_ENTRY_POINTS,
+  MONTHLY_CHARGE_ENTRY_POINTS,
   _private: { composeAutopaySmsDigest },
 } = require('../services/autopay-sms-digest');
 
@@ -29,6 +30,7 @@ function row(overrides = {}) {
     billing_mode: 'monthly_membership',
     waveguard_tier: 'Bronze',
     monthly_rate: '33.33',
+    lane_checked: true,
     ...overrides,
   };
 }
@@ -49,6 +51,16 @@ describe('AUTOPAY_EXTRA_ENTRY_POINTS', () => {
     // prefix rule that mirrors isAutopayCustomerSms — never listed here.
     expect(AUTOPAY_EXTRA_ENTRY_POINTS).toEqual(['monthly_billing_success', 'monthly_billing_failure', 'payment_expiry_workflow']);
     expect(AUTOPAY_EXTRA_ENTRY_POINTS.some((e) => e.startsWith('autopay_'))).toBe(false);
+  });
+
+  test('lane checks apply only to texts that presuppose a monthly charge (codex r6)', () => {
+    expect(MONTHLY_CHARGE_ENTRY_POINTS).toEqual([
+      'autopay_pre_charge_reminder', 'monthly_billing_success', 'monthly_billing_failure',
+      'autopay_retry_success', 'autopay_retry_failed', 'autopay_retry_final_failed',
+    ]);
+    expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('autopay_completion_decline');
+    expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('autopay_card_expiry_warning');
+    expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('payment_expiry_workflow');
   });
 });
 
@@ -119,6 +131,17 @@ describe('composeAutopaySmsDigest', () => {
     expect(stampedNull.mismatches).toBe(1);
     expect(stampedNull.text).toContain('lane unresolved');
     expect(stampedNull.text).not.toContain('(lane as of now)');
+  });
+
+  test('a per_application completion-decline notice is listed but never flagged (codex r6)', () => {
+    const composed = composeAutopaySmsDigest([
+      row({ total_count: 2, mismatch_count: 0 }),
+      row({ total_count: 2, mismatch_count: 0, lane_checked: false, entry_point: 'autopay_completion_decline', message_type: 'payment_failed', customer_id: 'cust-pa', customer_name: 'Per App', billing_mode: 'per_application' }),
+    ]);
+    expect(composed.subject).toBe('FYI: 2 autopay texts went out');
+    expect(composed.mismatches).toBe(0);
+    expect(composed.text).toContain('Per App — payment_failed · lane per_application · Bronze · $33.33/mo');
+    expect(composed.text).not.toContain('NOT a monthly member');
   });
 
   test('html escapes the preview and reports overflow beyond the page', () => {

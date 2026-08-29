@@ -58,6 +58,21 @@ const AUTOPAY_EXTRA_ENTRY_POINTS = [
   'payment_expiry_workflow',       // workflows/payment-expiry.js
 ];
 
+// Only texts that PRESUPPOSE a monthly charge are lane-checked (codex r6):
+// a non-monthly recipient of one of these is the 08-29 incident. The rest
+// of the autopay family is invoice- or card-driven and legitimately reaches
+// any lane — a per_application customer's completion-charge decline, a
+// card-expiry warning on any autopay card — so those are listed but never
+// flagged. A deferred replay is checked by its ORIGINAL entry point.
+const MONTHLY_CHARGE_ENTRY_POINTS = [
+  'autopay_pre_charge_reminder',
+  'monthly_billing_success',
+  'monthly_billing_failure',
+  'autopay_retry_success',
+  'autopay_retry_failed',
+  'autopay_retry_final_failed',
+];
+
 // Hard ceiling on the window when no marker exists (first run, or the
 // marker row was lost) — never replay a month of history into one email.
 const MAX_LOOKBACK_HOURS = 7 * 24;
@@ -79,7 +94,9 @@ async function loadSentAutopayTexts(since) {
     SELECT COUNT(*) OVER () AS total_count,
            -- Whole-window mismatch count (codex r1): a non-monthly recipient
            -- beyond the display page must still escalate the subject.
-           COUNT(*) FILTER (WHERE (CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE ${LIVE_LANE_SQL} END) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
+           COUNT(*) FILTER (WHERE (a.entry_point = ANY(:monthlyChargeEntryPoints) OR (a.metadata ->> 'original_entry_point') = ANY(:monthlyChargeEntryPoints))
+                              AND (CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE ${LIVE_LANE_SQL} END) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
+           (a.entry_point = ANY(:monthlyChargeEntryPoints) OR (a.metadata ->> 'original_entry_point') = ANY(:monthlyChargeEntryPoints)) AS lane_checked,
            a.sent_at, a.entry_point, a.body_preview,
            a.metadata ->> 'original_message_type' AS message_type,
            a.customer_id,
@@ -109,7 +126,7 @@ async function loadSentAutopayTexts(since) {
     ORDER BY a.sent_at DESC
     LIMIT :maxRows
     `,
-    { since, extraEntryPoints: AUTOPAY_EXTRA_ENTRY_POINTS, maxRows: MAX_ROWS },
+    { since, extraEntryPoints: AUTOPAY_EXTRA_ENTRY_POINTS, monthlyChargeEntryPoints: MONTHLY_CHARGE_ENTRY_POINTS, maxRows: MAX_ROWS },
   );
   return rows;
 }
@@ -125,7 +142,7 @@ function composeAutopaySmsDigest(rows) {
     // lane — it cannot be vouched for as a monthly member, so it escalates.
     const laneValue = r.customer_id || r.lane_source === 'at_send' ? (r.billing_mode || 'unresolved') : 'unknown (no customer row)';
     const lane = r.lane_source === 'live' && r.customer_id ? `${laneValue} (lane as of now)` : laneValue;
-    const mismatch = r.billing_mode !== 'monthly_membership';
+    const mismatch = r.lane_checked === true && r.billing_mode !== 'monthly_membership';
     return {
       when: etStamp(r.sent_at),
       who: r.customer_name || '(no name on file)',
@@ -150,8 +167,8 @@ function composeAutopaySmsDigest(rows) {
 
   const text = [
     mismatches > 0
-      ? `${mismatches} of ${total} autopay texts went to customers whose billing lane is not monthly_membership — they should not receive autopay texts. Check the recipients and the lane guard.`
-      : `${total} autopay text${total === 1 ? '' : 's'} went out since the last notice. All recipients are monthly members.`,
+      ? `${mismatches} of ${total} autopay texts presuppose a monthly charge but went to customers whose billing lane is not monthly_membership. Check the recipients and the lane guard.`
+      : `${total} autopay text${total === 1 ? '' : 's'} went out since the last notice. Every monthly-charge text went to a monthly member.`,
     '',
     ...lines.map((l) => `- ${describe(l)}${l.preview ? `\n    "${l.preview}"` : ''}`),
     ...(total > lines.length ? [`…and ${total - lines.length} more not shown`] : []),
@@ -162,8 +179,8 @@ function composeAutopaySmsDigest(rows) {
 
   const html = [
     mismatches > 0
-      ? `<p><strong>${mismatches} of ${total}</strong> autopay texts went to customers whose billing lane is <strong>not</strong> monthly_membership — they should not receive autopay texts. Check the recipients and the lane guard.</p>`
-      : `<p><strong>${total}</strong> autopay text${total === 1 ? '' : 's'} went out since the last notice. All recipients are monthly members.</p>`,
+      ? `<p><strong>${mismatches} of ${total}</strong> autopay texts presuppose a monthly charge but went to customers whose billing lane is <strong>not</strong> monthly_membership. Check the recipients and the lane guard.</p>`
+      : `<p><strong>${total}</strong> autopay text${total === 1 ? '' : 's'} went out since the last notice. Every monthly-charge text went to a monthly member.</p>`,
     `<ul style="margin:0 0 12px 18px;padding:0;">${lines.map((l) =>
       `<li style="margin:0 0 8px 0;${l.mismatch ? 'color:#b91c1c;' : ''}">${esc(l.when)} <strong>${esc(l.who)}</strong> — ${esc(l.type)} · lane <code>${esc(l.lane)}</code> · ${esc(l.tier)}${l.rate ? ` · ${esc(l.rate)}` : ''}${l.mismatch ? ' <strong>⚠ NOT a monthly member</strong>' : ''}${l.preview ? `<br><span style="color:#52525b;">“${esc(l.preview)}”</span>` : ''}</li>`,
     ).join('')}</ul>`,
@@ -262,5 +279,6 @@ async function runAutopaySmsDigest(opts = {}) {
 module.exports = {
   runAutopaySmsDigest,
   AUTOPAY_EXTRA_ENTRY_POINTS,
+  MONTHLY_CHARGE_ENTRY_POINTS,
   _private: { composeAutopaySmsDigest },
 };
