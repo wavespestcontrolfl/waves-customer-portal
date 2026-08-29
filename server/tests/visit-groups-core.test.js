@@ -146,7 +146,7 @@ describe('isRowVisitBlocked (legacy /complete guard, rev 5c)', () => {
   test('dissolved visit restores per-row completion', () => {
     expect(isRowVisitBlocked({ visit_id: 'v1' }, { status: 'dissolved' })).toBe(false);
   });
-  test('orphaned pointer fails open to legacy completion', () => {
-    expect(isRowVisitBlocked({ visit_id: 'v1' }, null)).toBe(false);
+  test('orphaned pointer fails CLOSED (never risk a duplicate completion)', () => {
+    expect(isRowVisitBlocked({ visit_id: 'v1' }, null)).toBe(true);
   });
 });

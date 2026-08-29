@@ -4289,7 +4289,6 @@ const {
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
 } = require('../services/completion-invoice-candidate');
-const { _test: { isRowVisitBlocked } } = require('../services/visit-groups');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -4532,15 +4531,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // stamping ships (no row carries a visit_id today). The check reads
     // the CURRENT visit status, so an admin "Separate these services"
     // (dissolve) restores per-row completion immediately.
-    if (svc.visit_id) {
-      const parentVisit = await db('service_visits')
-        .where({ id: svc.visit_id }).first('id', 'status')
-        .catch(() => null);
-      if (isRowVisitBlocked(svc, parentVisit)) {
+    {
+      // One atomic re-read (not the svc snapshot above) so a group
+      // attachment that landed after the load is still seen, and lookup
+      // errors propagate (fail closed) instead of silently allowing a
+      // duplicate completion. An orphaned visit pointer also blocks —
+      // dissolution NULLs child visit_id in the same transaction, so an
+      // orphan means something is mid-flight or broken, never "go ahead".
+      const membership = await db('scheduled_services as ss')
+        .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+        .where('ss.id', req.params.serviceId)
+        .first('ss.visit_id', 'sv.status as visit_status');
+      if (membership && membership.visit_id
+          && String(membership.visit_status || '') !== 'dissolved') {
         return res.status(409).json({
           error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
           code: 'visit_grouped',
-          visitId: svc.visit_id,
+          visitId: membership.visit_id,
         });
       }
     }

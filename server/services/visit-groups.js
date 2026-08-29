@@ -130,7 +130,7 @@ function canSplit(activity) {
  */
 function isRowVisitBlocked(row, visit) {
   if (!row || !row.visit_id) return false;
-  if (!visit) return false; // orphaned pointer: fail open to legacy completion
+  if (!visit) return true; // orphaned pointer: fail CLOSED — never risk a duplicate completion
   return String(visit.status) !== 'dissolved';
 }
 
@@ -200,8 +200,19 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       .whereIn('status', OPEN_STATUSES)
       .orderBy('stop_seq', 'asc');
 
+    // One technician owns the visit (doc §2 rev 5): all non-null
+    // assignments across the input rows must agree.
+    const rowTechs = [...new Set(rows.map((r) => r.technician_id).filter(Boolean).map(String))];
+    if (rowTechs.length > 1) throw new Error('rows not mutually groupable: technician');
+    // Every row — including the first — must be a groupable catalog type
+    // with a family (canJoin only checks the joining side).
+    for (const r of rows) {
+      if (!r.groupable || !r.group_family) throw new Error('rows not mutually groupable: not_groupable');
+    }
+
     let visit = null;
     for (const v of openVisits) {
+      if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
       if (rows.every((r) => canJoin(r, v).ok)) { visit = v; break; }
     }
 
@@ -220,7 +231,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           window_end: first.window_end || null,
           stop_base_key: baseKey,
           stop_seq: seq,
-          technician_id: rows.map((r) => r.technician_id).find(Boolean) || null,
+          technician_id: rowTechs[0] || null,
           group_family: first.group_family || null,
           status: 'open',
           created_by: createdBy || 'admin:unknown',
@@ -234,12 +245,24 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     const patch = {};
     if (starts.length) patch.window_start = starts.sort()[0];
     if (ends.length) patch.window_end = ends.sort().slice(-1)[0];
+    // The visit owns the assignment: adopt the rows' single technician when
+    // the visit has none, and align children below.
+    if (!visit.technician_id && rowTechs[0]) patch.technician_id = rowTechs[0];
     if (Object.keys(patch).length) {
       await t('service_visits').where({ id: visit.id }).update(patch);
       Object.assign(visit, patch);
     }
 
-    await t('scheduled_services').whereIn('id', rows.map((r) => r.id)).update({ visit_id: visit.id });
+    // Never silently transfer a row already attached elsewhere — membership
+    // must be null or already this visit (a stale caller would otherwise
+    // bypass the other visit's freeze checks). Count-verified.
+    const stamped = await t('scheduled_services')
+      .whereIn('id', rows.map((r) => r.id))
+      .where((q) => q.whereNull('visit_id').orWhere('visit_id', visit.id))
+      .update({ visit_id: visit.id, ...(visit.technician_id ? { technician_id: visit.technician_id } : {}) });
+    if (Number(stamped) !== rows.length) {
+      throw new Error('visit membership conflict: a row is attached to another visit');
+    }
     return visit;
   };
   return trx ? run(trx) : db.transaction(run);
