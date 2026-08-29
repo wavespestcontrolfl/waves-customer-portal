@@ -1110,9 +1110,9 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
     { services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }, service: 'bed_bug' },
     { services: { stinging: { species: 'PAPER_WASP' } }, service: 'stinging_insect' },
     { services: { stingingV2: { species: 'PAPER_WASP' } }, service: 'stinging_insect_v2' },
-    { services: { rodentWireMesh: { linearFeet: 20 } }, service: 'rodent_wire_mesh' },
+    { services: { rodentWireMesh: { meshLinearFeet: 20 } }, service: 'rodent_wire_mesh' },
     { services: { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 2 } }, service: 'rodent_bird_box' },
-    { services: { sanitation: { tier: 'standard' } }, service: 'rodent_sanitation' },
+    { services: { sanitation: { tier: 'standard', affectedSqFt: 400 } }, service: 'rodent_sanitation' },
     { services: { rodentInspection: true }, service: 'rodent_inspection' },
     { services: { foam: { points: 6 } }, service: 'foam_drill' },
     { services: { termiteFoam: { points: 6 } }, service: 'termite_foam' },
@@ -1235,6 +1235,13 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
       // Alternate services.exclusionV2 spelling: calculateExclusionPrice is
       // sqft-tiered off property.footprint — stays manual (codex #3594 r2 P1).
       { exclusionV2: { meshPoints: 4 } },
+      // Unit-scoped services WITHOUT their unit (codex #3594 r3 P1): the admin
+      // V2 adapter permits an absent mesh length / a 0 affected area — a
+      // footprint-derived or "0 LF" minimum must not become a firm quote.
+      { rodentWireMesh: {} },
+      { rodentWireMesh: { meshLinearFeet: 0, meshSubstrate: 'stucco' } },
+      { sanitation: { tier: 'standard' } },
+      { sanitation: { tier: 'heavy', affectedSqFt: 0 } },
       { rodentTrapping: true },
       { rodentGuarantee: true },
       { oneTimeMosquito: true },
@@ -1302,6 +1309,28 @@ describe('estimateHasCommercialOneTime — commercial stamp signal for one-time-
     expect(estimateHasCommercialOneTime({})).toBe(false);
   });
 
+  test('quote-wizard envelope: engineResult.lineItems one-time rows count, recurring commercial rows do not', () => {
+    // POST /public/quote/calculate persists the markers ONLY under
+    // engineResult.lineItems (codex #3594 r3 P1).
+    const wizard = (lineItems) => ({ engineResult: { summary: {}, lineItems } });
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'pre_slab_termiticide', price: 640, total: 640, annual: null, monthly: null,
+      isCommercial: true, commercialPricingMode: 'auto_estimate', taxable: true,
+    }]))).toBe(true);
+    // Recurring commercial auto-pricers carry the SAME markers plus an annual
+    // amount + estimatedPricing — they belong to the recurring stamp, not this one.
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'commercial_pest', annual: 2400, monthly: 200, price: null,
+      isCommercial: true, commercialPricingMode: 'auto_estimate', estimatedPricing: true,
+    }]))).toBe(false);
+    // A manual commercial quote row never counts.
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'commercial_pest', quoteRequired: true, requiresManualReview: true,
+      isCommercial: true, commercialPricingMode: 'auto_estimate',
+    }]))).toBe(false);
+    expect(estimateHasCommercialOneTime(wizard([]))).toBe(false);
+  });
+
   test('round trip: gate-on commercial pre-slab survives the legacy mapper as a stampable signal', () => {
     process.env[GATE] = 'true';
     const engineResult = generateEstimate(baseInput({
@@ -1347,6 +1376,16 @@ describe('codex #3594 r2 — public one-time accept stamp + display-only copy fl
     const bypassAt = routeSrc.indexOf('if (customerId && !treatAsOneTime && !annualPrepaySelected) {');
     expect(stampAt).toBeGreaterThan(0);
     expect(bypassAt).toBeGreaterThan(stampAt);
+  });
+
+  test('the manual Mark Won path stamps commercial identity for one-time wins', () => {
+    const manualSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-manual-acceptance.js'), 'utf8');
+    expect(manualSrc).toMatch(
+      /if \(updatedEstimate\.customer_id\s*\n\s*&& EstimateConverter\.estimateHasCommercialOneTime\(parseEstimateData\(updatedEstimate\.estimate_data\)\)\) \{\s*\n\s*await trx\('customers'\)\s*\n\s*\.where\(\{ id: updatedEstimate\.customer_id \}\)\s*\n\s*\.whereRaw\("coalesce\(property_type, ''\) <> 'commercial'"\)\s*\n\s*\.update\(\{ property_type: 'commercial' \}\);/
+    );
+    // …inside the win transaction, before the audit log.
+    expect(manualSrc.indexOf('estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))'))
+      .toBeLessThan(manualSrc.indexOf('await logManualAcceptance(trx, {'));
   });
 
   test('scoped one-time commercial rows feed the COPY flag, never the approval-only classifier', () => {

@@ -736,6 +736,21 @@ async function markEstimateManuallyAccepted({
       }
     }
 
+    // Commercial identity for a manual one-time win (codex #3594 r3 P1): the
+    // converter (and its one-way stamp) runs above only for a monthly total
+    // or annual prepay, so a one-time-only scoped commercial estimate marked
+    // won — e.g. commercial trenching, which the public accept route refuses
+    // and routes to staff — would leave a residential-coded customer
+    // residential and later invoicing would suppress the taxable line. Same
+    // one-way rule, same transaction; idempotent beside the converter's stamp.
+    if (updatedEstimate.customer_id
+      && EstimateConverter.estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))) {
+      await trx('customers')
+        .where({ id: updatedEstimate.customer_id })
+        .whereRaw("coalesce(property_type, '') <> 'commercial'")
+        .update({ property_type: 'commercial' });
+    }
+
     // Audit the win AFTER the customer is created/linked so a newly-created
     // no-customer proposal customer gets the acceptance event in its timeline
     // (activity_log is keyed on customer_id). updatedEstimate.customer_id is now

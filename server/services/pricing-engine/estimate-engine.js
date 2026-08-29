@@ -1596,8 +1596,14 @@ function generateEstimate(input) {
   // exclusion is active (V2 folds these into the unified calculation).
   const exclusionIsV2 = services.exclusion?.pricingVersion === 'v2';
 
-  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control', { scopedOneTime: true })) {
-    const opts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
+  // Commercial bypass only with a POSITIVE measured length (codex #3594 r3
+  // P1): the admin V2 adapter permits RODENT_WIRE_MESH with meshLinearFeet
+  // absent, and priceRodentWireMesh would still return the substrate minimum
+  // as a firm "0 LF" line. Unmeasured → manual quote.
+  const wireMeshOpts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
+  const wireMeshScoped = Number(wireMeshOpts.meshLinearFeet) > 0;
+  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control', { scopedOneTime: wireMeshScoped })) {
+    const opts = wireMeshOpts;
     lineItems.push(priceRodentWireMesh({
       meshLinearFeet: opts.meshLinearFeet,
       meshSubstrate: opts.meshSubstrate,
@@ -1619,11 +1625,17 @@ function generateEstimate(input) {
 
   // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
   // Legacy 'medium' resolves to 'standard' inside priceSanitation.
-  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control', { scopedOneTime: true })) {
+  // Commercial bypass only with an EXPLICIT positive affected area (codex
+  // #3594 r3 P1): the admin V2 adapter persists affectedSqFt: 0 when the
+  // sanitation area is omitted, and the residential footprint fallback below
+  // would then price a warehouse's whole building as the cleanup area.
+  // Unscoped → manual quote; residential keeps the footprint fallback.
+  const sanitationScopeSqFt = Number(services.sanitation?.affectedSqFt)
+    || Number(services.sanitation?.atticSqFt) || 0;
+  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control', { scopedOneTime: sanitationScopeSqFt > 0 })) {
     const result = priceSanitation({
       tier: services.sanitation.tier || 'standard',
-      affectedSqFt: services.sanitation.affectedSqFt
-        || services.sanitation.atticSqFt
+      affectedSqFt: sanitationScopeSqFt
         || property.footprint || 0,
       insulationRemovalCuFt: services.sanitation.insulationRemovalCuFt || 0,
       accessType: services.sanitation.accessType || 'normal',

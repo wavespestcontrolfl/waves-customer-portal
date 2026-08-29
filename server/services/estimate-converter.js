@@ -2629,12 +2629,29 @@ function shouldSuppressRecurringConversion({
 // recurring stamp never sees these rows (codex #3594 P1). A manual commercial
 // QUOTE row does not count: nothing commercial was priced or accepted.
 function estimateHasCommercialOneTime(estimateData = {}) {
-  return estimateOneTimeItemsFromData(estimateData).some(
-    (item) => item
-      && item.isCommercial === true
-      && item.commercialPricingMode === 'auto_estimate'
-      && item.quoteRequired !== true
-  );
+  const isPricedCommercialRow = (item) => item
+    && typeof item === 'object'
+    && item.isCommercial === true
+    && item.commercialPricingMode === 'auto_estimate'
+    // NOT requiresManualReview: pre-slab is priced AND review-flagged by
+    // design; only quoteRequired marks an unpriced manual-quote row.
+    && item.quoteRequired !== true;
+  if (estimateOneTimeItemsFromData(estimateData).some(isPricedCommercialRow)) return true;
+  // Quote-wizard drafts (POST /public/quote/calculate) persist the commercial
+  // markers ONLY under engineResult.lineItems — no mapped oneTime container
+  // (codex #3594 r3 P1). Recurring commercial auto-pricers carry the SAME
+  // markers, so a row counts here only when it is one-time: no annual amount
+  // (recurringLinesFromEngineResult's own recurring signal) and not
+  // estimatedPricing (the recurring commercial annual-row flag).
+  const data = normalizeEstimateData(estimateData);
+  const engineRows = [
+    ...(Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data.result?.lineItems) ? data.result.lineItems : []),
+  ];
+  return engineRows.some((li) => isPricedCommercialRow(li)
+    && !(Number(li.annual) > 0)
+    && li.estimatedPricing !== true
+    && (Number(li.price) > 0 || Number(li.total) > 0));
 }
 
 function firstPositiveNumber(...values) {
