@@ -450,7 +450,7 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(out.status.label).toBe('Termite activity observed at 2 stations');
     expect(out.metrics[1].value).toBe('2 stations');
     // the payload says the frozen select was overridden (the gauge trend is stale)
-    expect(out.statusEscalatedByPins).toBe(true);
+    expect(out.statusReconciled).toBe(true);
     // …and a frozen "No action needed" commitment is replaced by a monitoring commitment
     const noAction = buildTermiteReportV2({
       typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station',
@@ -466,7 +466,15 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(followUp.nextStep).toBe('Recheck active stations sooner.');
     // no escalation → the frozen commitment stands verbatim
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' }).nextStep).toBe('No action needed.');
-    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).statusEscalatedByPins).toBe(false);
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(false);
+    // …and so does EVERY reconciliation away from the select, not only pins
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(true);
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, activity_signs: 'Live termites in station' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(true);
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, bait_consumption: 'Light feeding' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(true);
+    // an explicit activity selection is the select's own reading — not a reconciliation
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Active termites present' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(false);
+    // frozen evidence also replaces a contradictory no-action step
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' }).nextStep).toBe('We will re-check the active stations at your next monitoring visit.');
     // pins never DOWNGRADE an explicit activity selection
     const kept = buildTermiteReportV2({
       typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted' },

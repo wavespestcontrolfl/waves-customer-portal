@@ -489,6 +489,12 @@ function buildTermiteReportV2({
   const pinActivity = visitBackedSummary(stationSummary)?.activity || 0;
   const statusEscalatedByPins = pinActivity > 0 && (formStatus.key === 'protected' || formStatus.key === 'monitoring');
   const statusBase = statusEscalatedByPins ? { key: 'action', tone: 'watch' } : formStatus;
+  // ANY reconciliation away from the select-derived status — pins, frozen
+  // count / location / sign chips, or feeding data promoting an explicit
+  // "None observed" — means the activity gauge (score / trend computed from
+  // that select) and a frozen "No action needed" step describe a reading the
+  // report no longer shows (codex P2 #3600 r22 / r25).
+  const statusReconciled = values.termite_activity === ACTIVITY_VALUES.NONE && statusBase.key !== 'protected';
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const feedingNoted = statusBase.key === 'monitoring'
     && (FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')));
@@ -528,7 +534,7 @@ function buildTermiteReportV2({
   // when station pins escalated the status, that commitment contradicts
   // the headline — replace it with a monitoring commitment (codex P2 #3600
   // r23). Genuine follow-up wording passes through untouched.
-  if (statusEscalatedByPins && nextStepText && /\bno (further )?action\b|\bnothing (further |else )?(is )?needed\b|\bno follow[- ]?up\b/i.test(nextStepText)) {
+  if (statusReconciled && nextStepText && /\bno (further )?action\b|\bnothing (further |else )?(is )?needed\b|\bno follow[- ]?up\b/i.test(nextStepText)) {
     nextStepText = 'We will re-check the active stations at your next monitoring visit.';
   }
 
@@ -540,10 +546,11 @@ function buildTermiteReportV2({
     defense: network ? { summary: network.summary, items: network.items } : null,
     stationSyncPartial,
     // The activity gauge (score / trend) is computed from the FROZEN
-    // termite_activity select; when station pins overrode it, that trend
-    // describes a reading the report no longer shows — the client must not
-    // print it (codex P2 #3600 r22).
-    statusEscalatedByPins,
+    // termite_activity select; when the status was reconciled away from it
+    // (pins, frozen evidence, feeding), that trend describes a reading the
+    // report no longer shows — the client must not print it (codex P2
+    // #3600 r22 / r25).
+    statusReconciled,
     nextStep: nextStepText,
     nextVisit: nextVisit && nextVisit.scheduledDate ? nextVisit : null,
     primaryMove: buildPrimaryMove({ values }),

@@ -508,7 +508,7 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       termiteReportV2: {
         status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
         statusSummary: 'Pins escalated.',
-        statusEscalatedByPins: true,
+        statusReconciled: true,
         nextStep: 'We will re-check the active stations at your next monitoring visit.',
       },
     };

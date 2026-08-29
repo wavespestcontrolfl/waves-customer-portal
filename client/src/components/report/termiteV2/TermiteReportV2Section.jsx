@@ -45,9 +45,9 @@ export default function TermiteReportV2Section({
         statusSummary={data.statusSummary}
         metrics={data.metrics}
         narrative={narrative}
-        /* the gauge trend describes the frozen select; when pins overrode
-           it, the trend is stale (codex P2 #3600 r22) */
-        activityTrend={data.statusEscalatedByPins ? null : activityTrend}
+        /* the gauge trend describes the frozen select; when the status was
+           reconciled away from it, the trend is stale (codex P2 r22 / r25) */
+        activityTrend={data.statusReconciled ? null : activityTrend}
         visitSequence={data.visitSequence}
       />
       {/* Live web only — pdf/static have no satellite basemap to pin against

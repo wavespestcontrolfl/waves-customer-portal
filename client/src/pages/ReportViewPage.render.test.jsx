@@ -223,10 +223,10 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(hero).getByText('Moderate feeding')).toBeInTheDocument();
   });
 
-  it('suppresses the gauge trend when station pins overrode the frozen activity select', async () => {
+  it('suppresses the gauge trend when the status was reconciled away from the frozen activity select', async () => {
     const escalated = JSON.parse(JSON.stringify(termiteReportV2));
     escalated.activity = { score: 0, label: 'Termite Activity', levelWord: 'none', trend: 'stable', trendWord: 'about the same as the last visit', isBaseline: false };
-    escalated.termiteReportV2.statusEscalatedByPins = true;
+    escalated.termiteReportV2.statusReconciled = true;
     const { container } = renderReport(escalated);
     await screen.findAllByText('Termite activity observed at 2 stations');
     const hero = container.querySelector('#visit-summary');
