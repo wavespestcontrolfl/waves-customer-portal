@@ -767,7 +767,7 @@ test('a basemap outage keeps the visit-check evidence as checkSummary (status bu
     imageContext: IMAGE_CONTEXT,
     typedTypes: ['termite_bait_station'],
   });
-  expect(context).toMatchObject({ available: false, reason: 'provider_unavailable' });
+  expect(context).toMatchObject({ available: false, reason: 'provider_unavailable', program: 'termite' });
   expect(context.checkSummary).toEqual({ total: 3, checked: 3, activity: 1, serviced: 1, inaccessible: 0 });
   expect(context.summary).toBeUndefined();
 });
@@ -786,7 +786,7 @@ test('stale marks (a malformed stored pin) still carry checkSummary', () => {
     imageContext: IMAGE_CONTEXT,
     typedTypes: ['termite_bait_station'],
   });
-  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
   expect(context.checkSummary).toEqual({ total: 2, checked: 2, activity: 1, serviced: 0, inaccessible: 0 });
 });
 
@@ -900,7 +900,7 @@ test('drift: a re-geocoded property far from the pin ref drops the mark; all dro
     imageContext: { center: { lat: REF.lat + 0.01, lng: REF.lng }, zoom: 20, width: 640, height: 340 },
     typedTypes: ['termite_bait_station'],
   });
-  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
 });
 
 test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed (no partial summaries)', () => {
@@ -922,7 +922,7 @@ test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed 
     typedTypes: ['termite_bait_station'],
     serviceDate: '2026-07-13',
   });
-  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
 });
 
 test('status vocabulary stays in lockstep with the DB CHECK', () => {

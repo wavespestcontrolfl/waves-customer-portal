@@ -9,6 +9,8 @@ const {
   buildTermiteReportV2,
   attachTermiteReportV2,
   termiteBaitSnapshotOf,
+  frozenTermiteServiceKey,
+  recordStage,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   resolveTermiteStatus,
@@ -28,10 +30,17 @@ const CLEAN_VALUES = {
 };
 
 describe('isTermiteBaitServiceName — next-visit predicate (bait-station appointments only)', () => {
-  it('accepts bait / station / monitoring termite names', () => {
+  it('accepts bait-station termite names', () => {
     expect(isTermiteBaitServiceName('Termite Bait Station Service')).toBe(true);
-    expect(isTermiteBaitServiceName('Termite Monitoring (Quarterly)')).toBe(true);
+    expect(isTermiteBaitServiceName('Termite Bait Monitoring (Quarterly)')).toBe(true);
     expect(isTermiteBaitServiceName('Termite Bait Cartridge Replacement')).toBe(true);
+  });
+
+  it('rejects installation / setup visits and detection-only monitoring names (no bait token)', () => {
+    expect(isTermiteBaitServiceName('Termite Bait Station Installation')).toBe(false);
+    expect(isTermiteBaitServiceName('Termite Station Setup')).toBe(false);
+    expect(isTermiteBaitServiceName('Termite Monitoring Service')).toBe(false);
+    expect(isTermiteBaitServiceName('Termite Bait Monitoring')).toBe(true);
   });
 
   it('rejects liquid / trench / inspection termite work and other lines', () => {
@@ -458,7 +467,7 @@ describe('attachTermiteReportV2 — the one composer shared by the route and the
   const payload = () => ({
     serviceLine: 'termite',
     typedReport: { type: 'termite_bait_station', visitSequence: 2, todaysResult: { nextStep: 'Recheck sooner.' } },
-    stationMap: { available: true, summary: { total: 12, checked: 12, activity: 0, serviced: 1, inaccessible: 0 } },
+    stationMap: { available: true, program: 'termite', summary: { total: 12, checked: 12, activity: 0, serviced: 1, inaccessible: 0 } },
     termiteNextMonitoringVisit: { scheduledDate: '2026-11-16', windowStart: '09:00', serviceType: 'Termite Bait Station Service' },
     summarySource: 'technician_report',
     summary: 'Reviewed copy.',
@@ -555,9 +564,25 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
     const data = attachTermiteReportV2({
       typedReport: { type: 'termite_bait_station', visitSequence: 2 },
-      stationMap: { available: false, reason: 'provider_unavailable', checkSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 } },
+      stationMap: { available: false, reason: 'provider_unavailable', program: 'termite', checkSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 } },
     }, service);
     expect(data.termiteReportV2.status.label).toBe('Termite activity observed at 2 stations');
+  });
+
+  it('never consumes a non-termite program map (rodent primary + termite companion renders the RODENT pins)', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({
+      typedReportSnapshot: { type: 'rodent_bait_station', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES }],
+    }) };
+    const data = attachTermiteReportV2({
+      typedReport: { type: 'rodent_bait_station', visitSequence: 1 },
+      companionReports: [{ type: 'termite_bait_station', visitSequence: 2, internalOnly: false }],
+      stationMap: { available: true, program: 'rodent', summary: { total: 12, checked: 12, activity: 3, serviced: 0, inaccessible: 0 } },
+    }, service);
+    // rodent capture pins must not escalate the termite status
+    expect(data.termiteReportV2.status.label).toBe('No termite activity observed');
+    expect(data.termiteReportV2.stationSyncPartial).toBe(false);
   });
 
   it('a companion the payload filtered out (internal_only) yields no dashboard', () => {
@@ -591,6 +616,25 @@ describe('termiteReportV2PdfSignature — PDF cache-key component', () => {
     expect(termiteReportV2PdfSignature(baitRecord)).toBe('-termv2');
     // object-shaped service_data (already parsed by a caller)
     expect(termiteReportV2PdfSignature({ service_data: { typedReportSnapshot: { type: 'termite_bait_station' } } })).toBe('-termv2');
+  });
+
+  it('frozenTermiteServiceKey / recordStage: completedServiceKey, else the snapshot\'s own serviceKey, else names', () => {
+    const snap = (extra) => ({ service_type: 'Termite Bait Station Service', service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: {}, ...extra } }) });
+    expect(frozenTermiteServiceKey({ service_data: JSON.stringify({ completedServiceKey: 'termite_installation_setup', typedReportSnapshot: { type: 'termite_bait_station', serviceKey: 'termite_bait', values: {} } }) })).toBe('termite_installation_setup');
+    expect(frozenTermiteServiceKey(snap({ serviceKey: 'termite_monitoring' }))).toBe('termite_monitoring');
+    expect(frozenTermiteServiceKey(snap({}))).toBeNull();
+    // the snapshot's immutable key drives the stage when no top-level freeze exists
+    expect(recordStage(snap({ serviceKey: 'termite_monitoring' }))).toBe('detection');
+    expect(recordStage(snap({ serviceKey: 'termite_installation_setup' }))).toBe('installation');
+    expect(recordStage(snap({ serviceKey: 'termite_bait' }))).toBe('monitoring');
+    // legacy (no frozen key at all): names
+    expect(recordStage({ ...snap({}), service_type: 'Termite Monitoring Service' })).toBe('detection');
+    // companion snapshot carries its own key
+    const combined = { service_type: 'Quarterly Pest Control', service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', serviceKey: 'cockroach_treatment', values: {} }, companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', serviceKey: 'termite_monitoring', values: {} }] }) };
+    expect(recordStage(combined)).toBe('detection');
+    process.env.TERMITE_REPORT_V2 = 'true';
+    expect(termiteReportV2PdfSignature(snap({ serviceKey: 'termite_monitoring' }))).toBe('');
+    expect(termiteReportV2PdfSignature(snap({ serviceKey: 'termite_bait' }))).toBe('-termv2');
   });
 
   it('keys the stage from the frozen completedServiceKey first; names only for legacy records without one', () => {

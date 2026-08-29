@@ -688,9 +688,16 @@ export function visitWorkSummary(data = {}, fallback = '') {
     let servicedPart = null;
     if (Number.isFinite(serviced) && serviced > 0) servicedPart = `${serviced} station${serviced === 1 ? '' : 's'} serviced`;
     else if (servicedRaw && !Number.isFinite(serviced)) servicedPart = 'bait service performed';
+    // A genuine supplemental treatment (foam / liquid termiticide) recorded
+    // on the bait visit is real work too — same identity rule as Products
+    // Applied (codex P2 #3600 r21).
+    const genuineCount = (Array.isArray(data.applications) ? data.applications : [])
+      .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name)
+      .filter(isProductApplication).length;
     const parts = [
       inspected ? `${inspected} stations inspected` : null,
       servicedPart,
+      genuineCount ? `${genuineCount} product${genuineCount === 1 ? '' : 's'} applied` : null,
     ].filter(Boolean);
     if (parts.length) return parts.join(' · ');
   }
@@ -8929,8 +8936,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               token={token}
               mode={mode}
               /* Station map rides INSIDE the dashboard (the standalone mount
-                 below is suppressed for termite V2). */
-              stationMap={data.stationMap}
+                 below is suppressed for termite V2). Only a termite-program
+                 map: a rodent primary with a termite companion renders the
+                 RODENT pins (codex P1 #3600 r21). */
+              stationMap={data.stationMap?.program === 'termite' ? data.stationMap : null}
               stationPins={Boolean(data.termiteStationPins)}
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */

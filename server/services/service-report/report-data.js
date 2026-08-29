@@ -4,7 +4,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
-const { isTermiteBaitServiceName, termiteBaitSnapshotOf, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { isTermiteBaitServiceName, termiteBaitSnapshotOf, frozenTermiteServiceKey, stageForServiceKey, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -4403,8 +4403,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           // which freezes the same type but is not a monitoring check
           // (codex P2 #3600 r19).
           if (profile?.findingsType) {
+            // …and neither the installation profile nor the detection-only
+            // termite_monitoring program (codex P2 #3600 r19 / r21).
             isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE
-              && profile.serviceKey !== 'termite_installation_setup';
+              && isMonitoringServiceKey(profile.serviceKey);
           } else if (profile?.projectType) isBait = false;
           else isBait = isTermiteBaitServiceName(row?.service_type);
           verdictByIdentity.set(identity, isBait);
@@ -4906,17 +4908,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // (service_data.completedServiceKey — a permanent report must not
     // change stage when an admin repoints the schedule row or a legacy
     // record loses its link), then the live profile, then name tokens.
+    // FROZEN identity first — completedServiceKey, else the applicable typed
+    // snapshot's own immutable serviceKey (codex P0 #3600 r21) — so a
+    // permanent report token never changes stage when the linked
+    // appointment is reclassified or unlinked; the live profile and name
+    // tokens serve only legacy records that froze neither.
     termiteBaitStage: termiteBaitSnapshotOf(service)
       ? (() => {
-        const stageForKey = (key) => {
-          if (key === 'termite_installation_setup') return 'installation';
-          if (key === 'termite_monitoring') return 'detection';
-          return key ? 'monitoring' : null;
-        };
-        if (hasFrozenPrimary && frozenTraceData.completedServiceKey) {
-          return stageForKey(frozenTraceData.completedServiceKey);
-        }
-        const fromProfile = stageForKey(laneProfile?.serviceKey || null);
+        const frozenStage = stageForServiceKey(frozenTermiteServiceKey(service));
+        if (frozenStage) return frozenStage;
+        const fromProfile = stageForServiceKey(laneProfile?.serviceKey || null);
         if (fromProfile) return fromProfile;
         const names = `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`;
         if (/\b(install|installation|setup|set-up)\b/i.test(names)) return 'installation';

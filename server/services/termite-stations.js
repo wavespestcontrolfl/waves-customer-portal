@@ -733,7 +733,7 @@ function buildStationMapReportContext({
   };
 
   if (!satelliteMap?.available || !satelliteMap.live?.url) {
-    return { available: false, reason: satelliteMap?.fallbackReason || 'satellite_unavailable', checkSummary: summary };
+    return { available: false, reason: satelliteMap?.fallbackReason || 'satellite_unavailable', program, checkSummary: summary };
   }
 
   const resolved = resolveZoneRowsImageDrift(visitRows, imageContext);
@@ -763,7 +763,7 @@ function buildStationMapReportContext({
   if (pins.length !== visitRows.length || !pins.length) {
     // The check evidence is still real — only the drawing failed
     // (codex P2 #3600 r16).
-    return { available: false, reason: 'marks_stale', checkSummary: summary };
+    return { available: false, reason: 'marks_stale', program, checkSummary: summary };
   }
 
   // (pins.length === visitRows.length was enforced above, so the pin

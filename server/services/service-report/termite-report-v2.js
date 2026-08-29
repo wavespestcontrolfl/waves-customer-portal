@@ -24,9 +24,32 @@ const TERMITE_BAIT_TYPED_TYPE = 'termite_bait_station';
 // as the "next monitoring visit" (codex P2 #3600 r2).
 const TERMITE_NAME_RE = /termite/i;
 const STATION_TOKEN_RE = /\b(bait|station|stations|monitor|monitoring|cartridge)\b/i;
+const INSTALLATION_NAME_RE = /\b(install|installation|setup|set-up)\b/i;
+const DETECTION_NAME_RE = /\bmonitor(?:ing)?\b/i;
+const BAIT_NAME_RE = /\bbait\b/i;
 function isTermiteBaitServiceName(serviceType) {
   const name = String(serviceType || '');
-  return TERMITE_NAME_RE.test(name) && STATION_TOKEN_RE.test(name);
+  if (!TERMITE_NAME_RE.test(name) || !STATION_TOKEN_RE.test(name)) return false;
+  // Installation / setup visits and detection-only monitoring programs (no
+  // active bait) are not active-bait monitoring checks — the legacy name
+  // fallback must not admit them either (codex P2 #3600 r21).
+  if (INSTALLATION_NAME_RE.test(name)) return false;
+  if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return false;
+  return true;
+}
+
+// Service keys whose completion profile freezes termite_bait_station but
+// which are NOT active-bait monitoring checks.
+const TERMITE_INSTALLATION_KEY = 'termite_installation_setup';
+const TERMITE_DETECTION_KEY = 'termite_monitoring';
+function stageForServiceKey(key) {
+  if (!key) return null;
+  if (key === TERMITE_INSTALLATION_KEY) return 'installation';
+  if (key === TERMITE_DETECTION_KEY) return 'detection';
+  return 'monitoring';
+}
+function isMonitoringServiceKey(key) {
+  return Boolean(key) && key !== TERMITE_INSTALLATION_KEY && key !== TERMITE_DETECTION_KEY;
 }
 
 const ACTIVITY_VALUES = {
@@ -582,7 +605,13 @@ function attachTermiteReportV2(data, service = {}) {
       // Visit-check evidence rides the map when it rendered and
       // `checkSummary` when only the basemap failed — either way the
       // persisted check rows reconcile the status (codex P2 #3600 r15).
-      stationSummary: data.stationMap?.summary || data.stationMap?.checkSummary || null,
+      // …and ONLY a termite-program map: a rodent primary with a termite
+      // companion renders the rodent program's pins, whose capture /
+      // activity statuses must never escalate the termite dashboard
+      // (codex P1 #3600 r21).
+      stationSummary: data.stationMap?.program === 'termite'
+        ? data.stationMap?.summary || data.stationMap?.checkSummary || null
+        : null,
       visitSequence: report.visitSequence || 1,
       // The dashboard replaces the typed Today's Result card, so it must
       // carry the tech's required next-step commitment itself.
@@ -618,29 +647,31 @@ function attachTermiteReportV2(data, service = {}) {
  * bait-station profile; codex P2 #3600 r1). Bump the suffix whenever the
  * termite-line report COMPOSITION changes.
  */
-// Installation / setup visits keep the typed record (see
-// attachTermiteReportV2). The signature only sees the record row, so the
-// service name is the available signal here; report-data's profile-backed
-// stage is the render-side authority.
-const INSTALLATION_NAME_RE = /\b(install|installation|setup|set-up)\b/i;
-
-const DETECTION_NAME_RE = /\bmonitor(?:ing)?\b/i;
-const BAIT_NAME_RE = /\bbait\b/i;
-
 /**
  * Stage from the record alone (no DB): the completion-FROZEN service key
  * first — the same identity report-data's render stage reads — and the
  * display name only for legacy records with no frozen identity (codex P1
  * #3600 r20). Keeps the signature and the render gate on one predicate.
  */
-function recordStage(service = {}) {
+/**
+ * The record's FROZEN service key: the top-level completedServiceKey
+ * (newer completions), else the applicable typed snapshot's own immutable
+ * serviceKey (every typed snapshot persists it — codex P0 #3600 r21). Null
+ * only for legacy records that froze neither.
+ */
+function frozenTermiteServiceKey(service = {}) {
   const data = serviceDataOf(service);
-  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) {
-    const key = data.completedServiceKey;
-    if (key === 'termite_installation_setup') return 'installation';
-    if (key === 'termite_monitoring') return 'detection';
-    return 'monitoring';
+  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey') && data.completedServiceKey) {
+    return String(data.completedServiceKey);
   }
+  const resolved = termiteBaitSnapshotOf(service);
+  const snapshotKey = resolved?.snapshot?.serviceKey;
+  return snapshotKey ? String(snapshotKey) : null;
+}
+
+function recordStage(service = {}) {
+  const frozenStage = stageForServiceKey(frozenTermiteServiceKey(service));
+  if (frozenStage) return frozenStage;
   const name = String(service.service_type || '');
   if (INSTALLATION_NAME_RE.test(name)) return 'installation';
   if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return 'detection';
@@ -658,6 +689,10 @@ module.exports = {
   buildTermiteReportV2,
   attachTermiteReportV2,
   termiteBaitSnapshotOf,
+  frozenTermiteServiceKey,
+  stageForServiceKey,
+  isMonitoringServiceKey,
+  recordStage,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   // exported for tests

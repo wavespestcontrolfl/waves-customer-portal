@@ -56,8 +56,10 @@ const card = {
   padding: '24px 24px',
   marginBottom: 20,
 };
+// 14px minimum on every customer surface (AGENTS.md) — eyebrows and
+// metadata included.
 const eyebrow = {
-  fontSize: 12,
+  fontSize: 14,
   textTransform: 'uppercase',
   letterSpacing: '0.08em',
   color: MUTED,
@@ -97,7 +99,7 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
         <p className="ai-summary-body" style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}>{narrative}</p>
       ) : null}
       {trendLine ? (
-        <p style={{ margin: '10px 0 0', fontSize: 13, color: MUTED }}>{trendLine}</p>
+        <p style={{ margin: '10px 0 0', fontSize: 14, color: MUTED }}>{trendLine}</p>
       ) : null}
       {Array.isArray(metrics) && metrics.length ? (
         <div style={{ marginTop: 16, display: 'grid', gap: 6 }}>
@@ -199,7 +201,7 @@ export function TermiteStationRecord({ stationMap }) {
         />
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: TEXT }}>{stationTitle(st)}</div>
-          <div style={{ fontSize: 13, lineHeight: 1.45, color: MUTED }}>{line.text}</div>
+          <div style={{ fontSize: 14, lineHeight: 1.45, color: MUTED }}>{line.text}</div>
         </div>
       </div>
     );
@@ -283,7 +285,7 @@ export function TermiteNextStep({ primaryMove }) {
       {primaryMove.why ? (
         <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.5, color: TEXT }}>{primaryMove.why}</p>
       ) : null}
-      <div style={{ marginTop: 12, display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 13, color: MUTED }}>
+      <div style={{ marginTop: 12, display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 14, color: MUTED }}>
         {primaryMove.impact ? <span>{primaryMove.impact}</span> : null}
         {primaryMove.dueLabel ? <span style={{ fontWeight: 700 }}>{primaryMove.dueLabel}</span> : null}
       </div>
@@ -311,7 +313,7 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
           <div style={{ fontSize: 17, fontWeight: 700, color: TEXT }}>{programLabel}</div>
         </div>
         {active ? (
-          <span style={{ background: COLORS.glassNavy, color: '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto' }}>
+          <span style={{ background: COLORS.glassNavy, color: '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto' }}>
             ACTIVE
           </span>
         ) : null}
