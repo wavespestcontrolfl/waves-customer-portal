@@ -1305,6 +1305,12 @@ function EstimateToolView() {
     }));
     setCustomerSearch("");
     setCustomers([]);
+    // A manually selected customer is a matched account too (codex #3591
+    // r27 P1): bind it and load its canonical qualifying families exactly
+    // like the address match does, so a member's rodent add-on generated
+    // without Property Lookup prices at the combined tier with the setup
+    // waived — and the save carries customerId.
+    bindMatchedCustomer(c);
   }
 
   /* ── v2 Property Lookup — AI property search + satellite review in one call ── */
@@ -1317,6 +1323,25 @@ function EstimateToolView() {
   // fallback quote AWAITS it and blocks when it failed (codex #3591 r18 P1
   // — never guess the setup waiver from the tier).
   const existingQualifyingKeysRef = useRef(Promise.resolve(null));
+  // ONE binding for both match paths (address auto-match + manual search
+  // selection): the matched account + its canonical qualifying-services
+  // load (codex #3591 r27 P1).
+  const bindMatchedCustomer = (match) => {
+    if (!match || !match.id) {
+      setExistingCustomerMatch(null);
+      setExistingQualifyingKeys(null);
+      existingQualifyingKeysRef.current = Promise.resolve(null);
+      return;
+    }
+    setExistingCustomerMatch(match);
+    setExistingQualifyingKeys(null);
+    const keysLoad = fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => (body && Array.isArray(body.keys) ? body.keys : null))
+      .catch(() => null);
+    existingQualifyingKeysRef.current = keysLoad;
+    keysLoad.then((keys) => { if (Array.isArray(keys)) setExistingQualifyingKeys(keys); });
+  };
 
   /* ── Live lawn pricing config → client fallback engine ────── */
   // The fallback engine (calculateEstimate, used when there is no enriched
@@ -1642,17 +1667,9 @@ function EstimateToolView() {
                 .includes(c.address.split(",")[0].trim().toLowerCase()),
           );
           if (match) {
-            setExistingCustomerMatch(match);
-            // Canonical qualifying families for the rodent setup waiver
-            // (codex #3591 r13 P1). Best-effort: a failed load leaves null
-            // and the waiver falls back to Silver+ evidence only.
-            setExistingQualifyingKeys(null);
-            const keysLoad = fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
-              .then((r) => (r.ok ? r.json() : null))
-              .then((body) => (body && Array.isArray(body.keys) ? body.keys : null))
-              .catch(() => null);
-            existingQualifyingKeysRef.current = keysLoad;
-            keysLoad.then((keys) => { if (Array.isArray(keys)) setExistingQualifyingKeys(keys); });
+            // Canonical qualifying families for the rodent setup waiver and
+            // the fallback tier (codex #3591 r13/r21 P1) — shared binding.
+            bindMatchedCustomer(match);
             // The match flips isRecurringCustomer (loyalty pricing) below —
             // a generate started between the property autofill and this
             // point must not mount a result priced without it.
@@ -1671,9 +1688,7 @@ function EstimateToolView() {
               customerEmail: match.email || f.customerEmail || "",
             }));
           } else {
-            setExistingCustomerMatch(null);
-            setExistingQualifyingKeys(null);
-            existingQualifyingKeysRef.current = Promise.resolve(null);
+            bindMatchedCustomer(null);
           }
         }
       } catch {

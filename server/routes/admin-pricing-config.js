@@ -18,14 +18,24 @@ router.use(adminAuthenticate, requireAdmin);
 // itself, but it must be visible in logs (a bare catch here previously
 // swallowed every failure silently).
 async function insertPricingAudit({ configKey, oldValue, newValue, changedBy, reason, conn = db }) {
+  const row = {
+    config_key: configKey,
+    old_value: oldValue === undefined ? null : JSON.stringify(oldValue),
+    new_value: newValue === undefined ? null : JSON.stringify(newValue),
+    changed_by: changedBy || 'admin',
+    reason: reason || null,
+  };
   try {
-    await conn('pricing_config_audit').insert({
-      config_key: configKey,
-      old_value: oldValue === undefined ? null : JSON.stringify(oldValue),
-      new_value: newValue === undefined ? null : JSON.stringify(newValue),
-      changed_by: changedBy || 'admin',
-      reason: reason || null,
-    });
+    // Inside a caller's transaction the insert runs in a SAVEPOINT (nested
+    // knex transaction): a failed audit — unavailable table, schema drift —
+    // rolls back only the savepoint, never the operator's pricing edit that
+    // owns the outer transaction (codex #3591 r27 P2). Postgres would
+    // otherwise leave the whole transaction aborted despite this catch.
+    if (conn !== db && typeof conn.transaction === 'function') {
+      await conn.transaction((sp) => sp('pricing_config_audit').insert(row));
+    } else {
+      await conn('pricing_config_audit').insert(row);
+    }
   } catch (err) {
     logger.error('[admin-pricing-config] pricing_config_audit insert failed', { configKey, error: err.message });
   }
@@ -839,6 +849,14 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     }
     if (updates.exclude_from_pct_discount !== undefined && typeof updates.exclude_from_pct_discount !== 'boolean') {
       return res.status(400).json({ error: 'exclude_from_pct_discount must be a boolean' });
+    }
+    // Strict boolean, same as the exclusion flag (codex #3591 r27 P2): a
+    // textual "false" would land on service_discount_rules (Postgres accepts
+    // it) but skip the typed mirror into pricing_config.rodent_waveguard —
+    // exactly the billing-vs-estimate policy split the mirror exists to
+    // prevent.
+    if (updates.tier_qualifier !== undefined && updates.tier_qualifier !== null && typeof updates.tier_qualifier !== 'boolean') {
+      return res.status(400).json({ error: 'tier_qualifier must be a boolean' });
     }
     const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();

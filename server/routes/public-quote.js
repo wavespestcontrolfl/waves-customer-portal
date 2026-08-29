@@ -1274,7 +1274,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
-    const oneTimeTotal = quoteRequired ? 0 : (
+    // `let`: a ZERO rodent-setup decision (decided under the draft row lock
+    // below) strips the setup from the draft AND from this outer total, so
+    // the persisted estimates.onetime_total scalar and the API response
+    // never show a waived setup (codex #3591 r27 P1).
+    let oneTimeTotal = quoteRequired ? 0 : (
       Number(estimate?.summary?.oneTimeTotal || 0) +
       Number(estimate?.summary?.specialtyTotal || 0)
     );
@@ -1871,7 +1875,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // decision waived (codex #3591 r26 P1). frozenRodentBaitSetupAmount
         // honors the persisted zero decision as the belt.
         if (setupFeeQuote?.kind === 'rodent_bait_setup' && !(Number(setupFeeQuote.amount) > 0)) {
-          stripWaivedRodentSetupFromDraft(estimateDataObj);
+          const removed = stripWaivedRodentSetupFromDraft(estimateDataObj);
+          if (removed > 0) {
+            oneTimeTotal = Math.max(0, Math.round((oneTimeTotal - removed) * 100) / 100);
+            estFields.onetime_total = oneTimeTotal || null;
+          }
         }
       };
       if (existingEst) {
