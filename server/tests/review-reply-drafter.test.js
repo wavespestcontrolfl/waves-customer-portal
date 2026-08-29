@@ -405,30 +405,31 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
-    // 2026-08-29 dry run: sentence-initial ORDINARY words (plural / gerund /
-    // participle …) are not names — exempt when nothing name-shaped follows.
+    // 2026-08-29 dry run: sentence-initial ORDINARY reply openers (pest nouns,
+    // gerunds, adverbs …) are on the explicit allowlist, not names.
     expect(verify(good('Hi Dana,\n\nAnts are relentless in this heat, so we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nFinding a company you can count on should not be hard, and we are glad Marcus could help.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nSkipping the paperwork is how we like to do it. We will pass your note along to Marcus.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHonestly, we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
-    // …but the same morphology followed by a name-shaped token is still a
-    // staff attribution: past-tense verb, copula, appositive, full name,
-    // a first name + "s", or a known first name regardless of context.
+    // …but a surname-shaped opener is NOT on the list, whatever follows it
+    // (pre-push hook rounds 1–3): past-tense verb, copula, appositive, full
+    // name, coordination, adverb, modal, "and the team", a first name + "s".
     expect(verify(good('Hi Dana,\n\nJennings handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nJennings is glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nSanders, our technician, was glad to help alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nJennings Smith helped with the ants alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRogers and Marcus are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHopes are high, and Kevin was glad to help alongside Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nJennings and the team are glad Marcus could help.'))).toBe('unlisted_name');
     // hook P1: a surname coordinated with a sourced name ("Davis and Marcus").
     expect(verify(good('Hi Dana,\n\nDavis and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHarding with Marcus made sure the ants are gone.'))).toBe('unlisted_name');
-    // hook P1 ×2: adverb / present-tense verb / modal after a surname is not ordinary-word evidence.
+    // hook P1 ×2: adverb / present-tense verb / modal after a surname.
     expect(verify(good('Hi Dana,\n\nSanders truly cares, and Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nCollins knows his stuff, and Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nJennings will be glad to help alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHarding never misses a spot, and Marcus says thanks.'))).toBe('unlisted_name');
-    // …while an ordinary plural coordinated with a lowercase word stays exempt.
+    // …while an allowlisted plural stays exempt whatever follows it.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
     const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
