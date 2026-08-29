@@ -49,6 +49,8 @@ function seedDb() {
       { id: 'v-done', service_type: PEST_OLD, status: 'completed', service_id: 'svc-pest6' },
       { id: 'v-cancel', service_type: PEST_OLD, status: 'cancelled', service_id: 'svc-pest6' },
       { id: 'v-resched', service_type: PEST_OLD, status: 'rescheduled', service_id: 'svc-pest6' },
+      // NULL status = live (tech app treats it as pending); SQL NOT IN would drop it.
+      { id: 'v-null', service_type: PEST_OLD, status: null, service_id: 'svc-pest6' },
       { id: 'v-rm', service_type: 'Rodent Monitoring Service (Monthly)', status: 'pending', service_id: 'svc-rm' },
       { id: 'v-lawn', service_type: LAWN_OLD, status: 'pending', service_id: 'svc-lawn6' },
       { id: 'v-ts', service_type: 'Bi-Monthly Tree & Shrub Care Service', status: 'pending', service_id: 'svc-ts6' },
@@ -100,6 +102,10 @@ function fakeKnex(db, { missingTables = [] } = {}) {
           const s = String(r[v.col || 'service_type'] || '');
           return s === v.exact || s.startsWith(v.prefix);
         }
+        if (k === 'open_status') {
+          const cur = r[v.col];
+          return cur == null || !v.vals.includes(cur);
+        }
         if (k === 'engine_keys_cas') {
           const cur = Array.isArray(r.engine_keys) ? r.engine_keys
             : (() => { try { return JSON.parse(r.engine_keys); } catch { return null; } })();
@@ -111,9 +117,20 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     );
     const q = {
       where(cond) {
-        // Grouped-where callbacks carry only label OR-filters the per-row
-        // swap re-checks — safe to ignore in the fake.
-        if (typeof cond === 'function') return q;
+        if (typeof cond === 'function') {
+          // The open-visit predicate (whereNull OR whereNotIn) is applied;
+          // other grouped callbacks carry only label OR-filters the per-row
+          // swap re-checks — safe to ignore in the fake.
+          let nullCol = null; let notIn = null;
+          const sub = {
+            whereNull(col) { nullCol = col; return sub; },
+            orWhereNotIn(col, vals) { notIn = { col, vals }; return sub; },
+            whereRaw() { return sub; },
+          };
+          cond.call(sub);
+          if (nullCol && notIn) filters.push({ open_status: { col: notIn.col, vals: notIn.vals } });
+          return q;
+        }
         filters.push(cond);
         return q;
       },
@@ -245,6 +262,7 @@ describe('20260829000010 cadence convention renames', () => {
     expect(visit(db, 'v-open-1').service_type).toBe(PEST_NEW);
     expect(visit(db, 'v-open-2').service_type).toBe(PEST_NEW);
     expect(visit(db, 'v-resched').service_type).toBe(PEST_NEW);
+    expect(visit(db, 'v-null').service_type).toBe(PEST_NEW);
     expect(visit(db, 'v-done').service_type).toBe(PEST_OLD);
     expect(visit(db, 'v-cancel').service_type).toBe(PEST_OLD);
     expect(visit(db, 'v-lawn').service_type).toBe(LAWN_NEW);
@@ -276,6 +294,7 @@ describe('20260829000010 cadence convention renames', () => {
     expect(svc(db, 'pest_general_bimonthly').name).toBe(PEST_OLD);
     expect(svc(db, 'lawn_care_recurring').name).toBe(LAWN_OLD);
     expect(visit(db, 'v-open-1').service_type).toBe(PEST_OLD);
+    expect(visit(db, 'v-null').service_type).toBe(PEST_OLD);
     expect(visit(db, 'v-lawn').service_type).toBe(LAWN_OLD);
     expect(db.self_booked_appointments[0].service_type).toBe(PEST_OLD);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(MOSQ_OLD);

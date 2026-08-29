@@ -46,6 +46,14 @@ const RENAMES = [
 // state that can revive, so it relabels.
 const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 
+// Open = not terminal, INCLUDING a NULL status: the column is nullable and
+// the tech app treats a missing status as pending, while SQL `NOT IN`
+// evaluates NULL as unknown and would silently leave such visits (and
+// their snapshots) on the old label (GH codex r5 P1).
+function openVisitStatus() {
+  this.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES);
+}
+
 // A rename applies to the exact catalog label AND its cadence-qualified
 // form ("<name> (Quarterly)" from older engine output) —
 // the qualifier is preserved through the swap (codex #3484 r6 P2).
@@ -246,12 +254,12 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
     const linked = await knex('scheduled_services')
       .where({ service_id: row.id })
       .whereRaw('(service_type = ? OR service_type LIKE ?)', [fromName, qualified])
-      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .where(openVisitStatus)
       .select('id', 'service_type', 'self_booking_id');
     const legacy = await knex('scheduled_services')
       .whereNull('service_id')
       .whereRaw('(service_type = ? OR service_type LIKE ?)', [fromName, qualified])
-      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .where(openVisitStatus)
       .select('id', 'service_type', 'self_booking_id');
     // Per-row CAS updates scoped to the id + observed label + status AND
     // the population's catalog-identity predicate (codex pre-push r10 P1:
@@ -264,7 +272,7 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       const count = await identityScope(
         knex('scheduled_services')
           .where({ id: v.id, service_type: v.service_type })
-          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .where(openVisitStatus)
       ).update({ service_type: next });
       if (count) {
         rec.visitIds.push(v.id);
@@ -323,7 +331,7 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       parentIds.length && (await knex.schema.hasTable('scheduled_services'))
         ? (await knex('scheduled_services')
           .whereIn('id', parentIds)
-          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .where(openVisitStatus)
           .forUpdate()
           .select('id')).map((v) => v.id)
         : []
@@ -521,14 +529,14 @@ exports.down = async function down(knex) {
       // qualifier intact, still value-guarded and open-only.
       const revertRows = await knex('scheduled_services')
         .whereIn('id', rec.visitIds)
-        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+        .where(openVisitStatus)
         .select('id', 'service_type');
       for (const v of revertRows) {
         const restored = swapRenamedPrefix(v.service_type, toName, fromName);
         if (!restored) continue;
         await knex('scheduled_services')
           .where({ id: v.id, service_type: v.service_type })
-          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .where(openVisitStatus)
           .update({ service_type: restored });
       }
     }
