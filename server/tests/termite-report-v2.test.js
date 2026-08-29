@@ -286,6 +286,26 @@ describe('buildStationNetwork — a RECONCILED station-map summary drives the co
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).stationSyncPartial).toBe(false);
   });
 
+  it('a map with ZERO persisted statuses beside a typed checked count is a failed sync — partial, map suppressed', () => {
+    const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } });
+    expect(out.stationSyncPartial).toBe(true);
+    expect(out.metrics[0].value).toBe('12 of 12');
+    // no map at all is not a failed sync; neither is a zero-check visit
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).stationSyncPartial).toBe(false);
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_checked: 0, stations_inaccessible: 12 }, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } }).stationSyncPartial).toBe(false);
+  });
+
+  it('an explicitly recorded activity count survives statuses that read lower (affected stations saved as serviced)', () => {
+    const values = { ...CLEAN_VALUES, termite_activity: 'Active termites present', stations_with_activity: 2 };
+    const out = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 12, activity: 0, serviced: 2, inaccessible: 0 } });
+    expect(out.stationSyncPartial).toBe(false);
+    expect(out.metrics[1].value).toBe('2 stations');
+    expect(out.defense.items.map((i) => i.key)).toContain('activity');
+    // and pins reading HIGHER than the form are never understated either
+    const higher = buildTermiteReportV2({ typedSnapshotValues: { ...values, stations_with_activity: 1 }, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 } });
+    expect(higher.metrics[1].value).toBe('2 stations');
+  });
+
   it('partial access without a recorded total derives a safe denominator — never "all N"', () => {
     const values = { stations_checked: 10, stations_inaccessible: 2, termite_activity: 'None observed', bait_consumption: 'None — bait intact' };
     const net = buildStationNetwork({ values });

@@ -787,6 +787,18 @@ test('the denominator is frozen at the visit completion time — a station added
   expect(legacy.summary.total).toBe(3);
 });
 
+test('a retire-all completion (retired_at stamped after the completion instant) never resurrects the rows as on-file', () => {
+  const rows = [
+    stationRow('st-1', 1, pin(0.2, 0.3), { created_at: '2026-01-01T00:00:00Z', is_active: false, retired_at: '2026-08-27T14:56:30Z' }),
+    stationRow('st-2', 2, pin(0.5, 0.5), { created_at: '2026-01-01T00:00:00Z', is_active: false, retired_at: '2026-08-27T14:56:31Z' }),
+  ];
+  const context = buildStationMapReportContext({
+    stationRows: rows, checkRows: [], satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27', visitCompletedAt: '2026-08-27T14:56:00Z',
+  });
+  expect(context).toMatchObject({ available: false, reason: 'no_stations' });
+});
+
 test('a basemap outage keeps the visit-check evidence as checkSummary (status builders reconcile without a map)', () => {
   const context = buildStationMapReportContext({
     stationRows: [

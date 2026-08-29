@@ -354,7 +354,14 @@ function stationDenominator({ total, checked, inaccessible }) {
 function buildStationNetwork({ values = {}, stationSummary = null }) {
   const summary = reconciledSummary(stationSummary, values);
   const checked = summary?.checked ?? toCount(values.stations_checked);
-  let activityCount = summary?.activity ?? toCount(values.stations_with_activity);
+  // An explicitly recorded activity count is preserved when the per-station
+  // statuses do not reconcile with it (an affected station saved as
+  // `serviced` reads as zero activity on the map) — never understate:
+  // the larger of the two documented counts stands (codex P2 #3600 r35).
+  const typedActivity = toCount(values.stations_with_activity);
+  let activityCount = summary
+    ? (typedActivity != null ? Math.max(typedActivity, Number(summary.activity) || 0) : (summary.activity ?? null))
+    : typedActivity;
   // The typed validator checks each count's shape, not their relationship:
   // an activity count above the inspected count is impossible, so it is
   // treated as UNCOUNTED (activity still reads "observed", never
@@ -468,7 +475,16 @@ function buildTermiteReportV2({
   // (partial station sync): the counts above come from the typed record, so
   // the map / station record — which would draw the partial rows — must not
   // render beside them (codex P2 #3600 r20). Surfaced to the client.
-  const stationSyncPartial = Boolean(visitBackedSummary(stationSummary)) && !reconciledSummary(stationSummary, values);
+  // Also partial: a map that exists but carries ZERO persisted statuses
+  // while the typed form documents checks — the sync failed or skipped every
+  // entry, and the registry-only fallback rows would read "on file, not
+  // checked" beside a 12-inspected hero (codex P2 #3600 r35).
+  const typedChecked = toCount(values.stations_checked);
+  const zeroCheckSync = Boolean(stationSummary && typeof stationSummary === 'object')
+    && !visitBackedSummary(stationSummary)
+    && typedChecked != null && typedChecked > 0;
+  const stationSyncPartial = (Boolean(visitBackedSummary(stationSummary)) && !reconciledSummary(stationSummary, values))
+    || zeroCheckSync;
   const checked = network?.counts?.checked ?? toCount(values.stations_checked);
   const total = network?.counts?.total ?? toCount(values.total_stations);
   const activityCount = network?.counts?.activity ?? null;

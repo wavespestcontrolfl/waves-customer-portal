@@ -651,7 +651,17 @@ function stationRowsOnVisitDay(stationRows, serviceDate, visitCompletedAt = null
     // no visit anchor — active rows only (legacy behavior)
     return stationRows.filter((row) => row.is_active !== false);
   }
-  const dayEnd = cutoffAt || parseETDateTime(`${dateStr}T23:59:59`);
+  // Two cutoffs (codex P2 #3600 r32 / r35): CREATIONS stop at the completion
+  // instant (a station added later that day never changes an issued
+  // report's denominator), while RETIREMENTS use the end of the ET service
+  // day — the completion's own retire-all stamps retired_at after the
+  // completion transaction, and those rows must not resurrect as "on file"
+  // on the very report whose counts dropped to zero. (Hiding a station
+  // retired later the same day one report early is the accepted safer
+  // direction.)
+  const dayEndOfDay = dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? parseETDateTime(`${dateStr}T23:59:59`) : null;
+  const dayEnd = cutoffAt || dayEndOfDay;
+  const retireCutoff = dayEndOfDay && cutoffAt ? new Date(Math.max(dayEndOfDay.getTime(), cutoffAt.getTime())) : dayEnd;
   return stationRows.filter((row) => {
     const createdAt = row.created_at ? new Date(row.created_at) : null;
     if (createdAt && !Number.isNaN(createdAt.getTime()) && createdAt > dayEnd) return false;
@@ -668,7 +678,7 @@ function stationRowsOnVisitDay(stationRows, serviceDate, visitCompletedAt = null
       // the pin on that morning's no-check report) shows the customer a
       // station that no longer exists one report early, which is the safer
       // direction than resurrecting removed stations.
-      if (retiredAt <= dayEnd) return false;
+      if (retiredAt <= retireCutoff) return false;
     }
     return true;
   });
