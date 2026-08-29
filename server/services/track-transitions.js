@@ -340,7 +340,7 @@ async function markEnRoute(serviceId, opts = {}) {
     const smsOutcome = result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled');
     const fan = await applyVisitFanOut({
       row: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
-      smsOutcome, notificationOwner: result.visitNotificationOwner === true,
+      smsOutcome, notificationOwner: result.visitNotificationOwner === true, claimToken: result.visitClaimToken || null,
     });
     if (fan) {
       result.visitFanOut = fan;
@@ -361,9 +361,9 @@ async function markEnRoute(serviceId, opts = {}) {
  * synthetic { ok:false } when the claim itself failed or an owned claim
  * could not be finalized because the fan-out did not run.
  */
-async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, notificationOwner }) {
+async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, notificationOwner, claimToken = null }) {
   const visitGroups = require('./visit-groups');
-  let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner });
+  let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner, claimToken });
   if (!row.visit_id) return fan;
   if (smsOutcome === 'claim_error' || smsOutcome === 'claim_in_flight' || smsOutcome === 'lease_expired') {
     const reason = smsOutcome === 'claim_error' ? 'notification claim failed'
@@ -376,7 +376,7 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
   // never stays `claimed` and a retryable miss is reclaimable next signal.
   const finalizeAttempted = fan && (fan.effect || (fan.trackerFailures || []).some((f) => f.id === 'effect_finalize'));
   if (notificationOwner && !finalizeAttempted) {
-    const fin = await visitGroups.finalizeVisitNotification(row.visit_id, kind, smsOutcome);
+    const fin = await visitGroups.finalizeVisitNotification(row.visit_id, kind, smsOutcome, new Date(), claimToken);
     if (!fin.ok) {
       fan = { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: fin.reason };
     } else if (fan && fin.status) {
@@ -401,6 +401,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   // must read differently from a provider failure ('retry').
   let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
   let visitClaim = null;
+  let claimToken = null;
   const guardOpen = !svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears;
   const attemptFence = {
     id: serviceId,
@@ -411,7 +412,9 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
   if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling && guardOpen) {
     // Claimed under the stop lock with membership verified (r5): 'detached'
     // means this row is no longer in the visit — it texts as a plain row.
-    visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
+    const claim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
+    visitClaim = claim && claim.state;
+    claimToken = claim && claim.token;
     if (visitClaim === 'taken') {
       smsOutcome = 'covered';
       try {
@@ -430,7 +433,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
     }
   }
   const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
-  if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route'))) {
+  if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
     // Our own lease expired before we could send (a stalled process): a
     // reclaim may own the notice now — never send twice (codex r9).
     smsOutcome = 'lease_expired';
@@ -494,7 +497,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
       if (smsOutcome !== 'sent') smsOutcome = 'retry';
     }
   }
-  return { smsSent, smsOutcome, visitClaim };
+  return { smsSent, smsOutcome, visitClaim, claimToken };
 }
 
 async function markEnRouteCore(serviceId, opts = {}) {
@@ -658,7 +661,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
     // Grouped row already en route with its guard still NULL (a prior claim
     // error or provider failure): the re-entry IS the retry (codex r6) —
     // reclaim and send, fenced to the existing attempt's en_route_at.
-    let retry = { smsSent: false, smsOutcome: undefined, visitClaim: null };
+    let retry = { smsSent: false, smsOutcome: undefined, visitClaim: null, claimToken: null };
     if (svc.visit_id && svc.track_state === 'en_route' && !svc.track_sms_sent_at
         && !opts._visitSibling && !opts.suppressCustomerSms) {
       retry = await claimAndSendEnRoute({ svc, serviceId, opts, attemptAt: svc.en_route_at });
@@ -670,6 +673,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
       smsSent: retry.smsSent,
       ...(retry.smsOutcome ? { smsOutcome: retry.smsOutcome } : {}),
       visitNotificationOwner: retry.visitClaim === 'owner',
+      visitClaimToken: retry.claimToken || null,
       alreadyEnRoute: svc.track_state === 'en_route',
       _row: svc,
     };
@@ -760,7 +764,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // write above, so it must not suppress today's send. A same-day guard
   // (SMS already sent for THIS attempt) still suppresses.
   const sendResult = await claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears, attemptAt: now });
-  const { smsSent, smsOutcome, visitClaim } = sendResult;
+  const { smsSent, smsOutcome, visitClaim, claimToken } = sendResult;
 
   // One-time "introducing the app" email for a new recurring customer's first
   // visit — fired here so it lands exactly when "watch your tech arrive live"
@@ -786,6 +790,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
     smsSent,
     smsOutcome,
     visitNotificationOwner: visitClaim === 'owner',
+    visitClaimToken: claimToken || null,
     alreadyEnRoute: false,
     _row: svc,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
@@ -1126,13 +1131,16 @@ async function markOnProperty(serviceId, opts = {}) {
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
   let arrivalSms = 'not_attempted';
   let visitClaim = null;
+  let claimToken = null;
   if (arrivalRow && !opts.suppressArrivalSms) {
     // Visit-scoped claim before the per-row arrival sender, taken under the
     // stop lock with membership verified (codex r4/r5).
     if (svc.visit_id && !opts._visitSibling && !arrivalRow.arrival_sms_sent_at) {
-      visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'on_site');
+      const claim = await require('./visit-groups').claimVisitNotification(svc, 'on_site');
+      visitClaim = claim && claim.state;
+      claimToken = claim && claim.token;
     }
-    if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'on_site'))) {
+    if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'on_site', claimToken))) {
       arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
     } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
       arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
@@ -1171,7 +1179,7 @@ async function markOnProperty(serviceId, opts = {}) {
       const fan = await applyVisitFanOut({
         row: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
         actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
-        notificationOwner: visitClaim === 'owner',
+        notificationOwner: visitClaim === 'owner', claimToken,
       });
       if (fan) {
         result.visitFanOut = fan;

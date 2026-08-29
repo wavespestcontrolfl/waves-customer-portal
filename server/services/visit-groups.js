@@ -1043,22 +1043,27 @@ function siblingEligibleFor(toStatus, siblingStatus) {
  * 'taken' and stamp themselves covered. Customer texts are at-most-once —
  * an unknown claim state ('error') never sends and is reported to the
  * caller as an incomplete stop, never silently swallowed.
- * Returns 'owner' | 'taken' | 'detached' | 'error' | null (no visit).
+ * Returns { state: 'owner' | 'taken' | 'in_flight' | 'detached' | 'error',
+ * token } — `token` (random, stored as visit_effects.claim_token, codex r10)
+ * is the owner's proof of ownership for its pre-send lease check and its
+ * finalize; a reclaim issues a new token, so a stalled former owner can
+ * neither send nor finalize over it. null when the row has no visit.
  */
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
   const logger = require('./logger');
+  const token = require('crypto').randomBytes(16).toString('hex');
   try {
     return await db.transaction(async (t) => {
       const visit = await t('service_visits').where({ id: row.visit_id }).first();
-      if (!visit || String(visit.status) !== 'open') return 'detached';
+      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
       await lockStop(t, visit.stop_base_key);
       // Full stop tuple, not just the id (codex r9): a same-day window move
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-      if (!fresh || String(fresh.visit_id || '') !== String(visit.id) || !rowStillAtVisitStop(fresh, visit)) return 'detached';
+      if (!fresh || String(fresh.visit_id || '') !== String(visit.id) || !rowStillAtVisitStop(fresh, visit)) return { state: 'detached', token: null };
       // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
       // miss) is RECLAIMED — the retry the ledger promised (codex r6) — and
       // so is a STALE `claimed` row (a claim whose finalize failed or whose
@@ -1076,9 +1081,10 @@ async function claimVisitNotification(row, kind) {
           status: 'claimed',
           attempts: 0,
           claimed_at: new Date(),
+          claim_token: token,
         })
         .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
-        .merge({ status: 'claimed', claimed_at: new Date() })
+        .merge({ status: 'claimed', claimed_at: new Date(), claim_token: token })
         .where(function reclaimable() {
           this.where('visit_effects.status', '=', 'failed')
             .orWhere(function staleClaim() {
@@ -1086,15 +1092,15 @@ async function claimVisitNotification(row, kind) {
             });
         })
         .returning('id');
-      if (rows && rows.length) return 'owner';
+      if (rows && rows.length) return { state: 'owner', token };
       const existing = await t('visit_effects')
         .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: `${visit.id}:${effectType}` })
         .first('status');
-      return existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken';
+      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null };
     });
   } catch (err) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
-    return 'error';
+    return { state: 'error', token: null };
   }
 }
 
@@ -1113,7 +1119,7 @@ function rowStillAtVisitStop(row, visit) {
  * step: a failure here leaves the row `claimed`, so the caller reports the
  * stop incomplete instead of advertising a status that was never written.
  */
-async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date()) {
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null) {
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
   const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
@@ -1134,7 +1140,10 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
       })
-      .where('visit_effects.status', '<>', 'sent');
+      .where('visit_effects.status', '<>', 'sent')
+      // Only the current claim owner finalizes (codex r10): a stale owner's
+      // late finalize never clobbers a reclaimer's row.
+      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); });
     return { ok: true, effectType, status };
   } catch (err) {
     require('./logger').warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects finalize failed: ${err.message}`);
@@ -1156,14 +1165,16 @@ const NOTIFICATION_CLAIM_LEASE_MS = 10 * 60 * 1000;
  * owner calls this immediately before its provider call: an expired lease
  * means a reclaim may already own the notice — do not send.
  */
-async function notificationLeaseLive(visitId, kind) {
-  if (!visitId) return false;
+async function notificationLeaseLive(visitId, kind, token) {
+  if (!visitId || !token) return false;
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
   try {
     const row = await db('visit_effects')
       .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}` })
-      .first('status', 'claimed_at');
+      .first('status', 'claimed_at', 'claim_token');
+    // Ours, still claimed, inside the lease — a reclaim replaced the token.
     return Boolean(row && String(row.status) === 'claimed' && row.claimed_at
+      && String(row.claim_token || '') === String(token)
       && (Date.now() - new Date(row.claimed_at).getTime()) < NOTIFICATION_CLAIM_LEASE_MS);
   } catch (err) {
     require('./logger').warn(`[visit-groups] lease check ${effectType} for visit ${visitId} failed: ${err.message}`);
@@ -1171,7 +1182,7 @@ async function notificationLeaseLive(visitId, kind) {
   }
 }
 
-async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId = null, smsOutcome = null, notificationOwner = false }) {
+async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId = null, smsOutcome = null, notificationOwner = false, claimToken = null }) {
   const toStatus = kind === 'en_route' ? 'en_route' : kind === 'on_site' ? 'on_site' : null;
   if (!primary || !primary.visit_id || !toStatus) return null;
   const targetTrack = kind === 'en_route' ? 'en_route' : 'on_property';
@@ -1241,8 +1252,15 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         bridges = [lockedPrimary];
       } else {
         const windowed = siblings.filter((s) => s.window_start && sameStopTuple(s) && !JOIN_INELIGIBLE_STATUSES.includes(String(s.status || '')));
-        bridges = windowedMembersConnected(windowed) ? windowed.slice() : [];
-        if (!bridges.length && windowed.length) logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: windowless primary, siblings form more than one chain — nothing follows`);
+        if (!windowed.length) {
+          // An all-windowless (explicitly grouped) visit is ONE stop by
+          // definition (codex r10): every same-tuple sibling is a member.
+          siblings.filter(sameStopTuple).forEach((s) => component.add(s.id));
+          bridges = [];
+        } else {
+          bridges = windowedMembersConnected(windowed) ? windowed.slice() : [];
+          if (!bridges.length) logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: windowless primary, siblings form more than one chain — nothing follows`);
+        }
       }
       let grew = true;
       while (grew) {
@@ -1363,7 +1381,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   const recordEffect = notificationOwner && NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome));
   let effect = null;
   if (recordEffect) {
-    const fin = await finalizeVisitNotification(fan.visitId, kind, smsOutcome, lifecycleAt);
+    const fin = await finalizeVisitNotification(fan.visitId, kind, smsOutcome, lifecycleAt, claimToken);
     if (fin.ok) effect = { effectType: fin.effectType, status: fin.status };
     else trackerFailures.push({ id: 'effect_finalize', reason: fin.reason });
   }

@@ -20,6 +20,7 @@ jest.mock('../models/db', () => {
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       insert(values) { chain._insert = values; log.push({ table, op: 'insert', values }); return chain; },
       onConflict() { chain._ops.push(['onConflict', ...arguments]); return chain; },
+      modify(fn) { fn(chain); return chain; },
       merge(values) { chain._merge = values; log.push({ table, op: 'merge', values }); return chain; },
       ignore() { return chain; },
       returning() { log.push({ table, op: 'returning', values: chain._insert }); return Promise.resolve(script[table] && script[table].returning ? script[table].returning() : []); },
@@ -239,6 +240,17 @@ describe('fanOutLiveTransition', () => {
     expect(out).toMatchObject({ ok: false, reason: 'primary_status_lagging', visitId: 'v1' });
   });
 
+  test('an all-windowless explicit visit is one stop: every same-tuple sibling follows', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary({ window_start: null, window_end: null }), select: () => [
+      { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+      { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's2', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+      { scheduled_date: '2026-09-01', customer_id: 'c1', property_id: 'p1', id: 's3', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+    ] } };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.siblingIds.sort()).toEqual(['s1', 's2']);
+    expect(out.skipped).toEqual([{ id: 's3', reason: 'stop_changed' }]);
+  });
+
   test('a windowless primary never bridges: siblings follow only when they form one chain among themselves', async () => {
     const chain = [
       { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '09:00', window_end: '10:00' },
@@ -277,31 +289,33 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
   const ROW = { id: 'p', visit_id: 'v1' };
   test('first claimant owns the send; a concurrent member sees taken; the stop lock is held', async () => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
-    expect(await claimVisitNotification(ROW, 'en_route')).toBe('owner');
+    const owner = await claimVisitNotification(ROW, 'en_route');
+    expect(owner.state).toBe('owner');
+    expect(owner.token).toMatch(/^[0-9a-f]{32}$/);
     expect(db.__rawCalls[0][1]).toEqual(['visit.stop', 'p1:2026-08-30']);
     const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
-    expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0 });
+    expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0, claim_token: owner.token });
     // a `failed` row is RECLAIMED (the retry); sent/suppressed/claimed are taken
     const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
     expect(merge.values).toMatchObject({ status: 'claimed' });
     // no row won: a terminal (sent/suppressed) row ⇒ taken; a LIVE claimed row ⇒ in_flight (lease, r8)
     db.__script.visit_effects = { returning: () => [], first: () => ({ status: 'sent' }) };
-    expect(await claimVisitNotification(ROW, 'on_site')).toBe('taken');
+    expect((await claimVisitNotification(ROW, 'on_site')).state).toBe('taken');
     db.__script.visit_effects = { returning: () => [], first: () => ({ status: 'claimed' }) };
-    expect(await claimVisitNotification(ROW, 'on_site')).toBe('in_flight');
+    expect((await claimVisitNotification(ROW, 'on_site')).state).toBe('in_flight');
   });
   test('a row a split just detached (or moved off the stop, or a visit no longer open) never claims', async () => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '15:00', window_end: '16:00' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
-    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v2' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
-    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
     expect(db.__calls.some((c) => c.table === 'visit_effects')).toBe(false);
     db.__script = { service_visits: { first: () => ({ ...VISIT, status: 'closing' }) } };
-    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
   });
   test('an unknown claim state is error (never sends) and no visit means no claim', async () => {
     db.__script = { service_visits: { first: () => { throw new Error('db down'); } } };
-    expect(await claimVisitNotification(ROW, 'en_route')).toBe('error');
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('error');
     expect(await claimVisitNotification({ id: 'p', visit_id: null }, 'en_route')).toBe(null);
   });
 });
@@ -337,15 +351,23 @@ describe('finalizeVisitNotification', () => {
   });
 });
 
-describe('notificationLeaseLive', () => {
-  test('live inside the lease, dead when expired / not claimed / missing', async () => {
-    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date() }) } };
-    expect(await notificationLeaseLive('v1', 'en_route')).toBe(true);
-    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date(Date.now() - 11 * 60 * 1000) }) } };
-    expect(await notificationLeaseLive('v1', 'en_route')).toBe(false);
-    db.__script = { visit_effects: { first: () => ({ status: 'sent', claimed_at: new Date() }) } };
-    expect(await notificationLeaseLive('v1', 'on_site')).toBe(false);
+describe('notificationLeaseLive (token-keyed)', () => {
+  test('live only for OUR token inside the lease; a reclaim (new token), expiry, terminal or missing row all read dead', async () => {
+    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date(), claim_token: 'tok-a' }) } };
+    expect(await notificationLeaseLive('v1', 'en_route', 'tok-a')).toBe(true);
+    expect(await notificationLeaseLive('v1', 'en_route', 'tok-b')).toBe(false);
+    expect(await notificationLeaseLive('v1', 'en_route', null)).toBe(false);
+    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date(Date.now() - 11 * 60 * 1000), claim_token: 'tok-a' }) } };
+    expect(await notificationLeaseLive('v1', 'en_route', 'tok-a')).toBe(false);
+    db.__script = { visit_effects: { first: () => ({ status: 'sent', claimed_at: new Date(), claim_token: 'tok-a' }) } };
+    expect(await notificationLeaseLive('v1', 'on_site', 'tok-a')).toBe(false);
     db.__script = { visit_effects: { first: () => null } };
-    expect(await notificationLeaseLive('v1', 'on_site')).toBe(false);
+    expect(await notificationLeaseLive('v1', 'on_site', 'tok-a')).toBe(false);
+  });
+  test('finalize is predicated on the owner token', async () => {
+    db.__script = {};
+    await finalizeVisitNotification('v1', 'en_route', 'sent', new Date(), 'tok-a');
+    const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
+    expect(merge).toBeTruthy();
   });
 });
