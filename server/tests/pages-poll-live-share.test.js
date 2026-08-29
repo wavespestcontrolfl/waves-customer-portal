@@ -214,6 +214,18 @@ describe('pollPost scheduler auto-merge: body-image contract at the HEAD (GH r19
     expect(merge).toHaveBeenCalledWith('post-1', expect.objectContaining({ expectHeadSha: 'abc' }));
   });
 
+  test('a row with a NULL slug resolves the scheduler path with the publisher slug fallback (GH r22)', async () => {
+    mockBranchDeploy();
+    setupDb();
+    freshRow = { ...freshRow, slug: null, title: 'Ant Trails in Bradenton' };
+    const merge = jest.spyOn(publisher, 'mergeAstro').mockResolvedValue({});
+    const check = jest.spyOn(publisher, 'assertBodyImagesAtHead').mockResolvedValue({ ok: true, reason: null });
+    const post = makePost({ astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'content/blog-x', slug: null, astro_requires_human_merge: false });
+    expect(await pagesPoll.pollPost(post)).toMatchObject({ ok: true, autoMerged: true });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ filePath: 'src/content/blog/ant-trails-in-bradenton.md' }));
+    expect(merge).toHaveBeenCalled();
+  });
+
   test('a TRANSIENT check failure defers without touching the claim; a moved base tip defers too (hook P1)', async () => {
     mockBranchDeploy();
     const updates = setupDb();

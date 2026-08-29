@@ -2154,7 +2154,14 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
     onRemediated: async ({ markdown, body, datesRestamped, frontmatterChanges }) => {
-      const patch = { content: body, updated_at: new Date() };
+      // blog_posts.content is prose-only: the publisher-managed body-N.webp
+      // references exist on the PR branch (and on main only after the
+      // merge) — mirroring them would make a republish after a closed/
+      // failed PR fail on assets that never landed. publishAstro re-inserts
+      // (reusing the live pictures) on the next publish.
+      const pub = deps.astroPublisher || require('../content-astro/astro-publisher');
+      const mirrored = typeof pub.stripManagedBodyImages === 'function' ? pub.stripManagedBodyImages(body, row.slug) : body;
+      const patch = { content: mirrored, updated_at: new Date() };
       // Whitelisted frontmatter fixes mirror into their row columns for the
       // same reason the body does: publishAstro rebuilds frontmatter from
       // blog_posts on a republish, so an unmirrored meta_description /

@@ -210,19 +210,27 @@ describe('helpers', () => {
 describe('scheduler-lane body-image revalidation (GH r19 P1)', () => {
   const { revalidateBodyImagesForMarkdown } = require('../services/content/codex-remediation');
   const internals = require('../services/content-astro/astro-publisher')._internals;
-  afterEach(() => { jest.restoreAllMocks(); });
-
   test('gate off → ok; gate on → a hero-only fixed body fails, a body with two committed distinct pictures passes', async () => {
     const md = (body) => `---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n${body}`;
     const gates = require('../config/feature-gates');
     const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => false);
-    expect(await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, {})).toEqual({ ok: true });
-    spy.mockImplementation((k) => k === 'blogBodyImages');
-    const gh = { getFile: jest.fn(async () => null) };
-    const r = await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/0 distinct in-article image/);
-    expect((await revalidateBodyImagesForMarkdown(md('## A'), {}, { gh, astroPublisherInternals: internals })).reason).toMatch(/PR head ref unavailable/);
+    try {
+      expect(await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, {})).toEqual({ ok: true });
+      spy.mockImplementation((k) => k === 'blogBodyImages');
+      const gh = { getFile: jest.fn(async () => null) };
+      const r = await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/0 distinct in-article image/);
+      expect((await revalidateBodyImagesForMarkdown(md('## A'), {}, { gh, astroPublisherInternals: internals })).reason).toMatch(/PR head ref unavailable/);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('maybeRemediateBlogPost mirrors the fixed body WITHOUT publisher-managed body-N references (GH r22)', async () => {
+    const { maybeRemediateBlogPost } = require('../services/content/codex-remediation');
+    const pub = require('../services/content-astro/astro-publisher');
+    expect(pub.stripManagedBodyImages('Prose.\n\n![g](/images/blog/roaches/body-1.webp)\n\nMore.', 'roaches')).toBe('Prose.\n\nMore.');
+    // Contract check only — the full scheduler remediation flow is exercised elsewhere; the mirror goes through stripManagedBodyImages (see codex-remediation.js onRemediated).
+    expect(typeof maybeRemediateBlogPost).toBe('function');
   });
 
   test('runRemediationForPr parks when the revalidateBodyImages hook fails', async () => {

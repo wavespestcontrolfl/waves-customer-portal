@@ -1203,6 +1203,7 @@ async function publishAstro(postId) {
         ...bodyImages.files,
         { path: filePath, content: markdown },
       ],
+      deletes: bodyImages.deletes || [],
     });
 
     // 4. PR
@@ -2293,7 +2294,7 @@ function legacyHeroRefs(body, heroSrc) {
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [] }) {
-  const none = { body, files: [], images: [], newAlts: [] };
+  const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
   if (!bodyImagesEnabled()) return none;
   const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs });
   if (!valid.ok) {
@@ -2354,7 +2355,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
 
   const have = valid.distinct;
   const need = BODY_IMAGE_MIN - have;
-  if (need <= 0) return { ...none, pinned };
+  if (need <= 0) return { ...none, pinned };  // nothing allocated → nothing superseded
 
   const slots = bodyImageSlots(body, need, { title: frontmatter?.title });
   if (slots.length < need) {
@@ -2376,12 +2377,63 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // not a near-duplicate) or skipped — a committed path is never overwritten
   // by a generation, so the atomic commit only ever ADDS asset paths (its
   // lock can then require each one to still be absent on the fresh branch).
+  // Pass 1 — REUSE: every publisher-managed picture the LIVE body carries
+  // under this slug is matched to the slot whose section still describes it
+  // (same heading + opening prose, alt vetted, not a near-duplicate); the
+  // match is by SECTION, not by name order, so a rewritten first section
+  // never causes the second section's still-valid picture to be dropped.
+  const managedPrefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+  const reusedBySlot = new Map(); // slot index → { src, repoPath, alt, hash, sha }
+  const taken = new Set();
+  if (existingFile?.file?.content) {
+    let liveBody = '';
+    try { liveBody = String(fm.parse(existingFile.file.content)?.content ?? existingFile.file.content); } catch { liveBody = String(existingFile.file.content); }
+    const liveManaged = [...new Set(bodyImageRefs(liveBody).map((r) => String(r.src || '')).filter((src) => src.startsWith(managedPrefix) && !draftSrcs.has(src)))];
+    for (let k = 0; k < slots.length; k++) {
+      const slot = slots[k];
+      for (const src of liveManaged) {
+        if (taken.has(src)) continue;
+        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
+        // A reused alt is customer-facing copy too: it must clear the same
+        // guardrails as a generated alt (no fallback → regenerate) and it
+        // joins the compliance second pass below.
+        const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
+        if (!vettedAlt) continue;
+        const repoPath = `public${src}`;
+        const onMain = await gh.getFile(repoPath);
+        const committed = await committedImageBuffer(repoPath, async () => onMain);
+        if (!committed) continue;
+        // A reused picture obeys the same rule as a generated one: if it
+        // duplicates the (possibly new) hero or a sibling, a NEW picture is
+        // generated instead.
+        const dup = await nearDuplicateOf(committed, seen);
+        if (dup.label) { logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — generating a new picture instead of reusing`); continue; }
+        reusedBySlot.set(k, { src, repoPath, alt: vettedAlt, hash: dup.hash, sha: onMain?.sha || null });
+        taken.add(src);
+        seen.push({ label: src, hash: dup.hash });
+        break;
+      }
+    }
+  }
+  // Pass 2 — names: each remaining slot takes the next name that is FREE in
+  // the repo (a draft-referenced or reused name is skipped; an occupied name
+  // this run neither reuses nor references is SUPERSEDED — a publisher-
+  // managed picture of this post, deleted in the same commit, pinned to the
+  // blob seen here — so section rewrites never pile up public orphans until
+  // the name cap parks the post).
   let n = 0;
+  const superseded = [];
   for (let k = 0; k < slots.length; k++) {
     const slot = slots[k];
+    const reuse = reusedBySlot.get(k) || null;
+    if (reuse) {
+      images.push({ src: reuse.src, alt: reuse.alt, reused: true, repoPath: reuse.repoPath, sha: reuse.sha });
+      newAlts.push(reuse.alt);
+      placements.push({ insertAt: slot.insertAt, src: reuse.src, alt: reuse.alt });
+      continue;
+    }
     let src;
     let repoPath;
-    let reuse = null;
     for (;;) {
       n += 1;
       if (n > BODY_IMAGE_NAME_SCAN_MAX) {
@@ -2391,35 +2443,10 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
       }
       src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`;
       repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
-      if (draftSrcs.has(src)) continue;
+      if (draftSrcs.has(src) || taken.has(src)) continue;
       const onMain = await gh.getFile(repoPath);
       if (!onMain) break; // free name → generate here
-      // Reuse a file already committed on main when the live body still
-      // describes it — never reuse a picture blind.
-      if (existingFile) {
-        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
-        // A reused alt is customer-facing copy too: it must clear the same
-        // guardrails as a generated alt (no fallback → regenerate) and it
-        // joins the compliance second pass below.
-        const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
-        const committed = vettedAlt ? await committedImageBuffer(repoPath, async () => onMain) : null;
-        if (committed) {
-          // A reused picture obeys the same rule as a generated one: if it
-          // duplicates the (possibly new) hero or a sibling, a NEW picture is
-          // generated under the next free name instead.
-          const dup = await nearDuplicateOf(committed, seen);
-          if (!dup.label) { reuse = { alt: vettedAlt, hash: dup.hash, sha: onMain.sha || null }; break; }
-          logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — generating a new picture under the next name instead of reusing`);
-        }
-      }
-      // Occupied by a picture this run cannot reuse → next name.
-    }
-    if (reuse) {
-      seen.push({ label: `body-${n}`, hash: reuse.hash });
-      images.push({ src, alt: reuse.alt, reused: true, repoPath, sha: reuse.sha });
-      newAlts.push(reuse.alt);
-      placements.push({ insertAt: slot.insertAt, src, alt: reuse.alt });
-      continue;
+      superseded.push({ repoPath, sha: onMain.sha || null });
     }
 
     let gen;
@@ -2485,7 +2512,11 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
-  return { body: nextBody, files, images, newAlts, pinned };
+  // Superseded = occupied names this run neither reused nor referenced.
+  const kept = new Set([...draftSrcs, ...images.map((img) => img.src)].map((src) => `public${src}`));
+  const deletes = superseded.filter((d) => !kept.has(d.repoPath));
+  for (const d of deletes) pinned.push({ repoPath: d.repoPath, sha: d.sha });
+  return { body: nextBody, files, images, newAlts, pinned, deletes: deletes.map((d) => d.repoPath) };
 }
 
 // Paths a body-image commit depends on, re-checked on the FRESH branch just
@@ -2747,7 +2778,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
       ...bodyImages.files,
       { path: filePath, content: markdown },
     ],
-    deletes: isLegacyMd ? [existingFile.path] : [],
+    deletes: [...(isLegacyMd ? [existingFile.path] : []), ...(bodyImages.deletes || [])],
   });
 
   const pr = await gh.createPr({
@@ -3147,7 +3178,7 @@ async function publishRefresh(draft, brief = {}) {
   // the SHA it was diffed against, and each generated asset path (allocated
   // as ABSENT from main — resolveBodyImages never overwrites a committed
   // picture) must still be absent, or a concurrent write would be lost.
-  if (refreshImages.files.length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
+  if (refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
     const conflicts = [];
     const onBranch = await gh.getFile(filePath, branch);
     if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
@@ -3161,11 +3192,12 @@ async function publishRefresh(draft, brief = {}) {
   }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
-  const fileCommit = refreshImages.files.length
+  const fileCommit = (refreshImages.files.length || (refreshImages.deletes || []).length)
     ? await gh.commitFiles({
       branch,
       message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
       files: [...refreshImages.files, { path: filePath, content: markdown }],
+      deletes: refreshImages.deletes || [],
     })
     : await gh.putFile({
       path: filePath,
@@ -4231,6 +4263,28 @@ function isCodexAuthor(login) {
 function scheduledBlogFilePath(slug) {
   return `${ASTRO_BLOG_DIR}/${slug}.md`;
 }
+// The same slug fallback publishAstro applies (a legacy/imported row may
+// have a null slug and publishes under slugify(title)).
+function scheduledBlogFilePathForPost(post) {
+  return scheduledBlogFilePath(post?.slug || slugify(post?.title || ''));
+}
+// Publisher-managed in-article pictures (`/images/blog/<slug>/body-N.webp`)
+// live in the Astro repo, never in blog_posts.content: a body mirrored back
+// into the row (scheduler-lane remediation) must not carry references that
+// exist only on a PR branch — a later republish would fail on them.
+// Removes those image lines (and the blank line that framed them).
+function stripManagedBodyImages(body, slug) {
+  const prefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+  const lines = String(body || '').split('\n');
+  const out = [];
+  for (const line of lines) {
+    const refs = imageRefsInText(line, new Map());
+    const managedOnly = refs.length > 0 && refs.every((r) => String(r.src || '').startsWith(prefix)) && line.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim() === '';
+    if (managedOnly) continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 
 module.exports = {
   publishAstro,
@@ -4256,6 +4310,8 @@ module.exports = {
   // Merge-time body-image contract for the autonomous PR poller.
   assertBodyImagesAtHead,
   scheduledBlogFilePath,
+  scheduledBlogFilePathForPost,
+  stripManagedBodyImages,
   // Length clamps reused by the autonomous runner to normalize a draft's
   // title/meta BEFORE the quality gate (the gate runs before publish, so the
   // in-publisher normalization above is too late to salvage a length overshoot).

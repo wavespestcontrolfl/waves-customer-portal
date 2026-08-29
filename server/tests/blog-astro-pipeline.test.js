@@ -4498,6 +4498,43 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect((await validateBodyImageRefs({ body: '![p](</images/blog/x/body-1.webp >)', heroSrc: '/images/blog/x/hero.webp', getFile })).reason).toMatch(/not committed/);
   });
 
+  test('refresh lane: a superseded body-N (section rewritten) is DELETED in the same commit, pinned to its blob; reused ones stay (GH r22)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const b1 = '/images/blog/shrub-diseases-sarasota-fl/body-1.webp';
+    const b2 = '/images/blog/shrub-diseases-sarasota-fl/body-2.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Live one](${b1})\n\n## Oleander\n\nOleander prose.\n\n![Live two](${b2})\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(4), 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: `${m[1]}-sha`, raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    // Hibiscus section REWRITTEN (different lead → body-1 not reusable); Oleander unchanged (body-2 reused). Draft drops both refs.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: '## Hibiscus\n\nCompletely new hibiscus guidance.\n\n## Oleander\n\nOleander prose.\n' };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', 'src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp']);
+    const written = fmModule.parse(call.files[1].content).content;
+    expect(written).toContain(`![Live two](${b2})`);
+    expect(written).not.toContain(b1);
+    // The lock also covers the deleted path (pinned to the blob it was judged on).
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('stripManagedBodyImages removes publisher-managed body-N references (and only those) from a body mirrored into blog_posts (GH r22)', () => {
+    const body = '## A\n\nProse.\n\n![gen](/images/blog/x/body-1.webp)\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore ![inline](/images/blog/x/body-2.webp) text.\n\n![gen2](/images/blog/x/body-2.webp)';
+    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore ![inline](/images/blog/x/body-2.webp) text.');
+    expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);

@@ -247,7 +247,14 @@ async function pollPost(post, { allowMerge = true } = {}) {
           if (typeof pub.assertBodyImagesAtHead === 'function' && post.astro_branch_name) {
             let check;
             try {
-              check = await pub.assertBodyImagesAtHead({ frontmatter: {}, branch: post.astro_branch_name, filePath: pub.scheduledBlogFilePath(post.slug) });
+              // publishAstro's own slug fallback (a nullable slug publishes
+              // under slugify(title)); the poll projection may omit both.
+              let pathPost = post;
+              if (!post.slug) {
+                const row = await db('blog_posts').where({ id: post.id }).first('slug', 'title');
+                pathPost = { slug: row?.slug, title: row?.title || post.title };
+              }
+              check = await pub.assertBodyImagesAtHead({ frontmatter: {}, branch: post.astro_branch_name, filePath: pub.scheduledBlogFilePathForPost(pathPost) });
             } catch (checkErr) {
               check = { ok: false, transient: true, reason: `body-image check failed: ${checkErr.message}` };
             }
