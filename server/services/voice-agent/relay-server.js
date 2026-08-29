@@ -264,7 +264,15 @@ function attachVoiceRelay(httpServer) {
       torn = true;
       clearTimeout(idleTimer);
       clearTimeout(sessionTimer);
-      if (convo) convo.end(reason).catch(() => {});
+      // Best-effort: the backstop timers can fire long after the socket is
+      // gone (they are unref'd, not cancelled by GC), so a session object that
+      // is half-built, already ended, or a test double must never turn the
+      // teardown itself into an unhandled throw.
+      if (convo && typeof convo.end === 'function') {
+        try {
+          Promise.resolve(convo.end(reason)).catch(() => {});
+        } catch { /* end() threw synchronously — nothing left to clean up */ }
+      }
       try { ws.terminate(); } catch { /* already closed */ }
     };
     const bumpIdle = () => {
