@@ -11,7 +11,7 @@ const { __setCatalogNamesForTest, refreshCatalogNames } = require('../services/s
 
 const CATALOG = [
   'Seasonal Mosquito Control Service',
-  'Mosquito Control Service (Monthly)',
+  'Monthly Mosquito Control Service',
   'Termite Bond Service (10-Year Term)',
   'Rodent Trapping + Exclusion Service',
   'Lawn Care Program — Every 6 Weeks',
@@ -43,7 +43,7 @@ describe('family map ordering (unprimed cache)', () => {
 
   test('mosquito cadence survives even without the catalog cache', () => {
     expect(normalizeServiceType('Seasonal Mosquito Control')).toBe('Seasonal Mosquito Control Service');
-    expect(normalizeServiceType('Monthly Mosquito Control')).toBe('Mosquito Control Service (Monthly)');
+    expect(normalizeServiceType('Monthly Mosquito Control')).toBe('Monthly Mosquito Control Service');
     expect(normalizeServiceType('Mosquito Control')).toBe('Mosquito Barrier Treatment');
   });
 

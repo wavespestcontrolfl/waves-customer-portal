@@ -18,7 +18,7 @@ const SERVICE_LABELS = {
   mosquito: 'Mosquito Control',
   tree_shrub: 'Tree & Shrub Care',
   termite: 'Termite Bait Monitoring',
-  rodent_bait: 'Rodent Monitoring',
+  rodent_bait: 'Rodent Bait Station',
   palm: 'Palm Injection',
   one_time_lawn: 'Lawn Follow-Up Visit',
   one_time_mosquito: 'One-Time Mosquito Treatment',
