@@ -63,6 +63,14 @@ jest.mock('../sockets', () => ({
 }));
 
 const db = require('../models/db');
+// The call-created follow-up shift (post-save, shared helper) probes ITS
+// children's destination occupancy through the same boundary this suite
+// spies on; it is not the parent gate under test here — mocked out, as the
+// rebooker harnesses do.
+jest.mock('../services/call-booking-catalog', () => ({
+  ...jest.requireActual('../services/call-booking-catalog'),
+  shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+}));
 const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = require('../services/scheduling/occupancy');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const express = require('express');
