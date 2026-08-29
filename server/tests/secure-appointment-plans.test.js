@@ -161,6 +161,22 @@ describe('buildSecurePlanContext', () => {
     });
   });
 
+  test('direct rodent bait series: the setup consumed at selection is the DISCLOSED (stamped) figure, never above it (codex #3591 r15 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    const lowered = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '79.00' }, visitId: 'v1' });
+    expect(lowered.setupFee).toEqual({ amount: 79, waivedWithPrepay: false });
+    expect(lowered.prepay.total).toBe(Math.round((coverage + 79) * 100) / 100);
+    const raised = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '150.00' }, visitId: 'v1' });
+    expect(raised.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+    const first = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(first.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+  });
+
   test('direct rodent bait series, MEMBER (another qualifying service on the account) → no setup fee', async () => {
     mockQualifyingKeys = async () => ['pest_control', 'rodent_bait'];
     setTables({

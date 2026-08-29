@@ -158,3 +158,10 @@ describe('P1-2 server-authoritative recompute ignores forged identity inputs', (
     expect(r.serverResult.isRecurringCustomer).toBe(true);
   });
 });
+
+describe('setupWaiverPriorQualifyingServices is a stripped client identity field (codex #3591 r15 P1)', () => {
+  test('a browser-supplied waiver identity never survives the sanitizer', () => {
+    const out = sanitizeClientIdentityFields({ homeSqFt: 2000, setupWaiverPriorQualifyingServices: ['pest_control'], priorQualifyingServices: ['lawn_care'] });
+    expect(out).toEqual({ homeSqFt: 2000 });
+  });
+});

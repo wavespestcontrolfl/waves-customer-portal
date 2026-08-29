@@ -1375,6 +1375,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     let customerId = null;
     try {
       const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+      // Normalized email for the new-customer insert below (the shared
+      // lookup normalizes its own copy — codex #3591 r15 P1 TDZ fix).
+      const emailLc = String(contactEmail || '').trim().toLowerCase();
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.

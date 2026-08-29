@@ -4209,6 +4209,32 @@ describe('public estimate one-time breakdown', () => {
     expect(single.lineItems).toHaveLength(1);
   });
 
+  test('invoice-mode recurring accept bills the frozen bait-station setup beside the first application (codex #3591 r15 P1)', () => {
+    const draft = buildEstimateInvoiceModeDraft({
+      estimate: { id: 3 },
+      estData: {},
+      treatAsOneTime: false,
+      effectiveMonthlyTotal: 29.67,
+      recurringFirstVisitAmount: 89,
+      recurringSvcList: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67 }],
+      effectiveBillingCadence: { frequencyLabel: 'Quarterly', visitChargeLabel: 'Charged after each application' },
+      rodentSetupAmount: 99,
+    });
+    expect(draft.lineItems).toEqual([
+      expect.objectContaining({ unit_price: 89 }),
+      expect.objectContaining({ description: 'Bait Station Setup — one-time setup fee', unit_price: 99 }),
+    ]);
+    expect(draft.amount).toBe(188);
+    expect(draft.title).toContain('bait station setup');
+    const none = buildEstimateInvoiceModeDraft({
+      estimate: { id: 4 }, estData: {}, treatAsOneTime: false, effectiveMonthlyTotal: 29.67, recurringFirstVisitAmount: 89,
+      recurringSvcList: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67 }],
+      effectiveBillingCadence: { frequencyLabel: 'Quarterly', visitChargeLabel: 'Charged after each application' },
+    });
+    expect(none.lineItems).toHaveLength(1);
+    expect(none.amount).toBe(89);
+  });
+
   test('Bora-Care plus a positive billable adjustment is NOT treated as Bora-Care-only', () => {
     // A positive one_time_adjustment (or any unrecognized positive charge) is a
     // real billable line — unlike the negative member discount it must NOT switch

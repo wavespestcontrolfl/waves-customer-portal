@@ -991,7 +991,13 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // the retired minimums on a FRESH save (codex #3432 r3 P1). Stripped here
 // and re-derived server-side only under the declared persisted-replay
 // branch below — same lifecycle as treeShrubPricingKnobs.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay'];
+// setupWaiverPriorQualifyingServices is the public-quote wizard's
+// pre-pricing account lookup (codex #3591 r14) — a setup-waiver-only
+// identity the engine unions with priorQualifyingServices. Browser-supplied
+// it would forge a $99 waiver, so it is stripped like the rest; the admin
+// save's server-derived priorQualifyingServices already carries the same
+// evidence (codex #3591 r15 P1).
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];

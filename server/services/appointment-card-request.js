@@ -1753,6 +1753,17 @@ async function loadSecureCardPageData(token) {
     // between the two reads would freeze a cap higher than displayed).
     const displayedPrice = planContext && Number(planContext.perVisit) > 0
       ? Number(planContext.perVisit) : null;
+    // The UNWAIVED bait-station setup the page displays (direct rodent
+    // series, non-member) freezes the same way (codex #3591 r15 P1):
+    // monotonic-down, so a fee raised between render and selection can
+    // never be stamped/invoiced above the disclosure. NULL clears when the
+    // page shows no unwaived setup.
+    const displayedSetupFee = planContext?.setupFee && planContext.setupFee.waivedWithPrepay === false
+      && Number(planContext.setupFee.amount) > 0
+      ? Number(planContext.setupFee.amount) : null;
+    disclosure.accepted_setup_fee = displayedSetupFee != null
+      ? db.raw('LEAST(COALESCE(accepted_setup_fee, ?::numeric), ?::numeric)', [displayedSetupFee, displayedSetupFee])
+      : null;
     if (displayedPrice != null) {
       disclosure.accepted_amount = db.raw(
         'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',

@@ -239,6 +239,13 @@ async function deriveSecurePlanContext({ request, visitId }) {
     const otherQualifiers = (await loadExistingQualifyingServiceKeys(db, visit.customer_id) || [])
       .filter((key) => key !== 'rodent_bait');
     if (otherQualifiers.length === 0) unwaivedSetupFee = Number(RODENT.baitSetupFee) || 0;
+    // Consume the DISCLOSED setup (accepted_setup_fee, stamped at render —
+    // codex #3591 r15 P1): never above what the customer saw. A row without
+    // a stamp (first render, or pre-column rows) prices live.
+    const frozenSetupFee = request?.accepted_setup_fee != null ? Number(request.accepted_setup_fee) : NaN;
+    if (unwaivedSetupFee > 0 && Number.isFinite(frozenSetupFee) && frozenSetupFee >= 0) {
+      unwaivedSetupFee = Math.min(unwaivedSetupFee, frozenSetupFee);
+    }
   }
   const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
 

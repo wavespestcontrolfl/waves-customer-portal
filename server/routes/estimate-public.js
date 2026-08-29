@@ -1720,6 +1720,11 @@ function buildEstimateInvoiceModeDraft({
   // labeled-discount itemization as the standard accept leg (codex 2652 r2:
   // invoice-mode accepts previously dropped the promised label).
   manualDiscountItemization = null,
+  // Frozen rodent bait-station setup the accepted estimate disclosed
+  // (EstimateConverter.frozenRodentBaitSetupAmount) — the recurring
+  // invoice-mode draft bills it beside the first application exactly like
+  // the standard accept leg (codex #3591 r15 P1).
+  rodentSetupAmount = 0,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -1815,11 +1820,20 @@ function buildEstimateInvoiceModeDraft({
       unit_price: amount,
     }];
 
+  const setupAmount = roundInvoiceAmount(rodentSetupAmount) || 0;
+  if (setupAmount > 0) {
+    recurringLineItems.push({
+      description: 'Bait Station Setup — one-time setup fee',
+      quantity: 1,
+      unit_price: setupAmount,
+    });
+  }
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
-    amount,
-    title: `${svcType} — first ${visitNoun}`,
+    amount: Math.round((amount + setupAmount) * 100) / 100,
+    title: setupAmount > 0 ? `${svcType} — first ${visitNoun} + bait station setup` : `${svcType} — first ${visitNoun}`,
     lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
@@ -10898,6 +10912,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
+          rodentSetupAmount: treatAsOneTime
+            ? 0
+            : require('../services/estimate-converter').frozenRodentBaitSetupAmount(acceptedEstDataForPricing),
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own

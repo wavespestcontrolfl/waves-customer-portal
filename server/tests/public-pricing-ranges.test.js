@@ -75,6 +75,10 @@ describe('public pricing ranges', () => {
       const row = refreshed.services.find((svc) => svc.key === 'rodent_bait_program');
       // 900 sf is not a hardcoded sample point; only the live ladder reaches it.
       expect(row.low).toBeLessThanOrEqual(59);
+      // ...and the DISCOUNTED sweep reaches it too (codex #3591 r15 P2).
+      const constants2 = require('../services/pricing-engine/constants');
+      const maxTier = Math.max(...Object.values(constants2.WAVEGUARD.tiers).map((t) => t.discount || 0));
+      expect(row.low).toBeLessThanOrEqual(Math.round(59 * (1 - maxTier) * 100) / 100 + 0.01);
     } finally {
       constants.RODENT.baitBrackets = original;
       computePublicPricingRanges({ refresh: true });

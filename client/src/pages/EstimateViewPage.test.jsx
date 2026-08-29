@@ -632,6 +632,16 @@ describe('estimateAddServiceOffer', () => {
       services: [{ name: 'Rodent Trapping' }],
     }], 'recurring');
     expect(trapping.body).toMatch(/Silver|10%|next/);
+    // A rodent row the server flagged non-qualifying (live rodent_waveguard
+    // flags) does not count either (codex #3591 r15 P2).
+    const flaggedOff = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, countsTowardWaveGuardTier: false },
+      ] }],
+    }], 'recurring');
+    expect(flaggedOff.body).toMatch(/Silver|10%|next/);
   });
 
   it('uses member keys from collapsed bundle sections', () => {
