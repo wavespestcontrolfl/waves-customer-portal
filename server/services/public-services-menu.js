@@ -58,9 +58,6 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   lawn_care_recurring: { lawn: { tier: 'standard' } },
   lawn_care_6week: { lawn: { tier: 'enhanced' } },
   lawn_care_monthly: { lawn: { tier: 'premium' } },
-  lawn_care_one_time: { oneTimeLawn: {} },
-  plugging: { plugging: {} },
-  top_dressing: { topDressing: {} },
   mosquito_seasonal: { mosquito: { tier: 'seasonal9' } },
   mosquito_monthly: { mosquito: { tier: 'monthly12' } },
   tree_shrub_quarterly: { treeShrub: { tier: 'light' } },
@@ -69,14 +66,10 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   rodent_bait_quarterly: { rodentBait: {} },
   rodent_trapping: { rodentTrapping: {} },
   rodent_exclusion_only: { exclusion: {} },
-  rodent_sanitation_light: { sanitation: { tier: 'light' } },
-  rodent_sanitation_standard: { sanitation: { tier: 'standard' } },
-  rodent_sanitation_heavy: { sanitation: { tier: 'heavy' } },
   // Catalog flea_tick is the SINGLE-visit treatment (engine key
   // flea_knockdown_single); the engine's default flea offer is the two-visit
   // package, so the offer is pinned here (pre-push codex P0).
   flea_tick: { flea: { offerKey: 'flea_knockdown_single' } },
-  bee_wasp_removal: { stinging: {} },
   termite_bait: { termite: {} },
   rodent_inspection: { rodentInspection: {} },
 });
@@ -84,7 +77,14 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
 // needs inputs the website does not collect or returns a manual line:
 //   palm_injection (palm count) · bed_bug_treatment (method) ·
 //   dethatching / termite_trenching / termite_slab_pretreat (quote-required
-//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time.
+//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time ·
+//   lawn_care_one_time (manually scoped: fert / weed / insect — the keyed
+//   request carries no treatment type) · rodent_sanitation_light/standard/heavy
+//   (one engine key covers three rows, so acceptance could stamp no service_id).
+//   bee_wasp_removal (species / tier / removal inputs decide $75–$450 of
+//   removal the site does not collect) · plugging / top_dressing (spacing /
+//   depth options move the price ~4× and the site does not collect them) —
+//   both pre-push codex P0.
 // The contract test runs every instant key through the engine and requires
 // a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
@@ -93,6 +93,56 @@ const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
 function quoteServicesForKey(serviceKey) {
   const req = PUBLIC_QUOTE_REQUESTS[serviceKey];
   return req ? JSON.parse(JSON.stringify(req)) : null;
+}
+
+// Visits/year the mapped request selects, for recurring products — the
+// catalog row's visits_per_year is admin-editable, so a row whose cadence
+// no longer matches its request is NOT advertised or priced as instant
+// (pre-push codex P1: the menu and the request must agree).
+// [visits/year, catalog frequency] the mapped request selects. Both are
+// admin-editable on the row, so both must still agree.
+const REQUEST_CADENCE = {
+  pest: { quarterly: [4, 'quarterly'], bimonthly: [6, 'bimonthly'], monthly: [12, 'monthly'] },
+  lawn: { standard: [6, 'bimonthly'], enhanced: [9, 'every_6_weeks'], premium: [12, 'monthly'] },
+  mosquito: { seasonal9: [9, 'seasonal_feb_oct'], monthly12: [12, 'monthly'] },
+  treeShrub: { light: [4, 'quarterly'], standard: [6, 'bimonthly'], enhanced: [9, 'every_6_weeks'] },
+  rodentBait: [4, 'quarterly'],
+  termite: [4, 'quarterly'],
+};
+function expectedCadenceForRequest(request) {
+  if (!request) return null;
+  if (request.pest) return REQUEST_CADENCE.pest[request.pest.frequency] ?? null;
+  if (request.lawn) return REQUEST_CADENCE.lawn[request.lawn.tier] ?? null;
+  if (request.mosquito) return REQUEST_CADENCE.mosquito[request.mosquito.tier] ?? null;
+  if (request.treeShrub) return REQUEST_CADENCE.treeShrub[request.treeShrub.tier] ?? null;
+  if (request.rodentBait) return REQUEST_CADENCE.rodentBait;
+  if (request.termite) return REQUEST_CADENCE.termite;
+  return null; // one-time products carry no cadence
+}
+// True when the catalog row (as it is NOW) still describes the product the
+// mapped request prices: recurring rows must match visits/year AND
+// frequency; one-time rows must not have become recurring.
+function requestMatchesCatalogRow(serviceKey, row) {
+  const request = PUBLIC_QUOTE_REQUESTS[serviceKey];
+  if (!request || !row) return false;
+  const expected = expectedCadenceForRequest(request);
+  if (expected == null) return row.billing_type !== 'recurring';
+  return Number(row.visits_per_year) === expected[0] && String(row.frequency || '') === expected[1];
+}
+
+// Site-supplied options a keyed request may carry — ONLY those the engine
+// needs and the website actually collects (grass type for lawn). Everything
+// else is fixed by the canonical request.
+const LAWN_TRACKS = new Set(['st_augustine', 'bahia', 'bermuda', 'zoysia']);
+function mergeKeyedRequestOptions(request, bodyServices) {
+  if (!request) return null;
+  const out = JSON.parse(JSON.stringify(request));
+  const track = String(bodyServices?.lawn?.track || '').toLowerCase();
+  if (out.lawn && LAWN_TRACKS.has(track)) out.lawn.track = track;
+  return out;
+}
+function instantForRow(row) {
+  return PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key) && requestMatchesCatalogRow(row.service_key, row);
 }
 
 function modeFor(row) {
@@ -108,7 +158,7 @@ function menuItem(row) {
     family: FAMILY_LABELS[row.category] || row.category,
     family_key: row.category,
     mode,
-    public_instant_quote: PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key),
+    public_instant_quote: instantForRow(row),
   };
   if (mode === 'recurring') {
     item.cadence = {
@@ -139,8 +189,8 @@ async function publicSelectableService(serviceKey, conn = db) {
     if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return null;
     const row = await conn('services')
       .where({ service_key: serviceKey, is_active: true, is_archived: false, public_quote_selectable: true })
-      .first('id', 'service_key', 'name');
-    return row ? { service_key: row.service_key, name: row.name } : null;
+      .first('id', 'service_key', 'name', 'billing_type', 'visits_per_year', 'frequency');
+    return row ? { service_key: row.service_key, name: row.name, instant: instantForRow(row) } : null;
   } catch {
     // Fail closed to a prose-only lead: a keyed lead must never be created
     // from an unverified key, and a catalog read failure must not fail intake.
@@ -152,4 +202,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, mergeKeyedRequestOptions, requestMatchesCatalogRow, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };

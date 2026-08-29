@@ -2,7 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
-const { publicSelectableService, quoteServicesForKey } = require('../services/public-services-menu');
+const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -494,7 +494,13 @@ function estimateBlocksBookingHandoff(estimate) {
 // with prep coordination, and bookingServiceFor('Bed Bug Treatment') falls
 // through to the generic 60-minute pest_control slot — undersized and
 // mis-labeled. These quotes show the price but the office schedules them.
-const NO_SELF_BOOK_LINE_SERVICES = new Set(['bed_bug']);
+const NO_SELF_BOOK_LINE_SERVICES = new Set([
+  'bed_bug',
+  // Cataloged booking_enabled=false (300–360 min visits): instant price,
+  // never a self-book slot (GH codex #3585).
+  'plugging',
+  'top_dressing',
+]);
 function estimateBlocksSelfBookLink(estimate) {
   return estimateBlocksBookingHandoff(estimate)
     || (estimate?.lineItems || []).some((l) => l && NO_SELF_BOOK_LINE_SERVICES.has(l.service));
@@ -582,6 +588,45 @@ function buildCompactCustomerServiceInterest(parts = []) {
     }
   }
   return kept.join(' + ') || compactParts[0]?.slice(0, 32) || null;
+}
+
+// Quote-on-request lead capture for a keyed, non-instant product (C2): the
+// same quote_wizard lead the priced path writes, minus pricing — the office
+// estimates from the key. Attaches to a client-supplied leadId only through
+// the same id+contact match the priced path uses.
+async function captureQuoteOnRequestLead({ leadId, keyedService, contact, address, attribution, anonId }) {
+  const attr = (attribution && typeof attribution === 'object') ? attribution : null;
+  const sourceMeta = await resolveLeadSource(attr);
+  const fields = {
+    first_name: contact.contactFirstName,
+    last_name: contact.contactLastName,
+    email: contact.contactEmail,
+    phone: contact.contactPhone,
+    address: address.quoteFullAddress,
+    city: address.quoteCity || null,
+    zip: address.quoteZip || null,
+    service_interest: keyedService.name,
+    service_key: keyedService.service_key,
+  };
+  if (leadId) {
+    const rows = await db('leads')
+      .where({ id: leadId, email: contact.contactEmail })
+      .update({ ...fields, updated_at: new Date() })
+      .returning(['id']);
+    if (rows[0]) return rows[0];
+  }
+  const rows = await db('leads').insert({
+    ...fields,
+    lead_type: 'quote_wizard',
+    first_contact_channel: 'website_quote',
+    lead_source_id: sourceMeta.leadSourceId,
+    status: 'new',
+    gclid: attr?.gclid ? String(attr.gclid).slice(0, 255) : null,
+    fbclid: attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null,
+    anon_id: anonId ? String(anonId).slice(0, 190) : null,
+    extracted_data: JSON.stringify({ stage: 'quote_on_request', service_key: keyedService.service_key }),
+  }).returning(['id']);
+  return rows[0] || null;
 }
 
 function buildPublicQuoteServiceInterest(services = {}) {
@@ -756,20 +801,20 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       enriched, services: bodyServices, attribution,
     } = req.body || {};
     // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
-    // exact engine request for that product, so the site never composes
-    // cadence/tier options and can never receive another product's price.
-    // A selectable-but-not-instant key is answered as quote-on-request.
+    // exact engine request for that product (plus the few site-collected
+    // options the engine needs, e.g. lawn grass type), so the site never
+    // composes cadence/tier options and can never receive another product's
+    // price. Resolved here; a selectable-but-not-instant key is answered as
+    // quote-on-request AFTER contact validation, with the lead captured.
     const requestedServiceKey = String(req.body?.serviceKey ?? req.body?.service_key ?? '').trim().toLowerCase() || null;
     let keyedService = null;
     if (requestedServiceKey) {
       if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
       keyedService = await publicSelectableService(requestedServiceKey);
       if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
-      if (!quoteServicesForKey(requestedServiceKey)) {
-        return res.status(409).json({ error: 'quote_on_request', service_key: requestedServiceKey, name: keyedService.name });
-      }
     }
-    const services = keyedService ? quoteServicesForKey(requestedServiceKey) : bodyServices;
+    const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
+    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices) : bodyServices;
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -810,6 +855,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
+    }
+    // Quote-on-request: the product is real but the public engine cannot
+    // price it — capture the keyed lead for the office, then say so.
+    if (keyedService && !keyedInstant) {
+      const lead = await captureQuoteOnRequestLead({
+        leadId, keyedService, contact: { contactFirstName, contactLastName, contactEmail, contactPhone },
+        address: { quoteFullAddress, quoteCity, quoteZip }, attribution, anonId: req.body?.anonId ?? req.body?.anon_id ?? null,
+      });
+      return res.status(409).json({ error: 'quote_on_request', service_key: keyedService.service_key, name: keyedService.name, leadId: lead?.id || null });
     }
     if (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
