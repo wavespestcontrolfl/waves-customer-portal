@@ -698,6 +698,13 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
         await sp(table).where({ id: row.id }).update({ [column]: winnerId });
       });
       moved += 1;
+      // A moved row the provider accepted but markWeekPlanSent never stamped
+      // is reconciled here too — the report reads only stamped rows, and the
+      // rewritten delivery identity later proves acceptance (codex gh-r21).
+      if (!row.sent_at && await weekPlanDelivered(trx, row, loserId)) {
+        await trx(table).where({ id: row.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
+        stamped += 1;
+      }
       continue;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;

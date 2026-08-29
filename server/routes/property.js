@@ -200,6 +200,16 @@ const IRRIGATION_INPUT_FIELDS = [
   'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
   'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
 ];
+// The subset the weekly watering plan sizes controller instructions from —
+// mirrored in irrigation-weekly-email.js (IRRIGATION_SIZING_FIELDS).
+const IRRIGATION_SIZING_FIELDS = [
+  'irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week',
+];
+function parseConfirmedFields(raw) {
+  let list = raw;
+  if (typeof raw === 'string') { try { list = JSON.parse(raw); } catch { list = []; } }
+  return Array.isArray(list) ? list.filter((f) => typeof f === 'string') : [];
+}
 
 // =========================================================================
 // GET /api/property/preferences
@@ -303,12 +313,8 @@ router.put('/preferences', async (req, res, next) => {
     }
     // Stamped on the row, not on `updates`: the account-updated email lists
     // what the customer changed, and the stamp is not a customer edit.
-    // irrigation_settings_saved_at: the weekly watering plan trusts sprinkler
-    // settings only when saved AFTER the last primary-address change — this
-    // dedicated stamp (never the row-wide updated_at, which any preference
-    // edit moves) is what re-confirms them (codex #3565 gh-r20).
     const stampIrrigationOn = IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
-      ? { irrigation_system: true, irrigation_settings_saved_at: db.fn.now() }
+      ? { irrigation_system: true }
       : {};
 
     // Normalize irrigation system type to an array (accepts legacy scalar)
@@ -333,15 +339,27 @@ router.put('/preferences', async (req, res, next) => {
       .where({ customer_id: req.customerId })
       .first();
 
+    // The weekly watering plan trusts sprinkler settings only once every
+    // instruction-shaping field has been re-saved AFTER the last primary-
+    // address change (the move resets irrigation_confirmed_fields). The
+    // portal autosaves one field per PUT, so confirmation accrues per field
+    // — a non-sizing irrigation edit (controller location, notes) and the
+    // row-wide updated_at confirm nothing (codex #3565 gh-r20/r21).
+    const confirmedNow = IRRIGATION_SIZING_FIELDS.filter((f) => f in updates);
+    const confirmFields = confirmedNow.length
+      ? { irrigation_confirmed_fields: JSON.stringify([...new Set([...parseConfirmedFields(existing?.irrigation_confirmed_fields), ...confirmedNow])]) }
+      : {};
+
     if (existing) {
       await db('property_preferences')
         .where({ customer_id: req.customerId })
-        .update({ ...updates, ...stampIrrigationOn, updated_at: db.fn.now() });
+        .update({ ...updates, ...stampIrrigationOn, ...confirmFields, updated_at: db.fn.now() });
     } else {
       await db('property_preferences').insert({
         customer_id: req.customerId,
         ...updates,
         ...stampIrrigationOn,
+        ...confirmFields,
       });
     }
 

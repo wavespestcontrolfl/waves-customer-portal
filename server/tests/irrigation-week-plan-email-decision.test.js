@@ -152,13 +152,23 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   const sweep = fs.readFileSync(path.join(__dirname, '../services/irrigation-weekly-email.js'), 'utf8');
   const lib = fs.readFileSync(path.join(__dirname, '../services/email-template-library.js'), 'utf8');
   test('settings saved before the home moved are withheld from the decision (all schedule inputs), and the plan email is told why', () => {
-    // gh-r20: the DEDICATED irrigation save stamp re-confirms, never the row-wide updated_at.
-    expect(sweep).toMatch(/const scheduleUnconfirmed = !!customer\.irrigation_home_changed_at\s*&& \(!customer\.irrigation_settings_saved_at \|\| new Date\(customer\.irrigation_home_changed_at\) >= new Date\(customer\.irrigation_settings_saved_at\)\);/);
-    expect(sweep).not.toMatch(/prefs_updated_at/);
+    // gh-r20/r21: confirmation is PER sizing field since the move — never the row-wide updated_at.
+    expect(sweep).toMatch(/const scheduleUnconfirmed = !!customer\.irrigation_home_changed_at\s*&& sizingFieldsUnconfirmed\(customer\);/);
+    expect(sweep).not.toMatch(/prefs_updated_at|irrigation_settings_saved_at/);
+    const { _private } = require('../services/irrigation-weekly-email');
+    const row = (over) => ({ irrigation_run_minutes: 20, watering_days: JSON.stringify(['Mon']), irrigation_system_type: JSON.stringify(['spray']), irrigation_inches_per_week: null, irrigation_confirmed_fields: JSON.stringify([]), ...over });
+    expect(_private.sizingFieldsUnconfirmed(row())).toBe(true);
+    // One re-saved field never confirms the rest…
+    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) }))).toBe(true);
+    // …every NON-NULL sizing field re-saved does (an empty field has nothing stale to reuse).
+    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] }))).toBe(false);
+    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_run_minutes: null, watering_days: '[]', irrigation_system_type: [], irrigation_inches_per_week: null }))).toBe(false);
+    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_inches_per_week: 1, irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] }))).toBe(true);
+    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: 'not json' }))).toBe(true);
     for (const k of ['irrigationInchesPerWeek: scheduleUnconfirmed \\? null : customer\\.irrigation_inches_per_week', 'turfIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'assessmentIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'irrigationRunMinutes: scheduleUnconfirmed \\? null : customer\\.irrigation_run_minutes', 'wateringDays: scheduleUnconfirmed \\? null : customer\\.watering_days', 'irrigationSystemType: scheduleUnconfirmed \\? null : customer\\.irrigation_system_type']) {
       expect(sweep).toMatch(new RegExp(k));
     }
-    expect(sweep).toMatch(/'pp\.irrigation_settings_saved_at',\s*'pp\.irrigation_home_changed_at',/);
+    expect(sweep).toMatch(/'pp\.irrigation_confirmed_fields',\s*'pp\.irrigation_home_changed_at',/);
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
@@ -170,6 +180,9 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     expect(sweep).toMatch(/if \(result\.aborted\) \{\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
+    // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
+    expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);
+    expect(sweep).toMatch(/const IN_PROGRESS_RETRIES = 3;/);
     expect(lib).toMatch(/return \{ sent: false, aborted: true, reason, message: aborted \|\| \{ \.\.\.message, status: 'failed', error_message: reason \}, rendered \};/);
     const queued = lib.indexOf("[message] = await db('email_messages').insert(queuedPayload).returning('*');");
     const hook = lib.indexOf("if (typeof onQueued === 'function') {", queued);

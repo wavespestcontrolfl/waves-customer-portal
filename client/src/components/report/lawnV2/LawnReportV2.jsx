@@ -692,7 +692,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           a 0" irrigation add, or a rain-only "total", contradicting the
           "Not on file" row above (codex P2 r22). Irrigation/total-flavored
           prose is suppressed with the row; a pure rain narrative stays. */}
-      {water.explanation && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
+      {/* With a weekly plan on the card the legal-first plan is the SOLE
+          watering instruction — the legacy balance explanation ("more
+          irrigation time will help") can contradict a hold or a
+          rain-conditional plan (codex gh-r21). */}
+      {water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
       {/* This week's watering plan (server-gated): the same decision the Monday

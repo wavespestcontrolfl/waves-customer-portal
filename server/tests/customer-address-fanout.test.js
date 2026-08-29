@@ -560,7 +560,9 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
     expect(stamp).toBeTruthy();
     expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
-    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at']); // never touches the settings themselves
+    // The move stamp + a reset of the per-field confirmation set — never the settings themselves.
+    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields']);
+    expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
     expect(counts.property_preferences).toBe(0); // mock: no prefs row
   });
   test('a unit-to-unit move in the same building stamps too (a unit is a distinct premise)', async () => {

@@ -921,6 +921,16 @@ describe('executeMerge', () => {
       expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()']]);
     });
 
+    it('a NON-colliding moved row that the provider accepted but never stamped is stamped on the way over (codex gh-r21)', async () => {
+      const trx = fakeTrx([
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+        { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: null, decision_hash: 'hash-old' },
+      ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-l']) }]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/moved 2, .* stamped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()'], ['l2', WINNER, null]]);
+    });
+
     it('both provider-accepted, winner UNSTAMPED + loser STAMPED → the stamped (renderable) row survives (codex gh-r18)', async () => {
       const trx = fakeTrx([
         { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },

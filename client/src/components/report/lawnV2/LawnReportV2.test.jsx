@@ -185,6 +185,14 @@ describe('GaugePrimitives honesty guards', () => {
 
 describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
   const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true, prescribesRun: true } };
+  it('with a plan on the card the legacy balance explanation is suppressed — the plan is the sole watering instruction (codex gh-r21)', () => {
+    render(<WaterIntakeBar water={{ ...water, status: 'low', explanation: 'A little more irrigation time will help this week.' }} />);
+    expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
+    expect(screen.queryByText(/more irrigation time will help/)).toBeNull();
+    cleanup();
+    render(<WaterIntakeBar water={{ rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 1, status: 'low', explanation: 'A little more irrigation time will help this week.' }} />);
+    expect(screen.getByText(/more irrigation time will help/)).toBeInTheDocument();
+  });
   it('credits the treatment watering only for a label-REQUIRED watering-in inside the plan week', () => {
     render(<WaterIntakeBar water={water} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
     expect(screen.getByTestId('lawn-week-plan-aftercare-note')).toHaveTextContent(/counts as one of this week/);

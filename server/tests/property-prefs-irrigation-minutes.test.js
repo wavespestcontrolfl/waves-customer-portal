@@ -90,8 +90,14 @@ describe('property preferences — irrigation on by default', () => {
     // Key PRESENCE, not a non-empty value: clearing notes / zones→0 /
     // unchecking the rain sensor on a legacy false row is still the
     // customer's first edit under Irrigation (pre-push codex P1).
-    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true, irrigation_settings_saved_at: db\.fn\.now\(\) \}/); // gh-r20: dedicated confirmation stamp
-    expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, updated_at/);
+    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true \}/);
+    expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, \.\.\.confirmFields, updated_at/);
+    // gh-r20/r21: confirmation after a move accrues PER sizing field (the portal
+    // autosaves one field per PUT) — never a shared stamp, never a non-sizing edit.
+    expect(src).toMatch(/const IRRIGATION_SIZING_FIELDS = \[\s*'irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week',\s*\];/);
+    expect(src).toMatch(/const confirmedNow = IRRIGATION_SIZING_FIELDS\.filter\(\(f\) => f in updates\);/);
+    expect(src).toMatch(/irrigation_confirmed_fields: JSON\.stringify\(\[\.\.\.new Set\(\[\.\.\.parseConfirmedFields\(existing\?\.irrigation_confirmed_fields\), \.\.\.confirmedNow\]\)\]\)/);
+    expect(src).toMatch(/\.\.\.stampIrrigationOn,\n\s+\.\.\.confirmFields,\n/);
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)
     expect(src).toMatch(/camelFields\.irrigationSystem = true/); // GET presentation of legacy false rows

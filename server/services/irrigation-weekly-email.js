@@ -30,6 +30,26 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaim, loadPriorWeekPlanEvents } = require('./irrigation-week-plan');
+
+// Mirrors IRRIGATION_SIZING_FIELDS in routes/property.js: the settings the
+// plan sizes controller instructions from. A field that is empty on the row
+// has nothing stale to reuse and needs no confirmation.
+// EMAIL_SEND_IN_PROGRESS collision retry (the aborting worker fails its row
+// within a second of queuing it).
+const IN_PROGRESS_RETRIES = 3;
+const IN_PROGRESS_RETRY_MS = 2000;
+const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week'];
+function sizingFieldsUnconfirmed(row) {
+  let confirmed = row.irrigation_confirmed_fields;
+  if (typeof confirmed === 'string') { try { confirmed = JSON.parse(confirmed); } catch { confirmed = []; } }
+  if (!Array.isArray(confirmed)) confirmed = [];
+  const present = (v) => {
+    if (v == null || v === '') return false;
+    if (typeof v === 'string' && /^\s*\[\s*\]\s*$/.test(v)) return false;
+    return !(Array.isArray(v) && v.length === 0);
+  };
+  return IRRIGATION_SIZING_FIELDS.some((f) => present(row[f]) && !confirmed.includes(f));
+}
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -941,7 +961,7 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // primary-address change stamps irrigation_home_changed_at (address
       // fan-out) and settings saved before it are withheld from the plan
       // until re-saved (codex #3565 gh-r19).
-      'pp.irrigation_settings_saved_at',
+      'pp.irrigation_confirmed_fields',
       'pp.irrigation_home_changed_at',
       // A schedule can also have been recorded by a tech rather than typed by
       // the customer (codex #3138 r1 P2). The lawn report already treats
@@ -1037,7 +1057,8 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  * or overlapping deploy tick dedupes inside the template library, and
  * runExclusive in the cron wiring prevents concurrent sweeps.
  */
-async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN } = {}) {
+async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
+} = {}) {
   const weekEnding = lastCompletedWeekEnding(now);
   const candidates = await findEligibleCustomers({ now });
 
@@ -1092,12 +1113,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         serviceDate: weekEnding,
       });
 
-      // Re-confirmation is the DEDICATED irrigation save stamp, never the
-      // row-wide updated_at (a gate-code or pet edit must not re-confirm the
-      // former home's sprinkler settings — codex gh-r20). `>=`: a stamp and a
-      // same-transaction save compare equal.
+      // After a move, every NON-NULL sizing field must have been re-saved
+      // (irrigation_confirmed_fields, reset by the move, accrues one field
+      // per portal autosave) before any of them sizes an instruction — a
+      // single re-saved field, a non-sizing irrigation edit, or the row-wide
+      // updated_at never re-confirms the rest (codex gh-r20/r21).
       const scheduleUnconfirmed = !!customer.irrigation_home_changed_at
-        && (!customer.irrigation_settings_saved_at || new Date(customer.irrigation_home_changed_at) >= new Date(customer.irrigation_settings_saved_at));
+        && sizingFieldsUnconfirmed(customer);
       const priorWeekEvents = weekPlanEnabled ? await loadPriorWeekPlanEvents({ customerId: customer.id, weekEnding }) : null;
       const decisionInputs = {
         firstName: customer.first_name,
@@ -1262,7 +1284,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
       summary.attempted += 1;
-      const result = await EmailTemplateLibrary.sendTemplate({
+      // A queued row another worker is about to abort (it lost its claim at
+      // the queue transition) collides as EMAIL_SEND_IN_PROGRESS for a
+      // moment; this weekly send must not be lost to that window — retry a
+      // few times before treating it as in flight (codex gh-r21).
+      let result;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          result = await EmailTemplateLibrary.sendTemplate({
         templateKey: decision.templateKey,
         to: String(customer.email).trim(),
         payload: decision.payload,
@@ -1285,7 +1314,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         onQueued: snapshotArgs?.claimToken
           ? async () => (await renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })) !== false
           : null,
-      });
+          });
+          break;
+        } catch (err) {
+          if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
+          await new Promise((resolve) => setTimeout(resolve, inProgressRetryMs));
+        }
+      }
 
       // Idempotency-dedupe and suppression short-circuit inside the library
       // BEFORE any SendGrid call — refund the budget so a long run of
@@ -1625,5 +1660,5 @@ module.exports = {
   TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_WEEK_PLAN,
   PLAN_WINDOW_END_HOUR_ET,
-  _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE },
+  _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE, sizingFieldsUnconfirmed, IRRIGATION_SIZING_FIELDS },
 };

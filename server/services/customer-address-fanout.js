@@ -211,7 +211,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   if (homeMoved) {
     counts.property_preferences = await conn('property_preferences')
       .where({ customer_id: customerId })
-      .update({ irrigation_home_changed_at: now });
+      .update({ irrigation_home_changed_at: now, irrigation_confirmed_fields: JSON.stringify([]) });
   }
   const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,

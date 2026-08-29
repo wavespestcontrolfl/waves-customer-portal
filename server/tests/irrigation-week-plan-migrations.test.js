@@ -67,7 +67,8 @@ describe('20260829000001 property_preferences.irrigation_home_changed_at (codex 
   const mig = require('../models/migrations/20260829000001_property_preferences_irrigation_home_changed_at');
   const rig = ({ hasTable = true, hasColumn = false } = {}) => {
     const cols = [];
-    const builder = { timestamp: jest.fn((n) => { cols.push(n); return {}; }), dropColumn: jest.fn((n) => cols.push(`-${n}`)) };
+    const chain = { notNullable: () => chain, defaultTo: (d) => { cols.push(`default:${d}`); return chain; } };
+    const builder = { timestamp: jest.fn((n) => { cols.push(n); return chain; }), jsonb: jest.fn((n) => { cols.push(n); return chain; }), dropColumn: jest.fn((n) => cols.push(`-${n}`)) };
     const knex = { schema: { hasTable: jest.fn(async () => hasTable), hasColumn: jest.fn(async () => hasColumn), alterTable: jest.fn(async (_t, cb) => cb(builder)) } };
     return { knex, cols, builder };
   };
@@ -76,12 +77,13 @@ describe('20260829000001 property_preferences.irrigation_home_changed_at (codex 
     await mig.up(a.knex);
     expect(a.knex.schema.alterTable).toHaveBeenCalledWith('property_preferences', expect.any(Function));
     expect(a.builder.timestamp).toHaveBeenCalledWith('irrigation_home_changed_at', { useTz: true });
-    expect(a.builder.timestamp).toHaveBeenCalledWith('irrigation_settings_saved_at', { useTz: true });
+    expect(a.builder.jsonb).toHaveBeenCalledWith('irrigation_confirmed_fields');
+    expect(a.cols).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields', 'default:[]']);
     const b = rig({ hasColumn: true });
     await mig.up(b.knex);
     expect(b.knex.schema.alterTable).not.toHaveBeenCalled();
     await mig.down(b.knex);
-    expect(b.cols).toEqual(['-irrigation_home_changed_at', '-irrigation_settings_saved_at']);
+    expect(b.cols).toEqual(['-irrigation_home_changed_at', '-irrigation_confirmed_fields']);
     const c = rig({ hasTable: false });
     await mig.up(c.knex); await mig.down(c.knex);
     expect(c.knex.schema.alterTable).not.toHaveBeenCalled();

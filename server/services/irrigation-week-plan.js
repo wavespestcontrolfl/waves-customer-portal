@@ -265,7 +265,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   if (scheduleUnconfirmed && plan.action !== 'hold') {
     // The home moved after the sprinkler settings were saved — the plan
     // deliberately left them out (events-only), and says so.
-    notes.push('Your address changed after your sprinkler settings were saved, so this plan leaves them out. Reconfirm your zone minutes, watering days and head type under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
+    notes.push('Your address changed after your sprinkler settings were saved, so this plan leaves them out. Re-enter each of your zone minutes, watering days and head type (and weekly inches, if you use them) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
     notes.push('Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {

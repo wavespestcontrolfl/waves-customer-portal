@@ -436,6 +436,30 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
   });
 
+  test('a momentary EMAIL_SEND_IN_PROGRESS collision is retried (bounded) before counting as failed (codex gh-r21)', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan');
+    fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
+    const collision = Object.assign(new Error('email send already in progress'), { code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+    EmailTemplateLibrary.sendTemplate
+      .mockRejectedValueOnce(collision)
+      .mockResolvedValueOnce({ sent: true, message: { provider_message_id: 'sg-2', sent_at: '2026-07-06T11:00:00Z' } });
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(summary.sent).toBe(1);
+    expect(summary.failed).toBe(0);
+    // Exhausted retries → the existing failure path (no infinite wait on a real in-flight send).
+    EmailTemplateLibrary.sendTemplate.mockReset();
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(collision);
+    const exhausted = await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(4); // 1 + 3 retries
+    expect(exhausted.failed).toBe(1);
+    // A non-collision error is never retried.
+    EmailTemplateLibrary.sendTemplate.mockReset();
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('boom'));
+    await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
   test('balanced week → the on-track email sends', async () => {
     isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
