@@ -2636,8 +2636,23 @@ function leadAddressTailPlace(address) {
   // The UNBOUNDED tail: LEAD_PLACE_TAIL_MAX_LENGTH is a write-time clamp for
   // values being composed; a stored legacy value with a long tail must
   // still surrender its trailing state/ZIP as evidence (#3608 codex r5).
-  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
-  return tail ? snapshotTailPlace(`street, ${tail}`) : null;
+  const parts = splitStreetLineUnitParts(raw);
+  const tail = String(parts.tail || '').trim();
+  if (tail) return snapshotTailPlace(`street, ${tail}`);
+  // A comma-free WHOLE line ("100 Main St Apt 4 Bradenton FL 34205") has no
+  // parsed tail, but its inline unit run is a lexically safe delimiter —
+  // the same premise leadAddressKeysEquivalent's prefix rule rests on — so
+  // everything after the last unit run is the place. Without that evidence
+  // a locked lead with empty city/zip columns would corroborate ANY place
+  // and a cross-shape restatement from another city could take rollback
+  // ownership (#3608 pre-push audit P1). No inline unit → no delimiter →
+  // no evidence (and no cross-shape match either), never a locality guess.
+  const { normalizeStreetLine } = require('../utils/address-normalizer');
+  const streetKey = String(normalizeStreetLine(parts.street) || parts.street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const { streetKey: canon, unitKeys } = canonicalizeInlineUnits(streetKey);
+  if (!unitKeys.length) return null;
+  const afterUnit = canon.slice(canon.lastIndexOf('}') + 1).trim();
+  return afterUnit ? snapshotTailPlace(`street, ${afterUnit}`) : null;
 }
 
 // Canonical street|unit key for a leads.address value, tolerant of every

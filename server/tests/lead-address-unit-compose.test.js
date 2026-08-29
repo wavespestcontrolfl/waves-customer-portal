@@ -318,6 +318,18 @@ describe('reaffirmedFilledLeadFields — address', () => {
     const lockedComma = { address: comma, city: null, zip: null };
     expect(reaffirmedFilledLeadFields({ address: whole, city: 'Sarasota', zip: '34236' }, lockedComma).address).toBe(comma);
     expect(reaffirmedFilledLeadFields({ address: whole, city: 'Bradenton', zip: '34205' }, lockedComma).address).toBeUndefined();
+    // A comma-free WHOLE line with EMPTY city/zip columns still carries its place after the
+    // inline unit — a same-door restatement from another city must not take ownership.
+    expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton FL 34205')).toEqual({ zip: '34205', city: expect.stringMatching(/bradenton/i) });
+    expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton')).toEqual({ zip: null, city: expect.stringMatching(/bradenton/i) });
+    expect(leadAddressTailPlace('100 Main St Apt 4')).toBeNull();
+    expect(leadAddressTailPlace('100 Main St North Port FL 34287')).toBeNull();
+    const lockedWholeNoCols = { address: '100 Main St Apt 4 Bradenton FL 34205', city: null, zip: null };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Sarasota', zip: '34236' }, lockedWholeNoCols).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Bradenton, FL 34205', city: 'Bradenton', zip: '34205' }, lockedWholeNoCols).address).toBe(lockedWholeNoCols.address);
+    const lockedWholeCityOnly = { address: '100 Main St Apt 4 Bradenton', city: null, zip: null };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Sarasota', zip: null }, lockedWholeCityOnly).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Bradenton', zip: null }, lockedWholeCityOnly).address).toBe(lockedWholeCityOnly.address);
   });
 
   test('stored place evidence is read from the UNBOUNDED tail (the clamp is write-time only)', () => {
