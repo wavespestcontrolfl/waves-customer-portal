@@ -15,6 +15,7 @@ jest.mock('../services/appointment-email', () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
@@ -22,7 +23,8 @@ const NotificationService = require('../services/notification-service');
 const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-const { apptChannel, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
+const { apptChannel, resolve72hChannel, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
+const { isEnabled } = require('../config/feature-gates');
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -58,6 +60,35 @@ describe('apptChannel', () => {
     expect(apptChannel(null)).toBe('sms');
     expect(apptChannel(undefined)).toBe('sms');
     expect(apptChannel('phone')).toBe('sms');
+  });
+});
+
+describe('resolve72hChannel — email-first promotion (GATE_REMINDER_72H_EMAIL_FIRST)', () => {
+  test('gate OFF: default/sms preference stays sms', () => {
+    isEnabled.mockImplementation(() => false);
+    expect(resolve72hChannel('sms')).toBe('sms');
+    expect(resolve72hChannel(null)).toBe('sms');
+    expect(resolve72hChannel(undefined)).toBe('sms');
+  });
+
+  test('gate ON: default/sms preference promotes to email', () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    expect(resolve72hChannel('sms')).toBe('email');
+    expect(resolve72hChannel(null)).toBe('email');
+    expect(resolve72hChannel(undefined)).toBe('email');
+    expect(isEnabled).toHaveBeenCalledWith('reminder72hEmailFirst');
+  });
+
+  test('gate ON: explicit email/both preferences pass through untouched', () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    expect(resolve72hChannel('email')).toBe('email');
+    expect(resolve72hChannel('both')).toBe('both');
+  });
+
+  test('gate OFF: explicit email/both unchanged (promotion only ever widens sms)', () => {
+    isEnabled.mockImplementation(() => false);
+    expect(resolve72hChannel('email')).toBe('email');
+    expect(resolve72hChannel('both')).toBe('both');
   });
 });
 

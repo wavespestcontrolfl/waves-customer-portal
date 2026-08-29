@@ -204,6 +204,24 @@ function apptChannel(value) {
   return value === 'email' || value === 'both' ? value : 'sms';
 }
 
+// Effective channel for the 72h reminder leg. Email-first 72h reminders
+// (owner ruling 2026-08-29, GATE_REMINDER_72H_EMAIL_FIRST): under the gate
+// the DEFAULT 'sms' resolution is promoted to 'email' — the
+// appointment.reminder_72h template with the self-serve reschedule CTA and
+// the card-hold fee-policy note — and deliverAppointmentNotice's 'email'
+// path already falls back to SMS when there's no usable address. An
+// explicit 'email'/'both' preference is returned untouched, and the 24h
+// leg never routes through this (day-of nudges stay SMS-led). A stored
+// 'sms' value is indistinguishable from the migration default, so under
+// the gate email-first IS the sms-pref behavior — the kill switch is
+// unsetting the gate.
+function resolve72hChannel(prefChannel) {
+  const ch = apptChannel(prefChannel);
+  if (ch !== 'sms') return ch;
+  const { isEnabled } = require('../config/feature-gates');
+  return isEnabled('reminder72hEmailFirst') ? 'email' : 'sms';
+}
+
 // Send-window pre-check for the 72h/24h reminder legs (GATE_SMS_SEND_WINDOW,
 // owner ruling 2026-08-07). Checked BEFORE the send attempt because a
 // canonical-path block inside safeSendAppointment would cascade into the
@@ -2325,7 +2343,9 @@ const AppointmentReminders = {
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id);
-          const channel72 = prefs.reminder72hChannel;
+          // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST —
+          // see resolve72hChannel for the full contract.
+          const channel72 = resolve72hChannel(prefs.reminder72hChannel);
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
@@ -4361,6 +4381,7 @@ AppointmentReminders._test = {
   acceptedMixServiceName,
   estimateBackedServiceName,
   apptChannel,
+  resolve72hChannel,
   deliverAppointmentNotice,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
