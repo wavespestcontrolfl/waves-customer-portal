@@ -111,7 +111,8 @@ function relabelInvoiceSnapshot(inv, fromName, toName) {
       if (!item || typeof item !== 'object') return item;
       const out = { ...item };
       const rec = { i, description: false, category: false };
-      const nd = swap(out.description);
+      // Descriptions carry the same combined format as titles.
+      const nd = swapRenamedTitle(out.description, fromName, toName);
       if (nd) { out.description = nd; rec.description = true; itemsChanged = true; }
       const nc = swap(out.category);
       if (nc) { out.category = nc; rec.category = true; itemsChanged = true; }
@@ -144,7 +145,7 @@ function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
       if (!rec || !item || typeof item !== 'object') return item;
       const out = { ...item };
       if (rec.description) {
-        const nd = swap(out.description);
+        const nd = swapRenamedTitle(out.description, fromName, toName);
         if (nd) { out.description = nd; itemsChanged = true; }
       }
       if (rec.category) {
@@ -391,8 +392,13 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
       .whereNull('scheduled_service_id')
       .whereIn('status', ['draft', 'scheduled'])
       .where(function labelMatch() {
+        // Contains-match on title and line items: a renamed service can be a
+        // LATER segment of a combined invoice ("A + <from> — first visit")
+        // and invoice-mode accepts leave service_type null (GH codex r6 P1).
+        // The per-invoice swap re-checks bounded segments, so a broad
+        // prefilter only costs a read.
         this.whereRaw('(title = ? OR title LIKE ? OR service_type = ? OR service_type LIKE ? OR line_items::text LIKE ?)',
-          [fromName, `${fromName} %`, fromName, `${fromName} (%`, `%"${fromName}"%`]);
+          [fromName, `%${fromName}%`, fromName, `${fromName} (%`, `%${fromName}%`]);
       })
       .select('id', 'title', 'line_items', 'service_type', 'payer_statement_id',
         knex.raw('updated_at::text AS updated_at_cas'));

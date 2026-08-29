@@ -14997,7 +14997,7 @@ router.get('/services-dropdown', async (req, res, next) => {
           // Recurring - Monitoring
           { name: 'Termite Monitoring Service', duration: 60, priceMin: 99, priceMax: 99, serviceKey: 'termite_monitoring', excludedFromPercentDiscount: false },
           { name: 'Annual Termite Active Bait Station Service', duration: 60, priceMin: 199, priceMax: 199, serviceKey: 'termite_active_annual', excludedFromPercentDiscount: false },
-          S('Termite Active Bait Station Service', 60, 'termite_active_bait_quarterly'),
+          S('Quarterly Termite Active Bait Station Service', 60, 'termite_active_bait_quarterly'),
           S('Termite Installation Setup', 60, 'termite_installation_setup'),
           // One-Time
           S('Termite Spot Treatment Service', 60, 'termite_spot_treatment'),

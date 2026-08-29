@@ -69,6 +69,10 @@ function seedDb() {
         line_items: JSON.stringify([{ description: PEST_OLD, amount: 97 }]), payer_statement_id: null, updated_at: 'inv-orig' },
       { id: 'inv-frozen', scheduled_service_id: 'v-open-1', status: 'draft', title: PEST_OLD, service_type: PEST_OLD,
         line_items: JSON.stringify([{ description: PEST_OLD, amount: 97 }]), payer_statement_id: 'stmt-frozen', updated_at: 'inv-orig' },
+      // Unattached invoice-mode accept: renamed service is the SECOND segment,
+      // service_type null, description carries the combined format.
+      { id: 'inv-combo', scheduled_service_id: null, status: 'draft', title: `Quarterly Pest Control Service + ${LAWN_OLD} — first visit`, service_type: null,
+        line_items: JSON.stringify([{ description: `Quarterly Pest Control Service + ${LAWN_OLD} — first visit`, amount: 240 }]), payer_statement_id: null, updated_at: 'inv-orig' },
     ],
     appointment_reminders: [
       { id: 'rem-1', scheduled_service_id: 'v-open-1', customer_id: 'c1', appointment_time: 't1', service_type: PEST_OLD },
@@ -278,6 +282,9 @@ describe('20260829000010 cadence convention renames', () => {
     expect(JSON.parse(invoiceById(db, 'inv-draft').line_items)[0]).toEqual({ description: PEST_NEW, amount: 97 });
     expect(invoiceById(db, 'inv-sent').title).toBe(PEST_OLD);
     expect(invoiceById(db, 'inv-frozen').title).toBe(PEST_OLD);
+    // Later-segment rename on an unattached combined invoice, amounts untouched.
+    expect(invoiceById(db, 'inv-combo').title).toBe(`Quarterly Pest Control Service + ${LAWN_NEW} — first visit`);
+    expect(JSON.parse(invoiceById(db, 'inv-combo').line_items)[0]).toEqual({ description: `Quarterly Pest Control Service + ${LAWN_NEW} — first visit`, amount: 240 });
     expect(reminder(db, 'rem-1').service_type).toBe(PEST_NEW);
     expect(reminder(db, 'rem-merged').service_type).toBe(`Quarterly Pest Control Service & ${PEST_NEW}`);
     expect(reminder(db, 'rem-done').service_type).toBe(PEST_OLD);
@@ -299,6 +306,8 @@ describe('20260829000010 cadence convention renames', () => {
     expect(db.self_booked_appointments[0].service_type).toBe(PEST_OLD);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(MOSQ_OLD);
     expect(invoiceById(db, 'inv-draft').title).toBe(PEST_OLD);
+    expect(invoiceById(db, 'inv-combo').title).toBe(`Quarterly Pest Control Service + ${LAWN_OLD} — first visit`);
+    expect(JSON.parse(invoiceById(db, 'inv-combo').line_items)[0].description).toBe(`Quarterly Pest Control Service + ${LAWN_OLD} — first visit`);
     expect(reminder(db, 'rem-merged').service_type).toBe(`Quarterly Pest Control Service & ${PEST_OLD}`);
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(PEST_OLD);
     expect(db.protocol_template_service_types.find((r) => r.protocol_template_id === 'pt-2').notes).toBe('admin');
