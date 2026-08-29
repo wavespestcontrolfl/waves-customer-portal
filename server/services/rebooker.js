@@ -1378,9 +1378,10 @@ class SmartRebooker {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     // Direct series callers (customer pull-forward, explicit admin series
-    // branch) reach the visit-unit choke point too (codex #3609 r1): the
-    // anchor's same-day visit siblings move with it; the anchor's own move
-    // re-enters here with visitPolicy:'single' and proceeds as a series.
+    // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
+    // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
+    // until the series_moves-backed visit operation ships; an ungrouped or
+    // single-member visit proceeds as a series.
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,

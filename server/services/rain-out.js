@@ -1791,6 +1791,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             ? seriesResult.rescheduledOccurrences
             : null;
           seriesResultForEffects = seriesResult;
+          // A grouped recurring anchor's series shift carried its visit
+          // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
+          // only on the single fallback (codex #3609 r3).
+          if (seriesResult?.visitMove?.visitId) coveredVisits.add(String(seriesResult.visitMove.visitId));
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
