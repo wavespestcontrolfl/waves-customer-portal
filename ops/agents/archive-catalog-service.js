@@ -70,8 +70,9 @@ const { getServiceByKey, getServiceReferences, deactivateService } = require(pat
   const after = await deactivateService(row.id, { audit: { actorId: null, userAgent: `ops/agents/archive-catalog-service.js (owner-run; ${APPROVED_KEYS.get(serviceKey)})` } });
   console.log(`ARCHIVED: ${after.service_key} | ${after.name} | active=${after.is_active} archived=${after.is_archived}`);
 })().catch(async (e) => {
-  // deactivateService re-checks references under the write; a blocker that
-  // appeared between preview and execute arrives on e.references (codex #3581 r1).
+  // deactivateService re-checks references inside its transaction with the
+  // catalog row locked; a blocker that appeared between preview and execute
+  // arrives on e.references / e.details (codex #3581 r1).
   const refs = e.references || (e.details && e.details.references) || e.details || null;
   console.error(e.message, refs ? JSON.stringify(refs) : '');
   process.exit(1);

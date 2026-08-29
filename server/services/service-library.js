@@ -561,13 +561,18 @@ function refreshAfterCatalogWrite(row) {
  * Soft-delete (deactivate)
  */
 async function deactivateService(id, { audit } = {}) {
-  const before = await db('services').where({ id }).first();
-  if (!before) return null;
-  const references = await getServiceReferences(before);
-  if (references?.blocking_total > 0) {
-    throw conflictError('Service is still referenced and cannot be archived', { references });
-  }
+  // Reference guard and archive write share ONE transaction with the catalog
+  // row locked (codex #3581): a booking/add-on/package/discount created
+  // between an unlocked pre-check and the UPDATE could otherwise leave a
+  // live reference to an archived service. Writers that reference a service
+  // read it first, so the row lock serializes them behind this check.
   return db.transaction(async (trx) => {
+    const before = await trx('services').where({ id }).forUpdate().first();
+    if (!before) return null;
+    const references = await getServiceReferences(before, trx);
+    if (references?.blocking_total > 0) {
+      throw conflictError('Service is still referenced and cannot be archived', { references });
+    }
     const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
     if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
     return row;
