@@ -21,12 +21,13 @@ const {
   LEGACY_LABEL_CADENCE_NAMES, legacyCatalogName, renamedCatalogName, counterpartServiceName,
 } = require('../config/service-name-aliases');
 
-function fakeConn(services, { fail = false, onQuery = null } = {}) {
+function fakeConn(services, { fail = false, onQuery = null, onLock = null } = {}) {
   return (table) => {
     if (table !== 'services') throw new Error(`unexpected table ${table}`);
     const filters = [];
     let lowerNames = null;
     const q = {
+      forShare() { if (onLock) onLock(); return q; },
       where(cond) { filters.push(cond); return q; },
       whereRaw(sql, bindings) {
         // The resolver reads every name candidate in ONE statement.
@@ -115,22 +116,31 @@ describe('resolveSeriesChildIdentity', () => {
 
   test('inside a caller transaction the catalog read runs in a SAVEPOINT (nested trx), so a failed read cannot abort the caller\'s trx', async () => {
     const parent = { id: 'p', service_id: null, service_type: 'Mosquito Control', recurring_pattern: 'monthly' };
-    const conn = fakeConn(CATALOG);
+    let locks = 0;
+    const conn = fakeConn(CATALOG, { onLock: () => { locks += 1; } });
     conn.isTransaction = true;
     conn.transaction = jest.fn(async (fn) => fn(conn));
     await expect(resolveSeriesChildIdentity(conn, parent)).resolves.toMatchObject({ service_id: 'svc-mosq' });
     expect(conn.transaction).toHaveBeenCalledTimes(1);
+    // …and the chosen catalog row is share-locked through the insert.
+    expect(locks).toBe(1);
+    // Linked branch locks too.
+    locks = 0;
+    await resolveSeriesChildIdentity(conn, { ...parent, service_id: 'svc-q' });
+    expect(locks).toBe(1);
     // A read failing inside the savepoint still resolves verbatim.
     const failing = fakeConn(CATALOG, { fail: true });
     failing.isTransaction = true;
     failing.transaction = jest.fn(async (fn) => fn(failing));
     await expect(resolveSeriesChildIdentity(failing, parent)).resolves.toEqual({ service_type: 'Mosquito Control', service_id: null, service_key: null });
     expect(failing.transaction).toHaveBeenCalledTimes(1);
-    // A plain (non-transaction) connection reads directly — no nested trx.
-    const plain = fakeConn(CATALOG);
+    // A plain (non-transaction) connection reads directly — no nested trx, no lock.
+    let plainLocks = 0;
+    const plain = fakeConn(CATALOG, { onLock: () => { plainLocks += 1; } });
     plain.transaction = jest.fn();
     await resolveSeriesChildIdentity(plain, parent);
     expect(plain.transaction).not.toHaveBeenCalled();
+    expect(plainLocks).toBe(0);
   });
 
   test('alias + exact label are read in ONE catalog query', async () => {
@@ -193,6 +203,7 @@ describe('canonical recurring seeder (source)', () => {
     expect(seeder).toContain('const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, { ...parent, recurring_pattern: pattern });');
     expect(seeder).toContain("service_type: opts.serviceType || (opts.childIdentity && opts.childIdentity.service_type) || parent.service_type || 'Service',");
     expect(seeder).toContain('if (opts.childIdentity.service_id) row.service_id = opts.childIdentity.service_id;');
+    expect(seeder).toContain('if (opts.childIdentity.service_key) row.service_key_snapshot = opts.childIdentity.service_key;');
   });
 });
 
@@ -221,19 +232,23 @@ describe('admin-schedule child-insert sites (source)', () => {
     expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(7);
     expect(src.match(/classifyAppointmentTag\(childIdentity\.service_type\)/g)).toHaveLength(7);
     expect(src).not.toMatch(/classifyAppointmentTag\(parent\.service_type\)/);
-    // Parent-driven sites: link from the resolver; snapshot fills a gap
-    // AFTER the parent-field copy (which writes the parent's own snapshot).
+    // Parent-driven sites: link from the resolver; a successful resolution
+    // stamps ITS key AFTER the parent-field copy (which writes the parent's
+    // own snapshot — stale or not) so a stale snapshot never rides into the
+    // child.
     expect(src.match(/if \(cols\.service_id && childIdentity\.service_id\) \w+\.service_id = childIdentity\.service_id;/g)).toHaveLength(5);
-    expect(src.match(/if \(cols\.service_key_snapshot && !\w+\.service_key_snapshot && childIdentity\.service_key\) \w+\.service_key_snapshot = childIdentity\.service_key;/g)).toHaveLength(5);
+    expect(src.match(/if \(cols\.service_key_snapshot && childIdentity\.service_key\) \w+\.service_key_snapshot = childIdentity\.service_key;/g)).toHaveLength(5);
+    expect(src).not.toMatch(/!\w+\.service_key_snapshot && childIdentity\.service_key/);
     const spawnCopy = src.indexOf('copyLineDiscountFields(childData, parent, cols);');
-    const spawnStamp = src.indexOf('if (cols.service_key_snapshot && !childData.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;');
+    const spawnStamp = src.indexOf('if (cols.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;');
     expect(spawnCopy).toBeGreaterThan(-1);
     expect(spawnStamp).toBeGreaterThan(spawnCopy);
-    // Create path: resolver link outranks the optional request serviceId;
-    // pricing's primary key outranks the resolver's (it priced the visit).
+    // Create path: resolver identity outranks the optional request serviceId
+    // and pricing's primary key alike (both describe the same just-inserted
+    // parent; the resolver read the catalog last).
     for (const v of ['childData', 'boosterData']) {
       expect(src).toContain(`if (cols.service_id && (childIdentity.service_id || serviceId)) ${v}.service_id = childIdentity.service_id || serviceId;`);
-      expect(src).toContain(`if (cols.service_key_snapshot) ${v}.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;`);
+      expect(src).toContain(`if (cols.service_key_snapshot) ${v}.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;`);
     }
     // The only `service_type: serviceType, status: 'pending'` left is the
     // PARENT insert on the create path — the request's own label.

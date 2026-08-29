@@ -153,8 +153,15 @@ async function resolveSeriesChildIdentity(conn, parent) {
 
 async function resolveFromCatalog(conn, parent, verbatim) {
   {
+    // Inside a transaction the chosen catalog row is share-locked through
+    // the child insert: the Service Library renames with a plain UPDATE and
+    // shares no lock with this read, so without it a rename landing between
+    // this SELECT and the insert would stamp the retired name next to the
+    // renamed row's id (codex #3604 r5 P2). The savepoint that runs this
+    // read releases into the outer transaction, which keeps the lock.
+    const stable = (q) => (conn.isTransaction && typeof q.forShare === 'function' ? q.forShare() : q);
     if (parent.service_id) {
-      const row = await conn('services').where({ id: parent.service_id }).first('id', 'name', 'service_key');
+      const row = await stable(conn('services').where({ id: parent.service_id })).first('id', 'name', 'service_key');
       return row && row.name
         ? { service_type: row.name, service_id: row.id, service_key: row.service_key || null }
         : verbatim;
@@ -166,8 +173,8 @@ async function resolveFromCatalog(conn, parent, verbatim) {
     // snapshot (codex #3604 r2 P0). Snapshot naming no active row → verbatim.
     const snapshotKey = String(parent.service_key_snapshot || '').trim();
     if (snapshotKey) {
-      const byKey = await conn('services')
-        .where({ service_key: snapshotKey, is_active: true })
+      const byKey = await stable(conn('services')
+        .where({ service_key: snapshotKey, is_active: true }))
         .select('id', 'name', 'service_key');
       return byKey.length === 1 && byKey[0].name
         ? { service_type: byKey[0].name, service_id: byKey[0].id, service_key: byKey[0].service_key || null }
@@ -184,9 +191,9 @@ async function resolveFromCatalog(conn, parent, verbatim) {
     // evidence → verbatim, unlinked. Only the old spelling lives → it is the
     // exact-name match.
     const names = candidate.toLowerCase() === label.toLowerCase() ? [candidate] : [candidate, label];
-    const rows = await conn('services')
+    const rows = await stable(conn('services')
       .whereRaw(`lower(name) IN (${names.map(() => 'lower(?)').join(', ')})`, names)
-      .where({ is_active: true })
+      .where({ is_active: true }))
       .select('id', 'name', 'service_key');
     const mapped = rows.filter((r) => String(r.name).toLowerCase() === candidate.toLowerCase());
     const exact = names.length === 2 ? rows.filter((r) => String(r.name).toLowerCase() === label.toLowerCase()) : [];

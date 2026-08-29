@@ -479,12 +479,13 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'state',
       'zip',
     ]);
-    // Resolved identity outranks the parent's copied link (the parent may
-    // be unlinked, or linked to a row since renamed); the resolved key only
-    // fills a snapshot gap. Cols-guarded downstream like the rest of the row.
+    // Resolved identity outranks the parent's copied link AND snapshot (the
+    // parent may be unlinked, linked to a row since renamed, or carry a
+    // stale snapshot that must not ride into the child — codex #3604 r5
+    // P1). Cols-guarded downstream like the rest of the row.
     if (opts.childIdentity) {
       if (opts.childIdentity.service_id) row.service_id = opts.childIdentity.service_id;
-      if (!row.service_key_snapshot && opts.childIdentity.service_key) row.service_key_snapshot = opts.childIdentity.service_key;
+      if (opts.childIdentity.service_key) row.service_key_snapshot = opts.childIdentity.service_key;
     }
     rows.push(row);
   }

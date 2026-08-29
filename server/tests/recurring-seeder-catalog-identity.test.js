@@ -51,6 +51,7 @@ function makeConn({ services = CATALOG, servicesThrow = false } = {}) {
       const filters = [];
       let lowerNames = null;
       const q = {
+        forShare() { return q; },
         where(cond) { filters.push(cond); return q; },
         whereRaw(sql, bindings) { lowerNames = bindings.map((b) => String(b).toLowerCase()); return q; },
         async select() {
@@ -111,6 +112,12 @@ describe('seedFollowUpsForParent child identity', () => {
     await seedFollowUpsForParent(conn, { ...PARENT, service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' }, { pattern: 'quarterly', plannedCount: 2 });
     expect(inserted).toHaveLength(1);
     expect(inserted[0]).toMatchObject({ service_type: 'Quarterly Pest Control Plan', service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' });
+  });
+
+  test('linked parent with a STALE snapshot (service_id=A, snapshot=B) → follow-ups carry A\'s key, never B', async () => {
+    const { conn, inserted } = makeConn();
+    await seedFollowUpsForParent(conn, { ...PARENT, service_id: 'svc-q', service_key_snapshot: 'pest_monthly' }, { pattern: 'quarterly', plannedCount: 2 });
+    expect(inserted[0]).toMatchObject({ service_type: 'Quarterly Pest Control Service', service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' });
   });
 
   test('an explicit caller serviceType still wins the label; the resolved link still applies', async () => {

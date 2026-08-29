@@ -5186,7 +5186,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
         if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.service_id && (childIdentity.service_id || serviceId)) childData.service_id = childIdentity.service_id || serviceId;
-        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
         if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
@@ -5261,7 +5261,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           };
           if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
           if (cols.service_id && (childIdentity.service_id || serviceId)) boosterData.service_id = childIdentity.service_id || serviceId;
-          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
@@ -9004,8 +9004,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
               copyLineDiscountFields(childData, parent, cols);
               // After the parent-field copy (which writes the parent's own
-              // snapshot, NULL included): a resolved key fills only a gap.
-              if (cols.service_key_snapshot && !childData.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
+              // snapshot): a successful resolution stamps ITS key — a stale
+              // parent snapshot must not ride into the child (codex r5 P1).
+              if (cols.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
@@ -10852,7 +10853,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
     const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
     copyLineDiscountFields(data, extensionPriceParent, cols);
-    if (cols.service_key_snapshot && !data.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
+    if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
@@ -11145,7 +11146,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
           const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
           copyLineDiscountFields(nextData, extensionPriceParent, cols);
-          if (cols.service_key_snapshot && !nextData.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
+          if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
@@ -15787,7 +15788,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
-        if (cols.service_key_snapshot && !data.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -15866,7 +15867,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
-        if (cols.service_key_snapshot && !data.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
