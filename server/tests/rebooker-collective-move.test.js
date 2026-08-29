@@ -801,6 +801,16 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(6) }); // Tue — Monday is the skipped row's slot
   });
 
+  test('an acknowledged count that no longer matches the LOCKED sibling set (a child landed since the preview) aborts 409 SERIES_CHANGED — nothing written', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectMovableCount: 2 }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED', message: expect.stringContaining('since it was previewed') });
+    expect(updates[0].update).not.toHaveBeenCalled();
+    const { updates: ok } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectMovableCount: 3 });
+    expect(ok[0].update).toHaveBeenCalled();
+  });
+
   test('the sweep writes from the LOCKED read: a window that changed between the reads is what the sibling keeps', async () => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
       lockedSiblings: [sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '13:00:00', window_end: '15:00:00' })],
@@ -996,7 +1006,7 @@ describe('caller wiring (source)', () => {
     const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(body).toContain("if (synced === 'stale') {");
     expect(body).toContain('seriesReminderGuards.push(...ownedGuards(occurrenceGuards));');
-    expect(body).toContain('const closeIds = ownedOccurrences()');
+    expect(body).toContain('const closeIds = closeScope()');
     // Conflicted / windowless landings keep their trigger-held preclosed reminders: never closed, never re-armed.
     expect(body).toContain('&& occurrence.conflicted !== true && !!occurrence.windowStart);');
     // The text and the close are separate recorded steps: customer_notified is written BEFORE the close is attempted, a failed close leaves notified_at NULL, and a retry with the text already out redoes ONLY the close.
@@ -1127,7 +1137,15 @@ describe('caller wiring (source)', () => {
     // Disclosure: without seriesAck the planner refuses up front (nothing saved) with the preview.
     expect(sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), handler)).toContain("code: 'COLLECTIVE_MOVE_ACK_REQUIRED'");
     const disp = read('../routes/admin-dispatch.js');
-    expect(disp).toContain("if (collectiveMoveGateOn() && req.body.seriesAck !== true) {");
+    expect(disp).toContain("const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;");
+    expect(disp).toContain('rescheduleOptions.expectMovableCount = seriesAckCount;');
+    expect(read('../routes/admin-schedule.js')).toContain('expectMovableCount: seriesAckCount,');
+    expect(read('../services/rebooker.js')).toContain('if (Number.isInteger(options.expectMovableCount) && sweptIds.length !== options.expectMovableCount) {');
+    // r18: blackout reads ride the series trx; a Quick Move close-only recovery closes the anchor only; explicit-window dispatch requests still pin the observed anchor.
+    expect(read('../services/rebooker.js')).toContain('const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1], trx);');
+    expect(disp).toContain("const closeScope = () => (markers.source_surface === 'quick_move'");
+    expect(disp).toContain('await ensureObservedAnchor(req.params.serviceId, observedAnchor);');
+    expect(disp).toContain('await ensureObservedAnchor(req.params.serviceId, observedForMove);');
     const plan = sched.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);', handler);
     const destructure = sched.indexOf('} = req.body;', handler);
     const commit = sched.indexOf('seriesMove = await seriesMovePlan.commit();', handler);

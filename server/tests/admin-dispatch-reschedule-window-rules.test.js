@@ -100,9 +100,20 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   test('gate on: the same move WITH seriesAck reaches the rebooker (the choke point widens it server-side)', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = recurringRow();
-    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true });
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckCount: 4 });
     expect(status).toBe(200);
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: an ack whose count no longer matches the plan (auto-extend since the preview) is refused with the REFRESHED preview — nothing moves', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckCount: 3 });
+    expect(status).toBe(409);
+    expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(body.error).toMatch(/changed since the preview/);
+    expect(body.preview).toMatchObject({ movableCount: 4 });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {
@@ -311,10 +322,13 @@ describe('the resolved window is fenced by the rebooker CAS (options.expect)', (
     expect(status).toBe(200);
   });
 
-  test('a FULL explicit window reads no row and pins nothing (it derived from nothing stored)', async () => {
+  test('a FULL explicit window derives nothing stored but still pins the OBSERVED anchor', async () => {
     mockVisitRow = { ...ROW };
     const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
     expect(status).toBe(200);
-    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expect');
+    // It derived nothing stored, but the move still pins the anchor it
+    // OBSERVED (ensureObservedAnchor): the series path needs the observed
+    // date to tell a round trip from a stale retry (codex #3562 r18 P2).
+    expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({ scheduled_date: '2026-08-01', window_start: '19:00:00' });
   });
 });

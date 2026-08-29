@@ -1718,6 +1718,16 @@ class SmartRebooker {
           siblings = locked;
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
+          // The acknowledged set: a surface confirmed "moves N visits" from
+          // a preview — the locked sweep must be exactly that many rows, or
+          // the operator confirmed a different plan (codex r18 P2).
+          if (Number.isInteger(options.expectMovableCount) && sweptIds.length !== options.expectMovableCount) {
+            throw Object.assign(new Error(`Cannot reschedule — the recurring plan changed since it was previewed (${sweptIds.length} visit(s) would move, not ${options.expectMovableCount}); reload and confirm again`), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SERIES_CHANGED',
+            });
+          }
           // The projector was built from the parent's recurrence config
           // read BEFORE the lock; a cadence edit (update-details holds this
           // same lock) that committed while this move waited is invisible
@@ -1794,7 +1804,10 @@ class SmartRebooker {
           if (initiatedBy !== 'admin') {
             const { getBlackoutDates } = require('./scheduling/blackout-dates');
             const sorted = [...projectedDates].sort();
-            const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1]);
+            // On THIS transaction's connection: the sweep already holds its
+            // scheduling locks here, and a second pool checkout under load
+            // would wait on an exhausted pool with them held (codex r18 P1).
+            const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1], trx);
             if (projectedDates.some((d) => blackout.has(d))) {
               throw Object.assign(new Error('That schedule would land a visit on an unavailable day — pick a different time'), {
                 statusCode: 409,

@@ -13491,7 +13491,22 @@ function rescheduleExpectPredicate(observed) {
 
 // `observed`, when passed, is filled with the row this resolution actually
 // read (see rescheduleExpectPredicate) — a full explicit window reads nothing
-// and leaves it untouched.
+// and leaves it untouched; callers that need a pin regardless call
+// ensureObservedAnchor afterwards.
+// A full explicit window derives nothing, so resolveRescheduleWindow reads
+// nothing — but the move still needs the anchor it OBSERVED (date, window,
+// duration) as its pin: the series path tells a legitimate round trip
+// (A→B, B→A, A→B) from a stale retry by the observed date, and fences the
+// delta basis on it (codex r18 P2). Reads the row only when the resolution
+// did not.
+async function ensureObservedAnchor(serviceId, observed) {
+  if (!observed || observed.read) return observed;
+  const row = await db('scheduled_services').where({ id: serviceId })
+    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring');
+  if (row) Object.assign(observed, row, { read: true });
+  return observed;
+}
+
 async function resolveRescheduleWindow(serviceId, window, observed = null) {
   const record = (row) => {
     if (observed && row) Object.assign(observed, row, { read: true });
@@ -14286,10 +14301,18 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // the state THIS pass synced (or, on a retry pass, the state read just
     // before the close) — a row a concurrent reschedule moved on keeps its
     // own flags.
+    // Close scope: every owned occurrence — except for a Quick Move
+    // operation, whose text is its OWN anchor-only moved-SMS: the siblings
+    // were synced with notifications off and never covered by that text,
+    // so a close-only recovery after a failed anchor close must not
+    // suppress their still-due reminders (codex r18 P1).
+    const closeScope = () => (markers.source_surface === 'quick_move'
+      ? ownedOccurrences().filter((occurrence) => String(occurrence.id) === String(serviceId))
+      : ownedOccurrences());
     const closeSeriesReminders = async () => {
-      const closeGuards = seriesReminderGuards.length
+      const closeGuards = seriesReminderGuards.length && markers.source_surface !== 'quick_move'
         ? seriesReminderGuards
-        : ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
+        : ownedGuards(await captureReminderGuards(closeScope().map((occurrence) => occurrence.id)));
       const guardsByServiceId = Array.isArray(closeGuards)
         ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
         : null;
@@ -14300,7 +14323,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // (partial map) must not turn into an unguarded close of that
       // occurrence over a newer reschedule (codex r9 P2). An occurrence
       // with no reminder row has nothing to close anyway.
-      const closeIds = ownedOccurrences()
+      const closeIds = closeScope()
         .map((occurrence) => occurrence.id)
         .filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));
       const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});
@@ -14610,6 +14633,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // sibling aborts the whole move).
       const observedAnchor = {};
       await resolveRescheduleWindow(req.params.serviceId, newWindow, observedAnchor);
+      await ensureObservedAnchor(req.params.serviceId, observedAnchor);
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
@@ -14681,6 +14705,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // the RescheduleModal's deriveWindowFromCurrentVisit opt-in).
     const observedForMove = {};
     const effectiveWindow = await resolveRescheduleWindow(req.params.serviceId, newWindow, observedForMove);
+    await ensureObservedAnchor(req.params.serviceId, observedForMove);
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
@@ -14696,21 +14721,37 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // operator what moves — refuse with the preview counts so it can, and
     // re-submit with the ack (or `scope: 'series'`, which is the explicit
     // "Reschedule series" choice). Gate off: unchanged single-visit move.
-    if (collectiveMoveGateOn() && req.body.seriesAck !== true) {
-      const job = await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+    // The ack is bound to the previewed set (`seriesAckCount` = the
+    // movableCount shown): a plan that changed since is refused with a
+    // refreshed preview, and the count is enforced again inside the series
+    // transaction (codex r18 P2).
+    if (collectiveMoveGateOn()) {
+      // The observed anchor (read above, or by the resolution) answers the
+      // recurrence + date questions — one read, one snapshot.
+      const job = observedForMove.is_recurring !== undefined
+        ? observedForMove
+        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
       if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+        const seriesAckCount = Number.isInteger(req.body.seriesAckCount) ? req.body.seriesAckCount : null;
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
         } catch {
           preview = null;
         }
-        return res.status(409).json({
-          error: `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
-          code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
-          preview: preview || null,
-        });
+        const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;
+        if (!acked) {
+          const changed = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount !== seriesAckCount;
+          return res.status(409).json({
+            error: changed
+              ? `The recurring plan changed since the preview — it now moves ${preview.movableCount - 1} later visit(s), not ${Math.max(seriesAckCount - 1, 0)}. Review the refreshed count and confirm again.`
+              : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
+            code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
+            preview: preview || null,
+          });
+        }
+        rescheduleOptions.expectMovableCount = seriesAckCount;
       }
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);

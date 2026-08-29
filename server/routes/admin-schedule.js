@@ -6592,21 +6592,32 @@ async function planCollectiveEditDateMove(req) {
   }
   const clearWindow = intake.clearBoth === true;
   // Disclosure contract (PR2 wires it): a gated collective date move must be
-  // acknowledged by the surface (`seriesAck: true`, sent after it rendered
-  // the preview count). Without it the save is refused up front — nothing
-  // saved, nothing moved — and the response carries the preview so the
-  // surface can show "moves N future visits" and re-submit.
-  if (req.body.seriesAck !== true) {
+  // acknowledged by the surface — `seriesAck: true` PLUS `seriesAckCount`,
+  // the previewed movableCount the operator confirmed — so the ack is bound
+  // to the set that was shown, not a bare boolean: a plan that changed
+  // since the preview (auto-extend, a length edit) is refused with a
+  // REFRESHED preview, and the count is enforced again inside the series
+  // transaction (expectMovableCount) against the locked sibling set
+  // (codex r18 P2). Without the ack the save is refused up front — nothing
+  // saved, nothing moved.
+  const seriesAckCount = Number.isInteger(req.body.seriesAckCount) ? req.body.seriesAckCount : null;
+  {
     let preview = null;
     try {
       preview = await require('../services/rebooker').previewSeriesMove(row.id, target);
     } catch {
       preview = null;
     }
-    throw Object.assign(
-      httpError(409, `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Confirm the series move to continue. Nothing was changed.`),
-      { code: 'COLLECTIVE_MOVE_ACK_REQUIRED', preview: preview || null },
-    );
+    const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;
+    if (!acked) {
+      const changed = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount !== seriesAckCount;
+      throw Object.assign(
+        httpError(409, changed
+          ? `The recurring plan changed since the preview — it now moves ${preview.movableCount - 1} later visit(s), not ${Math.max(seriesAckCount - 1, 0)}. Review the refreshed count and confirm again. Nothing was changed.`
+          : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Confirm the series move to continue. Nothing was changed.`),
+        { code: 'COLLECTIVE_MOVE_ACK_REQUIRED', preview: preview || null },
+      );
+    }
   }
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
@@ -6645,6 +6656,8 @@ async function planCollectiveEditDateMove(req) {
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
         notifyRequested: notifyCustomer === true,
+        // The acknowledged count, enforced against the locked sibling set.
+        expectMovableCount: seriesAckCount,
         ...(operationKey ? { operationKey } : {}),
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.
