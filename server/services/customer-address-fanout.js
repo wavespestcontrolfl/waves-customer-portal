@@ -181,6 +181,18 @@ function snapshotMatchesLine1(snapshot, line1) {
   return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
+// The ONE writer of the sprinkler-settings move guard: stamp the move and
+// reset the per-field confirmation set on the customer's preference row.
+// Callers: this fan-out (a move, an address removal), the different-homes
+// customer merge, and the primary-residence promotion (codex #3565 gh-r26).
+// Never touches the settings themselves. Returns the row count.
+async function markSprinklerSettingsMoved(customerId, conn = db) {
+  if (!customerId) return 0;
+  return conn('property_preferences')
+    .where({ customer_id: customerId })
+    .update({ irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) });
+}
+
 // Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
 // city) — the premise test the sprinkler-settings move guard uses, shared
 // with the customer merge (a duplicate pair can be the old and new home).
@@ -215,9 +227,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // the home that was just cleared (hook P1 on a40e19f53).
   if (!addressMatchKey(after && after.address_line1)) {
     if (addressMatchKey(before && before.address_line1)) {
-      counts.property_preferences = await conn('property_preferences')
-        .where({ customer_id: customerId })
-        .update({ irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) });
+      counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
     }
     return counts;
   }
@@ -237,9 +247,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // 75b90bf11. Normalized keys, so a formatting correction never counts.
   const homeMoved = !!before && homesDiffer(before, after);
   if (homeMoved) {
-    counts.property_preferences = await conn('property_preferences')
-      .where({ customer_id: customerId })
-      .update({ irrigation_home_changed_at: now, irrigation_confirmed_fields: JSON.stringify([]) });
+    counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
   }
   const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
@@ -469,6 +477,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 module.exports = {
   addressMatchKey,
   homesDiffer,
+  markSprinklerSettingsMoved,
   formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,

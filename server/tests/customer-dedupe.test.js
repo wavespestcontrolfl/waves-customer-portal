@@ -1059,7 +1059,10 @@ describe('executeMerge', () => {
       return { stamps, result };
     };
     const moved = await run({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
-    expect(moved.stamps).toEqual([[{ customer_id: WINNER }, { irrigation_home_changed_at: 'NOW()', irrigation_confirmed_fields: '[]' }]]);
+    expect(moved.stamps).toHaveLength(1);
+    expect(moved.stamps[0][0]).toEqual({ customer_id: WINNER });
+    expect(moved.stamps[0][1].irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(moved.stamps[0][1].irrigation_confirmed_fields).toBe('[]');
     expect(moved.result.repointed['property_preferences.irrigation_home_changed_at']).toBe(1);
     const same = await run({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
     expect(same.stamps).toEqual([]);

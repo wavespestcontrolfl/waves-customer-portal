@@ -1353,8 +1353,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
       try {
         await trx.transaction(async (sp) => {
-          const n = await sp('property_preferences').where({ customer_id: winnerId })
-            .update({ irrigation_home_changed_at: sp.fn.now(), irrigation_confirmed_fields: JSON.stringify([]) });
+          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp);
           if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
         });
       } catch (e) {

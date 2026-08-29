@@ -578,7 +578,12 @@ function decideWeeklyEmail({
   // heads) is their entry: it gets the plan, with the derivation named in
   // the note. Only tech-sourced readings keep the confirm-schedule ask.
   const derivedGetsPlan = weekPlanEnabled && scheduleSource === 'portal_derived';
-  if (scheduleSource !== 'portal' && !derivedGetsPlan) {
+  // An UNCONFIRMED (moved-home) schedule in plan mode must reach the plan
+  // branch below — never this neutral copy, which would quote the former
+  // home's tech-recorded figure and a mixed total (codex gh-r26); the legacy
+  // (gate-off) case is withheld by the wrapper before this point.
+  const unconfirmedGetsPlan = weekPlanEnabled && scheduleUnconfirmed;
+  if (scheduleSource !== 'portal' && !derivedGetsPlan && !unconfirmedGetsPlan) {
     const scheduleFmt = formatInches(effectiveInches);
     const totalFmt = formatInches(totalDisplayNum);
     const targetFmt = formatInches(advice.recommendedInchesPerWeek);
@@ -1381,7 +1386,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           // sent+deduped+providerAttempted). Pre-send write may have failed
           // transiently — one more try, then stamp by this decision's hash.
           const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
-          if (hash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+          if (hash) {
+            // One retry on a transient stamp failure; the delivery record
+            // (plan:<hash>) still lets loadCurrentWeekPlan reconcile later.
+            const stamped = await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+            if (!stamped) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+          }
         } else if (result.deduped) {
           // Deduped without a provider attempt: the durable record decides,
           // and only the row it names is stamped.

@@ -202,7 +202,7 @@ const IRRIGATION_INPUT_FIELDS = [
 ];
 // The subset the weekly watering plan / lawn report size controller
 // instructions from, and the confirmation-set parser — shared with both.
-const { IRRIGATION_SIZING_FIELDS, parseConfirmedFields } = require('../services/irrigation-schedule-confirmation');
+const { IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-confirmation');
 
 // =========================================================================
 // GET /api/property/preferences
@@ -339,8 +339,16 @@ router.put('/preferences', async (req, res, next) => {
     // — a non-sizing irrigation edit (controller location, notes) and the
     // row-wide updated_at confirm nothing (codex #3565 gh-r20/r21).
     const confirmedNow = IRRIGATION_SIZING_FIELDS.filter((f) => f in updates);
+    // The union is ONE atomic statement over the row's CURRENT value — an
+    // unlocked pre-move read could write a full pre-move set back over the
+    // fan-out's reset when an autosave overlaps an address change (gh-r26).
     const confirmFields = confirmedNow.length
-      ? { irrigation_confirmed_fields: JSON.stringify([...new Set([...parseConfirmedFields(existing?.irrigation_confirmed_fields), ...confirmedNow])]) }
+      ? {
+        irrigation_confirmed_fields: db.raw(
+          "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",
+          [JSON.stringify(confirmedNow)],
+        ),
+      }
       : {};
 
     if (existing) {
@@ -352,7 +360,7 @@ router.put('/preferences', async (req, res, next) => {
         customer_id: req.customerId,
         ...updates,
         ...stampIrrigationOn,
-        ...confirmFields,
+        ...(confirmedNow.length ? { irrigation_confirmed_fields: JSON.stringify(confirmedNow) } : {}),
       });
     }
 

@@ -313,7 +313,6 @@ describe('snapshot lifecycle — exactness contract', () => {
     const cap = stubSelect(row(POLICY));
     const hit = await loadCurrentWeekPlan('c1', { now: NOW });
     expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
-    expect(cap.notNull).toBe('sent_at');
     expect(hit.plan.action).toBe('run');
     expect(hit.decisionInputs.runMinutes).toBe(20);
     stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
@@ -356,6 +355,29 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null, strict: true })).toBeNull();
     stubSelect(row(POLICY));
     expect((await loadCurrentWeekPlan('c1', strictPin)).plan.action).toBe('run');
+  });
+
+  test('load: an UNSTAMPED row whose delivery record names its decision is stamped on load and served; undelivered stays absent (codex gh-r26)', async () => {
+    const planRow = { ...row(POLICY, { sent_at: null, decision_hash: 'h1' }) };
+    const calls = [];
+    const rig = (messages) => db.mockImplementation((table) => (table === 'email_messages'
+      ? { where() { return this; }, select: async () => messages }
+      : {
+        where(w) { calls.push(['where', w]); return this; },
+        whereNull() { return this; },
+        first: async () => ({ ...planRow }),
+        update: async (patch) => { calls.push(['update', patch]); if (patch.sent_at) planRow.sent_at = patch.sent_at; return 1; },
+      }));
+    db.fn = { now: () => 'now()' };
+    rig([{ status: 'sent', categories: JSON.stringify(['plan:h1']), provider_message_id: 'sg', queued_at: NOW, updated_at: NOW }]);
+    const hit = await loadCurrentWeekPlan('c1', { now: NOW });
+    expect(hit.plan.action).toBe('run');
+    expect(calls.some(([k, p]) => k === 'update' && p.sent_at)).toBe(true);
+    // Undelivered (or another decision) → absent; strict pin → refusal.
+    planRow.sent_at = null;
+    rig([{ status: 'sent', categories: JSON.stringify(['plan:other']), provider_message_id: 'sg', queued_at: NOW, updated_at: NOW }]);
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'unstamped' });
   });
 
   test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlanEvents reads last week\'s SENT plan (codex gh-r19)', async () => {

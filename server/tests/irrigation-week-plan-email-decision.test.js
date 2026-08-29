@@ -228,6 +228,16 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(moved.decisionInputs.rainOnlyCarryover).toBe(true);
     expect(ok.decisionInputs.rainOnlyCarryover).toBe(false);
   });
+  test('a tech-recorded schedule after a move reaches the PLAN in plan mode, never the confirm-schedule copy (codex gh-r26)', () => {
+    const { TEMPLATE_CONFIRM_SCHEDULE } = require('../services/irrigation-weekly-email');
+    const tech = { ...base, irrigationRunMinutes: null, wateringDays: null, irrigationSystemType: null, turfIrrigationInchesPerWeek: 1.1 };
+    expect(buildWeeklyEmailDecision(tech).templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE); // confirmed tech reading keeps the ask
+    const moved = buildWeeklyEmailDecision({ ...tech, scheduleUnconfirmed: true });
+    expect(moved.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(moved.payload.irrigation_inches).toBe('Not on file — re-enter after your move');
+    expect(moved.payload.plan_note).toContain('Your address changed after your sprinkler settings were saved');
+  });
+
   test('every LEGACY path withholds the former home\'s schedule (gate off / late retry / plan unavailable) → the setup ask, never stale totals (codex gh-r24)', () => {
     const { TEMPLATE_SETUP_SCHEDULE } = require('../services/irrigation-weekly-email');
     // Gate off (or a Tue–Sun late retry: the sweep passes weekPlanEnabled:false).

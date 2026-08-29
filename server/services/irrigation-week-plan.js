@@ -750,11 +750,24 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
   };
   try {
     const weekEnding = lastCompletedWeekEndingET(now);
-    const row = await db('irrigation_week_plans')
+    let row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding })
-      .whereNotNull('sent_at')
       .first();
     if (!row) return absent('missing');
+    if (!row.sent_at) {
+      // The provider may have accepted the email while the post-send stamp
+      // failed (a once-a-week cron would otherwise leave the report plan-less
+      // all week): reconcile from the customer-week delivery record, stamp,
+      // and re-read — served only once actually stamped (codex gh-r26).
+      const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${weekEnding}` });
+      if (delivery.state === 'sent' && delivery.decisionHash && delivery.decisionHash === row.decision_hash) {
+        await markWeekPlanSent({ customerId, weekEnding, decisionHash: row.decision_hash });
+        row = await db('irrigation_week_plans')
+          .where({ customer_id: customerId, week_ending: weekEnding })
+          .first();
+      }
+      if (!row || !row.sent_at) return absent('unstamped');
+    }
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
     const restriction = parse(row.restriction_policy) || null;
     const decisionInputs = parse(row.weather_inputs) || {};

@@ -1085,6 +1085,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
       await trx('customers').where({ id: customerId }).update(mirror);
+      // The primary HOME changed: the customer's sprinkler settings described
+      // the demoted property — same move guard as an address edit, same
+      // transaction (codex #3565 gh-r26).
+      await require('./customer-address-fanout').markSprinklerSettingsMoved(customerId, trx);
       applied += 1;
       continue;
     }

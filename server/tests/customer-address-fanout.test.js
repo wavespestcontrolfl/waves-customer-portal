@@ -579,6 +579,20 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);
     expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeTruthy();
   });
+  test('markSprinklerSettingsMoved is the ONE writer of the move guard — fan-out, merge and the primary-residence promotion all use it (gh-r26)', async () => {
+    const { markSprinklerSettingsMoved } = require('../services/customer-address-fanout');
+    const conn = makeConn({});
+    await markSprinklerSettingsMoved('cust-1', conn);
+    const w = conn.__updates.find((u) => u.table === 'property_preferences');
+    expect(w.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(w.patch.irrigation_confirmed_fields).toBe('[]');
+    const fs = require('fs');
+    const path = require('path');
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp\)/);
+    const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
+    expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
+  });
   test('homesDiffer is the shared premise test (street, unit, zip, city; normalized)', () => {
     const { homesDiffer } = require('../services/customer-address-fanout');
     expect(homesDiffer(BEFORE, AFTER)).toBe(true);

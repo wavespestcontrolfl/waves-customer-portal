@@ -95,10 +95,12 @@ describe('property preferences — irrigation on by default', () => {
     // gh-r20/r21: confirmation after a move accrues PER sizing field (the portal
     // autosaves one field per PUT) — never a shared stamp, never a non-sizing edit.
     // gh-r25: the sizing list + confirmation parser live in the shared module (sweep + report use the same).
-    expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS, parseConfirmedFields \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
+    expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
     expect(src).toMatch(/const confirmedNow = IRRIGATION_SIZING_FIELDS\.filter\(\(f\) => f in updates\);/);
-    expect(src).toMatch(/irrigation_confirmed_fields: JSON\.stringify\(\[\.\.\.new Set\(\[\.\.\.parseConfirmedFields\(existing\?\.irrigation_confirmed_fields\), \.\.\.confirmedNow\]\)\]\)/);
-    expect(src).toMatch(/\.\.\.stampIrrigationOn,\n\s+\.\.\.confirmFields,\n/);
+    // gh-r26: the union is ONE atomic statement over the row's CURRENT value (no read-modify-write race with the move reset).
+    expect(src).toMatch(/jsonb_array_elements_text\(COALESCE\(irrigation_confirmed_fields, '\[\]'::jsonb\) \|\| \?::jsonb\)/);
+    expect(src).toMatch(/\[JSON\.stringify\(confirmedNow\)\],/);
+    expect(src).toMatch(/\.\.\.stampIrrigationOn,\n\s+\.\.\.\(confirmedNow\.length \? \{ irrigation_confirmed_fields: JSON\.stringify\(confirmedNow\) \} : \{\}\),\n/);
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)
     expect(src).toMatch(/camelFields\.irrigationSystem = true/); // GET presentation of legacy false rows
