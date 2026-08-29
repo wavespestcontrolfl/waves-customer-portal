@@ -1,3 +1,4 @@
+const { counterpartServiceName } = require('../config/service-name-aliases');
 const db = require('../models/db');
 const logger = require('./logger');
 const { isTypedFindingsType } = require('./service-report/activity-indicators');
@@ -303,6 +304,15 @@ function serviceNameCandidates(serviceType) {
         expanded.push(stripped);
         seen.add(strippedKey);
       }
+    }
+    // 2026-08-29 cadence-convention renames relocate the cadence word, so
+    // neither the suffix nor the parenthetical bridges above can derive
+    // them — the centralized alias map supplies the counterpart in both
+    // directions (deployed state and the migration's documented down()).
+    const counterpart = counterpartServiceName(candidate);
+    if (counterpart && !seen.has(counterpart.toLowerCase())) {
+      expanded.push(counterpart);
+      seen.add(counterpart.toLowerCase());
     }
     if (/^pest\s+and\s+rodent\s+control$/i.test(candidate)) {
       const alias = 'Pest & Rodent Control';

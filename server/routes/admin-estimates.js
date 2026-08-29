@@ -570,6 +570,10 @@ router.put('/:id', async (req, res, next) => {
     });
     if (!dryRun) {
       logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+      // An operator revision IS the explicit price correction a pending
+      // bedroom re-price waits for — lift the stale-price send guard.
+      await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
+        .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
     }
     res.json({
       dryRun: dryRun || undefined,
@@ -1064,6 +1068,9 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId) {
   } catch { return false; }
   const eng = data?.estimatorEngine;
   if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  // A bedroom re-price in flight (estimate-clarify-asks): the draft's
+  // dollars are about to be replaced — not sendable meanwhile.
+  if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) return true;
   return !!(await staleCallLinkageReason(db, data));
 }
 
@@ -1143,6 +1150,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // full marker for send purposes — the archive just hasn't landed
       // yet. Never re-send, and never stamp a new claim over it.
       if (data?.estimatorEngine?.invalidation_pending_at) return 'invalidated_before_delivery';
+      // A bedroom re-price in flight replaces this draft's dollars —
+      // never deliver the fallback price meanwhile (time-boxed marker,
+      // see repricePendingActive).
+      if (require('../services/estimate-clarify-asks').repricePendingActive(data?.estimatorEngine)) return 'reprice_pending';
       // LIVE call-linkage revalidation for engine-drafted rows (codex P0,
       // PR #3304 r21): the call processor can commit a corrected stamp
       // BEFORE its reconcile archives this draft — the marker check alone
@@ -1168,7 +1179,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
         .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
-      const err = new Error('This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
+      const err = new Error(invalidatedNow === 'reprice_pending'
+        ? "This estimate is being re-priced from the customer's bedroom answer — the replacement draft is on its way. Nothing was sent."
+        : 'This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
       err.statusCode = 409;
       throw err;
     }
@@ -2792,18 +2805,27 @@ router.post('/:id/unarchive', async (req, res, next) => {
     // — a concurrent invalidation between read and write zero-rows into
     // the same 409 (codex P0 r16).
     const invalidatedMessage = 'This draft was invalidated by a call-linkage correction — its content belongs to a different lead. A corrected draft was rebuilt; this one cannot be unarchived.';
-    const invalidatedAt = (() => {
+    // A draft SUPERSEDED by a clarify-reply re-draft is permanent too:
+    // restoring it would put its stale fallback price and public token
+    // back alongside the replacement.
+    const supersededMessage = 'This draft was superseded by a re-priced replacement (customer answered the bedroom question). The replacement is the live draft; this one cannot be unarchived.';
+    const markers = (() => {
       try {
         const data = typeof estimate.estimate_data === 'string'
           ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
-        return data?.estimatorEngine?.linkage_invalidated_at || null;
-      } catch { return null; }
+        return {
+          invalidatedAt: data?.estimatorEngine?.linkage_invalidated_at || null,
+          supersededAt: data?.estimatorEngine?.superseded_at || null,
+        };
+      } catch { return { invalidatedAt: null, supersededAt: null }; }
     })();
-    if (invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
+    if (markers.invalidatedAt) return res.status(409).json({ error: invalidatedMessage });
+    if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
     const [updated] = await db('estimates')
       .where({ id: req.params.id })
       .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
+      .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
       .update({ archived_at: null, updated_at: db.fn.now() })
       .returning('*');
     if (!updated) return res.status(409).json({ error: invalidatedMessage });

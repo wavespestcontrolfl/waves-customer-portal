@@ -319,10 +319,79 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
   );
 }
 
+// --- Auto-reply pipeline chip (review.autoReply from the list API) ---
+const AUTO_REPLY_COLORS = {
+  queued: "#475569",
+  drafted: "#0F766E",
+  posted: "#15803D",
+  parked: "#A16207",
+  failed: "#A16207",
+  skipped: "#71717A",
+  retracted: "#71717A",
+};
+
+function autoReplyLabel(a) {
+  switch (a.status) {
+    case "queued": return "Auto-reply queued";
+    case "drafted": return "Shadow draft";
+    case "posted": return "Auto-replied";
+    case "parked": return a.reason === "low_rating" ? "Needs you (low rating)" : a.reason === "unrated" ? "Needs you (unrated)" : a.reason === "below_threshold" ? "Needs you (below auto-post threshold)" : a.reason === "agent_ops_draft" ? "Needs you (Agent Ops draft — Post now re-checks it)" : "Needs you";
+    case "failed": return "Auto-reply retrying";
+    case "skipped": return "Auto-reply skipped";
+    case "retracted": return "Reply retracted";
+    default: return `Auto-reply: ${a.status}`;
+  }
+}
+
+function autoReplyTitle(a) {
+  const bits = [];
+  if (a.reason) bits.push(`reason: ${a.reason.replace(/_/g, " ")}`);
+  if (a.mode) bits.push(`mode: ${a.mode.replace(/_/g, " ")}`);
+  if (a.dueAt && a.status === "queued") bits.push(`due ${new Date(a.dueAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  if (a.publishedAt) bits.push(`posted ${new Date(a.publishedAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  return bits.join(" · ") || "Automatic reply pipeline";
+}
+
 // --- Review Card ---
-function ReviewCard({ review, onReplySubmit, onDismiss }) {
+function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
+  const [autoBusy, setAutoBusy] = useState(false);
+  const autoReply = review.autoReply || null;
+  const runAuto = async (action) => {
+    if (!onAutoReplyAction) return;
+    if (action === "retract" && !window.confirm("Delete this reply on Google?")) return;
+    setAutoBusy(true);
+    try {
+      // Post now is bound to the draft this card displayed (null = none):
+      // the server refuses if a different draft is on the row by then.
+      await onAutoReplyAction(review.id, action, action === "post-now"
+        ? { expectedDraft: review.draftReply || (autoReply && autoReply.draft) || null }
+        : undefined);
+      if (action === "retract") { setReplyText(""); setEditing(false); }
+    } catch (e) {
+      alert(`${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
   const [editing, setEditing] = useState(false);
   const [replyText, setReplyText] = useState(review.reply || "");
+  // Set by "Use Draft": the pipeline draft's identity, sent with the reply so
+  // the server can refuse a draft the sync invalidated after it was loaded.
+  const [draftToken, setDraftToken] = useState(null);
+  // Set by "AI Reply": binds the generated text to the review + account facts
+  // it was grounded on (validated at publish time).
+  const [groundingToken, setGroundingToken] = useState(null);
+  // The card keeps its key across reloads; when the live reply changes
+  // underneath it (retract, sync, Google-side edit) the editor must follow,
+  // or a retracted reply could be re-posted from stale editor text.
+  // The draft slot this editor session observed (sent as expectedDraft). A
+  // reload that changes the saved draft resets the editor too, so the
+  // observed value can never drift from what the editor was seeded with.
+  const [observedDraft, setObservedDraft] = useState(review.draftReply || null);
+  useEffect(() => {
+    setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null);
+    setObservedDraft(review.draftReply || null);
+  }, [review.reply, review.draftReply, review.reviewToken]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -331,7 +400,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim());
+      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: observedDraft, expectedReview: review.reviewToken || null });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -350,6 +419,8 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
       });
       if (data.reply) {
         setReplyText(data.reply);
+        setGroundingToken(data.groundingToken || null);
+        setDraftToken(null);
         setEditing(true);
       }
     } catch (e) {
@@ -368,6 +439,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
 
   return (
     <div
+      id={`review-${review.id}`}
       style={{
         background: D.card,
         border: `1px solid ${D.border}`,
@@ -461,6 +533,22 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                   }}
                 >
                   Removed from Google
+                </span>
+              )}{" "}
+              {autoReply && !review.missingSince && (
+                <span
+                  title={autoReplyTitle(autoReply)}
+                  style={{
+                    fontSize: 14,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    fontWeight: 500,
+                    color: D.white,
+                    background: AUTO_REPLY_COLORS[autoReply.status] || D.muted,
+                    padding: "2px 8px",
+                    borderRadius: 99,
+                  }}
+                >
+                  {autoReplyLabel(autoReply)}
                 </span>
               )}{" "}
             </div>{" "}
@@ -558,9 +646,16 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             >
               {review.draftReply}
             </div>{" "}
+            {review.draftStale && (
+              <div style={{ marginTop: 6, fontSize: 12, color: D.warn || "#b45309" }}>
+                This draft was written before the reviewer changed the review — read the current review and edit it before posting.
+              </div>
+            )}
             <button
               onClick={() => {
                 setReplyText(review.draftReply);
+                setDraftToken(review.draftToken || null);
+                setGroundingToken(null);
                 setEditing(true);
               }}
               style={{
@@ -577,9 +672,102 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             >
               Use Draft
             </button>{" "}
+            {autoReply && ["drafted", "parked", "failed", "queued"].includes(autoReply.status) && (
+              <>
+                <button
+                  onClick={() => runAuto("post-now")}
+                  disabled={autoBusy}
+                  title="Post this draft to Google now (skips the delay and shadow mode)"
+                  style={{
+                    marginTop: 8,
+                    marginLeft: 8,
+                    padding: "6px 12px",
+                    background: D.teal,
+                    border: `1px solid ${D.teal}`,
+                    color: "#fff",
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                    opacity: autoBusy ? 0.5 : 1,
+                  }}
+                >
+                  {autoBusy ? "Working..." : "Post now"}
+                </button>{" "}
+                <button
+                  onClick={() => runAuto("skip")}
+                  disabled={autoBusy}
+                  title="Take this review out of the automatic reply pipeline"
+                  style={{
+                    marginTop: 8,
+                    marginLeft: 4,
+                    padding: "6px 12px",
+                    background: "transparent",
+                    border: `1px solid ${D.border}`,
+                    color: D.muted,
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                  }}
+                >
+                  Skip auto
+                </button>
+              </>
+            )}
           </div>
         )}
-
+        {!review.missingSince && autoReply && (["queued", "failed"].includes(autoReply.status) || (autoReply.status === "parked" && ["google_uncertain", "persist_failed"].includes(autoReply.reason))) && !review.draftReply && !review.reply && (
+          <div
+            style={{
+              fontSize: 14,
+              color: D.muted,
+              fontFamily: "Roboto, Arial, sans-serif",
+              marginBottom: 8,
+            }}
+          >
+            {autoReply.draft && (
+              <div
+                style={{
+                  padding: 10,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 8,
+                  background: D.bg,
+                  marginBottom: 8,
+                  color: D.text,
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.5,
+                }}
+              >
+                <div style={{ color: D.muted, marginBottom: 4 }}>{autoReply.status === "parked" ? "Auto-reply text attempted (needs reconciling)" : "Auto-reply draft (publish retrying)"}</div>
+                {autoReply.draft}
+              </div>
+            )}
+            {autoReply.status === "parked"
+              ? (autoReply.reason === "persist_failed"
+                ? "This reply is LIVE on Google but was not recorded here — confirm it after the next sync, or post / rewrite it."
+                : "Google did not answer in time — this reply MAY be live. Check the review after the next sync, or post / rewrite it.")
+              : autoReply.status === "failed"
+                ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${autoReply.dueAt ? `, next attempt ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`
+                : `Auto-reply scheduled${autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`}{" "}
+            <button
+              onClick={() => runAuto("post-now")}
+              disabled={autoBusy}
+              title="Post to Google now (skips the delay and shadow mode)"
+              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif", fontWeight: 500 }}
+            >
+              {autoBusy ? "Working..." : "Post now"}
+            </button>{" "}
+            ·{" "}
+            <button
+              onClick={() => runAuto("skip")}
+              disabled={autoBusy}
+              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif" }}
+            >
+              Skip auto
+            </button>
+          </div>
+        )}
         {success && (
           <div
             style={{
@@ -625,6 +813,9 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               {" "}
               <button
                 onClick={() => {
+                  // An ordinary manual edit carries no draft identity (codex r55).
+                  setDraftToken(null);
+                  setGroundingToken(null);
                   setEditing(true);
                   setReplyText(review.reply);
                 }}
@@ -659,6 +850,26 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
               </button>{" "}
+              {autoReply && (autoReply.status === "posted" || (autoReply.status === "parked" && autoReply.reason === "review_edited_after_post")) && (
+                <button
+                  onClick={() => runAuto("retract")}
+                  disabled={autoBusy}
+                  title="Delete this automatically posted reply on Google"
+                  style={{
+                    padding: "6px 14px",
+                    background: "transparent",
+                    border: `1px solid ${D.red}`,
+                    color: D.red,
+                    borderRadius: 6,
+                    fontSize: 14,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                    opacity: autoBusy ? 0.5 : 1,
+                  }}
+                >
+                  {autoBusy ? "Working..." : "Retract"}
+                </button>
+              )}
             </div>
             )}{" "}
           </div>
@@ -749,8 +960,13 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               {editing && (
                 <button
                   onClick={() => {
+                    // Cancel discards the draft AND its identity: a later
+                    // manual reply on this card must not carry the tokens of
+                    // a draft that was thrown away (codex r55).
                     setEditing(false);
                     setReplyText(review.reply || "");
+                    setDraftToken(null);
+                    setGroundingToken(null);
                   }}
                   style={{
                     padding: "8px 14px",
@@ -772,8 +988,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
       </div>
       {/* Dismiss — hidden on removed rows: they are retained evidence, the
           Removed filter ignores the flag, and a dismissed+reinstated review
-          would vanish from every live view (server 409s stale pages). */}
-      {onDismiss && !review.missingSince && (
+          would vanish from every live view (server 409s stale pages).
+          Also hidden on a pipeline-posted reply: it must stay reachable for
+          the edited-after-post bell and Retract (server 409s too). */}
+      {onDismiss && !review.missingSince && !(review.autoReply?.status === "posted" && !["human", "agent_ops"].includes(review.autoReply?.version)) && !(review.autoReply?.status === "parked" && review.autoReply?.reason === "review_edited_after_post") && (
         <div style={{ textAlign: "right", marginTop: 8 }}>
           {" "}
           <button
@@ -1816,8 +2034,27 @@ export default function ReviewsPage() {
   // back through the hourly Places sync as `review_reply`) drop off the
   // list automatically. Operators can flip back to "All Reviews" via
   // the filter dropdown when they need the full archive.
-  const [filterResponded, setFilterResponded] = useState("needs-reply");
+  // Deep links from auto-reply bells: ?responded=responded|needs-reply|all
+  // picks the view (a posted reply has left the default needs-reply view)
+  // and ?review=<id> scrolls to that card once loaded.
+  const deepLink = (() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      const responded = q.get("responded");
+      return {
+        responded: ["responded", "needs-reply", "all", "removed"].includes(responded) ? responded : null,
+        review: q.get("review") || null,
+      };
+    } catch { return { responded: null, review: null }; }
+  })();
+  const [filterResponded, setFilterResponded] = useState(deepLink.responded || "needs-reply");
   const [search, setSearch] = useState("");
+  const scrolledToRef = useRef(false);
+  useEffect(() => {
+    if (!deepLink.review || scrolledToRef.current || !data?.reviews?.length) return;
+    const el = document.getElementById(`review-${deepLink.review}`);
+    if (el) { scrolledToRef.current = true; el.scrollIntoView({ block: "center" }); }
+  }, [data]);
   const loadSeqRef = useRef(0);
   // Server pages at 200 rows; without a pager a large profile wipe would
   // leave older stamped reviews unreachable from the Removed filter (only
@@ -1841,8 +2078,11 @@ export default function ReviewsPage() {
     if (filterResponded === "needs-reply") params.set("responded", "false");
     if (filterResponded === "removed") params.set("missing", "true");
     if (search.trim()) params.set("search", search.trim());
+    // A notification deep link names one review; the server pins it into the
+    // first page so an old row (beyond the page size) is still reached.
+    if (pageNum === 1 && deepLink.review) params.set("review", deepLink.review);
     return params;
-  }, [filterLocation, filterRating, filterResponded, search]);
+  }, [filterLocation, filterRating, filterResponded, search, deepLink.review]);
 
   const loadData = useCallback(() => {
     const loadSeq = loadSeqRef.current + 1;
@@ -1856,11 +2096,14 @@ export default function ReviewsPage() {
     // the new result's Load More button isn't permanently disabled.
     setLoadingMore(false);
     setLoadMoreError(null);
-    adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
+    // Returns the fetch chain so callers that must not re-enable an action
+    // before the new row state is installed can await it (Post now on a
+    // 1-3★ review that just drafted: the card must render the draft first).
+    return adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
-        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
         setLoading(false);
       })
       .catch((e) => {
@@ -1880,7 +2123,7 @@ export default function ReviewsPage() {
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         pageRef.current = nextPage;
-        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
         setLoadingMore(false);
         setData((prev) => {
           if (!prev) return d;
@@ -1905,10 +2148,31 @@ export default function ReviewsPage() {
     return () => clearTimeout(t);
   }, [loadData, search]);
 
-  const handleReply = async (reviewId, replyText) => {
+  // Auto-reply pipeline actions: retract (delete on Google), post-now
+  // (publish the pending draft immediately), skip (leave the pipeline). The
+  // row's reply / autoReply state changes server-side, so reload the list.
+  const handleAutoReplyAction = async (reviewId, action, body) => {
+    const path = action === "retract"
+      ? `/admin/reviews/${reviewId}/retract-reply`
+      : `/admin/reviews/${reviewId}/auto-reply/${action}`;
+    const result = await adminFetch(path, body ? { method: "POST", body: JSON.stringify(body) } : { method: "POST" });
+    // Post now on a 1-3★ / unrated review with no surfaced draft: the server
+    // drafted + parked instead of posting; reload so the draft is rendered.
+    if (result && result.message) alert(result.message);
+    await loadData();
+  };
+
+  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null, expectedDraft = null, expectedReview = null } = {}) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
-      body: JSON.stringify({ replyText }),
+      body: JSON.stringify({
+        replyText,
+        expectedReply,
+        expectedDraft,
+        ...(expectedReview ? { expectedReview } : {}),
+        ...(draftToken ? { draftToken } : {}),
+        ...(groundingToken ? { groundingToken } : {}),
+      }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
     // With more pages still on the server, keeping the mutable page offset
@@ -1924,7 +2188,21 @@ export default function ReviewsPage() {
       ...prev,
       reviews: prev.reviews.map((r) =>
         r.id === reviewId
-          ? { ...r, reply: replyText, replyUpdatedAt: new Date().toISOString() }
+          ? {
+            ...r,
+            reply: replyText,
+            replyUpdatedAt: new Date().toISOString(),
+            // The saved draft slot is consumed by the post (server-side the
+            // "[DRAFT]" became the reply): clear it and its identity so a
+            // follow-up edit does not report the obsolete draft as observed.
+            draftReply: null,
+            draftToken: null,
+            draftStale: false,
+            // A manual post closes out the auto-reply state server-side
+            // (skipped/manual_reply); mirror it so Retract — which deletes
+            // whatever reply is live — is not offered on a human's reply.
+            autoReply: r.autoReply ? { ...r.autoReply, status: "skipped", reason: "manual_reply" } : null,
+          }
           : r,
       ),
     }));
@@ -2378,6 +2656,7 @@ export default function ReviewsPage() {
                     review={r}
                     onReplySubmit={handleReply}
                     onDismiss={handleDismiss}
+                    onAutoReplyAction={handleAutoReplyAction}
                   />
                 ))
               )}

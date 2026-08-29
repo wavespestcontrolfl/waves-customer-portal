@@ -328,10 +328,6 @@ router.put('/preferences', async (req, res, next) => {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
 
-    const existing = await db('property_preferences')
-      .where({ customer_id: req.customerId })
-      .first();
-
     // The weekly watering plan trusts sprinkler settings only once every
     // instruction-shaping field has been re-saved AFTER the last primary-
     // address change (the move resets irrigation_confirmed_fields). The
@@ -339,30 +335,47 @@ router.put('/preferences', async (req, res, next) => {
     // — a non-sizing irrigation edit (controller location, notes) and the
     // row-wide updated_at confirm nothing (codex #3565 gh-r20/r21).
     const confirmedNow = IRRIGATION_SIZING_FIELDS.filter((f) => f in updates);
-    // The union is ONE atomic statement over the row's CURRENT value — an
-    // unlocked pre-move read could write a full pre-move set back over the
-    // fan-out's reset when an autosave overlaps an address change (gh-r26).
-    const confirmFields = confirmedNow.length
-      ? {
-        irrigation_confirmed_fields: db.raw(
-          "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",
-          [JSON.stringify(confirmedNow)],
-        ),
-      }
-      : {};
 
-    if (existing) {
-      await db('property_preferences')
+    // The read-then-upsert holds the customer-scoped preference advisory
+    // lock (`property-preferences:<customerId>`): a collective series move
+    // takes the same lock before it re-judges the weekday preference under
+    // its own locks, so a preference written — INCLUDING a first row a
+    // FOR SHARE read could not lock — while that move waits cannot slip
+    // between its verdict and its commit (codex r16 P2).
+    const existing = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(req.customerId)],
+      );
+      const current = await trx('property_preferences')
         .where({ customer_id: req.customerId })
-        .update({ ...updates, ...stampIrrigationOn, ...confirmFields, updated_at: db.fn.now() });
-    } else {
-      await db('property_preferences').insert({
-        customer_id: req.customerId,
-        ...updates,
-        ...stampIrrigationOn,
-        ...(confirmedNow.length ? { irrigation_confirmed_fields: JSON.stringify(confirmedNow) } : {}),
-      });
-    }
+        .first();
+      // The confirmation union is ONE atomic statement over the row's
+      // CURRENT value — an unlocked pre-move read could write a full pre-move
+      // set back over the fan-out's reset when an autosave overlaps an
+      // address change (codex #3565 gh-r26).
+      const confirmFields = confirmedNow.length
+        ? {
+          irrigation_confirmed_fields: trx.raw(
+            "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",
+            [JSON.stringify(confirmedNow)],
+          ),
+        }
+        : {};
+      if (current) {
+        await trx('property_preferences')
+          .where({ customer_id: req.customerId })
+          .update({ ...updates, ...stampIrrigationOn, ...confirmFields, updated_at: trx.fn.now() });
+      } else {
+        await trx('property_preferences').insert({
+          customer_id: req.customerId,
+          ...updates,
+          ...stampIrrigationOn,
+          ...(confirmedNow.length ? { irrigation_confirmed_fields: JSON.stringify(confirmedNow) } : {}),
+        });
+      }
+      return current;
+    });
 
     // Return the full updated record
     const prefs = await db('property_preferences')

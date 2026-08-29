@@ -95,6 +95,11 @@ function buildFcmMessage(deviceToken, notification = {}) {
     if (v === undefined || v === null) continue;
     data[k] = typeof v === 'string' ? v : String(v);
   }
+  const android = { priority: 'high', notification: { sound: 'default' } };
+  // Same-tag redelivery REPLACES the banner on Android (mirrors the web-push
+  // `tag` contract and apns-collapse-id): a stale-lease retry after a crash
+  // never stacks a second phone notification.
+  if (notification.tag) android.notification.tag = String(notification.tag);
   return {
     message: {
       token: deviceToken,
@@ -103,7 +108,7 @@ function buildFcmMessage(deviceToken, notification = {}) {
         body: notification.body || '',
       },
       data,
-      android: { priority: 'high', notification: { sound: 'default' } },
+      android,
     },
   };
 }

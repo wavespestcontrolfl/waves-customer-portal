@@ -958,7 +958,15 @@ try {
 // so `npm run dev` still auto-migrates against the local DB. Run
 // `npm run db:migrate` manually if you want to migrate without
 // starting the dev server.
-httpServer.listen(PORT, () => {
+// Prime the catalog-name cache BEFORE accepting traffic so the first
+// requests already display real service identities instead of the lossy
+// regex fallback (service-catalog-names.js). Bounded: a slow/failed prime
+// falls back to today's behavior rather than delaying boot.
+const primeCatalogNames = config.nodeEnv === 'test'
+  ? Promise.resolve()
+  : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
+
+primeCatalogNames.then(() => httpServer.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
@@ -1228,6 +1236,33 @@ httpServer.listen(PORT, () => {
       logger.info(`[mem] RSS: ${Math.round(m.rss/1024/1024)}MB | Heap: ${Math.round(m.heapUsed/1024/1024)}/${Math.round(m.heapTotal/1024/1024)}MB`);
     }, 5 * 60 * 1000);
 
+    // Collective series moves: finish the post-commit effects of any
+    // series_moves row whose pass died after the commit (reminder sync,
+    // conflict card, board broadcast, the requested customer text) —
+    // idempotent via the row's markers + lease; no-op when nothing is
+    // pending. RECOVERY, not a scheduled job: it runs regardless of the
+    // GATE_CRON_JOBS master gate (like the recording fallback above) —
+    // the request paths that create series_moves rows are gated on
+    // GATE_ADMIN_COLLECTIVE_MOVE alone, and an environment with that on and
+    // the cron fleet off must still finish a dead pass (codex r11 P1).
+    // Safe with the collective gate off (no rows appear).
+    {
+      const { runExclusive } = require('./utils/cron-lock');
+      if (config.nodeEnv !== 'test') {
+        require('node-cron').schedule('*/15 * * * *', async () => {
+          try {
+            await runExclusive('series-move-effects-reconcile', async () => {
+              const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
+              const out = await reconcileSeriesMoveEffects();
+              if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
+            });
+          } catch (err) {
+            logger.error(`[cron] series move effects reconcile failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+      }
+    }
+
     // Weekly: recompute all assessment analytics (product efficacy, protocol
     // performance, benchmarks, contradictions). Sunday 4 AM ET via node-cron —
     // the old setInterval(7 days) reset on every boot, and Railway redeploys
@@ -1338,7 +1373,7 @@ httpServer.listen(PORT, () => {
       }
     }
   })();
-});
+}));
 
 // Graceful shutdown — Railway sends SIGTERM ~30s before forced kill on
 // deploy. Drain Socket.io connections first (clients see a clean

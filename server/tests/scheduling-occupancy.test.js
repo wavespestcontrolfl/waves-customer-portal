@@ -293,7 +293,7 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     expect(singleTechIdx).toBeGreaterThan(singleIdx);
     // Series: the multi-date acquisition is sorted-ascending (acquireOccupancyLocks)
     // and precedes every per-sibling tech lock in the loop below it.
-    const seriesIdx = src.indexOf('await acquireOccupancyLocks(trx, projectedDates);');
+    const seriesIdx = src.indexOf('await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);');
     expect(seriesIdx).toBeGreaterThan(-1);
     for (const techLock of [
       "['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],",
@@ -313,7 +313,7 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     // advisory lock. Pinned at the source so a future edit can't reintroduce
     // the inversion.
     const src = read('services/rebooker.js');
-    const locksIdx = src.indexOf('await acquireOccupancyLocks(trx, projectedDates);');
+    const locksIdx = src.indexOf('await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);');
     const parentUpdateIdx = src.indexOf('.where({ id: parentId }).update({');
     expect(locksIdx).toBeGreaterThan(-1);
     expect(parentUpdateIdx).toBeGreaterThan(-1);

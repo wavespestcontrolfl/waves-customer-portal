@@ -7,8 +7,6 @@ const ReviewIncentives = require('../services/review-incentives');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS, resolveReviewLocationId } = require('../config/locations');
 const logger = require('../services/logger');
-const MODELS = require('../config/models');
-const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
 const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
@@ -16,22 +14,18 @@ const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
 const { toE164 } = require('../utils/phone');
 
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
+const { DRAFT_REPLY_PREFIX, isDraftReply, stripDraftPrefix, whereNeedsRealReply, whereHasRealReply } = require('../services/review-reply/draft-prefix');
+const ReplyPublisher = require('../services/review-reply/publisher');
+const ReplyDrafter = require('../services/review-reply/drafter');
+const { buildReplyGrounding } = require('../services/review-reply/grounding');
+const AutoReply = require('../services/review-reply/runner');
 
-function isDraftReply(reply) {
-  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
-}
-
-function whereNeedsRealReply(qb) {
-  qb.where(function () {
-    this.whereNull('google_reviews.review_reply')
-      .orWhere('google_reviews.review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
-  });
-}
-
-function whereHasRealReply(qb) {
-  qb.whereNotNull('google_reviews.review_reply')
-    .where('google_reviews.review_reply', 'not like', `${DRAFT_REPLY_PREFIX}%`);
+// Route-level translation of the canonical publisher's typed errors.
+function sendReplyError(res, err, next) {
+  if (err instanceof ReplyPublisher.ReviewReplyError) {
+    return res.status(err.status || 500).json({ error: err.message, code: err.code });
+  }
+  return next(err);
 }
 
 // Dismissing a review means "we are deliberately not replying to this one"
@@ -104,23 +98,6 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
       .whereIn('google_reviews.location_id', activeLocationIds)
-      // The removed-from-Google filter promises EVERY stamped review is
-      // reachable (it backs the removal-alert support workflow), so it must
-      // not be narrowed by the dismissed exclusion — a review dismissed
-      // before (or after) Google removed it is still removal evidence.
-      .modify(qb => {
-        if (!showDismissed && missing !== 'true') {
-          qb.where(function () {
-            this.where('google_reviews.dismissed', false)
-              .orWhereNull('google_reviews.dismissed')
-              // Stamped rows pass regardless of dismissal: the removal
-              // alert links to the DEFAULT view, and a review dismissed
-              // before Google removed it is still removal evidence — the
-              // dismissed exclusion must not hide it there.
-              .orWhereNotNull('google_reviews.missing_since');
-          });
-        }
-      })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
@@ -133,33 +110,73 @@ router.get('/', async (req, res, next) => {
       // requests is silently skipped by Load More.
       .orderBy('google_reviews.id', 'desc');
 
-    if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
-    if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
-    // Dedicated removed-from-Google filter — makes every stamped review
-    // reachable regardless of the result cap on the default view (a large
-    // profile wipe stays fully inspectable).
-    if (missing === 'true') query = query.whereNotNull('google_reviews.missing_since');
-    if (responded === 'true') query = query.modify(whereHasRealReply);
-    if (responded === 'false') {
-      // The default "Needs Reply" view must still surface reviews Google has
-      // removed (missing_since stamped) even when they were already replied
-      // to — the removal notification links here, and a replied-to removed
-      // review would otherwise be invisible in the default list.
-      query = query.where(function () {
-        this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+    // Every list predicate lives here so the deep-link pin below is filtered
+    // by the SAME rules as the page (codex r67): a pinned review must not
+    // contradict the rating / location / response-state / removed / search
+    // filters the operator has since selected.
+    const withFilters = (q) => {
+      // The removed-from-Google filter promises EVERY stamped review is
+      // reachable (it backs the removal-alert support workflow), so it must
+      // not be narrowed by the dismissed exclusion — a review dismissed
+      // before (or after) Google removed it is still removal evidence.
+      if (!showDismissed && missing !== 'true') {
+        q = q.where(function () {
+          this.where('google_reviews.dismissed', false)
+            .orWhereNull('google_reviews.dismissed')
+            // Stamped rows pass regardless of dismissal: the removal
+            // alert links to the DEFAULT view, and a review dismissed
+            // before Google removed it is still removal evidence — the
+            // dismissed exclusion must not hide it there.
+            .orWhereNotNull('google_reviews.missing_since');
+        });
+      }
+      if (location && location !== 'all') q = q.where('google_reviews.location_id', location);
+      if (rating) q = q.where('google_reviews.star_rating', parseInt(rating));
+      // Dedicated removed-from-Google filter — makes every stamped review
+      // reachable regardless of the result cap on the default view (a large
+      // profile wipe stays fully inspectable).
+      if (missing === 'true') q = q.whereNotNull('google_reviews.missing_since');
+      if (responded === 'true') q = q.modify(whereHasRealReply);
+      if (responded === 'false') {
+        // The default "Needs Reply" view must still surface reviews Google has
+        // removed (missing_since stamped) even when they were already replied
+        // to — the removal notification links here, and a replied-to removed
+        // review would otherwise be invisible in the default list.
+        q = q.where(function () {
+          this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+        });
+      }
+      if (search) q = q.where(function () {
+        this.whereILike('google_reviews.reviewer_name', `%${search}%`)
+          .orWhereILike('google_reviews.review_text', `%${search}%`)
+          .orWhereILike('customers.first_name', `%${search}%`)
+          .orWhereILike('customers.last_name', `%${search}%`)
+          .orWhereRaw("LOWER(customers.first_name || ' ' || COALESCE(customers.last_name, '')) LIKE LOWER(?)", [`%${search}%`]);
       });
-    }
-    if (search) query = query.where(function () {
-      this.whereILike('google_reviews.reviewer_name', `%${search}%`)
-        .orWhereILike('google_reviews.review_text', `%${search}%`)
-        .orWhereILike('customers.first_name', `%${search}%`)
-        .orWhereILike('customers.last_name', `%${search}%`)
-        .orWhereRaw("LOWER(customers.first_name || ' ' || COALESCE(customers.last_name, '')) LIKE LOWER(?)", [`%${search}%`]);
-    });
+      return q;
+    };
+    query = withFilters(query);
 
     const parsedLimit = Math.max(1, Math.min(500, parseInt(limit, 10) || 200));
     const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * parsedLimit;
     const reviews = await query.limit(parsedLimit).offset(offset);
+    // Explicit pagination signal, computed BEFORE a pinned review is added
+    // (the page may then carry limit+1 rows; offset paging is unaffected).
+    const hasMore = reviews.length === parsedLimit;
+    // Deep-linked review (?review=<id> from an action bell): pin it into the
+    // first page when it is not already there, so a review older than the
+    // page size (edited-after-post, removal evidence …) is reached directly.
+    const pin = typeof req.query.review === 'string' && req.query.review.trim() ? req.query.review.trim() : null;
+    if (pin && offset === 0 && !reviews.some((r) => String(r.id) === pin)) {
+      const pinned = await withFilters(db('google_reviews')
+        .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
+        .where('google_reviews.id', pin)
+        .where('google_reviews.reviewer_name', '!=', '_stats')
+        .whereIn('google_reviews.location_id', activeLocationIds)
+        .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier as cust_tier'))
+        .first();
+      if (pinned) reviews.unshift(pinned);
+    }
 
     // Get real Google stats from Places API (stored during sync).
     // Restrict to currently-configured WAVES_LOCATIONS so a `_stats`
@@ -285,13 +302,43 @@ router.get('/', async (req, res, next) => {
     const locationStatuses = await getReviewLocationStatuses();
 
     res.json({
+      hasMore,
       reviews: reviews.map(r => ({
         id: r.id, googleReviewId: r.google_review_id, locationId: r.location_id,
         reviewerName: r.reviewer_name, reviewerPhoto: r.reviewer_photo_url,
         starRating: r.star_rating, reviewText: r.review_text,
         reply: isDraftReply(r.review_reply) ? null : r.review_reply,
-        draftReply: isDraftReply(r.review_reply) ? r.review_reply.replace(/^\[DRAFT\]\s*/, '') : null,
+        draftReply: isDraftReply(r.review_reply) ? stripDraftPrefix(r.review_reply) : null,
+        // Identity of the pipeline's own draft in the slot: "Use Draft" sends
+        // it back with the reply so a draft the sync invalidated meanwhile
+        // (review edit / re-attribution) is refused, not posted as free text.
+        draftToken: isDraftReply(r.review_reply) && r.auto_reply_draft && stripDraftPrefix(r.review_reply).trim() === String(r.auto_reply_draft).trim()
+          ? AutoReply.reviewFingerprint(r) : null,
+        // Identity of the review CONTENT the browser is showing; every editor
+        // submission sends it back so text written for the old review is
+        // refused after a reviewer rewrite the sync recorded meanwhile.
+        reviewToken: AutoReply.reviewFingerprint(r),
+        // A person's saved draft the sync found written for an EARLIER version
+        // of the review: shown, but refused verbatim until edited.
+        draftStale: isDraftReply(r.review_reply) && r.auto_reply_reason === AutoReply.HUMAN_DRAFT_STALE,
         replyUpdatedAt: isDraftReply(r.review_reply) ? null : r.reply_updated_at,
+        // Auto-reply pipeline state (null = never queued; see review-reply/runner.js).
+        autoReply: r.auto_reply_status ? {
+          status: r.auto_reply_status,
+          reason: r.auto_reply_reason || null,
+          dueAt: r.auto_reply_due_at || null,
+          draftedAt: r.auto_reply_drafted_at || null,
+          publishedAt: r.auto_reply_published_at || null,
+          mode: r.auto_reply_mode || null,
+          version: r.auto_reply_version || null,
+          hasDraft: !!r.auto_reply_draft,
+          // The verified text a failed publish is retrying with (review_reply
+          // stays null on those rows) — surfaced so the page can offer it.
+          // …and the attempted text of a reconciliation park (google_uncertain /
+          // persist_failed) so a person can post or rewrite it (codex r41).
+          draft: (r.auto_reply_status === 'failed' || (r.auto_reply_status === 'parked' && ['google_uncertain', 'persist_failed'].includes(r.auto_reply_reason)))
+            ? (r.auto_reply_draft || null) : null,
+        } : null,
         reviewCreatedAt: r.review_created_at,
         matchedCustomer: r.cust_first ? { name: `${r.cust_first} ${r.cust_last}`, tier: r.cust_tier, id: r.customer_id } : null,
         syncedAt: r.synced_at,
@@ -332,138 +379,114 @@ router.get('/', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/:id/reply — reply to a review
+// POST /api/admin/reviews/:id/reply — reply to a review (human writer).
+// Posts through the canonical publisher (draft → verify → liveness recheck →
+// publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText } = req.body;
+    const { replyText, draftToken, groundingToken, expectedReply, expectedDraft, expectedReview } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
-
-    const review = await db('google_reviews').where({ id: req.params.id }).first();
-    if (!review) return res.status(404).json({ error: 'Review not found' });
-    // A stamped (removed-from-Google) review has no live GBP resource to
-    // reply to. The client disables the editor, but a page loaded BEFORE the
-    // hourly sync stamped the row still has an active editor — reject here so
-    // a stale client gets a clear 409 instead of the GBP 502.
-    if (review.missing_since) {
-      return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
-    }
-
-    // Try to post reply to Google. When GBP is configured, do not mark the
-    // review replied locally unless Google accepted the reply.
-    let googlePosted = false;
-    let googleError = null;
-    if (gbp.configured) {
-      let resourceName = review.gbp_review_name;
-
-      // If no GBP resource name stored, try to resolve it now
-      if (!resourceName && review.location_id) {
-        try {
-          const { WAVES_LOCATIONS } = require('../config/locations');
-          const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id);
-          if (loc?.googleLocationResourceName) {
-            const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 100);
-            const match = gbpReviews.find(g => {
-              const gName = (g.reviewer?.displayName || '').toLowerCase();
-              const rName = (review.reviewer_name || '').toLowerCase();
-              const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
-              const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
-              return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000;
-            });
-            if (match?.name) {
-              resourceName = match.name;
-              await db('google_reviews').where({ id: req.params.id }).update({ gbp_review_name: resourceName });
-            }
-          }
-        } catch (lookupErr) {
-          logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
-        }
-      }
-
-      if (resourceName) {
-        // Liveness decision + external post + local record run under the
-        // per-location publish-claim mechanism (publishWithReviewLivenessLock):
-        // the claim is acquired under the sync advisory lock (so no in-flight
-        // cycle has already observed this review absent), the reconcile
-        // defers stamping claimed rows, and the local save below happens
-        // INSIDE the claim window — Google accepting a reply on a
-        // mid-removal review can no longer leave an external side effect
-        // with no local record.
-        const { publishWithReviewLivenessLock } = require('../services/social-content-studio');
-        let outcome = null;
-        try {
-          outcome = await publishWithReviewLivenessLock(req.params.id, async () => {
-            await gbp.replyToReview(resourceName, replyText, review.location_id);
-            return true;
-          });
-        } catch (e) {
-          googleError = e.message;
-          logger.error(`Google reply failed: ${e.message}`);
-        }
-        if (outcome) {
-          if (outcome.blocked) {
-            return res.status(409).json({
-              error: outcome.lockBusy
-                ? 'Review sync is in progress for this location — try again in a moment.'
-                : 'This review has been removed from Google — replies are disabled.',
-            });
-          }
-          try {
-            googlePosted = true;
-            const updated = await db('google_reviews')
-              .where({ id: req.params.id })
-              .whereNull('missing_since')
-              .update({ review_reply: replyText, reply_updated_at: db.fn.now() });
-            if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-              // Defensive only — unreachable while the claim defers stamping.
-              return res.status(409).json({
-                error: 'This review was removed from Google while replying — the reply was not recorded locally.',
-                googlePosted,
-              });
-            }
-            await db('activity_log').insert({
-              admin_user_id: req.technicianId, action: 'review_replied',
-              description: `Replied to ${review.star_rating}-star review from ${review.reviewer_name} on ${review.location_id}`,
-            });
-            return res.json({ success: true, googlePosted });
-          } finally {
-            await outcome.releaseClaim();
-          }
-        }
-      } else {
-        logger.warn(`No GBP resource name for review ${req.params.id} — reply not saved locally`);
-      }
-    }
-
-    if (gbp.configured && !googlePosted) {
-      return res.status(502).json({
-        error: googleError || 'Could not post reply to Google. Reply was not saved locally.',
-        googlePosted: false,
-      });
-    }
-
-    // Conditional write, mirroring the IB submit path: the reconcile can
-    // stamp the row at any point after the checks above, and an
-    // unconditional update would record a reply that falsely reports as
-    // visible on Google. Zero rows updated ⇒ the stamp won the race.
-    const updated = await db('google_reviews')
-      .where({ id: req.params.id })
-      .whereNull('missing_since')
-      .update({
-        review_reply: replyText, reply_updated_at: db.fn.now(),
-      });
-    if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-      return res.status(409).json({
-        error: 'This review was removed from Google while replying — the reply was not recorded locally.',
-        googlePosted,
-      });
-    }
-
-    await db('activity_log').insert({
-      admin_user_id: req.technicianId, action: 'review_replied',
-      description: `Replied to ${review.star_rating}-star review from ${review.reviewer_name} on ${review.location_id}`,
+    const result = await ReplyPublisher.publishReviewReply({
+      reviewId: req.params.id,
+      text: replyText,
+      actor: { type: 'admin', adminUserId: req.technicianId || null },
+      allowOverwrite: true,
+      // A human posting closes out a pending/posted auto-reply state on the
+      // row; a never-queued row keeps NULL.
+      autoFields: AutoReply.manualReplyCloseFields(db),
+      // "Use Draft" re-submits the pipeline's stored draft through this
+      // route: it must still match the review + account facts it was
+      // grounded on (a re-attribution or city fix since then → 409).
+      guard: AutoReply.pipelineDraftGuard(replyText, {
+        draftToken: typeof draftToken === 'string' ? draftToken : null,
+        groundingToken: typeof groundingToken === 'string' ? groundingToken : null,
+      }),
+      // What the browser saw in the reply slot when the page loaded (null =
+      // no reply). Omitted by older clients → no browser-side check.
+      expectedReply: expectedReply === undefined ? undefined : (expectedReply == null ? null : String(expectedReply)),
+      expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
+      expectedReview: typeof expectedReview === 'string' && expectedReview ? expectedReview : undefined,
+      // The account half of an editor AI draft's grounding token: the
+      // post-PUT check parks a reply whose facts changed while Google's PUT
+      // was in flight, human path included (codex r40).
+      expectedAccountFingerprint: await (async () => {
+        const fromToken = AutoReply.parseGroundingToken(groundingToken)?.account;
+        if (fromToken) return fromToken;
+        // "Use Draft" (draftToken only): the stored pipeline draft's snapshot
+        // carries the account fingerprint it was grounded on (codex r50).
+        if (typeof draftToken !== 'string' || !draftToken) return undefined;
+        const r = await db('google_reviews').where({ id: req.params.id }).first('auto_reply_draft', 'auto_reply_grounding', 'review_reply');
+        if (!r?.auto_reply_draft || !isDraftReply(r.review_reply) || stripDraftPrefix(r.review_reply).trim() !== String(r.auto_reply_draft).trim()) return undefined;
+        const g = r.auto_reply_grounding;
+        const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+        return snap?.accountFingerprint || undefined;
+      })(),
     });
+    res.json({ success: true, googlePosted: result.googlePosted });
+  } catch (err) { sendReplyError(res, err, next); }
+});
 
-    res.json({ success: true, googlePosted });
+// POST /api/admin/reviews/:id/retract-reply — delete the owner reply on
+// Google (auto-posted or not) and clear it locally.
+router.post('/:id/retract-reply', requireAdmin, async (req, res, next) => {
+  try {
+    const result = await ReplyPublisher.retractReviewReply({
+      reviewId: req.params.id,
+      actor: { type: 'admin', adminUserId: req.technicianId || null },
+      autoFields: { auto_reply_status: AutoReply.STATUS.RETRACTED, auto_reply_reason: 'admin_retract', auto_reply_claimed_until: null },
+    });
+    res.json({ success: true, googleDeleted: result.googleDeleted });
+  } catch (err) { sendReplyError(res, err, next); }
+});
+
+// POST /api/admin/reviews/:id/auto-reply/post-now — publish the pending
+// auto draft immediately (bypasses the jitter and shadow mode; a person asked).
+router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => {
+  try {
+    const { expectedDraft } = req.body || {};
+    const result = await AutoReply.postNow(req.params.id, { type: 'admin', adminUserId: req.technicianId || null }, {
+      // The draft the page displayed (null = none). Omitted by older clients.
+      expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
+    });
+    if (result.outcome !== 'posted') {
+      // A 1-3★ / unrated review with no surfaced draft: the draft was just
+      // created and parked; the person reads it, then posts it.
+      // Success-shaped (200) so the page reloads the card and RENDERS the
+      // draft before another Post now is possible (codex r28).
+      // The reply IS live but the review / customer facts changed while it
+      // posted: recorded parked for a person (codex r57).
+      if (result.reason === 'review_edited_after_post' && result.live) {
+        return res.json({ success: true, outcome: result.outcome, reason: result.reason, message: 'Posted — but the review (or its customer facts) changed while the reply was posting. It is parked for you to check: edit or retract it.' });
+      }
+      if (result.drafted) {
+        const message = result.reason === 'draft_replaced'
+          ? 'The draft you approved was no longer valid (the review or customer facts changed, or it no longer passes the checks). A fresh draft is on the review — read it, then Post now again.'
+          : 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.';
+        return res.json({ success: false, drafted: true, outcome: result.outcome, reason: result.reason || null, message });
+      }
+      return res.status(409).json({ error: `Could not post: ${result.reason || result.outcome}`, outcome: result.outcome, reason: result.reason || null });
+    }
+    res.json({
+      success: true, outcome: result.outcome, mode: result.mode || null, reconciled: !!result.reconciled,
+      ...(result.reconciled ? { message: 'The earlier attempt had already landed on Google — the reply is now recorded as posted. You can read or retract it here.' } : {}),
+    });
+  } catch (err) { sendReplyError(res, err, next); }
+});
+
+// POST /api/admin/reviews/:id/auto-reply/skip — take a review out of the
+// automatic pipeline (it stays in the manual needs-reply queue).
+router.post('/:id/auto-reply/skip', requireAdmin, async (req, res, next) => {
+  try {
+    const skipped = await AutoReply.skipAutoReply(req.params.id);
+    if (!skipped) return res.status(409).json({ error: 'This review is not waiting on the auto-reply pipeline (a reply is being posted right now, or a Google result is still being reconciled — try again after the next sync)' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/reviews/auto-reply/status — mode, counts, shadow-exit facts.
+router.get('/auto-reply/status', requireAdmin, async (req, res, next) => {
+  try {
+    res.json(await AutoReply.autoReplyStatus());
   } catch (err) { next(err); }
 });
 
@@ -479,9 +502,17 @@ router.post('/:id/dismiss', async (req, res, next) => {
     const updated = await db('google_reviews')
       .where({ id: req.params.id })
       .whereNull('missing_since')
-      .update({ dismissed: true });
+      // Never under an in-flight automatic publish (mirrors Skip).
+      .modify(AutoReply.whereNoLivePublishClaim)
+      // Never a reconciliation park: our reply may be live on Google and
+      // only that parked state lets the next sync claim it (codex r70).
+      .modify(AutoReply.whereNoReconcilePark)
+      // Never a pipeline-posted reply: it must stay reachable for the
+      // edited-after-post bell and Retract (codex r75).
+      .modify(AutoReply.whereNotAutoPosted)
+      .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-      return res.status(409).json({ error: 'This review has been removed from Google — it is retained as evidence and cannot be dismissed.' });
+      return res.status(409).json({ error: 'This review cannot be dismissed right now — it was removed from Google (retained as evidence), it carries an automatic reply (retract it first if it should go), a reply is being posted this moment, or a Google result is still being reconciled; try again after the next sync.' });
     }
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -497,70 +528,36 @@ router.post('/dismiss-batch', async (req, res, next) => {
     const dismissed = await db('google_reviews')
       .whereIn('id', ids)
       .whereNull('missing_since')
-      .update({ dismissed: true });
+      // Rows under an in-flight automatic publish are skipped, like stamped ones.
+      .modify(AutoReply.whereNoLivePublishClaim)
+      // …and so are reconciliation parks (a PUT may be live; codex r70).
+      .modify(AutoReply.whereNoReconcilePark)
+      // …and pipeline-posted replies (codex r75).
+      .modify(AutoReply.whereNotAutoPosted)
+      .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     res.json({ success: true, dismissed: Array.isArray(dismissed) ? dismissed.length : dismissed });
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/reviews/:id/ai-reply — generate AI reply using Claude
+// POST /api/admin/reviews/:id/ai-reply — draft a reply for the editor.
+// Same drafter + verifier + public-safe grounding as the auto-reply runner
+// (services/review-reply); returns text only, posts nothing.
 router.post('/:id/ai-reply', async (req, res, next) => {
   try {
     const review = await db('google_reviews').where({ id: req.params.id }).first();
-    if (!review) return res.status(404).json({ error: 'Review not found' });
+    if (!review || review.reviewer_name === '_stats') return res.status(404).json({ error: 'Review not found' });
+    if (review.missing_since) return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
 
-    const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id) || WAVES_LOCATIONS[0];
-    const locationName = loc.name;
-
-    // Try to find customer city
-    let customerCity = '';
-    if (review.customer_id) {
-      const cust = await db('customers').where({ id: review.customer_id }).first();
-      if (cust) customerCity = cust.city || '';
+    const grounding = await buildReplyGrounding(review);
+    const recentReplies = await ReplyDrafter.loadRecentPostedReplies(review.location_id);
+    const draft = await ReplyDrafter.draftReviewReply({ grounding, recentReplies });
+    if (!draft.ok) {
+      if (draft.reason === 'provider_unavailable') return res.status(502).json({ error: 'AI reply providers unavailable' });
+      return res.status(422).json({ error: `No draft passed the safety checks (${(draft.rejections || []).join(', ')}) — write this one by hand.`, rejections: draft.rejections || [] });
     }
-
-    const prompt = `You are an expert in local business reputation management and are writing a personalized response on behalf of Waves Pest Control ${locationName}, a family-owned pest control & lawn care company serving ${locationName} and neighboring cities.
-
-Your response must strictly adhere to Google's best practices, be limited to a maximum of two paragraphs, and be written in the first person plural (using "we" and "our").
-
-Input Data
-Review Text: ${review.review_text || '(No comment — just a star rating)'}
-Reviewer Name: ${review.reviewer_name}
-Star Rating: ${review.star_rating}/5
-Customer City: ${customerCity}
-
-Instructions for Generating the Response
-Greeting & Personalization:
-- Start the response with a warm, human greeting.
-- If the reviewer's name is a common English first name (e.g., John, Lisa, Michael), greet them with: "Hello [First Name]!"
-- If the name is uncommon, use: "Hey there!" or "Hello there!".
-
-Core Content & Keyword Integration (Paragraph 1):
-- Tone: Write with a genuine, approachable, and slightly conversational tone, using "we" and "our" consistently.
-- Review with Comment: We must thank the reviewer and specifically comment on the subject of their review. Naturally weave in one or two high-value search terms relevant to the local homeowner (e.g., "general pest control," "rodent removal," or "reliable scheduling") without sounding robotic.
-- Review with NO Comment (Just Stars): If the review text is empty, we must generate a brief, sincere thank you for their rating, focusing on our commitment as a local pest & lawn company. Do not reference a specific service.
-
-Brand Differentiation & Localization (Paragraph 2):
-- Localization Logic: If the Customer City is provided, we must reference our service in that specific city (e.g., "We are glad our team could deliver excellent service in ${customerCity || 'Sarasota'}!"). If the Customer City data is empty, default the reference to: "Southwest Florida."
-- Commitment: Briefly highlight our commitment to effective pest management and our "neighborly" approach.
-- Uniqueness: Ensure the entire response is completely unique and does not repeat phrasing or structure from previous responses.
-
-Closing & Format:
-- Conclude with a warm, sincere closing statement that acts as a final expression of gratitude or soft call to action.
-- Strictly enforce the two-paragraph limit.
-- Signature: The response must end with the exact sign-off on a separate paragraph:
-
-The 🌊 Waves Pest Control ${locationName} Team
-
-Generate the reply now.`;
-
-    const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
-      text: prompt,
-      jsonMode: false,
-      maxTokens: 500,
-    });
-    if (!result.ok) return res.status(502).json({ error: 'AI reply providers unavailable' });
-    const reply = result.text || '';
-    res.json({ reply });
+    // The draft is not stored on the row; the token binds it to the review +
+    // account facts it was grounded on and is validated at publish time.
+    res.json({ reply: draft.text, mode: draft.mode, version: draft.version, groundingToken: AutoReply.groundingToken(review, grounding) });
   } catch (err) {
     logger.error(`AI reply generation failed: ${err.message}`);
     res.status(500).json({ error: err.message });

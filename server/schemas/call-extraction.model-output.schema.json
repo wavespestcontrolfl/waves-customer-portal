@@ -512,6 +512,15 @@
           ],
           "minimum": 0
         },
+        "bedroom_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 20,
+          "description": "Bedroom count of the caller's dwelling UNIT (apartment/condo) as SPOKEN on the call — 'one-bedroom' = 1, 'studio' = 0. null unless stated. Never infer from square footage, rent, or property type."
+        },
         "pets_on_property": {
           "type": "object",
           "additionalProperties": false,

@@ -4,6 +4,8 @@
 const db = require('../models/db');
 const { auditServiceCatalogChange, auditServicePackageChange } = require('./audit-log');
 const { inferCloseoutDefaults } = require('./service-closeout-requirements');
+const { refreshCatalogNames } = require('./service-catalog-names');
+const logger = require('./logger');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -425,7 +427,7 @@ async function createService(data, { audit } = {}) {
     const [row] = await trx('services').insert(insert).returning('*');
     await writeCatalogAudit('create', { after: row, audit, trx });
     return row;
-  });
+  }).then(refreshAfterCatalogWrite);
 }
 
 /**
@@ -541,20 +543,43 @@ async function updateService(id, data, { audit } = {}) {
       await writeCatalogAudit(changeType, { before, after: row, references: archiveReferences, audit, trx });
     }
     return row;
+  }).then(refreshAfterCatalogWrite);
+}
+
+// A renamed/created catalog service should display under its new name
+// without waiting for the 10-minute refresh. Fire-and-forget: the write is
+// already committed, so the admin response never waits on (or fails from)
+// a display-cache query (codex P1).
+function refreshAfterCatalogWrite(row) {
+  refreshCatalogNames().catch((err) => {
+    logger.error(`[service-library] catalog-name cache refresh failed: ${err.message}`);
   });
+  return row;
 }
 
 /**
  * Soft-delete (deactivate)
  */
 async function deactivateService(id, { audit } = {}) {
-  const before = await db('services').where({ id }).first();
-  if (!before) return null;
-  const references = await getServiceReferences(before);
-  if (references?.blocking_total > 0) {
-    throw conflictError('Service is still referenced and cannot be archived', { references });
-  }
+  // Reference guard and archive write share ONE transaction with the catalog
+  // row locked (codex #3581). What the lock guarantees: concurrent archives
+  // of the same row serialize, and the check + write see one consistent
+  // snapshot instead of a pre-check that could go stale before the UPDATE.
+  // What it does NOT guarantee: a writer that inserts a reference WITHOUT
+  // reading this row under the same lock (name-based bookings, add-ons) can
+  // still land after the check — full atomicity would need an advisory lock
+  // taken by every reference writer, which is out of this change's scope.
+  // Residual exposure is bounded: catalog resolution only links rows with
+  // is_active = true (slot-reservation, estimate-converter), so an archived
+  // row cannot be newly LINKED; a text-only late reference is a display
+  // label, not a lane.
   return db.transaction(async (trx) => {
+    const before = await trx('services').where({ id }).forUpdate().first();
+    if (!before) return null;
+    const references = await getServiceReferences(before, trx);
+    if (references?.blocking_total > 0) {
+      throw conflictError('Service is still referenced and cannot be archived', { references });
+    }
     const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
     if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
     return row;

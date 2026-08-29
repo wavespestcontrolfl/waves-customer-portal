@@ -15,6 +15,7 @@
  *   APNS_PRODUCTION — 'true' → prod APNs host; otherwise sandbox
  */
 const http2 = require('http2');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const logger = require('./logger');
 
@@ -74,6 +75,22 @@ function providerToken(nowMs = Date.now()) {
  * into an APNs payload. Extra keys ride along as top-level data (read by the
  * Capacitor push listener in client/src/native/nativePush.js).
  */
+/**
+ * Pure: APNs `apns-collapse-id` for a push. Mirrors the web-push `tag`
+ * contract — a redelivery with the same tag REPLACES the banner instead of
+ * stacking a second one (a stale-lease retry after a crash, a re-fired
+ * SMS bell). Apple caps the header at 64 bytes.
+ */
+function apnsCollapseId(tag) {
+  if (!tag) return null;
+  const s = String(tag);
+  if (Buffer.byteLength(s) <= 64) return s;
+  // Hash, never truncate: tags put the distinguishing suffix LAST (e.g.
+  // customer id + decision id), so a prefix cut would collapse distinct
+  // pushes into one (codex r6). sha256 hex is exactly 64 bytes.
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
 function buildApnsPayload(notification = {}) {
   const { title, body, badge, sound, url, aps: _ignore, ...rest } = notification;
   const aps = {
@@ -153,7 +170,7 @@ function send(deviceToken, notification) {
     // Any synchronous throw building/sending the request also fails soft.
     try {
       const body = Buffer.from(JSON.stringify(buildApnsPayload(notification)));
-      const req = client.request({
+      const headers = {
         ':method': 'POST',
         ':path': `/3/device/${deviceToken}`,
         authorization: `bearer ${token}`,
@@ -161,7 +178,10 @@ function send(deviceToken, notification) {
         'apns-push-type': 'alert',
         'content-type': 'application/json',
         'content-length': body.length,
-      });
+      };
+      const collapseId = apnsCollapseId(notification?.tag);
+      if (collapseId) headers['apns-collapse-id'] = collapseId;
+      const req = client.request(headers);
 
       let status = 0;
       let data = '';
@@ -204,4 +224,5 @@ module.exports = {
   signProviderToken,
   buildApnsPayload,
   classifyApnsResponse,
+  apnsCollapseId,
 };

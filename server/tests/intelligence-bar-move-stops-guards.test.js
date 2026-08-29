@@ -388,3 +388,52 @@ test('proposal (unconfirmed) lists only movable stops and flags the terminal one
   expect(result.stops.map((s) => s.id)).toEqual(['svc-ok']);
   expect(result.skipped_terminal).toEqual([{ id: 'svc-done', status: 'no_show' }]);
 });
+
+test('GATE_ADMIN_COLLECTIVE_MOVE on: a recurring stop is refused on the PROPOSAL and the commit alike (skipped_collective) — the confirmed pass moves exactly the proposed set', async () => {
+  process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+  try {
+    const rows = () => [stop('svc-rec', 'confirmed', { is_recurring: true }), stop('svc-one', 'pending')];
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue(rows()) }));
+    const proposal = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-rec', 'svc-one'], new_date: '2099-01-15' });
+    expect(proposal.proposal).toBe(true);
+    expect(proposal.stop_count).toBe(1);
+    expect(proposal.stops.map((s) => s.id)).toEqual(['svc-one']);
+    expect(proposal.skipped_collective).toEqual([{ id: 'svc-rec', status: 'confirmed', reason: 'collective_move_required' }]);
+
+    const listChain = chain({ select: jest.fn().mockResolvedValue(rows()) });
+    const update = chain();
+    const svcSeq = [chain(), update];
+    const logInsert = chain();
+    let svcIdx = 0;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        if (listChain.select.mock.calls.length === 0) return listChain;
+        return svcSeq[svcIdx++];
+      }
+      if (table === 'reschedule_log') return logInsert;
+      if (table === 'job_status_history') return chain();
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+    const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-rec', 'svc-one'], new_date: '2099-01-15', confirmed: true });
+    expect(result).toMatchObject({ success: true, moved_count: 1 });
+    expect(result.stops.map((s) => s.id)).toEqual(['svc-one']);
+    expect(result.skipped_collective).toEqual(proposal.skipped_collective);
+    expect(update.update).toHaveBeenCalledTimes(1);
+    expect(update.update.mock.calls[0][0]).toMatchObject({ scheduled_date: '2099-01-15' });
+  } finally {
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  }
+});
+
+test('GATE_ADMIN_COLLECTIVE_MOVE on: a selection of only recurring stops errors on the proposal instead of promising a move that would commit nothing', async () => {
+  process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+  try {
+    db.mockImplementation(() => chain({ select: jest.fn().mockResolvedValue([stop('svc-rec', 'confirmed', { is_recurring: true })]) }));
+    const result = await executeScheduleTool('move_stops_to_day', { service_ids: ['svc-rec'], new_date: '2099-01-15' });
+    expect(result.proposal).toBeUndefined();
+    expect(result.error).toMatch(/recurring-plan visit/);
+    expect(result.skipped_collective).toEqual([{ id: 'svc-rec', status: 'confirmed', reason: 'collective_move_required' }]);
+  } finally {
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  }
+});

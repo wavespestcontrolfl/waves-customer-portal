@@ -24,6 +24,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+  planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/tech-status', () => ({
@@ -70,6 +71,7 @@ function chain(overrides = {}) {
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
 }
@@ -107,9 +109,11 @@ function wireRescheduleMocks(svc) {
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     if (table === 'scheduled_services') return trxScheduled;
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -120,6 +124,8 @@ function wireRescheduleMocks(svc) {
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
+    // The series writer always looks up a prior operation_key first — none here.
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected db table ${table}`);
   });
 
@@ -430,11 +436,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -444,6 +452,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -488,11 +498,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -502,6 +514,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -552,11 +566,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const reminderRead = chain({ first: jest.fn().mockResolvedValue({ id: 'ar-2', customer_id: 'cust-1', appointment_time: new Date('2026-12-01T13:00:00Z') }) });
     const reminderUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
     const reminderQueue = [reminderRead, reminderUpdate];
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       if (table === 'appointment_reminders') return reminderQueue.shift();
       throw new Error(`Unexpected trx table ${table}`);
     });
@@ -567,6 +583,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -629,11 +647,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -643,6 +663,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -683,11 +705,13 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
 
     // Month-based order: siblings SELECT, parent UPDATE, seriesClash probe,
     // anchor UPDATE.
-    const scheduledQueue = [siblingsQuery, parentUpdate, seriesClashProbe, anchorUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, parentUpdate, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return chain();
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -697,6 +721,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 

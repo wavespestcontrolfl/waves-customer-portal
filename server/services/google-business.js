@@ -10,11 +10,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
 const { runExclusive } = require('../utils/cron-lock');
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function isDraftReply(reply) {
-  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
-}
+const { DRAFT_REPLY_PREFIX } = require('./review-reply/draft-prefix');
 
 function starRatingToNumber(value) {
   if (typeof value === 'number') return value;
@@ -88,6 +84,27 @@ const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
 // produces an opaque SyntaxError that bubbles up to the user as "Unexpected
 // token '<'". Read as text first, only JSON.parse when the body looks like
 // JSON, and surface the raw status + a truncated body on anything else.
+// A mutation whose request was sent but whose response never arrived
+// (ECONNRESET, socket hang-up, abort) may have been applied by Google.
+// Flag it so the reply publisher parks for reconciliation instead of
+// treating it as a definitive rejection and retrying the write (codex r64).
+// Failures that happen BEFORE a request can be sent (DNS, refused
+// connection, unreachable network, TLS handshake / certificate) — Google
+// never received the mutation, so they are ordinary retryable failures
+// (codex r72). Everything else (reset, abort, socket errors mid-flight) is
+// ambiguous.
+const PRE_SEND_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL', 'ERR_INVALID_URL', 'UND_ERR_CONNECT_TIMEOUT', 'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_HANDSHAKE_TIMEOUT', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ERR_SSL_WRONG_VERSION_NUMBER', 'EPROTO']);
+function isPreSendFailure(e) {
+  const code = String(e?.cause?.code || e?.code || '');
+  if (PRE_SEND_CODES.has(code)) return true;
+  if (/^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_)/.test(code)) return true;
+  return /\b(?:getaddrinfo|certificate|handshake|ssl|tls)\b/i.test(String(e?.cause?.message || ''));
+}
+async function mutationFetch(url, init) {
+  try { return await fetch(url, init); }
+  catch (e) { if (e && typeof e === 'object' && !isPreSendFailure(e)) e.transport = true; throw e; }
+}
+
 async function readJsonOrThrow(res, label) {
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
@@ -252,21 +269,24 @@ class GoogleBusinessService {
   // =========================================================================
   // REVIEWS
   // =========================================================================
-  async getReviews(locationResourceName, locationId, pageSize = 50, pageToken = null) {
+  async getReviews(locationResourceName, locationId, pageSize = 50, pageToken = null, { signal } = {}) {
     const headers = await this._getHeaders(locationId);
     const params = new URLSearchParams({ pageSize: String(pageSize) });
     if (pageToken) params.set('pageToken', pageToken);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/reviews?${params.toString()}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
     const data = await readJsonOrThrow(res, 'GBP getReviews');
     return data;
   }
 
-  async getAllLocationReviews(locationResourceName, locationId, pageSize = 50) {
+  // `signal` lets a caller with a total deadline cancel the paginated
+  // lookup (codex r56): no orphaned page fetches after the caller times out.
+  async getAllLocationReviews(locationResourceName, locationId, pageSize = 50, { signal } = {}) {
     const reviews = [];
     let pageToken = null;
     do {
-      const page = await this.getReviews(locationResourceName, locationId, pageSize, pageToken);
+      if (signal?.aborted) throw new Error('GBP review lookup aborted (deadline)');
+      const page = await this.getReviews(locationResourceName, locationId, pageSize, pageToken, { signal });
       reviews.push(...(page.reviews || []));
       pageToken = page.nextPageToken || null;
     } while (pageToken);
@@ -287,7 +307,9 @@ class GoogleBusinessService {
     return allReviews;
   }
 
-  async replyToReview(reviewResourceName, replyText, locationId) {
+  // `signal` (AbortSignal) lets a caller with a total deadline actually cancel
+  // the request instead of just racing a timer (auto-reply publisher).
+  async replyToReview(reviewResourceName, replyText, locationId, { signal } = {}) {
     // Determine location from resource name if not provided
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
@@ -298,11 +320,31 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }) });
-    return readJsonOrThrow(res, 'GBP replyToReview');
+    const res = await mutationFetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }), ...(signal ? { signal } : {}) });
+    // A 2xx whose body cannot be read or parsed is an APPLIED mutation with
+    // an unprovable result — flag it like a transport failure so the
+    // publisher parks for reconciliation instead of retrying (codex r65).
+    try { return await readJsonOrThrow(res, 'GBP replyToReview'); }
+    catch (e) { if (res.ok && e && typeof e === 'object') e.transport = true; throw e; }
   }
 
-  async deleteReply(reviewResourceName, locationId) {
+  // Single-review read (v4 GET {name}) — used by the reply publisher to see
+  // Google's CURRENT owner reply inside its publish claim, since the hourly
+  // sync cannot close the "owner replied in Google after the last sync" gap.
+  async getReview(reviewResourceName, locationId, { signal } = {}) {
+    if (!locationId) {
+      const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
+      if (match) {
+        const loc = WAVES_LOCATIONS.find(l => l.googleAccountId === match[1]);
+        locationId = loc?.id || 'bradenton';
+      }
+    }
+    const headers = await this._getHeaders(locationId);
+    const res = await fetch(`https://mybusiness.googleapis.com/v4/${reviewResourceName}`, { headers, ...(signal ? { signal } : {}) });
+    return readJsonOrThrow(res, 'GBP getReview');
+  }
+
+  async deleteReply(reviewResourceName, locationId, { signal } = {}) {
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
       if (match) {
@@ -312,7 +354,7 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'DELETE', headers });
+    const res = await mutationFetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);
@@ -755,13 +797,51 @@ class GoogleBusinessService {
       .where('reviewer_name', '!=', '_stats')
       .whereNull('missing_since')
       .select('id', 'reviewer_name', 'review_created_at');
-    return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
+    const hit = candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at));
+    // Callers read the FULL row (reply, draft/auto-reply state, publish
+    // claim) off `existing` — the fuzzy candidate projection above is not it.
+    return hit ? (await db('google_reviews').where({ id: hit.id }).first()) || null : null;
+  }
+
+  // A reviewer edit (rating / text / name) on a review the auto-reply lane
+  // has touched: a POSTED reply may no longer fit (5★ praise → 1★
+  // complaint) — park it for a person; a pipeline-owned DRAFT was written
+  // for the old review — clear it and requeue (no bell: the runner redrafts).
+  // Compare-and-set on the state the snapshot saw. Shared by the GBP upsert
+  // and the Places fallback.
+  async _reconcileReviewEdit(existing, normalized, { conn = db, bell = true } = {}) {
+    const { applyReviewEditFields } = require('./review-reply/runner');
+    const wasPosted = existing.auto_reply_status === 'posted';
+    const n = await applyReviewEditFields(existing.id, existing, normalized, { conn });
+    if (n === 0) return false;
+    if (!wasPosted) return true;
+    // Inside a caller's transaction the bell is deferred to after commit
+    // (see _bellEditedAfterPost); the Places path bells inline.
+    if (!bell) return 'posted_parked';
+    await this._bellEditedAfterPost(existing, normalized);
+    return true;
+  }
+
+  async _bellEditedAfterPost(existing, normalized) {
+    // One bell for every "review changed under a posted reply" path
+    // (sync edit here, manual re-attribution in review-incentives).
+    const { notifyReviewEditedAfterPost } = require('./review-reply/runner');
+    await notifyReviewEditedAfterPost(existing, { location_id: normalized.location_id, star_rating: normalized.star_rating, cause: 'edit' });
+    return true;
   }
 
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
-    const replyFields = isDraftReply(existing?.review_reply)
+    // Reply fields from the feed snapshot — deferred under a live publish
+    // claim, replacing a local draft when Google has an owner reply, and
+    // preserving a draft against an empty feed (services/review-reply/runner).
+    const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
+    // Existing rows: reply fields are written by applySyncReplyFields as a
+    // separate statement conditioned on the publish claim at write time.
+    // New rows carry them in the insert (no claim can exist yet).
+    const existingReplyFields = existing ? syncReplyFields(existing, normalized, { fnNow: db.fn.now() }) : null;
+    const replyFields = existing
       ? {}
       : {
           review_reply: normalized.owner_reply,
@@ -802,11 +882,71 @@ class GoogleBusinessService {
       : db.fn.now();
     let result;
     if (existing) {
-      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+      // A Places-first row that parked waiting for its GBP identity re-enters
+      // the auto-reply queue once this authoritative sync attaches the name.
+      const { applyRequeueOnIdentity } = require('./review-reply/runner');
+      // Content update + reply sync + reviewer-edit reconciliation commit
+      // TOGETHER: if the edit's park/requeue were written after the content
+      // in a separate statement, a crash in between would leave the next
+      // sync seeing the edited text as the existing fingerprint (no change
+      // detected) and a posted reply attached to a rewritten review.
+      const edited = await db.transaction(async (trx) => {
+        // The row as it is NOW, locked for this transaction (hook P1): a
+        // publisher can move it queued/drafted → posted between the pre-
+        // transaction snapshot and here; reconciling against the stale
+        // snapshot would CAS zero rows and leave a now-stale reply 'posted'.
+        const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
+        // An OLDER overlapping runner reaching this row after a newer one
+        // must not write its older snapshot (and must not read the newer
+        // content as a "reviewer edit" and park a valid reply) — codex r47.
+        if (syncStart && live.synced_at && new Date(live.synced_at).getTime() > new Date(syncStart).getTime()) {
+          logger.info(`[gbp] existing row ${existing.id}: older runner yielded to a newer sync token`);
+          return 'yielded';
+        }
+        await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+        // Conditional on the row STILL being parked for that reason (an admin
+        // Skip in the meantime wins).
+        await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
+        const { validatePromotionAccountFacts } = require('./review-reply/runner');
+        const liveReplyFields = await validatePromotionAccountFacts(live, syncReplyFields(live, normalized, { fnNow: db.fn.now() }), { conn: trx });
+        const promotedParked = liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post'
+          && (await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null })) > 0;
+        if (!promotedParked && !(liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post')) {
+          await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null });
+        }
+        // A reviewer edit: a POSTED reply parks for a person, a pipeline
+        // draft is cleared and requeued. Judged on the row AFTER the reply
+        // sync (a landed google_uncertain / persist_failed write promoted to
+        // posted just above must park like any posted reply — codex r39),
+        // with the review CONTENT from the pre-update snapshot.
+        const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
+        const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
+        const reconciled = await this._reconcileReviewEdit(basis, normalized, { conn: trx, bell: false });
+        return promotedParked ? 'posted_parked' : reconciled;
+      });
+      // A yielded (older) runner performs NONE of the side effects below
+      // (attribution marks, thank-you enrollment, reinstatement clear): its
+      // snapshot is stale by definition (codex r48).
+      if (edited === 'yielded') return { id: existing.id, inserted: false, yielded: true };
+      // The action bell only after the park is durable.
+      if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
       result = { id: existing.id, inserted: false };
     } else {
       try {
-        const [insertedReview] = await db('google_reviews').insert(row).returning('id');
+        // Auto-reply lane: a review the sync sees for the FIRST time enters
+        // the jittered reply queue in the SAME insert (atomic — a separate
+        // post-insert hook that failed would leave the row unqueued forever,
+        // since later syncs take the update path). Deploy-forward only: rows
+        // that existed before the lane shipped never gain these columns.
+        // Lazy require: the runner depends on this service.
+        const { autoReplyInsertFields } = require('./review-reply/runner');
+        const autoReply = autoReplyInsertFields({
+          location_id: normalized.location_id,
+          reviewer_name: normalized.reviewer_name,
+          owner_reply: normalized.owner_reply,
+          review_created_at: normalized.review_created_at,
+        });
+        const [insertedReview] = await db('google_reviews').insert({ ...row, ...autoReply }).returning('id');
         result = { id: insertedReview?.id || insertedReview, inserted: true };
       } catch (err) {
         // Overlapping runners (hourly job vs manual sync vs deploy instance)
@@ -824,19 +964,27 @@ class GoogleBusinessService {
         // (built with existing = null) would overwrite both and bypass the
         // draft-preservation rule above.
         const { review_reply: _loserReply, reply_updated_at: _loserReplyAt, ...providerRow } = row;
-        const winnerReplyFields = isDraftReply(winner.review_reply)
-          ? {}
-          : {
-              review_reply: normalized.owner_reply,
-              reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
-            };
-        await db('google_reviews').where({ id: winner.id }).update({
+        const winnerReplyFields = syncReplyFields(winner, normalized, { fnNow: db.fn.now() });
+        // An OLDER runner losing the race must not write its older snapshot
+        // over the winner's newer content (codex r40): the provider-content
+        // write and the reply sync apply only while this runner's fetch
+        // start is at least as new as the stored liveness token.
+        const loserWrite = db('google_reviews').where({ id: winner.id });
+        if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
+        const loserUpdated = await loserWrite.update({
           ...providerRow,
           synced_at: monotonicSyncedAt,
           // Same existing-link-first rule as the row build above.
           customer_id: winner.customer_id || customerId || null,
-          ...winnerReplyFields,
         });
+        if ((Array.isArray(loserUpdated) ? loserUpdated.length : loserUpdated) > 0) {
+          await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
+        } else {
+          // A yielded loser performs NONE of the attribution / thank-you /
+          // reinstatement side effects below: its snapshot is stale (codex r50).
+          logger.info(`[gbp] insert race: older runner yielded to the newer winner row ${winner.id}`);
+          return { id: winner.id, inserted: false, yielded: true };
+        }
         result = { id: winner.id, inserted: false };
       }
     }
@@ -987,6 +1135,48 @@ class GoogleBusinessService {
             }
             existing = candidate;
           } else {
+            // Different content on a row the auto-reply lane has touched:
+            // during a GBP outage this is how a reviewer edit looks (the
+            // Places id moved with the edit). The row is still not merged or
+            // overwritten — only its auto-reply state is reconciled (posted →
+            // parked for a person; pipeline draft → cleared + requeued). A
+            // same-name different account costs one human glance at the
+            // bell; a rewritten complaint left answered by praise is the
+            // worse failure.
+            // Display names are not unique (hook P1): only the exact-second
+            // identity proof (Places `time` == stored creation instant, the
+            // same corroboration the stamp clear and synced_at refresh use)
+            // may let this sample mutate the candidate's auto-reply state.
+            // An uncorroborated same-name sample is a different account until
+            // the authoritative GBP feed says otherwise.
+            // An EDIT moves the Places `time` (documented above), so the
+            // exact-second match cannot corroborate the edited review itself;
+            // the reviewer's profile photo URL is the stable per-account
+            // identity the sample also carries (codex r47).
+            // Ordering first (codex r52): an older sample finishing after a
+            // newer authoritative sync must not park / clear anything.
+            if (sampleSyncStart && candidate.synced_at && new Date(candidate.synced_at).getTime() > sampleSyncStart.getTime()) {
+              logger.info(`[gbp] Places sample: older runner yielded on ambiguous candidate ${candidate.id}`);
+              continue;
+            }
+            const editPlacesSec = review.time ? Math.floor(review.time) : null;
+            const editCandidateSec = candidate.review_created_at ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000) : null;
+            const editPhoto = String(review.profile_photo_url || '').trim();
+            const editCorroborated = (editPlacesSec != null && editCandidateSec != null && editPlacesSec === editCandidateSec)
+              || (!!editPhoto && editPhoto === String(candidate.reviewer_photo_url || '').trim());
+            if (editCorroborated && !candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
+              // Persist the corroborated edit WITH the reconciliation (codex
+              // r59): a requeued draft must redraft from the new text, and the
+              // action bell's card must show what the reviewer now says.
+              const placesEditContent = { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id };
+              const edited = await db.transaction(async (trx) => {
+                const liveCand = (await trx('google_reviews').where({ id: candidate.id }).forUpdate().first()) || candidate;
+                if (sampleSyncStart && liveCand.synced_at && new Date(liveCand.synced_at).getTime() > sampleSyncStart.getTime()) return 'yielded';
+                await trx('google_reviews').where({ id: candidate.id }).update({ star_rating: placesEditContent.star_rating, review_text: placesEditContent.review_text, ...(editPhoto ? { reviewer_photo_url: editPhoto } : {}) });
+                return this._reconcileReviewEdit(liveCand, placesEditContent, { conn: trx, bell: false });
+              });
+              if (edited === 'posted_parked') await this._bellEditedAfterPost(candidate, placesEditContent);
+            }
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
             continue;
           }
@@ -1033,11 +1223,52 @@ class GoogleBusinessService {
         if (identityCorroborated) {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
-        if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
-          upd.review_reply = ownerReply;
-          upd.reply_updated_at = db.fn.now();
-        }
-        await db('google_reviews').where({ id: existing.id }).update(upd);
+        // Content update + reviewer-edit reconciliation commit together (same
+        // reason as the authoritative upsert): a crash between them would
+        // leave the next sync seeing the edited text as the existing
+        // fingerprint. The action bell fires only after commit.
+        const placesEdit = { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id };
+        const edited = await db.transaction(async (trx) => {
+          // Same live re-read under the lock as the authoritative upsert.
+          const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
+          // An older Places sample (its fetch start older than the stored
+          // token) yields before touching content or reply/edit state
+          // (codex r48).
+          if (sampleSyncStart && live.synced_at && new Date(live.synced_at).getTime() > sampleSyncStart.getTime()) {
+            logger.info(`[gbp] Places sample: older runner yielded on row ${existing.id}`);
+            return 'yielded';
+          }
+          await trx('google_reviews').where({ id: existing.id }).update(upd);
+          // Owner reply first (a landed uncertain write becomes posted), then
+          // the reviewer-edit reconciliation on the post-sync row (codex r39).
+          // A Places owner reply that differs from the local one goes through
+          // the canonical sync path: it fills an empty slot, replaces a
+          // "[DRAFT]", and — when the owner edited our POSTED reply directly
+          // on Google during a GBP outage — replaces the stale text and
+          // closes the automatic state (edited_on_google). Judged against the
+          // row AS IT IS after the reconciliation above (hook P1: a cleared
+          // draft must not make this CAS miss), inside the same transaction.
+          // An ABSENT Places reply is still never a downgrade (the sample is
+          // not authoritative for deletions).
+          let placesPromotedParked = false;
+          if (ownerReply) {
+            const after = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || live;
+            if (ownerReply.trim() !== String(after.review_reply || '').trim()) {
+              const { syncReplyFields, applySyncReplyFields, validatePromotionAccountFacts } = require('./review-reply/runner');
+              const placesFields = await validatePromotionAccountFacts(after, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx });
+              const n = await applySyncReplyFields(existing.id, placesFields, { conn: trx, expectedReply: after.review_reply ?? null });
+              // A landed write promoted straight into a park (review /
+              // account facts moved) needs the bell too (codex r54).
+              placesPromotedParked = n > 0 && placesFields.auto_reply_status === 'parked' && placesFields.auto_reply_reason === 'review_edited_after_post';
+            }
+          }
+          const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
+          const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
+          const reconciled = await this._reconcileReviewEdit(basis, placesEdit, { conn: trx, bell: false });
+          return placesPromotedParked ? 'posted_parked' : reconciled;
+        });
+        if (edited === 'yielded') continue;
+        if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
         // Reinstatement clear, mirroring _upsertGbpReview: the main update
         // never touches missing_since; the clear is a separate conditional
         // UPDATE against the CURRENT column value with the ordering token,
@@ -1061,6 +1292,12 @@ class GoogleBusinessService {
           }
         }
       } else {
+        // Same atomic auto-reply queueing as the GBP insert: a review first
+        // seen through the Places fallback is matched by identity once GBP
+        // recovers and takes the update path, so this insert is its only
+        // chance to enter the pipeline.
+        const { autoReplyInsertFields } = require('./review-reply/runner');
+        const placesCreatedAt = new Date(review.time * 1000).toISOString();
         await db('google_reviews').insert({
           google_review_id: googleId,
           location_id: loc.id,
@@ -1070,9 +1307,10 @@ class GoogleBusinessService {
           review_text: review.text || null,
           review_reply: ownerReply,
           reply_updated_at: ownerReply ? new Date() : null,
-          review_created_at: new Date(review.time * 1000).toISOString(),
+          review_created_at: placesCreatedAt,
           customer_id: customerId,
           synced_at: sampleSyncStart.toISOString(),
+          ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt }),
         }).returning('id');
         newCount++;
       }

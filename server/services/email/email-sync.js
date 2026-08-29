@@ -14,6 +14,12 @@ async function syncEmails() {
 
     const state = await db('email_sync_state').first();
 
+    // Durable retry for the customer-email bell: Gmail never re-emits a
+    // message, so a claim released by a transient delivery failure would be
+    // lost forever without this — every run re-offers unclaimed eligible
+    // rows (idempotent via the atomic claim) (hook P1).
+    await sweepUnclaimedCustomerEmailBells().catch((err) => logger.warn(`[email-sync] bell sweep failed: ${err.message}`));
+
     if (state?.last_history_id) {
       return incrementalSync(state);
     } else {
@@ -39,14 +45,37 @@ async function fullSync(state) {
     const fullSyncLimit = process.env.GMAIL_FULL_SYNC_LIMIT
       ? Number.parseInt(process.env.GMAIL_FULL_SYNC_LIMIT, 10)
       : null;
+    // First connect: persist the scan boundary ONCE, before the remote
+    // listing begins, and reuse it on every retry — mail received after it
+    // (during the listing, or between a failed pass and its retry) is new
+    // and takes the normal path (codex P1).
+    const initialConnect = !state?.initial_sync_completed_at;
+    let scanBoundary = state?.initial_scan_started_at ? new Date(state.initial_scan_started_at) : null;
+    if (initialConnect && !scanBoundary && state?.id) {
+      scanBoundary = new Date();
+      await db('email_sync_state').where('id', state.id).whereNull('initial_scan_started_at').update({ initial_scan_started_at: scanBoundary });
+      const fresh = await db('email_sync_state').where('id', state.id).first('initial_scan_started_at');
+      if (fresh?.initial_scan_started_at) scanBoundary = new Date(fresh.initial_scan_started_at); // another pod may have won
+    }
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
+    // fullSync serves two cases: first connect (mailbox HISTORY, never
+    // notify) and expired-history-cursor recovery (genuinely new arrivals
+    // are among these, so the 24h age guard decides, as for an incremental
+    // sync). Decided from the sync-state row read BEFORE the remote scan —
+    // durable across pods: a pod that has never completed a sync has no
+    // last_sync_at, so two concurrent first syncs both see "initial" (both
+    // stay silent); recovery has a completed prior sync (hook P1).
+    // initial_sync_completed_at is written exactly once, when a full sync
+    // COMPLETES (failed/incomplete runs also stamp last_sync_at, so that
+    // cannot be the signal — codex P1). Null ⇒ this IS the first connect.
 
     let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
-        const inserted = await upsertEmail(parsed);
+        const receivedTs = parsed.received_at ? new Date(parsed.received_at).getTime() : 0;
+        const inserted = await upsertEmail(parsed, { backfill: initialConnect && Boolean(scanBoundary) && receivedTs < scanBoundary.getTime() });
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
@@ -82,6 +111,9 @@ async function fullSync(state) {
     await db('email_sync_state').where('id', state.id).update({
       last_history_id: anchorHistoryId,
       last_sync_at: new Date(),
+      // First COMPLETED full sync — set once, never cleared (see migration
+      // 20260828000041); later full syncs are recoveries, not first connects.
+      ...(state?.initial_sync_completed_at ? {} : { initial_sync_completed_at: new Date() }),
       errors: null,
     });
     if (newEmails > 0) {
@@ -188,14 +220,16 @@ async function incrementalSync(state) {
   }
 }
 
-async function upsertEmail(parsed) {
+async function upsertEmail(parsed, { backfill = false } = {}) {
   const existing = await db('emails').where('gmail_id', parsed.gmail_id).first();
 
   // Match sender to customer
   let customerId = null;
   if (parsed.from_address) {
+    // Case-insensitive, like the request/complaint handlers (codex P2): a
+    // sender whose address differs only by casing is the same customer.
     const customer = await db('customers')
-      .where('email', parsed.from_address)
+      .whereRaw('LOWER(email) = ?', [String(parsed.from_address).trim().toLowerCase()])
       .first();
     if (customer) customerId = customer.id;
   }
@@ -248,6 +282,9 @@ async function upsertEmail(parsed) {
   };
 
   if (existing) {
+    // Crash-recovery: a row inserted by a sync that died before its bell
+    // fired is re-seen here. Ring at most once (idempotent on emailId).
+    await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => {});
     const labelIds = parsed.label_ids || [];
     // Update read/starred/archive label status
     await db('emails').where('id', existing.id).update({
@@ -308,8 +345,26 @@ async function upsertEmail(parsed) {
     return blockedInsert.length > 0; // true only if this sync actually inserted it (else a concurrent sync won)
   }
 
+  // First-connect history is pre-claimed at insert so the retry sweep can
+  // never re-offer it (hook P1). Column guard: the migration runs prebuild,
+  // but a sync racing an older pod must not fail the insert.
+  if (backfill && await bellClaimColumnExists()) emailData.customer_bell_settled_at = new Date();
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
   if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
+  // A new inbound email from someone on the customer list rings the admin
+  // bell like a text does (owner ruling 2026-08-28) — but only AFTER the
+  // async classifier has had its say (spam / marketing_newsletter arrive
+  // later than the insert), so the bell fires from inside that path below.
+  const bellCandidate = customerEmailBellEligible({
+    customerId,
+    classification: emailData.classification,
+    listUnsubscribe: parsed.list_unsubscribe,
+    labelIds: parsed.label_ids,
+    authenticationResults: parsed.authentication_results,
+    fromAddress: parsed.from_address,
+    receivedAt: parsed.received_at,
+    backfill,
+  });
   const [email] = inserted;
 
   // Store list_unsubscribe for auto-unsubscribe
@@ -358,19 +413,278 @@ async function upsertEmail(parsed) {
   // to false (Codex r10).
   const approvalControl = approvalControlEarly;
 
+  // Control messages never ring AND must never reach the recovery sweep,
+  // which would otherwise read their unclassified row as a crash recovery
+  // and run the classifier (auto-actions) over them. Pre-claim the bell so
+  // the sweep skips them (hook P1). Best-effort: a miss here is caught by
+  // the sweep's own control check.
+  if ((proofHandled || approvalControl) && await bellClaimColumnExists()) {
+    await settleCustomerEmailBell(email.id).catch(() => {});
+  }
+
   // Classify in background (don't block sync)
   if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
-    setImmediate(() => {
-      (async () => {
-        const { classifyEmail } = require('./email-classifier');
-        await classifyEmail(email);
-      })().catch((err) => {
-        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+    const { classifyEmail } = require('./email-classifier');
+    if (bellCandidate) {
+      // Bell candidates only: classification + bell are AWAITED so the sync
+      // cursor never advances past a message whose bell has not happened
+      // (a process exit there would otherwise lose it). Everything else
+      // keeps the bounded background path — a full mailbox sync must not
+      // serialize an LLM call per message (hook P1 ×2).
+      // The per-email claim is taken BEFORE classification so a recovery
+      // sweep on another pod can't classify (and auto-act on) the same row
+      // concurrently — whoever owns the claim classifies + rings (hook P1).
+      // Column guard: before migration 20260828000042 runs the lease
+      // columns don't exist — fall back to the plain background classify.
+      const lease = (await bellClaimColumnExists()) ? await claimCustomerEmailBell(email.id) : null;
+      if (lease) {
+        const classified = await classifyOwned(email);
+        await ringCustomerEmailBell(email, { customerId, parsed, classified, lease });
+      }
+    } else {
+      setImmediate(() => {
+        classifyEmail(email).catch((err) => {
+          logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+        });
       });
-    });
+    }
   }
 
   return true; // new email
 }
 
-module.exports = { syncEmails };
+const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Re-offer unclaimed, still-eligible customer emails from the last 24h.
+ * Cheap (indexed on customer_id / received_at), bounded, idempotent.
+ */
+// Only a confirmed `true` is cached: a transient schema-check failure must
+// not disable the sweep for the process lifetime (hook P1).
+let bellClaimColumnKnown = false;
+async function bellClaimColumnExists() {
+  if (!bellClaimColumnKnown) {
+    bellClaimColumnKnown = (await db.schema.hasColumn('emails', 'customer_bell_settled_at').catch(() => false)) === true;
+  }
+  return bellClaimColumnKnown;
+}
+
+async function sweepUnclaimedCustomerEmailBells() {
+  if (!(await bellClaimColumnExists())) return 0;
+  const rows = await db('emails')
+    .whereNull('customer_bell_settled_at')
+    // Unclaimed, or a lease that went stale (process died mid-delivery) —
+    // reclaimable, never permanently lost (hook P1).
+    .whereRaw('(customer_bell_claimed_at IS NULL OR customer_bell_claimed_at < ?)', [new Date(Date.now() - BELL_LEASE_MS)])
+    .whereNotNull('customer_id')
+    .where('received_at', '>', new Date(Date.now() - CUSTOMER_EMAIL_BELL_MAX_AGE_MS))
+    .where({ is_archived: false })
+    // Terminal exclusions the DB can see (bulk class, List-Unsubscribe)
+    // never occupy the page (hook P1 — starvation).
+    .whereNull('list_unsubscribe')
+    .where((b) => b.whereNull('classification').orWhereNotIn('classification', [...NEVER_RING_CLASSES]))
+    .orderBy('received_at', 'asc')
+    .limit(50);
+  let rung = 0;
+  for (const row of rows) {
+    const parsed = { from_name: row.from_name, from_address: row.from_address, subject: row.subject, label_ids: row.label_ids || [] };
+    const outcome = await recoverLostCustomerEmailBell(row, { customerId: row.customer_id, parsed, backfill: false }).catch(() => null);
+    if (outcome === 'ineligible' || outcome === 'control') {
+      // ('claimed' = another pod owns it; nothing to do here.)
+      // Terminally ineligible (unauthenticated sender, not in INBOX, control
+      // message): mark handled so it stops occupying the oldest-50 page and
+      // can't starve newer eligible rows (hook P1). Only the sweep stamps —
+      // the history-replay caller leaves the row for a later replay.
+      await settleCustomerEmailBell(row.id).catch(() => {});
+    } else if (outcome === 'offered') {
+      rung += 1;
+    }
+  }
+  return rung;
+}
+
+// Bulk/spam classes the classifier may assign after insert — never ring.
+const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor', 'vendor_invoice', 'vendor_communication']);
+
+/**
+ * Is this row a control message (newsletter proof reply / [EA-…] content
+ * approval reply)? Same two gated checks the insert path makes before
+ * classification — the sweep must never classify these (hook P1).
+ */
+async function isControlMessage(row) {
+  try {
+    const proof = require('../newsletter-proof');
+    if (proof.isProofApprovalEnabled() && proof.parseProofToken(row.subject)) return true;
+  } catch { /* module unavailable = not proof traffic */ }
+  try {
+    const { isApprovalControlMessage } = require('../content/email-approvals');
+    return await isApprovalControlMessage({ subject: row.subject, from_address: row.from_address });
+  } catch { return false; }
+}
+
+/**
+ * A row that exists but was never notified (sync died between insert and
+ * bell): if it is still an eligible candidate and no bell carries its id,
+ * ring now. Idempotent — the bell payload stores emailId.
+ * Returns 'ineligible' | 'control' | 'offered' (the sweep stamps the first
+ * two as handled; 'offered' means the claim was attempted).
+ */
+async function recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }) {
+  // A persisted NON-bulk classification (the crash window is after the
+  // classifier wrote, before the bell) must not disqualify the row.
+  const bulk = existing.classification && NEVER_RING_CLASSES.has(existing.classification);
+  if (!customerEmailBellEligible({
+    customerId: existing.customer_id || customerId,
+    classification: bulk ? existing.classification : null,
+    listUnsubscribe: existing.list_unsubscribe,
+    labelIds: parsed.label_ids,
+    authenticationResults: existing.authentication_results,
+    fromAddress: existing.from_address,
+    receivedAt: existing.received_at,
+    backfill,
+  })) return 'ineligible';
+  if (existing.is_archived) return 'ineligible';
+  if (await isControlMessage(existing)) return 'control';
+  // Own the row BEFORE any classifier auto-action can run (hook P1): the
+  // claim is the cross-pod lock — a concurrent sweep or the insert path on
+  // another pod loses it and does nothing.
+  const lease = await claimCustomerEmailBell(existing.id);
+  if (!lease) return 'claimed';
+  // A row the crash left UNCLASSIFIED (insert landed, classifier never
+  // wrote) gets the same awaited classification the insert path gives a
+  // bell candidate — otherwise spam without a List-Unsubscribe header could
+  // ring through the recovery lane (codex r4). Classifier failure keeps the
+  // insert path's fallback: ring (classified:false).
+  const classified = existing.classification ? true : await classifyOwned(existing);
+  await ringCustomerEmailBell(existing, {
+    customerId: existing.customer_id || customerId, parsed, classified, lease,
+    // A stale lease we took over may have died AFTER its bell was written.
+    reclaimed: Boolean(existing.customer_bell_claimed_at),
+  });
+  return 'offered';
+}
+
+// Lease length for the per-email claim: long enough to cover the awaited
+// classifier + delivery, short enough that a crash is recovered by the next
+// few sweeps (2-minute cadence).
+const BELL_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * Take the per-email lease (emails.customer_bell_claimed_at): succeeds when
+ * the row is unsettled and either unclaimed or its lease went stale. The
+ * returned Date is the fence token — settle/release only apply while the
+ * row still carries it, so a later reclaimer can't be undone by a stale
+ * owner. Null = someone else holds it.
+ */
+async function claimCustomerEmailBell(emailId) {
+  const token = new Date();
+  const claimed = await db('emails').where({ id: emailId })
+    .whereNull('customer_bell_settled_at')
+    .whereRaw('(customer_bell_claimed_at IS NULL OR customer_bell_claimed_at < ?)', [new Date(token.getTime() - BELL_LEASE_MS)])
+    .update({ customer_bell_claimed_at: token });
+  return claimed ? token : null;
+}
+
+/** Terminal: delivered or never-to-ring. Fenced when a token is given. */
+async function settleCustomerEmailBell(emailId, token = null) {
+  let q = db('emails').where({ id: emailId }).whereNull('customer_bell_settled_at');
+  if (token) q = q.where('customer_bell_claimed_at', token);
+  return q.update({ customer_bell_settled_at: new Date() });
+}
+
+/** Classify a row this process owns. Returns whether classification wrote. */
+async function classifyOwned(email) {
+  const { classifyEmail } = require('./email-classifier');
+  try {
+    await classifyEmail(email);
+    return true;
+  } catch (err) {
+    logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+    return false;
+  }
+}
+
+/**
+ * Fire the bell for an already-eligible candidate once classification is
+ * known. Reads the row back (the classifier writes there). Fallback policy
+ * when the classifier FAILED: ring — the sender already passed DMARC
+ * alignment and matches a customer, and a missed customer email costs more
+ * than a rare unwanted bell. An archived row (auto-trashed / bulk) never
+ * rings. Fail-soft: the bell can never fail the sync.
+ */
+async function ringCustomerEmailBell(email, { customerId, parsed, classified, lease, reclaimed = false }) {
+  try {
+    if (!lease) return; // callers always ring under their own lease
+    const row = await db('emails').where('id', email.id).first('classification', 'is_archived');
+    // Archived / bulk after classification: terminal — settle under the
+    // lease (nothing to deliver, nothing to retry).
+    if (!row || row.is_archived || (classified && row.classification && NEVER_RING_CLASSES.has(row.classification))) {
+      await settleCustomerEmailBell(email.id, lease);
+      return;
+    }
+    // Reclaimed a stale lease: the previous owner may have died between
+    // writing the bell and settling. A bell row carrying this emailId means
+    // it delivered — settle, don't ring twice. A push-only delivery leaves
+    // no row; re-sending it is harmless because the push tag is
+    // deterministic per email (pushTagFor) and the browser REPLACES a
+    // notification with the same tag rather than stacking a second one —
+    // settling before dispatch would instead turn that crash into a
+    // permanent loss (hook P1).
+    if (reclaimed) {
+      const prior = await db('notifications').where({ recipient_type: 'admin', category: 'inbound_email' })
+        .whereRaw("metadata->'payload'->>'emailId' = ?", [String(email.id)]).first('id');
+      if (prior) { await settleCustomerEmailBell(email.id, lease); return; }
+    }
+    const { triggerNotification } = require('../notification-triggers');
+    let stats = null;
+    try {
+      stats = await triggerNotification('customer_email_received', {
+        fromName: parsed.from_name || parsed.from_address,
+        subject: parsed.subject,
+        emailId: email.id,
+        customerId,
+      });
+    } finally {
+      // Settle only on a real outcome: a bell written, a push sent, or a
+      // deliberate suppression (prefs/policy). Any other no-delivery (prefs
+      // lookup failed, empty recipients, insert/push failure) releases the
+      // lease so the sweep can retry (hook P1). Both writes are fenced on
+      // the lease token. A crash here leaves the lease to go stale — the
+      // sweep reclaims it and the bell-row check above prevents a repeat.
+      const delivered = Boolean(stats && !stats.error
+        && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
+      if (delivered) {
+        await settleCustomerEmailBell(email.id, lease).catch(() => {});
+      } else {
+        await db('emails').where({ id: email.id, customer_bell_claimed_at: lease })
+          .update({ customer_bell_claimed_at: null }).catch(() => {});
+      }
+    }
+  } catch (e) { logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`); }
+}
+
+/**
+ * Should a new inbound email ring the "email from a customer" bell?
+ * Pure. From is attacker-controlled, so an exact address match is not proof
+ * the customer sent it: the sender must pass DMARC-style alignment
+ * (inbox-hygiene.hasAlignedAuth — the same gate auto-unsubscribe trusts).
+ * Vendor/spam/bulk mail (classification set, or a List-Unsubscribe header)
+ * and anything not in INBOX never ring.
+ */
+function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress, receivedAt, backfill = false, now = Date.now() } = {}) {
+  // A fullSync (first Gmail connect / empty table) is history, whatever its
+  // timestamps say — it never notifies (hook P1). The 24h guard below is the
+  // second line for incremental syncs that replay old messages.
+  if (backfill) return false;
+  if (!customerId || classification || listUnsubscribe) return false;
+  if (!(labelIds || []).includes('INBOX')) return false;
+  // Only NEW arrivals ring: a full mailbox backfill (first connect, empty
+  // table) inserts history and must never bell/push for it (hook P1).
+  const ts = receivedAt ? new Date(receivedAt).getTime() : NaN;
+  if (!Number.isFinite(ts) || now - ts > CUSTOMER_EMAIL_BELL_MAX_AGE_MS) return false;
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const { domainFromAddress } = require('./spam-blocker');
+  return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
+}
+
+module.exports = { syncEmails, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells };

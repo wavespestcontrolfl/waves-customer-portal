@@ -252,6 +252,15 @@ function measurementMetadataFields(li = {}) {
     fields.manualReviewReasons = Array.isArray(li.manualReviewReasons) ? li.manualReviewReasons : [];
   }
   [
+    // Residential-unit bedroom band (GATE_UNIT_BAND_PRICING): pricing
+    // provenance + the customer scope copy ride onto the stored/accepted row.
+    'pricingBasis',
+    'pricingBand',
+    'pricingBandLabel',
+    'bedroomCount',
+    'includedScope',
+    'scopeExclusions',
+    'scopeNote',
     'source',
     'standalone',
     'autoFiredFromRecurringPest',
@@ -772,7 +781,14 @@ function mapV1ToLegacyShape(v1Result) {
   // under — the public preference/floor clamps read it off the stored row
   // (unstamped rows are treated as legacy v1, so every new mapped row must
   // carry it; codex #2966 r2 P2).
-  svcAdd('Pest Control', pestLI, { service: 'pest_control', pricingVersion: pestLI?.pricingVersion });
+  svcAdd('Pest Control', pestLI, {
+    service: 'pest_control',
+    pricingVersion: pestLI?.pricingVersion,
+    // Bedroom-band unit quote: the interior-only scope line is customer
+    // copy (owner ruling 2026-08-11 #5) — renderPage shows scopeNote on the
+    // recurring row and `detail` is the no-visits fallback / JSON field.
+    ...(pestLI?.scopeNote ? { detail: pestLI.scopeNote, scopeNote: pestLI.scopeNote } : {}),
+  });
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)

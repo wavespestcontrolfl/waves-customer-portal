@@ -263,6 +263,12 @@ const INTENT_SCHEMA = {
     },
     uncertainties: { type: 'array', maxItems: 10, items: { type: 'string' } },
     confidence: { enum: ['high', 'medium', 'low'] },
+    // Caller-stated bedroom count of the dwelling UNIT (studio = 0) —
+    // GATE_UNIT_BAND_PRICING prompt addendum. The bedroom-band pricer's
+    // basis on the SMS-thread path (no call extraction there) and how a
+    // clarify reply "it's a 2 bedroom" reaches pricing. Optional; the
+    // ungated prompt never emits it. Never inferred from sqft or rent.
+    unit_bedroom_count: { type: ['integer', 'null'], minimum: 0, maximum: 20 },
   },
   required: ['decision', 'category', 'is_commercial', 'services', 'evidence', 'confidence'],
   additionalProperties: false,

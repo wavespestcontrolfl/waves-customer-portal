@@ -182,6 +182,10 @@ function lawnServiceTypeFromVisits(visitsPerYear) {
   if (visits === 12) return 'Monthly Lawn Care Service';
   if (visits === 9) return 'Every 6 Weeks Lawn Care Service';
   if (visits === 6) return 'Bi-Monthly Lawn Care Service';
+  // 4-app Basic tier: retired on the public accept path but linkable
+  // (cadenceCatalogKeyForProfile → lawn_care_quarterly, an active row) —
+  // the label must equal that row's name (literal ⇄ catalog parity test).
+  if (visits === 4) return 'Quarterly Lawn Care Service';
   return 'Lawn Care';
 }
 

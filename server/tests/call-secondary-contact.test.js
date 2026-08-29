@@ -266,8 +266,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.9.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.9.0');
+  test('current SCHEMA_VERSION is 1.10.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.10.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {

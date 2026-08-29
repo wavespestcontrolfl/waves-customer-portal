@@ -65,7 +65,7 @@ const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 const CLOSED_LEAD_STATUSES = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 const TASK_LIFECYCLE_STATUSES = new Set(['done', 'dismissed']);
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
+const { DRAFT_REPLY_PREFIX } = require('../services/review-reply/draft-prefix');
 
 async function tableExists(table) {
   return db.schema.hasTable(table).catch(() => false);
@@ -1366,9 +1366,17 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
       .where(function needsRealReply() {
         this.whereNull('review_reply').orWhere('review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
       })
+      // Never under an in-flight automatic publish (the auto-reply lane's
+      // per-review publish claim): the draft would be overwritten or race it.
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
       .update({
         review_reply: `${DRAFT_REPLY_PREFIX} ${draftResponse}`,
         reply_updated_at: null,
+        // Machine-authored: mirrored into auto_reply_draft with agent
+        // provenance so Post now re-verifies it through the canonical
+        // verifier instead of publishing it as a person's words
+        // (review-reply/runner, codex r46).
+        ...require('../services/review-reply/runner').agentDraftSavedFields(draftResponse),
       })
       .returning('id');
     if (Array.isArray(updated) ? updated.length === 0 : updated === 0) {
