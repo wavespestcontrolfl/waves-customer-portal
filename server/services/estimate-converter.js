@@ -501,14 +501,34 @@ function explicitServiceCadence(svc = {}) {
 // it to the matcher as a synthetic companion line; supplements never got
 // their own scheduled row from the converter, so the combined row is
 // strictly added coverage.
+// A PINNED pre-realignment rodent row (mapper keeps it inside
+// recurring.services with legacyPinnedReplay and no per-application marker)
+// is the legacy monthly-billed plan and must convert exactly like the legacy
+// rodentBaitMo scalar did — as a standalone supplement on the monthly lane,
+// never as the single recurring unit the per-application stamp is derived
+// from (codex #3591 r19 P0: a disclosed $49/mo plan would otherwise become
+// a $147 per-completion charge under billing_mode per_application).
+function isPinnedLegacyRodentRow(svc = {}) {
+  return svc?.legacyPinnedReplay === true
+    && String(svc?.service || '').toLowerCase() === 'rodent_bait'
+    && svc?.perApplicationBilled !== true;
+}
+
 function supplementalCompanionLines(estimateData = {}) {
   const result = estimateData.result || {};
   const recurring = estimateData.recurring || result.recurring || {};
   const resultStats = estimateData.results || result.results || {};
   const lines = [];
-  const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
+  const pinnedRow = (Array.isArray(recurring.services) ? recurring.services : []).find(isPinnedLegacyRodentRow);
+  const rodentMonthly = firstPositiveNumber(
+    recurring.rodentBaitMo,
+    resultStats.rodBaitMo,
+    pinnedRow?.mo,
+    pinnedRow?.monthly,
+    pinnedRow?.annual > 0 ? pinnedRow.annual / 12 : null,
+  );
   if (rodentMonthly) {
-    lines.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: rodentMonthly });
+    lines.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: Math.round(rodentMonthly * 100) / 100 });
   }
   return lines;
 }
@@ -3614,9 +3634,12 @@ const EstimateConverter = {
     // MULTI-unit plans (codex P1 round 4), so the rider's amounts are
     // folded into the bait line's billing fields before the row goes —
     // single-unit fees still derive from the rental-inclusive plan totals.
+    // Pinned legacy rodent rows leave the conversion line set and ride as
+    // the legacy supplement instead (supplementalCompanionLines) — same
+    // monthly lane the pre-realignment scalar took (codex #3591 r19 P0).
     const recurringServicesForConversion = suppressRecurringConversion
       ? []
-      : foldTermiteRentalIntoBait(recurringServices);
+      : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isPinnedLegacyRodentRow(svc));
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -6432,6 +6455,7 @@ module.exports.reservedRowComboRewrites = reservedRowComboRewrites;
 module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
+module.exports.isPinnedLegacyRodentRow = isPinnedLegacyRodentRow;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;

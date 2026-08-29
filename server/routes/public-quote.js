@@ -2306,7 +2306,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.setup_fee_amount = setupFeeQuote.amount;
     }
     if (oneTimeTotal > 0) {
-      response.one_time_total = Math.round(oneTimeTotal);
+      // Cents-exact (codex #3591 r19 P2): a fractional live setup fee
+      // ($79.50) must read the same on the widget as on the persisted draft
+      // and the accepted invoice.
+      response.one_time_total = Math.round(oneTimeTotal * 100) / 100;
+    }
+    // Additive: the rodent bait-station setup share inside one_time_total,
+    // so the widget can name it without double-showing it as a membership
+    // fee (has_setup_fee stays the membership disclosure).
+    if (setupFeeQuote?.kind === 'rodent_bait_setup' && Number(setupFeeQuote.amount) > 0 && draftEstimateId) {
+      response.rodent_setup_amount = setupFeeQuote.amount;
     }
     const perApplication = derivePerApplication(estimate);
     if (perApplication) {

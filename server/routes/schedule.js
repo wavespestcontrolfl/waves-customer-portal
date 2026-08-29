@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
+const { toQualifyingKeys } = require('../services/waveguard-existing-services');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
 
@@ -143,6 +144,11 @@ router.get('/', async (req, res, next) => {
         // visits from one-time visits and free re-service callbacks.
         isRecurring: s.is_recurring === true,
         isCallback: s.is_callback === true,
+        // Server-derived WaveGuard qualification for this row's family
+        // (the same classifier alignment uses, which follows the LIVE
+        // rodent_waveguard.tier_qualifier flag) — the portal reads this
+        // instead of re-deriving coverage from the label (codex #3591 r19 P1).
+        waveguardQualifying: toQualifyingKeys(s.service_type).length > 0,
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS
         // to the office. Same-customer row, so exposing the token here adds

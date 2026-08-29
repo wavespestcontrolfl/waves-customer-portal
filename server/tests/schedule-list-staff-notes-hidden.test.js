@@ -60,6 +60,32 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     reschedule_token: 'tok-1',
   };
 
+  test('upcoming rows carry the server-derived WaveGuard qualification that follows the live rodent flag (codex #3591 r19 P1)', async () => {
+    const rodentRow = { ...row, id: 'svc-r', service_type: 'Rodent Bait Stations' };
+    const trapRow = { ...row, id: 'svc-t', service_type: 'Rodent Trapping' };
+    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow]));
+    await withServer(async (baseUrl) => {
+      const body = await (await fetch(`${baseUrl}/schedule`)).json();
+      const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
+      expect(byId['svc-1'].waveguardQualifying).toBe(true);
+      expect(byId['svc-r'].waveguardQualifying).toBe(true);
+      expect(byId['svc-t'].waveguardQualifying).toBe(false);
+    });
+    // Live flag off → rodent bait no longer qualifies on the portal payload.
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      db.mockReturnValueOnce(listChain([rodentRow]));
+      await withServer(async (baseUrl) => {
+        const body = await (await fetch(`${baseUrl}/schedule`)).json();
+        expect(body.upcoming[0].waveguardQualifying).toBe(false);
+      });
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
+  });
+
   test('upcoming rows omit notes entirely while keeping the visit fields', async () => {
     db.mockReturnValueOnce(listChain([row]));
 

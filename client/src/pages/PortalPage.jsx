@@ -10017,12 +10017,16 @@ function MyPlanTab({ customer, focusService }) {
     // A rescheduled/terminal recurring row is a phantom for coverage — it must not be
     // detected and, under the tier-limit slice, displace the customer's real plan.
     if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
+    // Server-derived qualification wins when present (schedule route,
+    // codex #3591 r19 P1): it follows the live rodent_waveguard flag through
+    // the same classifier alignment uses, so a rodent-only account whose
+    // tier was cleared server-side never lists bait stations as coverage.
+    if (typeof s.waveguardQualifying === 'boolean') return s.waveguardQualifying;
     const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
     if (PLAN_NON_QUALIFIER_RE.test(text)) return false;
-    // Rodent BAIT stations are WaveGuard plan coverage since 2026-08-29
-    // (owner directive) — mirrors the server classifier (toQualifyingKeys).
-    // Non-bait rodent work (trapping, exclusion, one-time) still never
-    // qualifies.
+    // Legacy payloads (no server flag): rodent BAIT stations are WaveGuard
+    // plan coverage since 2026-08-29 — mirrors the server classifier;
+    // non-bait rodent work (trapping, exclusion, one-time) never qualifies.
     if (/rodent|rat\b|mice|mouse/.test(text) && !/bait|station|monitor/.test(text)) return false;
     return true;
   };

@@ -35,6 +35,27 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(standalone[0].service.frequency).toBe('quarterly');
   });
 
+  test('a PINNED legacy rodent row converts on the legacy monthly-supplement lane, never as a per-application unit (codex #3591 r19 P0)', () => {
+    const { supplementalCompanionLines, isPinnedLegacyRodentRow } = require('../services/estimate-converter');
+    const pinned = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, annual: 588, visitsPerYear: 4, legacyPinnedReplay: true, discountable: false };
+    const fresh = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 };
+    expect(isPinnedLegacyRodentRow(pinned)).toBe(true);
+    expect(isPinnedLegacyRodentRow(fresh)).toBe(false);
+    // The pinned row surfaces as the legacy scalar did …
+    expect(supplementalCompanionLines({ result: { recurring: { services: [pinned] } } }))
+      .toEqual([{ name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: 49 }]);
+    // … and a new-model row never does.
+    expect(supplementalCompanionLines({ result: { recurring: { services: [fresh] } } })).toEqual([]);
+    // Scheduling: the supplement becomes a fromSupplement standalone unit —
+    // counted as a unit, so pest + pinned rodent is multi-unit and the
+    // per-application single-unit derivation stays off (status-quo fallback).
+    const { standalone } = combineRecurringServicesForScheduling(
+      [{ name: 'Pest Control', service: 'pest_control', mo: 100 }],
+      { supplementalCompanions: supplementalCompanionLines({ result: { recurring: { services: [pinned] } } }) },
+    );
+    expect(standalone.some((u) => u.fromSupplement && u.catalogServiceKey === 'rodent_bait_quarterly')).toBe(true);
+  });
+
   test('a rodent bait line with no cadence gets the quarterly program default standalone', () => {
     const { standalone } = combineRecurringServicesForScheduling([
       { name: 'Rodent Bait Stations', service: 'rodent_bait' },
