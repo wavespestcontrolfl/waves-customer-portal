@@ -1204,7 +1204,7 @@ together:
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
   (an unleased `renewal` reservation is claimable by the runner, §6.3 — and the claim's re-run of
   the §6.3 decision computes `month_spend_cents` EXCLUDING the reservation being claimed, exactly
-  as the pre-mint check does, so a renewal that fills the remaining budget is not double-counted); and the provider identity — DERIVED SERVER-SIDE from the authenticated worker credential, never read from a query/body value (§12: one distinct service token per provider, `LINK_WORKER_TOKEN_<PROVIDER>`, resolved by `hermes-auth.js` to a fixed `{ provider, capabilities }` record; the legacy shared `HERMES_SERVICE_TOKEN` maps to the `hermes` provider with NO payment/credential capability) — carries the capability the step needs (payment and credential steps → the `deterministic_runner` identity only). A caller-supplied `provider` field is ignored (logged as a mismatch if it disagrees with the token). A row
+  as the pre-mint check does, so a renewal that fills the remaining budget is not double-counted); and the provider identity — DERIVED SERVER-SIDE from the authenticated worker credential, never read from a query/body value (§12: per-provider HMAC REQUEST SIGNING — `LINK_WORKER_SECRET_<PROVIDER>` signs `timestamp + nonce + method + path + body-sha256`; the server verifies the signature, rejects timestamps outside ±5 min and any nonce seen within that window (durable nonce table), and only AFTER verification maps the key id to a fixed `{ provider, capabilities }` record — the AGENTS.md rule that every `/api/integrations/*-worker` mount carries its own signed auth; the legacy static bearer `HERMES_SERVICE_TOKEN` remains ONLY for the `hermes` identity's non-payment, non-credential scope and can never reach a privileged step) — carries the capability the step needs (payment and credential steps → the `deterministic_runner` identity only). A caller-supplied `provider` field is ignored (logged as a mismatch if it disagrees with the token). A row
   the policy has not authorized cannot be leased by any caller.
 - **Draft leases are separate from send authority (no claim-before-draft deadlock).** The
   drafter (`backlink-outreach-drafter.js`) claims with `?type=outreach&mode=draft`: a draft
@@ -1465,7 +1465,7 @@ Link Building board and outreach approvals remain as shipped.
 ## 12. Gates, env, kill switches
 
 Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
-`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report — from step 1 one of several per-provider tokens `LINK_WORKER_TOKEN_<PROVIDER>`; each resolves server-side to a fixed provider identity + capability set, and only the `deterministic_runner` token carries payment/credential capability), `GATE_SIGNUP_RUNNER` +
+`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report — from step 1 the legacy bearer is confined to the `hermes` non-privileged scope; every other provider authenticates with per-provider HMAC request signing `LINK_WORKER_SECRET_<PROVIDER>` (timestamp + nonce replay protection, capabilities derived only after signature verification), and only the `deterministic_runner` key carries payment/credential capability), `GATE_SIGNUP_RUNNER` +
 `SIGNUP_RUNNER_ALLOWLIST`, `GATE_OUTREACH_DRAFTER`, `GATE_LINK_OUTREACH` +
 `LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
