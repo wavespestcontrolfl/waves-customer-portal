@@ -181,6 +181,12 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
     expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{[^}]*if \(!planWindowOpen\(tick\(\)\)\) \{ windowClosedAtQueue = true; return false; \}[\s\S]*?homeMovedAtQueue = true; return false; \}[\s\S]*?claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
+    // gh-r40: grass type and the rain-sensor flag are home-bound — withheld while the schedule is unconfirmed.
+    expect(sweep).toMatch(/grassType: scheduleUnconfirmed \? null : resolveGrassType\(customer\),/);
+    expect(sweep).toMatch(/rainSensor: !scheduleUnconfirmed && \(customer\.rain_sensor === true \|\| customer\.rain_sensor === 't'\),/);
+    // gh-r40: an unreadable stamp read at the queue transition fails CLOSED (plan withheld, counted claim_error, snapshot claimable).
+    expect(sweep).toMatch(/stampCheckFailedAtQueue = true;\s*return false;/);
+    expect(sweep).toMatch(/if \(stampCheckFailedAtQueue\) \{[\s\S]*?summary\.plan\.claim_error \+= 1;\s*continue;\s*\}/);
     // gh-r38: the move stamp is re-read at the queue transition; a changed stamp withholds the plan and sends nothing.
     expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
     // gh-r38: each candidate is re-read through the SAME audience query at their turn.

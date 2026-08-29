@@ -600,8 +600,14 @@ async function loadPriorWeekPlan({ customerId, weekEnding, home = null } = {}) {
       if (priorHome) {
         const fanout = require('./customer-address-fanout');
         const shape = (h) => ({ address_line1: h.addressLine1, address_line2: h.addressLine2, city: h.city, zip: h.zip });
-        if (fanout.addressMatchKey(priorHome.addressLine1) && fanout.addressMatchKey(home.addressLine1)
-          && fanout.homesDiffer(shape(priorHome), shape(home))) return null;
+        // Same rule as planBindsToService (gh-r40): a prior plan that names
+        // a home is never credited against a blank current address (address
+        // removal is an explicit move); only a home-less prior snapshot
+        // passes without comparison.
+        if (fanout.addressMatchKey(priorHome.addressLine1)) {
+          if (!fanout.addressMatchKey(home.addressLine1)) return null;
+          if (fanout.homesDiffer(shape(priorHome), shape(home))) return null;
+        }
       }
     }
     // Delivered = stamped, OR the durable customer-week delivery record says
@@ -697,7 +703,13 @@ function planBindsToService(snapshot, service) {
   // binds, as before (nothing to contradict the stamp).
   const fanout = require('./customer-address-fanout');
   const svc = { address_line1: service?.address_line1, address_line2: service?.address_line2, city: service?.city, zip: service?.zip };
-  if (!fanout.addressMatchKey(svc.address_line1)) return true;
+  // Only a snapshot with NO usable home street binds without comparison
+  // (legacy rows). A snapshot that names a home fails CLOSED against a
+  // blank current premise — clearing the primary address is an explicit
+  // move (the fan-out stamps it), and the removed home's plan must not
+  // keep rendering on an addressless service (codex gh-r40).
+  if (!fanout.addressMatchKey(home.addressLine1)) return true;
+  if (!fanout.addressMatchKey(svc.address_line1)) return false;
   return !fanout.homesDiffer(svc, { address_line1: home.addressLine1, address_line2: home.addressLine2, city: home.city, zip: home.zip });
 }
 

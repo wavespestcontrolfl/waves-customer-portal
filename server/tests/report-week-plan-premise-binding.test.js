@@ -43,6 +43,10 @@ describe('planBindsToService', () => {
     expect(planBindsToService(snap, { address_line1: '100 Main St', address_line2: 'Unit 4', city: 'Lakewood Ranch', zip: snap.decisionInputs.home.zip })).toBe(true);
     expect(planBindsToService(snap, { address_line1: '100 Main Street Unit 4', address_line2: null, city: null, zip: null })).toBe(true); // suffix + inline unit + missing place ≠ contradiction
     expect(planBindsToService({ decisionInputs: {} }, { address_line1: '9 Beach Rd' })).toBe(true); // no home recorded → legacy snapshot, no binding
+    // gh-r40: a snapshot that NAMES a home fails closed against a blank current premise (address removal is a move);
+    // only a snapshot without a usable home street binds without comparison.
+    expect(planBindsToService(snap, { address_line1: null, city: null, zip: null })).toBe(false);
+    expect(planBindsToService({ decisionInputs: { home: { addressLine1: '' } } }, { address_line1: null })).toBe(true);
   });
 });
 

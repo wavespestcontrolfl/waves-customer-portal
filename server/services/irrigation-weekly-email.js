@@ -1217,6 +1217,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     // transition (a fresh irrigation_home_changed_at stamp): the decided
     // plan sized the FORMER home — withhold it (codex gh-r38).
     let homeMovedAtQueue = false;
+    // The stamp could not be read at the queue transition: the final home
+    // check before a legal/controller instruction must fail CLOSED — the
+    // plan is not sent this run (codex gh-r40).
+    let stampCheckFailedAtQueue = false;
     // THIS customer's clock reading: the window verdict and the snapshot's
     // planAsOf come from it, not from the sweep's start time.
     const planAsOf = tick();
@@ -1245,7 +1249,12 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
       const decisionInputs = {
         firstName: customer.first_name,
-        grassType: resolveGrassType(customer),
+        // Grass type is a property of the LAWN: after a move the profile
+        // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
+        // changes the target and the hold/run call). Until the schedule is
+        // reconfirmed the plan sizes from the unknown-grass fallback and the
+        // copy says "your lawn", never the old grass by name (codex gh-r40).
+        grassType: scheduleUnconfirmed ? null : resolveGrassType(customer),
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
         turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
@@ -1262,7 +1271,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         scheduleUnconfirmed,
         priorWeekEvents,
         priorWeekPrescribedInches,
-        rainSensor: customer.rain_sensor === true || customer.rain_sensor === 't',
+        // The rain-sensor flag describes the former home's controller after a
+        // move — the plan must not promise "your rain sensor will skip a run"
+        // for a home we know nothing about (codex gh-r40).
+        rainSensor: !scheduleUnconfirmed && (customer.rain_sensor === true || customer.rain_sensor === 't'),
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
@@ -1452,8 +1464,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             // and is about to commit the new stamp (codex gh-r38/r39) — the
             // lock makes an in-flight move commit first, then the committed
             // stamp is read. A changed stamp means the decision sized the
-            // former home — abort the plan. An unreadable check proceeds
-            // (the claim renewal below is the correctness gate).
+            // former home — abort the plan. An UNREADABLE check also aborts
+            // (fail closed — this is the last home check before a legal
+            // instruction; the snapshot stays claimable for a retry —
+            // codex gh-r40).
             try {
               const row = await db.transaction(async (trx) => {
                 await trx.raw(
@@ -1465,7 +1479,9 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
               const stampAt = (v) => (v ? new Date(v).getTime() : null);
               if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) { homeMovedAtQueue = true; return false; }
             } catch (err) {
-              logger.warn(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id}: ${err.message}`);
+              logger.error(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id} — plan withheld this run: ${err.message}`);
+              stampCheckFailedAtQueue = true;
+              return false;
             }
             claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
             return claimRenewal === true;
@@ -1516,6 +1532,12 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // library aborted before dispatch — nothing to stamp, and the discard
       // is the new owner's to make (codex gh-r20).
       if (result.aborted) {
+        if (stampCheckFailedAtQueue) {
+          // Ops exception, not a resolved race: nothing was sent, the unsent
+          // snapshot stays claimable past its lease for a retry.
+          summary.plan.claim_error += 1;
+          continue;
+        }
         if (homeMovedAtQueue) {
           // The plan was decided for the former home: discard its unsent
           // snapshot and send nothing this run — every loaded input (county,
