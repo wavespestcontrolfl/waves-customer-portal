@@ -568,6 +568,92 @@ export function applyServerTermiteRentalPricingConfig(config) {
 const TERMITE_MONITORING_DEFAULTS = { baseMonthly: 19, stepMonthly: 5, bracketStations: 5 };
 let TERMITE_MONITORING = { ...TERMITE_MONITORING_DEFAULTS };
 
+// Rodent bait footprint brackets (owner 2026-08-29) — DB-tunable via
+// pricing_config.rodent_bait_brackets + rodent_setup_fee (admin-editable
+// since #3591), same live-rates posture as the termite appliers above: the
+// retained fallback must price from what the server will use, or a save
+// that lands on the CLIENT_FALLBACK path (no replayable inputs / server
+// recompute error) is sent and accepted at a stale literal ladder (codex
+// #3591 r10 P1). Cents-preserving, mirroring db-bridge.
+const RODENT_BAIT_DEFAULTS = {
+  brackets: [
+    { maxSqFt: 1750, stations: 4, perVisit: 79 },
+    { maxSqFt: 2750, stations: 5, perVisit: 89 },
+    { maxSqFt: 3750, stations: 6, perVisit: 99 },
+    { maxSqFt: 4750, stations: 7, perVisit: 109 },
+    { maxSqFt: 5750, stations: 8, perVisit: 119 },
+    { maxSqFt: 6750, stations: 9, perVisit: 129 },
+  ],
+  extension: { perSqFt: 1000, stationsPerStep: 1, perVisitPerStep: 10 },
+  setupFee: 99,
+};
+let RODENT_BAIT = {
+  brackets: RODENT_BAIT_DEFAULTS.brackets.map((b) => ({ ...b })),
+  extension: { ...RODENT_BAIT_DEFAULTS.extension },
+  setupFee: RODENT_BAIT_DEFAULTS.setupFee,
+};
+
+export function applyServerRodentBaitBracketsPricingConfig(config) {
+  const cents = (v) => Math.round(Number(v) * 100) / 100;
+  const parsed = (Array.isArray(config?.brackets) ? config.brackets : [])
+    .map((b) => ({
+      maxSqFt: Number(b?.max_sq_ft ?? b?.maxSqFt),
+      stations: Number(b?.stations),
+      perVisit: cents(b?.per_visit ?? b?.perVisit),
+    }))
+    .filter((b) => Number.isFinite(b.maxSqFt) && b.maxSqFt > 0
+      && Number.isFinite(b.stations) && b.stations > 0
+      && Number.isFinite(b.perVisit) && b.perVisit > 0)
+    .sort((a, b) => a.maxSqFt - b.maxSqFt);
+  const ext = config?.extension || {};
+  const perSqFt = Number(ext.per_sq_ft ?? ext.perSqFt);
+  const stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+  const perVisitPerStep = Number(ext.per_visit_per_step ?? ext.perVisitPerStep);
+  RODENT_BAIT = {
+    brackets: parsed.length ? parsed : RODENT_BAIT_DEFAULTS.brackets.map((b) => ({ ...b })),
+    extension: {
+      perSqFt: Number.isFinite(perSqFt) && perSqFt > 0 ? perSqFt : RODENT_BAIT_DEFAULTS.extension.perSqFt,
+      stationsPerStep: Number.isInteger(stationsPerStep) && stationsPerStep >= 0
+        ? stationsPerStep
+        : RODENT_BAIT_DEFAULTS.extension.stationsPerStep,
+      perVisitPerStep: Number.isFinite(perVisitPerStep) && perVisitPerStep > 0
+        ? cents(perVisitPerStep)
+        : RODENT_BAIT_DEFAULTS.extension.perVisitPerStep,
+    },
+    setupFee: RODENT_BAIT.setupFee,
+  };
+  return { ...RODENT_BAIT, brackets: RODENT_BAIT.brackets.map((b) => ({ ...b })) };
+}
+
+// Zero is the documented "fee disabled" value; a missing row keeps the
+// in-code default (same as db-bridge).
+export function applyServerRodentSetupFeePricingConfig(config) {
+  const fee = Number(config?.value);
+  RODENT_BAIT = {
+    ...RODENT_BAIT,
+    setupFee: Number.isFinite(fee) && fee >= 0 ? Math.round(fee * 100) / 100 : RODENT_BAIT_DEFAULTS.setupFee,
+  };
+  return RODENT_BAIT.setupFee;
+}
+
+export function rodentBaitBracketForFootprint(footprintSqFt) {
+  const fpEff = Number(footprintSqFt) > 0 ? Number(footprintSqFt) : 2500;
+  const found = RODENT_BAIT.brackets.find((b) => fpEff <= b.maxSqFt);
+  if (found) return { stations: found.stations, perVisit: found.perVisit, extended: false };
+  const top = RODENT_BAIT.brackets[RODENT_BAIT.brackets.length - 1];
+  const ext = RODENT_BAIT.extension;
+  const steps = Math.ceil((fpEff - top.maxSqFt) / ext.perSqFt);
+  return {
+    stations: top.stations + steps * ext.stationsPerStep,
+    perVisit: Math.round((top.perVisit + steps * ext.perVisitPerStep) * 100) / 100,
+    extended: true,
+  };
+}
+
+export function rodentBaitSetupFee() {
+  return RODENT_BAIT.setupFee;
+}
+
 export function applyServerTermiteMonitoringPricingConfig(config) {
   const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
@@ -2615,22 +2701,11 @@ export function calculateEstimate(inputs) {
     // price by home size; above 6,750 sf the ladder extends +1 station /
     // +$10 per 1,000 sf. Billed per quarterly application — the monthly
     // figure is display-only (annual / 12).
-    const fpEff = footprint > 0 ? footprint : 2500;
-    const RB_BRACKETS = [
-      { maxSqFt: 1750, stations: 4, perVisit: 79 },
-      { maxSqFt: 2750, stations: 5, perVisit: 89 },
-      { maxSqFt: 3750, stations: 6, perVisit: 99 },
-      { maxSqFt: 4750, stations: 7, perVisit: 109 },
-      { maxSqFt: 5750, stations: 8, perVisit: 119 },
-      { maxSqFt: 6750, stations: 9, perVisit: 129 },
-    ];
-    let rbBracket = RB_BRACKETS.find(b => fpEff <= b.maxSqFt);
-    if (!rbBracket) {
-      const top = RB_BRACKETS[RB_BRACKETS.length - 1];
-      const steps = Math.ceil((fpEff - top.maxSqFt) / 1000);
-      rbBracket = { stations: top.stations + steps, perVisit: top.perVisit + steps * 10 };
-    }
-    const rbAnnual = rbBracket.perVisit * 4;
+    // Live ladder (pricing_config.rodent_bait_brackets via
+    // applyServerRodentBaitBracketsPricingConfig), never a second literal
+    // dollar authority (codex #3591 r10 P1).
+    const rbBracket = rodentBaitBracketForFootprint(footprint);
+    const rbAnnual = Math.round(rbBracket.perVisit * 4 * 100) / 100;
     R.rodBaitMo = Math.round(rbAnnual / 12 * 100) / 100;
     R.rodBaitSize = rbBracket.stations <= 5 ? 'Small' : rbBracket.stations <= 7 ? 'Medium' : 'Large';
     R.rodBait = {
@@ -3381,19 +3456,25 @@ export function calculateEstimate(inputs) {
       // legacy monthly plan and suppresses per-application provenance.
       perApplicationBilled: true,
     });
-    // $99 setup only for NON-members: no other qualifying service on this
-    // estimate AND not a recognized existing recurring customer (the admin
-    // estimator passes isRecurringCustomer for known accounts — a member
-    // adding rodent bait alone must not save/send the fee).
-    if (ac === 1 && !isRC) {
+    // Setup only for NON-members: no other qualifying service on this
+    // estimate AND no ACTIVE WaveGuard membership on the matched account.
+    // The generic recurring-customer toggle (isRC) is NOT membership
+    // evidence — a palm/foam-only account, or a staff member ticking the
+    // loyalty box, has no other qualifying service and owes the fee, exactly
+    // as generateEstimate's priorQualifyingServices decides (codex #3591 r10
+    // P1). The estimator passes existingWaveGuardMember from the matched
+    // customer's active tier (the same evidence that unlocks loyalty).
+    const rbSetupFee = rodentBaitSetupFee();
+    const existingMemberWaives = inputs.existingWaveGuardMember === true;
+    if (ac === 1 && !existingMemberWaives && rbSetupFee > 0) {
       hasOT = true;
       otItems.push({
         service: 'rodent_bait_setup',
         name: 'Bait Station Setup',
-        price: 99,
+        price: rbSetupFee,
         discountable: false,
         excludeFromPctDiscount: true,
-        detail: 'One-time $99 setup — waived for WaveGuard members',
+        detail: `One-time $${rbSetupFee} setup — waived for WaveGuard members`,
       });
     }
   }

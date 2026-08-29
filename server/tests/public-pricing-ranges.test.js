@@ -81,6 +81,23 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('rodent bait note tracks the live setup fee to the cent and disappears when the fee is disabled (codex #3591 r10 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitSetupFee;
+    try {
+      constants.RODENT.baitSetupFee = 99.5;
+      let row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.notes).toContain('a one-time $99.50 setup applies only without another WaveGuard recurring service');
+      constants.RODENT.baitSetupFee = 0;
+      row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.notes).not.toMatch(/setup/);
+      expect(row.notes).toMatch(/station allowance by home size\.$/);
+    } finally {
+      constants.RODENT.baitSetupFee = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
   test('every service sweeps without errors', () => {
     expect(payload.errors).toEqual([]);
   });

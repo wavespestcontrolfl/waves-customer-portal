@@ -427,6 +427,10 @@ function buildRows() {
   }));
 
   const RODENT_PUBLIC_MAX_SQFT = 20000;
+  const formatSetupFee = (v) => {
+    const n = Math.round(Number(v) * 100) / 100;
+    return Number.isInteger(n) ? String(n) : n.toFixed(2);
+  };
   function rodentBaitSweepFootprints() {
     const brackets = Array.isArray(constants.RODENT.baitBrackets) ? constants.RODENT.baitBrackets : [];
     const ext = constants.RODENT.baitBracketExtension || {};
@@ -459,7 +463,14 @@ function buildRows() {
       // Tier-discounted customer-paid values (rodent takes the WaveGuard %
       // since 2026-08-29) widen the low — same pattern as pest/lawn.
       (r) => r.perVisit).concat(bundle('rodentBait')),
-    notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
+    // Setup copy tracks the LIVE value to the cent and disappears when the
+    // fee is disabled (0) — the public surface must match the live charge
+    // (codex #3591 r10 P2).
+    notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size${
+      Number(constants.RODENT.baitSetupFee) > 0
+        ? `; a one-time $${formatSetupFee(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`
+        : '.'
+    }`,
   }));
 
   add('rodent_trapping', () => rangeRow({

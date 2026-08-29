@@ -279,6 +279,21 @@ describe('revised rodent pricing rules', () => {
     expect(commLine.pricingBasis).toBe('LEGACY_PINNED_REPLAY');
   });
 
+  test('commercial rodent detail states the MONTHLY figure (commercial bills monthly) — never a per-application price (codex #3591 r10 P2)', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 3000,
+      services: { rodentBait: {} },
+    }));
+    const line = commercial.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(line.quoteRequired).toBeFalsy();
+    expect(line.detail).toContain(`$${line.monthly}/mo, billed monthly (4 applications per year)`);
+    expect(line.detail).not.toMatch(/per application\./);
+  });
+
   test('rodentBaitLegacyReplaySignal pins legacy stored shapes and never new-model rows', () => {
     const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
     // Legacy scalar-only estimate → pin.

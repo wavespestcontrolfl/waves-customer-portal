@@ -43,6 +43,7 @@ const BRACKETS_DATA = {
 // compare against exactly these strings.
 const UP_SETUP_DESCRIPTION = 'One-time inspection, station hardware, placement, and mapping. Charged only for non-WaveGuard members — waived when the customer has any other WaveGuard recurring service.';
 const CATALOG_SETUP_AUDIT_KEY = 'services.rodent_bait_setup';
+const UP_RULE_NOTES = 'Owner directive 2026-08-29: full WaveGuard member — tier-counted and tier-discounted. Authoritative flags also live in pricing_config.rodent_waveguard; keep them in agreement.';
 const UP_SETUP_INTERNAL_NOTES = 'Owner directive 2026-08-29: $99, non-WaveGuard members only (no other qualifying recurring service on the estimate or account).';
 
 const CHANGELOG_IDENTITY = {
@@ -159,7 +160,7 @@ exports.up = async function up(knex) {
         .update({
           tier_qualifier: true,
           exclude_from_pct_discount: false,
-          notes: 'Owner directive 2026-08-29: full WaveGuard member — tier-counted and tier-discounted. Authoritative flags also live in pricing_config.rodent_waveguard; keep them in agreement.',
+          notes: UP_RULE_NOTES,
         });
     }
   }
@@ -307,7 +308,11 @@ exports.down = async function down(knex) {
           .update({
             tier_qualifier: snapshot.tier_qualifier === true,
             exclude_from_pct_discount: snapshot.exclude_from_pct_discount === true,
-            ...(snapshot.notes !== undefined ? { notes: snapshot.notes } : {}),
+            // notes guarded on its OWN value (codex #3591 r10 P2): an
+            // operator note written after up() outranks the snapshot even
+            // while the flags still match — same per-field posture as the
+            // catalog restore below.
+            ...(snapshot.notes !== undefined && rule.notes === UP_RULE_NOTES ? { notes: snapshot.notes } : {}),
           });
         await audit(knex, 'service_discount_rules.rodent_bait',
           { tier_qualifier: true, exclude_from_pct_discount: false }, snapshot, DOWN_REASON);

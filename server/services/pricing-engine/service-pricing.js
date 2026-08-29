@@ -3607,7 +3607,13 @@ function priceCommercialRodentBait(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''} · up to ${stations} stations · $${perVisit} per application.`,
+    // Commercial programs bill MONTHLY (the documented exception to the
+    // per-application unit rule — public-quote MONTHLY_BILLED_SERVICE_KEYS),
+    // so the customer-facing detail states the monthly figure like the
+    // sibling commercial lines, never a per-application price the quote
+    // email would contradict (codex #3591 r10 P2). perApp/perVisit stay as
+    // internal cadence provenance, exactly like every other commercial line.
+    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''} · up to ${stations} stations · $${monthly}/mo, billed monthly (${rodentVisits} applications per year).`,
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     frequency: rodentVisits,
     visitsPerYear: rodentVisits,

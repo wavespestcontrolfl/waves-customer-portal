@@ -14,6 +14,8 @@ import {
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
+  applyServerRodentBaitBracketsPricingConfig,
+  applyServerRodentSetupFeePricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1355,12 +1357,14 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
+        fetchConfigRow("rodent_bait_brackets"),
+        fetchConfigRow("rodent_setup_fee"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
@@ -1377,6 +1381,11 @@ function EstimateToolView() {
       // Station-check brackets: same live-rates posture as the rental horizon
       // above, and same not-part-of-readiness reasoning (new row shape).
       if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
+      // Rodent bait ladder + setup fee: live-rates posture, not part of the
+      // readiness return (new rows — codex #3591 r10 P1). A missing row
+      // leaves the in-code default in place.
+      if (rodentBracketsRow.ok && rodentBracketsRow.data) applyServerRodentBaitBracketsPricingConfig(rodentBracketsRow.data);
+      if (rodentSetupRow.ok && rodentSetupRow.data) applyServerRodentSetupFeePricingConfig(rodentSetupRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
@@ -2329,6 +2338,12 @@ function EstimateToolView() {
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
+      // Membership evidence for the rodent setup waiver — the matched
+      // account's ACTIVE WaveGuard tier (same test that unlocks loyalty
+      // pricing above), never the generic recurring-customer toggle.
+      existingWaveGuardMember: !!(existingCustomerMatch
+        && existingCustomerMatch.tier && existingCustomerMatch.tier !== "null"
+        && existingCustomerMatch.tier !== "Commercial" && Number(existingCustomerMatch.monthlyRate) > 0),
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",

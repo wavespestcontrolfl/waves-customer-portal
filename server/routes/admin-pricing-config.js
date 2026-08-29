@@ -880,6 +880,10 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
       });
       mirroredWaveguard = nextData;
     });
+    // The rules row just changed: bust discount-engine's serviceRulesCache
+    // so invoice/schedule paths read the new policy now, not up to five
+    // minutes later (codex #3591 r10 P1).
+    try { require('../services/discount-engine').clearCache(); } catch { /* non-fatal */ }
     if (mirroredWaveguard) {
       // Same immediate-resync pattern the pricing_config PUT uses — the
       // mirrored flags must reach the engine now, not on the next cache
@@ -1222,6 +1226,13 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
       const bridge = require('../services/pricing-engine/db-bridge');
       if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
     } catch { /* non-fatal */ }
+    // The mirrored service_discount_rules row feeds the invoice/schedule
+    // discount paths through discount-engine's 5-minute serviceRulesCache
+    // — bust it too, or those paths keep the old rodent policy while fresh
+    // estimates already use the new one (codex #3591 r10 P1).
+    if (req.params.key === 'rodent_waveguard') {
+      try { require('../services/discount-engine').clearCache(); } catch { /* non-fatal */ }
+    }
 
     // Audit log
     if (normalizedData !== undefined) {

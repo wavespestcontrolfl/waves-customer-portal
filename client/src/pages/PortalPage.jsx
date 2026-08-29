@@ -10333,7 +10333,11 @@ function MyPlanTab({ customer, focusService }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             // 0% is not a perk — hide the discount tile entirely at zero
             // (eyeball 07-12 finding 6).
-            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every plan service' },
+            // Not "every plan service": a pre-realignment rodent bait plan
+            // keeps its snapshotted rate and never received the tier %
+            // (codex #3591 r10 P2) — the tile speaks to plan pricing; the
+            // rows below carry the label only where the % applies.
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'on WaveGuard plan pricing' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].filter(Boolean).map((item, idx, arr) => (
             <div key={item.label} style={{
@@ -10442,9 +10446,15 @@ function MyPlanTab({ customer, focusService }) {
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
                               (owner 2026-07-11: no per-year totals). Rodent bait
-                              is a WaveGuard member since 2026-08-29 and carries
-                              the tier label like every other plan service. */}
-                          {discount > 0 ? (
+                              joined WaveGuard 2026-08-29, but only plans priced
+                              on/after that date receive the tier % — a
+                              grandfathered bait plan keeps its snapshotted rate.
+                              The portal payload carries no pricing provenance
+                              (service type + price only), so the rodent row
+                              makes NO discount claim rather than promising a
+                              percentage it may never have received (codex
+                              #3591 r10 P2). */}
+                          {discount > 0 && svc.id !== 'rodent_bait' ? (
                             <div style={{ marginTop: 4, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
                               WaveGuard {tierName}
                             </div>
