@@ -457,7 +457,13 @@ function backslashRunBefore(text, idx) {
 // body-image scanner alike.
 function* eachMarkdownLink(text) {
   const str = String(text || '');
+  // A LINK label may legally contain an image (`[![alt](/x.webp)](/url)`),
+  // so a link span is not skipped over: scanning continues inside its
+  // label, and only its `](destination)` / `][label]` tail is jumped.
+  const tailSkips = [];
   for (let i = 0; i < str.length; i += 1) {
+    const skip = tailSkips.find((t) => t.from === i);
+    if (skip) { i = skip.to; continue; }
     if (str[i] !== '[') continue;
     const isImage = i > 0 && str[i - 1] === '!' && backslashRunBefore(str, i - 1) % 2 === 0;
     let depth = 0;
@@ -500,8 +506,12 @@ function* eachMarkdownLink(text) {
     }
     yield span;
     // A bare `[label]` is not consumed: a link nested inside it (`[a [b](x)]`)
-    // is still found by the continuing scan.
-    if (span.kind !== 'none') i = span.end;
+    // is still found by the continuing scan. An IMAGE span is consumed whole
+    // (its alt renders as text, never as pictures); a LINK span's label is
+    // scanned for nested images, only its tail is skipped.
+    if (span.kind === 'none') continue;
+    if (span.isImage) i = span.end;
+    else tailSkips.push({ from: span.labelEnd, to: span.end });
   }
 }
 

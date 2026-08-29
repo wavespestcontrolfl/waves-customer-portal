@@ -4490,6 +4490,14 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
   });
 
+  test('bodyImageRefs: an image used as a link label is scanned; an angle destination keeps its edge whitespace (GH r21)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('[![linked alt](/images/blog/x/missing.webp)](/contact/)\n![p](</images/blog/x/body-1.webp >)').map((r) => [r.alt, r.src])).toEqual([['linked alt', '/images/blog/x/missing.webp'], ['p', '/images/blog/x/body-1.webp ']]);
+    const getFile = async (path) => (path === 'public/images/blog/x/body-1.webp' ? { content: 'x' } : null);
+    expect((await validateBodyImageRefs({ body: '[![linked alt](/images/blog/x/missing.webp)](/contact/)', heroSrc: '/images/blog/x/hero.webp', getFile })).reason).toMatch(/not committed.*missing\.webp/);
+    expect((await validateBodyImageRefs({ body: '![p](</images/blog/x/body-1.webp >)', heroSrc: '/images/blog/x/hero.webp', getFile })).reason).toMatch(/not committed/);
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);

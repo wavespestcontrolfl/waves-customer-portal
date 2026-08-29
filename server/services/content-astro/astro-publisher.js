@@ -1925,7 +1925,10 @@ const ANGLE_DESTINATION_RE = /(\]\(|^[ \t]*\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:\n[ \
 // and decoded back when the destination is resolved, so the path the
 // browser requests is the path that gets validated.
 function normalizeAngleDestinations(text) {
-  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.trim().replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
+  // EVERY character between the brackets is part of the destination —
+  // leading/trailing spaces included (CommonMark keeps them), so they are
+  // encoded, never trimmed away.
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
 }
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }

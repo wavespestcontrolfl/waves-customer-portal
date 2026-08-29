@@ -4740,6 +4740,9 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(spans('[t][ref] ![i][] [s] ![m](oops')).toEqual([[false, 'reference', 't', 'ref'], [true, 'reference', 'i', ''], [false, 'none', 's', null], [true, 'malformed', 'm', null]]);
     // `\\![x](y)` is a literal "!" followed by a LINK (not an image); an escaped `\\[z](/w)` is still scanned as a link (citation rules rely on it).
     expect(spans('\\![x](/y) \\[z](/w) \\\\![img](/v)')).toEqual([[false, 'inline', 'x', '/y'], [false, 'inline', 'z', '/w'], [true, 'inline', 'img', '/v']]);
+    // An image used as a LINK label is still yielded (the link's tail is skipped, its label is scanned); an image's alt is not scanned (GH r21).
+    expect(spans('[![linked alt](/x.webp)](/contact/) ![a ![b](/y.webp)](/z.webp)')).toEqual([[false, 'inline', '![linked alt](/x.webp)', '/contact/'], [true, 'inline', 'linked alt', '/x.webp'], [true, 'inline', 'a ![b](/y.webp)', '/z.webp']]);
+    expect(guardrails.blankMarkdownLinkDestinations('[![linked alt](/x.webp)](/contact/)', { keepImages: true })).toBe(` ![linked alt](/x.webp)${' '.repeat('](/contact/)'.length)}`);
     // A link nested inside bare brackets is still found.
     expect(spans('[outer [in](/i)]')).toEqual([[false, 'none', 'outer [in](/i)', null], [false, 'inline', 'in', '/i']]);
     expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)', { keepImages: true })).toBe('![Technician [close-up]](/x.webp)');
