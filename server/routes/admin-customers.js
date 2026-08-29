@@ -4440,12 +4440,17 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // Optional one-time setup (rodent bait station setup) billed on the same
     // invoice as its own line. Relayed from the prepay-on-book preview's
     // mintPayload; excluded from the term's coverage basis below.
+    // Whole cents with the SAME tolerance the pricing-config validator
+    // applies (79.1 * 100 is 7909.999…; strict equality would 400 a fee the
+    // preview legitimately offered — codex #3591 r29 P2), normalized to
+    // exact cents.
     const setupFeeRaw = req.body?.setupFeeAmount;
-    const setupFeeAmount = setupFeeRaw === undefined || setupFeeRaw === null ? 0 : Number(setupFeeRaw);
-    if (!Number.isFinite(setupFeeAmount) || setupFeeAmount < 0
-      || Math.round(setupFeeAmount * 100) !== setupFeeAmount * 100) {
+    const setupFeeInput = setupFeeRaw === undefined || setupFeeRaw === null ? 0 : Number(setupFeeRaw);
+    if (!Number.isFinite(setupFeeInput) || setupFeeInput < 0
+      || Math.abs(setupFeeInput * 100 - Math.round(setupFeeInput * 100)) > 1e-6) {
       return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
     }
+    const setupFeeAmount = Math.round(setupFeeInput * 100) / 100;
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -4663,14 +4668,19 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
           ? { depositCredit: { amount: pendingCredit.amount, estimateId: pendingCredit.estimateId } }
           : {}),
       });
-      const setupShareOfTotal = setupFeeAmount > 0 && (amount + setupFeeAmount) > 0
-        ? Math.round((Number(invoice.total) * (setupFeeAmount / (amount + setupFeeAmount))) * 100) / 100
-        : 0;
       // Consume exactly what create() applied (it caps the request; payer-billed
       // invoices apply 0 and the ledger stays untouched). A mismatch means the
       // ledger moved under us — roll the whole mint back rather than leave a
       // credit line without dollar-for-dollar ledger backing.
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
+      // The setup line's share of the GROSS year (invoice.total is already
+      // net of the deposit credit create() applied — a net ratio undersizes
+      // the share and, on a fully-settled invoice, folds the whole setup
+      // into coverage; codex #3591 r29 P1). Tax-proportional.
+      const grossInvoiceTotal = Number(invoice.total) + appliedDepositCredit;
+      const setupShareOfTotal = setupFeeAmount > 0 && (amount + setupFeeAmount) > 0
+        ? Math.round((grossInvoiceTotal * (setupFeeAmount / (amount + setupFeeAmount))) * 100) / 100
+        : 0;
       // A requested credit that create() DECLINED to apply (customer flipped to
       // payer-billed between preview and submit — create() zeroes deposit
       // credit on payer invoices) must NOT mint the gross invoice the operator

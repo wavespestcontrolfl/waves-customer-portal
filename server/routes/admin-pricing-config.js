@@ -875,11 +875,18 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     // mirror failure rolls the edit back instead of splitting policy.
     let mirroredWaveguard = null;
     await db.transaction(async (trx) => {
+      const mirrorsWaveguard = req.params.serviceKey === 'rodent_bait'
+        && (updates.tier_qualifier !== undefined || updates.exclude_from_pct_discount !== undefined);
+      // Lock ORDER matches the generic pricing_config writer (pricing_config
+      // row first, then service_discount_rules): two concurrent rodent
+      // edits through the two cards otherwise take the same two rows in
+      // opposite order and Postgres aborts one with a deadlock (codex #3591
+      // r29 P2).
+      const waveguardRow = mirrorsWaveguard
+        ? await trx('pricing_config').where({ config_key: 'rodent_waveguard' }).forUpdate().first()
+        : null;
       await trx('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
-      if (req.params.serviceKey !== 'rodent_bait'
-        || (updates.tier_qualifier === undefined && updates.exclude_from_pct_discount === undefined)) return;
-      const waveguardRow = await trx('pricing_config').where({ config_key: 'rodent_waveguard' }).forUpdate().first();
-      if (!waveguardRow) return;
+      if (!mirrorsWaveguard || !waveguardRow) return;
       let waveguardData = {};
       try {
         waveguardData = typeof waveguardRow.data === 'string' ? JSON.parse(waveguardRow.data) : (waveguardRow.data || {});

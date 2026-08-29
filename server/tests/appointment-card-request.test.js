@@ -255,7 +255,9 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
 
   test('direct rodent series: auto-secure stamps the resolved setup obligation on the series anchor (codex #3591 r28)', async () => {
     const plans = require('../services/secure-appointment-plans');
-    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    // The resolver re-reads the row by id and names the SERIES ANCHOR (the
+    // funnel's visit fragment carries neither provenance nor parent id).
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupStamp').mockResolvedValueOnce({ amount: 99, anchorId: 'parent-1' });
     try {
       mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
       const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
@@ -265,6 +267,7 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
         .map((t) => t.chain.calls)
         .find((calls) => calls.some(([op, patch]) => op === 'update' && patch && patch.pending_setup_fee === 99));
       expect(stamp).toBeDefined();
+      expect(stamp.some(([op, w]) => op === 'where' && w && w.id === 'parent-1')).toBe(true);
       // whereNull-guarded: never overwrites an obligation already stamped.
       expect(stamp.some(([op, col]) => op === 'whereNull' && col === 'pending_setup_fee')).toBe(true);
     } finally {
@@ -274,7 +277,7 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
 
   test('no obligation (0) → no scheduled_services stamp', async () => {
     const plans = require('../services/secure-appointment-plans');
-    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupStamp').mockResolvedValueOnce({ amount: 0, anchorId: 'svc-1' });
     try {
       mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
       await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
@@ -1253,9 +1256,17 @@ describe('loadSecureCardPageData — page state machine', () => {
     // Recurring plan with NO unwaived setup (fee disabled / member) → sticky 0, never NULL.
     const none = await stampFor({ mode: 'recurring', perVisit: 89, visitsPerYear: 4, annualBase: 356, prepay: { total: 338.2, discount: 17.8, ratePctLabel: '5%' }, setupFee: null, selected: null });
     expect(none.accepted_setup_fee.bindings).toEqual([0, 0]);
-    // No plan displayed → nothing disclosed.
-    const oneTime = await stampFor({ mode: 'one_time', perVisit: 135, selected: null });
-    expect(oneTime.accepted_setup_fee).toBeNull();
+    // No plan displayed → the column is left UNTOUCHED (codex r29 P1: a
+    // NULL write here would erase a cap frozen by an earlier successful
+    // render, and submit reads NULL as "price live").
+    const before = touches('appointment_card_requests').length;
+    const spy = jest.spyOn(plans, 'deriveSecurePlanContext').mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
+    try { await loadSecureCardPageData(REQUEST.token); } finally { spy.mockRestore(); }
+    const oneTimePatches = touches('appointment_card_requests').slice(before)
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(oneTimePatches.length).toBeGreaterThan(0);
+    expect(oneTimePatches.some((p) => 'accepted_setup_fee' in p)).toBe(false);
   });
 
   test('a plan-context derivation FAILURE renders unavailable and stamps NOTHING — a hiccup is never a no-price consent (#3175 hardening)', async () => {

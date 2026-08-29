@@ -130,6 +130,30 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, customer_id: null })).resolves.toBe(0);
   });
 
+  test('a PERSISTED visit (id) is re-read by id — the caller\'s fragment never decides provenance or family', async () => {
+    mockQualifyingKeys = async () => [];
+    // Fragment claims a direct rodent series; the row says estimate-origin → 0.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', source_estimate_id: 'est-1' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1', ...rodentVisit })).resolves.toBe(0);
+    // Fragment carries no service_type (secure-page saved-card branch); the row is rodent → owed.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1', customer_id: 'c1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // Missing row throws (fail closed) rather than pricing the fragment.
+    setTables({ visit: null });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'gone', ...rodentVisit })).rejects.toThrow('not found');
+  });
+
+  test('resolveDirectRodentSetupStamp names the SERIES ANCHOR of the authoritative row', async () => {
+    const { resolveDirectRodentSetupStamp } = require('../services/secure-appointment-plans');
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, id: 'child-1', recurring_parent_id: 'parent-1', service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupStamp(db, { id: 'child-1', customer_id: 'c1' }))
+      .resolves.toEqual({ amount: Number(RODENT.baitSetupFee), anchorId: 'parent-1' });
+    // Unpersisted preview row (no id): taken as given, anchor null.
+    await expect(resolveDirectRodentSetupStamp(db, rodentVisit))
+      .resolves.toEqual({ amount: Number(RODENT.baitSetupFee), anchorId: null });
+  });
+
   test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {
     mockQualifyingKeys = async () => { throw new Error('db down'); };
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');

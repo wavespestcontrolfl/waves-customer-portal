@@ -175,14 +175,47 @@ function seriesAnchorId(visit) {
  * the admin prepay-on-book — so none can activate or prepay the series
  * without the obligation. Lookup failures propagate (callers fail closed).
  */
-async function resolveDirectRodentSetupObligation(database, visit = {}) {
-  if (!visit || !visit.customer_id || visit.source_estimate_id) return 0;
-  if (recurringServiceKey({ name: visit.service_type }) !== 'rodent_bait') return 0;
+// Callers hand this resolver whatever fragment they happen to hold (the
+// funnel loads no provenance columns; the secure-page saved-card branch
+// passes id/customer only). Trusting the fragment mis-classifies: an
+// estimate-origin visit reads as direct (second setup), a child gets
+// stamped instead of its anchor, a direct rodent visit with no
+// service_type reads as non-rodent (no setup). So a PERSISTED visit (id
+// present) is always re-read by id (codex #3591 r29 P1); only an
+// unpersisted preview row (no id — the prepay-on-book preview prices a
+// booking that does not exist yet) is taken as given. A missing row throws
+// (callers fail closed).
+const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'source_estimate_id', 'recurring_parent_id'];
+async function loadAuthoritativeSetupVisit(database, visit) {
+  if (!visit || !visit.id) return visit || {};
+  const row = await database('scheduled_services').where({ id: visit.id }).first(...SETUP_VISIT_COLUMNS);
+  if (!row) throw new Error(`resolveDirectRodentSetupObligation: scheduled_services ${visit.id} not found`);
+  return row;
+}
+
+async function directRodentSetupForRow(database, row) {
+  if (!row || !row.customer_id || row.source_estimate_id) return 0;
+  if (recurringServiceKey({ name: row.service_type }) !== 'rodent_bait') return 0;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, visit.customer_id) || [])
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
     .filter((key) => key !== 'rodent_bait');
   if (otherQualifiers.length > 0) return 0;
   return cents(Math.max(0, Number(RODENT.baitSetupFee) || 0));
+}
+
+async function resolveDirectRodentSetupObligation(database, visit = {}) {
+  const row = await loadAuthoritativeSetupVisit(database, visit);
+  return directRodentSetupForRow(database, row);
+}
+
+// The obligation PLUS where it is stamped: always the series anchor
+// (recurring_parent_id || id) of the authoritative row, never the
+// fragment's id — a child stamp strands a fee the completion claim (which
+// reads the parent) never finds.
+async function resolveDirectRodentSetupStamp(database, visit = {}) {
+  const row = await loadAuthoritativeSetupVisit(database, visit);
+  const amount = await directRodentSetupForRow(database, row);
+  return { amount, anchorId: row.recurring_parent_id || row.id || null };
 }
 
 async function deriveSecurePlanContext({ request, visitId }) {
@@ -723,6 +756,7 @@ module.exports = {
   // formula and one service→incentive-class whitelist across both lanes.
   computeSeriesPrepayPricing,
   resolveDirectRodentSetupObligation,
+  resolveDirectRodentSetupStamp,
   PLAN_CLASS_BY_SERVICE_KEY,
   // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a
   // third copy of the coverage-holding status list is a drift bug waiting

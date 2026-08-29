@@ -361,13 +361,15 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       // same obligation here and stamp it on the series anchor (whereNull-
       // guarded), so the first completion mint bills it (codex #3591 r28
       // P1). A resolver failure rolls back and skips (fail closed).
-      const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
-      const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
-      if (directRodentSetup > 0) {
+      // The resolver re-reads the visit by id (this caller's fragment carries
+      // no provenance) and names the series anchor to stamp (codex r29 P1).
+      const { resolveDirectRodentSetupStamp } = require('./secure-appointment-plans');
+      const directRodentSetup = await resolveDirectRodentSetupStamp(trx, visit);
+      if (directRodentSetup.amount > 0 && directRodentSetup.anchorId) {
         await trx('scheduled_services')
-          .where({ id: visit.recurring_parent_id || visit.id })
+          .where({ id: directRodentSetup.anchorId })
           .whereNull('pending_setup_fee')
-          .update({ pending_setup_fee: directRodentSetup, updated_at: new Date() });
+          .update({ pending_setup_fee: directRodentSetup.amount, updated_at: new Date() });
       }
       const inserted = await trx('appointment_card_requests')
         .insert({
@@ -1781,12 +1783,18 @@ async function loadSecureCardPageData(token) {
         ? Number(planContext.setupFee.amount)
         : 0)
       : null;
-    disclosure.accepted_setup_fee = displayedSetupFee != null
-      ? db.raw(
+    // No plan displayed on THIS render (one-time visit, or a transient
+    // derivation failure that fell back to the card-only page): leave the
+    // column exactly as it is. Writing NULL here would erase a cap frozen
+    // by an earlier successful render, and the submit path reads NULL as
+    // "price live" — an intervening fee increase could then bill more than
+    // the customer's original tab disclosed (codex #3591 r29 P1).
+    if (displayedSetupFee != null) {
+      disclosure.accepted_setup_fee = db.raw(
         'CASE WHEN accepted_setup_fee = 0 THEN 0 ELSE LEAST(COALESCE(accepted_setup_fee, ?::numeric), ?::numeric) END',
         [displayedSetupFee, displayedSetupFee],
-      )
-      : null;
+      );
+    }
     if (displayedPrice != null) {
       disclosure.accepted_amount = db.raw(
         'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',

@@ -2344,16 +2344,18 @@ function EstimateToolView() {
       alert("Live rodent bait pricing (brackets, setup fee, WaveGuard flags) could not be loaded — retry in a moment. (Rodent quotes are blocked rather than priced on possibly-stale configuration.)");
       return;
     }
-    // A rodent quote for a MATCHED account waits for the canonical
-    // qualifying-services load and blocks when it failed — the setup waiver
-    // is decided from those keys, never guessed from the tier (codex #3591
-    // r18 P1: a Bronze pest-only customer must waive, a rodent-only Bronze
-    // must not).
+    // EVERY quote for a MATCHED account waits for the canonical
+    // qualifying-services load and blocks when it failed: the WaveGuard
+    // tier combines the account's current families with this quote's, and
+    // the rodent setup waiver is decided from the same keys — never guessed
+    // from the tier (codex #3591 r18 P1, widened r29 P1: generating any
+    // add-on in the window right after a manual bind priced the customer as
+    // a first-time Bronze account).
     let resolvedQualifyingKeys = existingQualifyingKeys;
-    if (form.svcRodentBait && existingCustomerMatch) {
+    if (existingCustomerMatch) {
       const keys = await existingQualifyingKeysRef.current;
       if (!Array.isArray(keys)) {
-        alert("The matched customer's existing services could not be loaded — retry in a moment. (Rodent quotes are blocked rather than guessing the setup waiver.)");
+        alert("The matched customer's existing services could not be loaded — retry in a moment. (Quotes for a matched account are blocked rather than priced as a first-time customer.)");
         return;
       }
       resolvedQualifyingKeys = keys;
