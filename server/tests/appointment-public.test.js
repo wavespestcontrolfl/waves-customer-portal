@@ -12,6 +12,11 @@ jest.mock('../services/weather-forecast', () => ({
 jest.mock('../services/tech-photo', () => ({
   resolveTechPhotoUrl: jest.fn().mockResolvedValue(null),
 }));
+jest.mock('../services/appointment-reminders', () => ({
+  ...jest.requireActual('../services/appointment-reminders'),
+  // per-row pristine label (parent + add-ons), keyed by the raw service_type
+  buildServiceLabel: jest.fn(async (id, name) => ({ pest_control: 'Quarterly Pest Control', 'Lawn Fertilization': 'Lawn Fertilization' }[name] || name)),
+}));
 
 const appointmentRouter = require('../routes/appointment-public');
 const {
@@ -375,8 +380,11 @@ describe('grouped visit payload (codex #3609 r10)', () => {
       };
       return api;
     });
+    // each member carries its OWN pristine label (codex r15 P2) — the
+    // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Quarterly Pest Control'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
+      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
+    expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
   });
 });
@@ -442,5 +450,46 @@ describe('grouped calendar identity + locked anchor read (codex #3609 r13)', () 
       ['forUpdate'],
       ['first', ['visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start']],
     ]);
+  });
+});
+
+describe('lone-member visit keeps the confirm race verdict (local codex audit)', () => {
+  const { confirmGroupedOrSolo } = appointmentRouter._test;
+  const shown = { date: '2026-08-05', windowStart: '09:00' };
+  const svc = { id: 'a', visit_id: 'v1' };
+  const anchor = { visit_id: 'v1', status: 'confirmed', customer_confirmed: false, scheduled_date: '2026-08-05', window_start: '09:00:00' };
+  // scheduled_services call order: anchor FOR UPDATE read → openMembers select → sibling FOR UPDATE select → update
+  const fakeTrx = ({ members, pendingSiblings = [] }) => {
+    const log = [];
+    let ss = 0;
+    const trx = jest.fn((table) => {
+      const call = table === 'scheduled_services' ? ss++ : -1;
+      const api = {
+        where: () => api, whereNot: () => api, whereNotIn: () => api, forUpdate: () => api,
+        first: async () => anchor,
+        select: async () => (call === 1 ? members : pendingSiblings),
+        update: async (v) => { log.push(['update', table, v]); return 1; },
+        insert: async (v) => { log.push(['insert', table, v]); },
+      };
+      return api;
+    });
+    trx.fn = { now: () => 'now()' };
+    trx.__log = log;
+    return trx;
+  };
+
+  test('one live member ⇒ solo with the locked row, no sibling write; two ⇒ fan-out', async () => {
+    let trx = fakeTrx({ members: [{ id: 'a' }] });
+    expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'solo', row: anchor });
+    expect(trx.__log).toEqual([]);
+    trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
+    expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'fanned', row: anchor });
+    expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert']);
+    expect(trx.__log[0][2]).toMatchObject({ status: 'confirmed', customer_confirmed: true });
+  });
+
+  test('the anchor must still be at the shown slot either way', async () => {
+    const trx = fakeTrx({ members: [{ id: 'a' }] });
+    await expect(confirmGroupedOrSolo(trx, svc, { date: '2026-08-06', windowStart: '09:00' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
   });
 });

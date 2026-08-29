@@ -247,10 +247,14 @@ async function visitServicesFor(svc) {
     // earliest member's) drives the arrival promise: two links to the same
     // physical visit must quote the same window (codex r10).
     const parent = await db('service_visits').where({ id: svc.visit_id }).first('window_start');
-    // Every member label goes through the same customer-facing resolution
-    // as the heading (codex r11): raw service_type can be a canonical key
-    // or carry admin-only suffixes.
-    const services = await Promise.all(members.map((m) => resolveServiceLabel(m)));
+    // Per-member PRISTINE labels (codex r15 P2): reminder registration
+    // merges same-slot siblings into the owner row's service_type ("Pest
+    // Control & Mosquito Control"), so resolving every member from its
+    // reminder row duplicates work in the list. Each member's own
+    // parent-plus-add-ons label (buildServiceLabel — the same customer-
+    // facing resolution registration uses per row) is what the visit
+    // list wants; the merged label stays the single notification heading.
+    const services = await Promise.all(members.map((m) => memberServiceLabel(m)));
     const isConfirmed = (m) => String(m.status || '').toLowerCase() === 'confirmed';
     const isConfirmable = (m) => String(m.status || '').toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(m);
     return {
@@ -329,6 +333,22 @@ function readConfirmedAnchorLocked(trx, svc) {
     .first('visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start');
 }
 
+// Already-confirmed anchor under the stop lock: prove it still sits at the
+// shown slot, then — only when the visit really has two or more live
+// members — confirm the pending siblings. A lone member is 'solo': the
+// caller applies the single-row race verdict to the locked row.
+async function confirmGroupedOrSolo(trx, svc, shown) {
+  const cur = await readConfirmedAnchorLocked(trx, svc);
+  if (!confirmedRowStillShown(cur, svc, shown)) {
+    throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
+  }
+  const { openMembers } = require('../services/visit-groups');
+  const members = await openMembers(trx, svc.visit_id);
+  if (members.length < 2) return { outcome: 'solo', row: cur };
+  await confirmGroupedSiblings(trx, svc);
+  return { outcome: 'fanned', row: cur };
+}
+
 // Locked re-read guard for the already-confirmed grouped fan-out (codex r12
 // P1): the pre-lock loadByToken/slotMatchesShown pass proves nothing about
 // the row AFTER a concurrent move, so under the stop lock the row must still
@@ -358,6 +378,14 @@ async function underStopLock(svc, fn) {
       if (err && err.code === 'VISIT_STOP_MOVED') { if (attempt < 2) continue; return false; }
       throw err;
     }
+  }
+}
+
+async function memberServiceLabel(m) {
+  try {
+    return await require('../services/appointment-reminders').buildServiceLabel(m.id, m.service_type);
+  } catch {
+    return m.service_type || 'service';
   }
 }
 
@@ -672,14 +700,16 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // a move landing between the pre-lock read and the lock otherwise
       // confirms siblings at a slot nobody was shown.
       if (svc.visit_id) {
-        const ok = await underStopLock(svc, async (trx) => {
-          const cur = await readConfirmedAnchorLocked(trx, svc);
-          if (!confirmedRowStillShown(cur, svc, req.body)) {
-            throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
-          }
-          await confirmGroupedSiblings(trx, svc);
-        });
+        let locked = null;
+        const ok = await underStopLock(svc, async (trx) => { locked = await confirmGroupedOrSolo(trx, svc, req.body); });
         if (!ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+        // A visit_id with ONE live member is not grouped (local codex
+        // audit): the page rendered single-row behavior, so the existing
+        // race verdict applies — on the LOCKED row — instead of a fan-out
+        // success for a staff confirm the customer never made.
+        if (locked.outcome === 'solo' && confirmRaceVerdict(locked.row) !== 'idempotent_success') {
+          return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+        }
         return res.json({ success: true, confirmed: true });
       }
       if (confirmRaceVerdict(svc) === 'idempotent_success') {
@@ -849,6 +879,8 @@ router._test = {
   calendarUid,
   calendarSummaryLabel,
   readConfirmedAnchorLocked,
+  confirmGroupedOrSolo,
+  memberServiceLabel,
   confirmedRowStillShown,
 };
 

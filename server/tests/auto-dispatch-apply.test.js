@@ -350,6 +350,19 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadAnchorMap).not.toHaveBeenCalled();
   });
 
+  test('skip_weekends: a Saturday target refuses when any sibling skips weekends (codex r15 P1)', async () => {
+    const today = etDateString(new Date());
+    let n = 1; let sat = null;
+    while (!sat) { const d = etDateString(addETDays(parseETDateTime(`${today}T12:00`), n)); if (new Date(`${d}T12:00:00Z`).getUTCDay() === 6) sat = d; n += 1; }
+    const friday = shiftDateStr(sat, -1);
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const guard = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: {}, techChanged: false });
+    const skipper = { id: 's2', service_type: 'Lawn Fertilization', is_recurring: false, skip_weekends: true };
+    await expect(guard(sat)({ trx: fakeTrx({ siblings: [skipper] }), members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    await expect(guard(friday)({ trx: fakeTrx({ siblings: [skipper] }), members })).resolves.toBeUndefined();
+    await expect(guard(sat)({ trx: fakeTrx({ siblings: [{ ...skipper, skip_weekends: false }] }), members })).resolves.toBeUndefined();
+  });
+
   test('same-series date: a sibling whose recurring series already has another visit on the target date refuses (codex r14 P1)', async () => {
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });

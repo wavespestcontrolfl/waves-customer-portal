@@ -18,6 +18,7 @@ const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const { classifyServiceCategory } = require('./service-category');
 const { etDateString } = require('../../utils/datetime-et');
+const { _internals: { isSaturday } } = require('./candidate-slots');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -108,6 +109,9 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     not be dragged past it; unreadable anchor evidence refuses (fail closed)
  *   - technician reassignment: the chosen tech must not be DEACTIVATED for
  *     a sibling's service category (the scorer's hard filter)
+ *   - skip_weekends (codex r15 P1): a sibling whose series skips weekends
+ *     never lands on a Saturday (the candidate generator's HARD filter,
+ *     evaluated for the tapped row only)
  *   - same-series date (codex r14 P1): the target date must not already
  *     hold another occurrence of a sibling's recurring series (the scorer's
  *     HARD candidate-date exclusion, evaluated for the tapped row only) —
@@ -126,8 +130,12 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
     }
     const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id))
-      .select('id', 'service_type', 'recurring_parent_id', 'is_recurring', 'scheduled_date', 'auto_dispatch_change_count');
+      .select('id', 'service_type', 'recurring_parent_id', 'is_recurring', 'scheduled_date', 'auto_dispatch_change_count', 'skip_weekends');
     const memberIds = (members || []).map((m) => m.id);
+    if (isSaturday(best.date)) {
+      const weekend = rows.find((r) => r.skip_weekends === true);
+      if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
+    }
     if (config.routeTiersEnabled === true) {
       const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
       if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');

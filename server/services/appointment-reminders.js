@@ -4464,6 +4464,7 @@ AppointmentReminders._test = {
   getReminderPrefs,
   liveReminderServiceLabel,
   buildMergedServiceLabel,
+  buildServiceLabel,
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).

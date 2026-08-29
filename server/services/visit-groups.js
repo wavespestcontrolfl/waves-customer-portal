@@ -1563,6 +1563,24 @@ function shiftClock(hhmm, deltaMin) {
  * Warnings from every member are aggregated; a failed sibling is reported
  * in visitMove.failed and as a warning for the operator.
  */
+// Does a live row satisfy a rebooker-style `expect` predicate? Same
+// semantics as the rebooker's `.where(options.expect)` CAS, evaluated in JS:
+// dates by day, clocks by HH:MM, everything else by null-safe string
+// equality; a key the row does not carry fails (closed).
+function expectMatchesRow(row, expect) {
+  if (!row) return false;
+  const norm = (v) => (v == null || v === '' ? null : String(v).slice(0, 5));
+  for (const [key, want] of Object.entries(expect || {})) {
+    if (!Object.prototype.hasOwnProperty.call(row, key)) return false;
+    const have = row[key];
+    if (key === 'scheduled_date') { if (dateOnly(have) !== dateOnly(want)) return false; continue; }
+    if (key === 'window_start' || key === 'window_end') { if (norm(have) !== norm(want)) return false; continue; }
+    if ((have == null) !== (want == null)) return false;
+    if (have != null && String(have) !== String(want)) return false;
+  }
+  return true;
+}
+
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
   if (!rebooker || !service || !service.visit_id) return null;
   const logger = require('./logger');
@@ -1711,6 +1729,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const replay = await rebooker.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, visitPolicy: 'single', skipVisitSeam: true });
       return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
     }
+    // The caller's `expect` fence still applies to a no-op (local codex
+    // audit): every member already sits at the target, so the rebooker —
+    // and its CAS on options.expect — never runs. Auto-dispatch pins the
+    // ORIGINAL placement; a staff move that landed here first must surface
+    // as stale, not as this run's success (stamps/notice from a stale
+    // snapshot). Fail closed on an unreadable row.
+    if (options.expect && Object.keys(options.expect).length) {
+      const live = await db('scheduled_services').where({ id: serviceId }).first();
+      if (!expectMatchesRow(live, options.expect)) {
+        throw Object.assign(new Error('Cannot move this stop — it changed since it was read (another writer already placed it here)'), { statusCode: 409, code: 'VISIT_EXPECT_STALE', isOperational: true });
+      }
+    }
     return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
   }
 
@@ -1719,7 +1749,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const failed = [];
   const warnings = [];
   let primaryResult = null;
-  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, ...siblingBase } = options;
+  // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
+  // rebooker writes technician_id directly, bypassing the canonical
+  // assignment writer (tech-day fences, unassigned_overdue resolution,
+  // dispatch broadcast). Each moved sibling is re-pointed AFTER its move
+  // through alignMemberTechnician → assignDispatchJob instead.
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, technicianId: _tech, ...siblingBase } = options;
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};
@@ -1801,6 +1836,29 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // visit's one reminder text is the primary's. A sibling's own series
     // move (seriesMoveId) is finished by the series-effects reconciler like
     // any other committed series_moves row.
+    // Re-point a moved SIBLING at the requested technician through the
+    // canonical writer (codex r15 P1). Its own transaction after the move
+    // committed; 40P01 (tech-day fence vs a scheduling writer waiting on
+    // our stop lock) retries. A failure leaves the row moved but on its old
+    // technician — reported as a failed member (the detach seam separates
+    // it from the re-pointed parent), never silently split-tech.
+    const alignSibling = async () => {
+      if (target.isPrimary || options.technicianId === undefined) return;
+      if (String(target.expect.technician_id || '') === String(options.technicianId || '')) return;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null));
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (err && err.code === '40P01') continue;
+          break;
+        }
+      }
+      failed.push({ id: target.id, reason: `moved but its technician reassignment failed: ${lastErr.message}`, code: lastErr.code || 'ASSIGNMENT_FAILED' });
+      logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} technician reassignment failed: ${lastErr.message}`);
+    };
     const syncSiblingReminder = async () => {
       try {
         // expectSchedule fences this sync against a NEWER move that landed
@@ -1828,7 +1886,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
-      else await syncSiblingReminder();
+      else { await alignSibling(); await syncSiblingReminder(); }
     } catch (err) {
       // The rebooker COMMITS its move transaction and then runs post-commit
       // work (tech_status clear, follow-up shift, escalation, legacy
@@ -1843,7 +1901,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
         if (target.isPrimary) primaryResult = { success: true, newDate };
-        else await syncSiblingReminder();
+        else { await alignSibling(); await syncSiblingReminder(); }
         continue;
       }
       if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
@@ -1958,6 +2016,7 @@ module.exports = {
   visitSummariesForRows,
   _test: {
     shiftClock,
+    expectMatchesRow,
     siblingEligibleFor,
     visitSummariesForRows,
     windowedMembersConnected,

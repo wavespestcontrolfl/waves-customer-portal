@@ -41,10 +41,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]) }));
+jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
-const { moveVisitAsUnit, _test: { shiftClock } } = require('../services/visit-groups');
+const { assignDispatchJob } = require('../services/dispatch-assignment');
+const { moveVisitAsUnit, _test: { shiftClock, expectMatchesRow } } = require('../services/visit-groups');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
 const member = (id, over = {}) => ({ id, status: 'confirmed', technician_id: 't1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', ...over });
@@ -499,5 +501,84 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
     expect(out.warnings.some((w) => /service b moved but its post-move cleanup failed/.test(w))).toBe(true);
     expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T09:00', expect.objectContaining({ sendNotification: false }));
+  });
+});
+
+describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
+  const script = ({ members, landed = null, first = null }) => ({
+    service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : VISIT) },
+    scheduled_services: {
+      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+        : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
+          : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+      first: (ops, cols) => (first ? first(ops, cols) : null),
+    },
+  });
+
+  test('a technician change re-points every moved SIBLING through assignDispatchJob (own trx), never through the rebooker (P1)', async () => {
+    db.__script = script({ members: [member('a'), member('b'), member('c', { technician_id: 't9' })] });
+    const rebooker = fakeRebooker();
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
+    expect(out.visitMove).toMatchObject({ moved: ['a', 'b', 'c'], failed: [] });
+    // the primary keeps the caller's technicianId (the caller's own contract); siblings get NO technicianId
+    expect(rebooker.reschedule.mock.calls[0][5].technicianId).toBe('t9');
+    expect(rebooker.reschedule.mock.calls[1][5]).not.toHaveProperty('technicianId');
+    expect(rebooker.reschedule.mock.calls[2][5]).not.toHaveProperty('technicianId');
+    // b (t1 → t9) re-pointed through the canonical writer on a transaction; c already on t9 is not touched
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function) });
+    // and the parent still carries the technician
+    const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.scheduled_date);
+    expect(patch.values).toMatchObject({ technician_id: 't9' });
+  });
+
+  test('a sibling whose reassignment fails is reported as a failed member (moved, wrong tech) — deadlocks retry', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    assignDispatchJob
+      .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: '40P01' }))
+      .mockResolvedValueOnce({ changed: true });
+    let out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(out.visitMove.failed).toEqual([]);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(2);
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Technician is inactive'), { statusCode: 400 }));
+    out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
+    expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED' }]);
+    expect(out.warnings.some((w) => /did not move with this stop/.test(w))).toBe(true);
+    // unassign (null) goes through the same writer
+    jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: null } });
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'b', technicianId: null }));
+  });
+
+  test('an all-at-target no-op still honours the caller\'s expect fence on the live row (local audit)', async () => {
+    const atTarget = { visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] };
+    const live = { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', technician_id: 't1', auto_dispatch_locked: false, auto_dispatch_excluded: false };
+    // auto-dispatch pinned the ORIGINAL date: a staff move that landed first is stale, not this run's success
+    db.__script = { ...script({ ...atTarget, first: () => live }), service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : atTarget.visit) } };
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch', options: { seriesPolicy: 'single', expect: { scheduled_date: '2026-08-30', status: 'pending', auto_dispatch_locked: false } } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_EXPECT_STALE' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    // a fence the live row satisfies keeps the no-op
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'single', expect: { scheduled_date: '2026-09-02', window_start: '09:00', status: 'confirmed', technician_id: 't1' } } });
+    expect(out.visitMove).toMatchObject({ moved: [], alreadyAtTarget: true });
+    // unreadable row fails closed; no expect ⇒ no read
+    db.__script = { ...script({ ...atTarget, first: () => null }), service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : atTarget.visit) } };
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'single', expect: { status: 'confirmed' } } })).rejects.toMatchObject({ code: 'VISIT_EXPECT_STALE' });
+    expect((await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'single' } })).visitMove.alreadyAtTarget).toBe(true);
+  });
+
+  test('expectMatchesRow: day / HH:MM / null-safe string semantics, unknown key fails closed', () => {
+    const row = { scheduled_date: new Date('2026-09-02T04:00:00Z'), window_start: '09:00:00', window_end: null, status: 'confirmed', technician_id: null, auto_dispatch_locked: false };
+    expect(expectMatchesRow(row, { scheduled_date: '2026-09-02', window_start: '09:00', window_end: null, status: 'confirmed', technician_id: null, auto_dispatch_locked: false })).toBe(true);
+    expect(expectMatchesRow(row, { window_start: '10:00' })).toBe(false);
+    expect(expectMatchesRow(row, { technician_id: 't1' })).toBe(false);
+    expect(expectMatchesRow(row, { auto_dispatch_locked: true })).toBe(false);
+    expect(expectMatchesRow(row, { estimated_duration_minutes: 60 })).toBe(false);
+    expect(expectMatchesRow(null, {})).toBe(false);
+    expect(expectMatchesRow(row, {})).toBe(true);
   });
 });
