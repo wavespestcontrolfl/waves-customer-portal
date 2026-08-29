@@ -174,8 +174,8 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/const priorWeek = weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
     expect(sweep).toMatch(/const priorWeekPrescribedInches = priorWeek \? priorWeek\.prescribedInches : null;/);
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
-    expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, profileUpdatedAt: customer\.turf_updated_at \|\| null \}\)/);
-    expect(sweep).toMatch(/'tp\.updated_at as turf_updated_at',/);
+    expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, countyConfirmed: countyConfirmedAfterMove\(customer\) \}\)/);
+    expect(sweep).not.toMatch(/turf_updated_at|profileUpdatedAt/); // gh-r32: the row-wide timestamp is not a premise confirmation
     expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
@@ -245,7 +245,7 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
   test('from the second plan week on, last week\'s irrigation is what the delivered plan prescribed, not the programmed schedule (codex gh-r31)', () => {
     const held = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0 });
     expect(held.templateKey).toBe(TEMPLATE_WEEK_PLAN);
-    expect(held.decisionInputs.appliedInches).toBe(0);
+    expect(held.decisionInputs.appliedInches).toBe(0.2); // prior plan depth 0 + the 0.2" of observed rain (gh-r32)
     expect(held.decisionInputs.priorWeekPrescribedInches).toBe(0);
     expect(held.weekPlan.carryoverInches).toBe(0); // no manufactured surplus from the superseded 2"/wk schedule
     expect(held.payload.summary_line).toMatch(/last week's watering plan \(0" of irrigation\)/);
@@ -254,6 +254,43 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     const first = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2 });
     expect(first.decisionInputs.appliedInches).toBeGreaterThan(0);
     expect(first.payload.summary_line).not.toMatch(/last week's watering plan/);
+  });
+
+  test('a prior plan\'s depth is added to the OBSERVED rain — a held week after heavy rain still carries the surplus (codex gh-r32)', () => {
+    // No rain sensor: last week's applied water = prior plan irrigation + rain.
+    const wet = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0, rainfallInches7d: 2.5 });
+    expect(wet.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(wet.decisionInputs.appliedInches).toBe(2.5);
+    expect(wet.decisionInputs.priorWeekPrescribedInches).toBe(0);
+    expect(wet.weekPlan.carryoverInches).toBe(0.5); // root-zone cap, from the rain alone
+    expect(wet.weekPlan.reasons).toContain('prior_week_overwatered');
+    expect(wet.payload.summary_line).toMatch(/last week's watering plan \(0" of irrigation\), your lawn got about 2\.5"/);
+    const ran = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.2 });
+    expect(ran.decisionInputs.appliedInches).toBe(0.95);
+    expect(ran.payload.total_inches).toBe('0.95"');
+    // Untrusted rain never joins the total (same rule as the advice engine).
+    const { decideWeekPlan } = require('../services/irrigation-week-plan');
+    const { plan, decisionInputs } = decideWeekPlan({ advice: { rainKnown: false, appliedInchesPerWeek: null, recommendedInchesPerWeek: 0.75 }, grassType: 'st_augustine', forecastEt0Inches: 1.4, lastWeekRainInches: 2.5, priorWeekPrescribedInches: 0, county: 'Manatee', planWeekEnd: '2026-09-06', now: new Date('2026-08-31T11:00:00Z') });
+    expect(decisionInputs.appliedInches).toBe(0);
+    expect(plan.carryoverInches).toBe(0);
+  });
+
+  test('a PARTIAL former-home schedule in plan mode reaches the setup ask without quoting the stale minutes/days (codex gh-r32)', () => {
+    const { TEMPLATE_SETUP_SCHEDULE } = require('../services/irrigation-weekly-email');
+    const partial = { ...base, irrigationRunMinutes: 20, wateringDays: ['Mon', 'Thu'], irrigationSystemType: null };
+    const stale = buildWeeklyEmailDecision(partial);
+    expect(stale.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(stale.payload.schedule_ask).toMatch(/2 watering days/);
+    expect(stale.payload.schedule_ask).toMatch(/20 minutes per zone/);
+    const moved = buildWeeklyEmailDecision({ ...partial, scheduleUnconfirmed: true });
+    expect(moved.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(moved.payload.schedule_ask).toMatch(/^Your address changed after your sprinkler settings were saved/);
+    expect(moved.payload.schedule_ask).not.toMatch(/2 watering days|20 minutes|Mon|Thu/);
+    expect(moved.payload.schedule_ask).toMatch(/Add your watering days, minutes per zone and head type/);
+    // Gate off: the wrapper withholds the same inputs before the decision.
+    const legacy = buildWeeklyEmailDecision({ ...partial, scheduleUnconfirmed: true, weekPlanEnabled: false });
+    expect(legacy.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(legacy.payload.schedule_ask).not.toMatch(/2 watering days|20 minutes/);
   });
 
   test('every LEGACY path withholds the former home\'s schedule (gate off / late retry / plan unavailable) → the setup ask, never stale totals (codex gh-r24)', () => {

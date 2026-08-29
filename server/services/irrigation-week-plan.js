@@ -123,9 +123,20 @@ function decideWeekPlan({
   // cool, cloudy week must not size a hot week's plan).
   const targetInchesPerWeek = recommendedFromEt0(forecastEt0Inches, grassType, planMonth)
     ?? recommendedInchesPerWeek(grassType, planMonth);
+  // Last week's APPLIED water is rain + irrigation (buildIrrigationAdvice's
+  // appliedInchesPerWeek). A delivered prior plan replaces only the
+  // irrigation half: its prescribed depth PLUS the observed rain — a prior
+  // hold after 1.25" of rain is 1.25" applied, not 0, so the rain surplus
+  // still carries (codex gh-r32). Rain counts only when it is trusted, the
+  // same rule the advice engine applies.
+  const rainKnown = advice?.rainKnown !== false;
+  const lastWeekRain = Number.isFinite(Number(lastWeekRainInches)) ? Number(lastWeekRainInches) : null;
+  const lastWeekAppliedInches = priorWeekPrescribedInches != null
+    ? Math.round((Number(priorWeekPrescribedInches) + (rainKnown && lastWeekRain != null ? lastWeekRain : 0)) * 100) / 100
+    : (advice?.appliedInchesPerWeek ?? null);
   const plan = buildWeekPlan({
     targetInchesPerWeek,
-    lastWeekAppliedInches: priorWeekPrescribedInches != null ? priorWeekPrescribedInches : (advice?.appliedInchesPerWeek ?? null),
+    lastWeekAppliedInches,
     lastWeekRainInches,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     forecastRainInches,
@@ -136,7 +147,7 @@ function decideWeekPlan({
     systemType,
     explicitInchesPerWeek,
     rainSensor,
-    rainKnown: advice?.rainKnown !== false,
+    rainKnown,
     priorWeekEvents,
     rainOnlyCarryover,
   });
@@ -146,12 +157,12 @@ function decideWeekPlan({
   const decisionInputs = {
     targetInches: targetInchesPerWeek,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
-    appliedInches: priorWeekPrescribedInches != null ? priorWeekPrescribedInches : (advice?.appliedInchesPerWeek ?? null),
+    appliedInches: lastWeekAppliedInches,
     priorWeekEvents,
     priorWeekPrescribedInches,
     rainOnlyCarryover: rainOnlyCarryover === true,
     lastWeekRainInches,
-    rainKnown: advice?.rainKnown !== false,
+    rainKnown,
     forecastRainInches,
     planMonth,
     grassType,

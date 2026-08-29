@@ -39,7 +39,7 @@ const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, 
 const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
-const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -483,6 +483,17 @@ function decideWeeklyEmail({
     if (!advice.rainKnown) {
       return { shouldSend: false, reason: 'rain_unknown', advice };
     }
+    // A PARTIAL schedule saved for a former home (say minutes and days but
+    // no head type) lands here in plan mode with its inputs still riding
+    // (the wrapper withholds them only for the legacy path). The ask must
+    // not quote those figures as "on file" — they describe the previous
+    // property — so it sees no inputs at all and says why (codex gh-r32).
+    const askInputs = scheduleUnconfirmed ? normalizeRuntimeInputs({}) : runtimeInputs;
+    const askDerived = scheduleUnconfirmed ? null : derived;
+    const askExplicit = scheduleUnconfirmed ? null : prefsInches;
+    const movedPreface = scheduleUnconfirmed
+      ? 'Your address changed after your sprinkler settings were saved, so the settings on file describe your previous home and are not used for this one. '
+      : '';
     // "Do we know a sprinkler system exists?" — a technician's recorded
     // irrigation_type is a FIRST-HAND OBSERVATION and outranks the portal
     // toggle, which the customer may have set long ago (codex #3138 r2 P2).
@@ -509,7 +520,7 @@ function decideWeeklyEmail({
         // setup_schedule's callout ({{schedule_ask}}): what is on file and
         // the one input still missing. setup_system has no such block, and
         // an empty optional variable renders nothing.
-        schedule_ask: hasSystem ? buildScheduleAsk({ derived, inputs: runtimeInputs, toggleOff: irrigationSystem === false, explicitInches: prefsInches }) : '',
+        schedule_ask: hasSystem ? movedPreface + buildScheduleAsk({ derived: askDerived, inputs: askInputs, toggleOff: irrigationSystem === false, explicitInches: askExplicit }) : '',
         forecast_line: forecastLine({
           forecastRainInches,
           status: advice.status,
@@ -1024,8 +1035,6 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.zip',
       'tp.county as turf_county',
       'tp.municipality as turf_city',
-      // A profile rewritten AFTER a move may be trusted for jurisdiction again.
-      'tp.updated_at as turf_updated_at',
       'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
       'tp.irrigation_type as turf_irrigation_type',
       // LATEST non-null reading, and its value is passed through EVEN IF ZERO
@@ -1197,7 +1206,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, profileUpdatedAt: customer.turf_updated_at || null }),
+        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, countyConfirmed: countyConfirmedAfterMove(customer) }),
         home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
         // The restriction must cover the WHOLE plan week (through this Sunday).
         planWeekEnd,

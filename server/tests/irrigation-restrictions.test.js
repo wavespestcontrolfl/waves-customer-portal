@@ -134,8 +134,22 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     // The current address establishing the county wins after a move.
     expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Bradenton', zip: '34205', homeMoved: true })).toBe('Manatee');
     // gh-r31: a matching city is NOT proof the profile was rewritten (Englewood straddles the line) → null…
-    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', profileUpdatedAt: '2026-08-01T00:00:00Z' })).toBe(null);
-    // …a profile UPDATED after the move is trusted again.
-    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', profileUpdatedAt: '2026-08-25T00:00:00Z' })).toBe('Charlotte');
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z' })).toBe(null);
+    // gh-r32: …and neither is the profile's row-wide updated_at (an unrelated turf writer bumps it) — the
+    // parameter no longer exists; only a re-saved COUNTY (ledger entry) restores trust.
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', profileUpdatedAt: '2026-08-25T00:00:00Z' })).toBe(null);
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', countyConfirmed: false })).toBe(null);
+    // …a county RE-SAVED after the move is trusted again.
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', countyConfirmed: true })).toBe('Charlotte');
+    // A confirmed county still loses to a current address that contradicts it.
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Bradenton', zip: '34205', homeMoved: true, countyConfirmed: true })).toBe('Manatee');
+  });
+  test('the ledger entry is written only by a turf-profile save that carries a county (source contract)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
+    expect(route).toMatch(/if \(typeof fields\.county === 'string' && fields\.county\.trim\(\)\) \{\s*try \{\s*await confirmIrrigationFields\(db, customerId, \[COUNTY_CONFIRMED_FIELD\]\);/);
+    const assessment = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
+    expect(assessment).not.toMatch(/confirmIrrigationFields|COUNTY_CONFIRMED_FIELD/);
   });
 });

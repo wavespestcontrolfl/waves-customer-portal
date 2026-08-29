@@ -22,6 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -174,6 +175,20 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
       .onConflict('customer_id')
       .merge({ ...fields, updated_at: new Date() })
       .returning('*'));
+
+    // A county saved here is the technician's statement about the CURRENT
+    // home: it confirms the turf county in the sprinkler-settings ledger, so
+    // the weekly watering plan may trust it for jurisdiction again after a
+    // move (the profile's row-wide updated_at proves nothing — codex #3565
+    // gh-r32). Fail-soft: the plan stays withheld (fail closed) until the
+    // next county save if this write fails; the profile itself is saved.
+    if (typeof fields.county === 'string' && fields.county.trim()) {
+      try {
+        await confirmIrrigationFields(db, customerId, [COUNTY_CONFIRMED_FIELD]);
+      } catch (confirmErr) {
+        logger.warn?.(`[turf-profile] county confirmation skipped for ${customerId}: ${confirmErr.message}`);
+      }
+    }
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });
