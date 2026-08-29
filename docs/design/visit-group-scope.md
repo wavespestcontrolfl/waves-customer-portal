@@ -173,8 +173,13 @@ service_visits                                  ← rev 5 shape
     whose window overlaps the row's and satisfies the other join rules — the visit's
     `window_start/end` then widen to the union (visit-level window policy); non-overlapping ⇒
     a new seq (a second stop that day); creation and split allocate `max(seq)+1` over every historical row for
-    that base, in one transaction, so `route_stop_key` is an immutable identity for the life
-    of the row and a late scheduler or retry can never re-mint a closed/dissolved visit's key. Nullable technician_id is NOT part of the identity (NULLs don't collide
+    that base, in one transaction, so a late scheduler or retry can never re-mint a
+    closed/dissolved visit's key. `route_stop_key` is NOT immutable across a reschedule
+    (rev 5g): the collective move recomputes `stop_base_key` for the new date atomically
+    while holding BOTH stop locks (old base then new base, ordered lexically to avoid
+    deadlock), re-checking uniqueness at the new key. Effect dedupe keys and the visit `id`
+    never embed the stop key — `visit_id` is the durable identity; the stop key only
+    serialises concurrent creation/join/split for one property-day. Nullable technician_id is NOT part of the identity (NULLs don't collide
     in a unique index).
 
 visit_effects                                   ← rev 5: ONE durable outbox for every external
