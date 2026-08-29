@@ -132,6 +132,10 @@ describe('notification preference updates', () => {
     expect(updates).toEqual({
       appointment_confirmation_channel: 'email',
       service_reminder_72h_channel: 'both',
+      // Any explicit 72h channel write stamps the explicit-choice marker
+      // (Codex #3588 P1) — the email-first promotion must never override a
+      // deliberate delivery-method selection, Text included.
+      service_reminder_72h_channel_explicit: true,
       service_reminder_24h_channel: 'sms',
       en_route_channel: 'email',
       // Arrival alerts are SMS-only (email twin retired 2026-08-06): the key

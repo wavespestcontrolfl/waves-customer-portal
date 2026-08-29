@@ -257,7 +257,15 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.paymentConfirmationSms !== undefined) dbUpdates.payment_confirmation_sms = updates.paymentConfirmationSms;
   if (updates.serviceReportNotifyPrimary !== undefined) dbUpdates.service_report_notify_primary = updates.serviceReportNotifyPrimary;
   if (updates.appointmentConfirmationChannel !== undefined) dbUpdates.appointment_confirmation_channel = channelValue(updates.appointmentConfirmationChannel);
-  if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
+  if (updates.serviceReminder72hChannel !== undefined) {
+    dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
+    // Explicit-choice stamp (Codex #3588 P1): a customer write of this field
+    // is a deliberate delivery-method choice — the email-first 72h promotion
+    // (GATE_REMINDER_72H_EMAIL_FIRST) must never override it. Stamped for
+    // EVERY explicit value (sms included): re-choosing Text after the gate
+    // flips is exactly the opt-out this exists to honor.
+    dbUpdates.service_reminder_72h_channel_explicit = true;
+  }
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
   if (updates.enRouteChannel !== undefined) dbUpdates.en_route_channel = channelValue(updates.enRouteChannel);
   // Arrival alerts are SMS-only (email twin retired 2026-08-06). The key stays

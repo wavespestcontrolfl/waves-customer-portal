@@ -109,6 +109,23 @@ describe('resolve72hChannel — email-first promotion, one-time visits only (GAT
     await expect(resolve72hChannel('both', 'ss1')).resolves.toBe('both');
   });
 
+  test('fail closed: unreadable prefs row never promotes (hook P1 — email leg bypasses the consent validator)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { prefsUnavailable: true })).resolves.toBe('sms');
+    // Explicit email/both still pass through — those ARE the stored contract
+    // the existing email path already honors on unavailable prefs.
+    await expect(resolve72hChannel('email', 'ss1', { prefsUnavailable: true })).resolves.toBe('email');
+  });
+
+  test('explicit Text choice never promotes (Codex #3588 P1 — portal delivery-method control)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { explicitChoice: true })).resolves.toBe('sms');
+    // Un-stamped default still promotes.
+    await expect(resolve72hChannel('sms', 'ss1', { explicitChoice: false })).resolves.toBe('email');
+  });
+
   test('fail-safe: missing row, missing id, or thrown lookup keeps sms', async () => {
     isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
     ssDb(null); // no scheduled_services row
@@ -265,6 +282,25 @@ describe('getReminderPrefs account-level channel resolution', () => {
     expect(prefs.reminder72hChannel).toBe('email');
     // Toggles still come from the property's own row.
     expect(prefs.serviceReminder72h).toBe(true);
+  });
+
+  test('the 72h explicit-choice stamp rides the owner-resolved row (secondary profile honors the owner)', async () => {
+    setDbQueues({
+      notification_prefs: [
+        firstChain({ service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: false }),
+        // Owner deliberately chose Text — the stamp must surface even though
+        // the resolved channel value is the ambiguous 'sms'.
+        firstChain({ service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: true }),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: false }),
+        firstChain({ id: 'primary-1' }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('secondary-1');
+    expect(prefs.reminder72hChannel).toBe('sms');
+    expect(prefs.reminder72hChannelExplicit).toBe(true);
   });
 
   test('a FAILED owner-profile resolution marks prefs unavailable — the email fallback fails closed (Codex #3361 r28 P1)', async () => {

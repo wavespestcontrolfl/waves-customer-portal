@@ -241,9 +241,19 @@ async function isOneTimeVisit(scheduledServiceId) {
   }
 }
 
-async function resolve72hChannel(prefChannel, scheduledServiceId) {
+async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavailable = false, explicitChoice = false } = {}) {
   const ch = apptChannel(prefChannel);
   if (ch !== 'sms') return ch;
+  // Fail closed on an unreadable prefs row (pre-push hook P1): the 'sms'
+  // in hand is a fail-open default, not a stored choice, and the email leg
+  // bypasses sendCustomerMessage's consent validator — promotion could mail
+  // past an opt-out the lookup never read. SMS-led keeps the validator in
+  // the path.
+  if (prefsUnavailable) return 'sms';
+  // A customer who deliberately picked Text in the portal's delivery-method
+  // control keeps Text (Codex #3588 P1) — the stamp is written by the
+  // notifications route on every explicit channel write.
+  if (explicitChoice) return 'sms';
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('reminder72hEmailFirst')) return 'sms';
   return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
@@ -1446,6 +1456,11 @@ async function getReminderPrefs(customerId) {
     serviceReminder24h: prefs?.service_reminder_24h !== false,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
     reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel),
+    // Explicit delivery-method choice (Codex #3588 P1): stamped by the
+    // notifications route on any customer write of the 72h channel. Read
+    // from the same owner-resolved row as the channel itself so a secondary
+    // profile honors the account owner's choice.
+    reminder72hChannelExplicit: channelPrefs?.service_reminder_72h_channel_explicit === true,
     reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel),
   };
 }
@@ -2371,8 +2386,12 @@ const AppointmentReminders = {
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id);
           // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
-          // (one-time visits only) — see resolve72hChannel for the contract.
-          const channel72 = await resolve72hChannel(prefs.reminder72hChannel, r.scheduled_service_id);
+          // (one-time visits only; never past an unreadable prefs row or an
+          // explicit Text choice) — see resolve72hChannel for the contract.
+          const channel72 = await resolve72hChannel(prefs.reminder72hChannel, r.scheduled_service_id, {
+            prefsUnavailable: prefs.unavailable,
+            explicitChoice: prefs.reminder72hChannelExplicit,
+          });
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
