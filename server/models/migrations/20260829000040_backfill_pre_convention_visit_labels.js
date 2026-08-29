@@ -241,11 +241,13 @@ function invoiceCas(knex, inv) {
 const INVOICE_COLS = ['id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id'];
 
 // Relabel one invoice under CAS + frozen-statement guard; records on success.
-async function relabelInvoice(knex, inv, frozen, from, to, state) {
+async function relabelInvoice(knex, inv, frozen, from, to, state, { predicate, addonIds } = {}) {
   if (inv.payer_statement_id && frozen.has(inv.payer_statement_id)) return;
   const patch = relabelInvoiceSnapshot(inv, from, to);
   if (!patch) return;
-  const count = await invoiceCas(knex, inv).update({ ...patch, updated_at: knex.fn.now() });
+  let cas = invoiceCas(knex, inv);
+  if (predicate) cas = predicate(cas);
+  const count = await cas.update({ ...patch, updated_at: knex.fn.now() });
   if (!count) return;
   // Record exactly what this pass replaced and wrote, per field, plus the
   // timestamp THIS write stamped: down() compares against that, never
@@ -268,6 +270,9 @@ async function relabelInvoice(knex, inv, frozen, from, to, state) {
     prior,
     written: patch,
     visit_id: inv.scheduled_service_id || null,
+    // Add-ons whose relabel put this component here: the copy reverts only
+    // in step with them too (r8 P2).
+    addon_ids: addonIds && addonIds.length ? [...addonIds] : [],
     written_at: after ? after.updated_at_cas : null,
   });
   // Later passes see this pass's result (the CAS timestamp and the labels).
@@ -299,8 +304,61 @@ async function liveSiblingReminders(knex, rem, hasPreclosedCol) {
 // Fan one (from → to) relabel out to the customer-facing copies of the
 // given visits. Each record carries its COMPONENT visit(s) so down() can
 // gate on that visit's own reversal.
-async function fanOutSnapshots(knex, { from, to, visits }, state) {
+const slotKey = (rem) => `${rem.customer_id}␟${rem.appointment_time}`;
+
+// Where ONE stale label was relabeled to DIFFERENT targets within a single
+// snapshot's scope — two same-slot visits both stored as "Pest Control"
+// (one quarterly, one monthly), or two same-named add-ons on one parent
+// with different linkages — a component swap can only advertise whichever
+// pass runs first (the merger dedupes identical labels). Those snapshots
+// FAIL CLOSED: untouched, and listed in state.divergent for the owner
+// (r8 P1). Built once over every relabel group before any fanout.
+async function buildDivergence(knex, groups) {
+  const perVisit = new Map(); // visitId → Map(from → Set(to))
+  const note = (map, key, from, to) => {
+    if (!map.has(key)) map.set(key, new Map());
+    const byFrom = map.get(key);
+    if (!byFrom.has(from)) byFrom.set(from, new Set());
+    byFrom.get(from).add(to);
+  };
+  for (const { from, to, visits } of groups.values()) {
+    for (const v of visits) note(perVisit, v.id, from, to);
+  }
+  const perSlot = new Map(); // slotKey → Map(from → Set(to))
+  if (perVisit.size && (await knex.schema.hasTable('appointment_reminders'))) {
+    const rows = await knex('appointment_reminders')
+      .whereIn('scheduled_service_id', [...perVisit.keys()])
+      .select('scheduled_service_id', 'customer_id', 'appointment_time');
+    for (const r of rows) {
+      if (r.customer_id == null || r.appointment_time == null) continue;
+      for (const [from, tos] of perVisit.get(r.scheduled_service_id) || []) {
+        for (const to of tos) note(perSlot, slotKey(r), from, to);
+      }
+    }
+  }
+  const divergent = (map, key, from) => ((map.get(key) || new Map()).get(from) || new Set()).size > 1;
+  return {
+    atVisit: (visitId, from) => divergent(perVisit, visitId, from),
+    atSlot: (key, from) => divergent(perSlot, key, from),
+    acrossVisits: (visitIds, from) => new Set(visitIds.flatMap((id) => [...((perVisit.get(id) || new Map()).get(from) || [])])).size > 1,
+  };
+}
+
+async function fanOutSnapshots(knex, { from, to, visits }, state, divergence) {
   const visitIds = [...new Set(visits.map((v) => v.id))];
+  // Add-ons whose relabel brought each visit into this group (an add-on-only
+  // parent carries no relabel of its own) — every copy records them so it
+  // reverts only in step with the add-on too (r8 P2).
+  const addonIdsByVisit = new Map();
+  for (const v of visits) {
+    if (!v.addon_id) continue;
+    if (!addonIdsByVisit.has(v.id)) addonIdsByVisit.set(v.id, new Set());
+    addonIdsByVisit.get(v.id).add(v.addon_id);
+  }
+  const addonIdsFor = (ids) => [...new Set(ids.flatMap((id) => [...(addonIdsByVisit.get(id) || [])]))];
+  const skipDivergent = (scope, key) => {
+    state.divergent.push({ scope, key, from });
+  };
 
   if (await knex.schema.hasTable('appointment_reminders')) {
     const hasPreclosedCol = await knex.schema.hasColumn('appointment_reminders', 'windows_preclosed');
@@ -323,15 +381,25 @@ async function fanOutSnapshots(knex, { from, to, visits }, state) {
     for (const { rem, visitIds: sources } of targets.values()) {
       const next = relabelReminderComponent(rem.service_type, from, to);
       if (next === null) continue;
+      if (rem.customer_id != null && rem.appointment_time != null && divergence.atSlot(slotKey(rem), from)) {
+        skipDivergent('reminder_slot', rem.id);
+        continue;
+      }
       const count = await knex('appointment_reminders')
         .where({ id: rem.id, service_type: rem.service_type })
         .update({ service_type: next, updated_at: knex.fn.now() });
-      if (count) state.reminders.push({ id: rem.id, prior: rem.service_type, written: next, from, to, visit_ids: [...sources] });
+      if (count) {
+        state.reminders.push({
+          id: rem.id, prior: rem.service_type, written: next, from, to, visit_ids: [...sources], addon_ids: addonIdsFor([...sources]),
+        });
+      }
     }
   }
 
   // Self-booking snapshots — a booking can link several visits; down()
-  // gates on ALL of them reverting.
+  // gates on ALL of them reverting. Exact prior/written, like every other
+  // copy: an owner edit that keeps the new prefix ("(Custom)" qualifier)
+  // is theirs, never rewritten (r8 P2).
   const bookingToVisits = new Map();
   for (const v of visits) {
     if (!v.self_booking_id) continue;
@@ -345,10 +413,12 @@ async function fanOutSnapshots(knex, { from, to, visits }, state) {
     for (const sb of sbRows) {
       const next = swapRenamedPrefix(sb.service_type, from, to);
       if (!next) continue;
+      const linkedVisits = bookingToVisits.get(sb.id);
+      if (divergence.acrossVisits(linkedVisits, from)) { skipDivergent('self_booking', sb.id); continue; }
       const count = await knex('self_booked_appointments')
         .where({ id: sb.id, service_type: sb.service_type })
         .update({ service_type: next });
-      if (count) state.selfBookings.push({ id: sb.id, from, to, visit_ids: bookingToVisits.get(sb.id) });
+      if (count) state.selfBookings.push({ id: sb.id, from, to, prior: sb.service_type, written: next, visit_ids: linkedVisits });
     }
   }
 
@@ -359,14 +429,17 @@ async function fanOutSnapshots(knex, { from, to, visits }, state) {
       .whereIn('status', MUTABLE_INVOICE_STATUSES)
       .select(...INVOICE_COLS, knex.raw('updated_at::text AS updated_at_cas'));
     const frozen = await frozenPayerStatementIds(knex, drafts);
-    for (const inv of drafts) await relabelInvoice(knex, inv, frozen, from, to, state);
+    for (const inv of drafts) {
+      if (divergence.atVisit(inv.scheduled_service_id, from)) { skipDivergent('invoice', inv.id); continue; }
+      await relabelInvoice(knex, inv, frozen, from, to, state, { addonIds: addonIdsFor([inv.scheduled_service_id]) });
+    }
   }
 }
 
 // UNATTACHED draft/scheduled invoices, matched by their own labels. Only
 // labels with exactly ONE target across the whole relabel qualify — with
 // no visit to supply cadence, anything else is a guess.
-async function relabelUnattachedInvoices(knex, from, to, state) {
+async function relabelUnattachedInvoices(knex, from, to, state, predicate) {
   const unattached = await knex('invoices')
     .whereNull('scheduled_service_id')
     .whereIn('status', MUTABLE_INVOICE_STATUSES)
@@ -380,14 +453,14 @@ async function relabelUnattachedInvoices(knex, from, to, state) {
   // once per pass, never skipped after the first (r4 P1). The per-pass
   // updated_at::text CAS is re-read fresh, so passes chain safely.
   const frozen = await frozenPayerStatementIds(knex, unattached);
-  for (const inv of unattached) await relabelInvoice(knex, inv, frozen, from, to, state);
+  for (const inv of unattached) await relabelInvoice(knex, inv, frozen, from, to, state, { predicate });
 }
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('scheduled_services'))) return;
   if (!(await knex.schema.hasTable('services'))) return;
 
-  const state = { unlinked: [], linked: [], addons: [], reminders: [], selfBookings: [], invoices: [] };
+  const state = { unlinked: [], linked: [], addons: [], reminders: [], selfBookings: [], invoices: [], divergent: [] };
   const catalog = await activeCatalogNames(knex);
   // (from → to) → relabeled visits, for the snapshot fanout below.
   const groups = new Map();
@@ -396,6 +469,16 @@ exports.up = async function up(knex) {
     if (!groups.has(key)) groups.set(key, { from, to, visits: [] });
     groups.get(key).visits.push(visit);
   };
+
+  // Write predicates that re-check the catalog at write time — the initial
+  // activeCatalogNames() read is a snapshot, and the admin catalog editor
+  // (service-library.js) takes no lock that conflicts with these writes:
+  //  - a mapped write stamps its constant target only while an ACTIVE
+  //    service still carries that name (r8 P2);
+  //  - a linked write stamps the name it observed on the join only while
+  //    the catalog row still carries it (r7 P2).
+  const targetStillActive = (q, name) => q.whereRaw('EXISTS (SELECT 1 FROM services WHERE name = ? AND is_active = true)', [name]);
+  const catalogNameStill = (q, serviceId, name) => q.whereRaw('(SELECT name FROM services WHERE id = ?) = ?', [serviceId, name]);
 
   // Leg A — unlinked legacy rows, mapped by (label, cadence).
   for (const [stale, pattern, target] of UNLINKED_MAPPING) {
@@ -410,11 +493,11 @@ exports.up = async function up(knex) {
     for (const r of rows) {
       // CAS scoped to id + observed label + population predicate: a row
       // relinked or completed between read and write is never renamed.
-      const count = await openVisitStatus(
+      const count = await targetStillActive(openVisitStatus(
         knex('scheduled_services')
           .where({ id: r.id, service_type: stale, recurring_pattern: pattern })
           .whereNull('service_id')
-      ).update({ service_type: target });
+      ), target).update({ service_type: target });
       if (count) {
         state.unlinked.push({ id: r.id, from: stale, to: target, pattern });
         noteRelabel(stale, target, r);
@@ -434,11 +517,6 @@ exports.up = async function up(knex) {
         .whereRaw('ss.service_type <> sv.name')
     ).select('ss.id', 'ss.service_type', 'ss.service_id', 'ss.self_booking_id', 'sv.name as catalog_name')
     : [];
-
-  // The write predicate re-checks the catalog name it is about to stamp:
-  // an admin rename landing between the join read and this write must
-  // make the CAS miss, never stamp the obsolete name (r7 P2).
-  const catalogNameStill = (q, serviceId, name) => q.whereRaw('(SELECT name FROM services WHERE id = ?) = ?', [serviceId, name]);
 
   for (const r of linkedRows) {
     const count = await catalogNameStill(openVisitStatus(
@@ -493,7 +571,7 @@ exports.up = async function up(knex) {
         // down() re-checks exactly that (r4 P2, r7 P1).
         if (cadence) { rec.pattern = cadence.pattern; rec.pattern_source = cadence.source; }
         state.addons.push(rec);
-        noteRelabel(a.service_name, to, { id: a.scheduled_service_id, self_booking_id: null });
+        noteRelabel(a.service_name, to, { id: a.scheduled_service_id, self_booking_id: null, addon_id: a.id });
       }
     };
     for (const a of linkedAddons) {
@@ -508,15 +586,17 @@ exports.up = async function up(knex) {
         : { pattern: parent.recurring_pattern, source: 'parent' };
       const to = mappingTarget(a.service_name, cadence.pattern);
       if (!to || !catalog.has(to)) continue;
-      // The add-on's own cadence is part of its identity for the CAS.
-      const scope = (q) => (cadence.source === 'addon'
+      // The add-on's own cadence is part of its identity for the CAS; the
+      // mapped target is re-checked as still active at write time (r8 P2).
+      const scope = (q) => targetStillActive(cadence.source === 'addon'
         ? q.whereNull('service_id').where({ recurring_pattern: cadence.pattern })
-        : q.whereNull('service_id'));
+        : q.whereNull('service_id'), to);
       await relabelAddon(a, to, scope, cadence);
     }
   }
 
-  for (const group of groups.values()) await fanOutSnapshots(knex, group, state);
+  const divergence = await buildDivergence(knex, groups);
+  for (const group of groups.values()) await fanOutSnapshots(knex, group, state, divergence);
 
   // Unattached drafts: only the labels that NAME their own cadence
   // (UNATTACHED_LABELS) — a draft with no visit has no cadence or linkage
@@ -532,7 +612,7 @@ exports.up = async function up(knex) {
       // Same fail-closed target guard as Leg A: a mapping whose target the
       // catalog doesn't carry neither relabels visits nor drafts (r5 P2).
       if (!catalog.has(to)) continue;
-      await relabelUnattachedInvoices(knex, from, to, state);
+      await relabelUnattachedInvoices(knex, from, to, state, (q) => targetStillActive(q, to));
     }
   }
 
@@ -608,6 +688,13 @@ exports.down = async function down(knex) {
     }
   }
   const visitRevertible = (id) => (recordedVisits.has(id) ? revertedVisits.has(id) : !terminal.has(id));
+  // Add-on reversals run first; a copy that carries an add-on's component
+  // reverts only when that add-on's own reversal succeeded (r8 P2).
+  const revertedAddons = new Set();
+  const sourcesRevertible = (rec) => (
+    Array.isArray(rec.visit_ids) && rec.visit_ids.length > 0 && rec.visit_ids.every(visitRevertible)
+    && (rec.addon_ids || []).every((id) => revertedAddons.has(id))
+  );
 
   if (addonRecs.length && (await knex.schema.hasTable('scheduled_service_addons'))) {
     for (const rec of addonRecs) {
@@ -623,7 +710,8 @@ exports.down = async function down(knex) {
       // An add-on mapped through its OWN cadence re-checks that cadence on
       // the row itself (r7 P1) — the identity the forward CAS used.
       if (rec.pattern_source === 'addon') q = q.where({ recurring_pattern: rec.pattern });
-      await q.update({ service_name: rec.from });
+      const count = await q.update({ service_name: rec.from });
+      if (count) revertedAddons.add(rec.id);
     }
   }
 
@@ -646,7 +734,7 @@ exports.down = async function down(knex) {
       if (!current) continue;
       let working = current.service_type;
       for (const rec of [...recs].reverse()) {
-        if (!rec.visit_ids.every(visitRevertible)) break;
+        if (!sourcesRevertible(rec)) break;
         if (working !== rec.written) break;
         working = rec.prior;
       }
@@ -659,16 +747,12 @@ exports.down = async function down(knex) {
 
   if (sbRecs.length && (await knex.schema.hasTable('self_booked_appointments'))) {
     for (const rec of sbRecs) {
-      if (!pair(rec)) continue;
-      const visitIds = Array.isArray(rec.visit_ids) ? rec.visit_ids : [];
-      if (!visitIds.length || !visitIds.every(visitRevertible)) continue;
-      const current = await knex('self_booked_appointments').where({ id: rec.id }).first('id', 'service_type');
-      if (!current) continue;
-      const restored = swapRenamedPrefix(current.service_type, rec.to, rec.from);
-      if (!restored) continue;
+      if (!pair(rec) || typeof rec.written !== 'string' || typeof rec.prior !== 'string') continue;
+      if (!sourcesRevertible(rec)) continue;
+      // Exact: only a row still carrying what up() wrote reverts (r8 P2).
       await knex('self_booked_appointments')
-        .where({ id: rec.id, service_type: current.service_type })
-        .update({ service_type: restored });
+        .where({ id: rec.id, service_type: rec.written })
+        .update({ service_type: rec.prior });
     }
   }
 
@@ -703,7 +787,8 @@ exports.down = async function down(knex) {
       const working = { ...inv };
       const patch = {};
       for (const rec of [...recs].reverse()) {
-        if (rec.visit_id && !visitRevertible(rec.visit_id)) break;
+        // Unattached drafts (no visit) revert under the still-draft guard alone.
+        if (rec.visit_id && !sourcesRevertible({ visit_ids: [rec.visit_id], addon_ids: rec.addon_ids })) break;
         const fields = Object.keys(rec.written);
         if (!fields.every((f) => sameSnapshotValue(working[f], rec.written[f]))) break;
         for (const f of fields) { working[f] = rec.prior[f]; patch[f] = rec.prior[f]; }
