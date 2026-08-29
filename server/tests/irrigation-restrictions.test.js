@@ -88,11 +88,15 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Sarasota' })).toBe('Sarasota'); // normalized
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Bradenton' })).toBe('Manatee'); // conflicting current city wins
     expect(resolveRestrictionCounty({ city: 'Lakewood Ranch' })).toBeNull(); // straddles Manatee/Sarasota
-    // ZIP outranks the USPS city: "Sarasota" at 34243 is Manatee County; a Lakewood Ranch ZIP resolves too.
-    expect(resolveRestrictionCounty({ city: 'Sarasota', zip: '34243' })).toBe('Manatee');
+    // ZIP outranks the USPS city: a Lakewood Ranch ZIP resolves even though the city straddles.
     expect(resolveRestrictionCounty({ city: 'Lakewood Ranch', zip: '34202' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'Lakewood Ranch', zip: '34240' })).toBe('Sarasota');
-    expect(resolveRestrictionCounty({ county: 'Sarasota', zip: '34243' })).toBe('Manatee'); // stale profile vs current ZIP
+    // gh-r33: 34243 straddles Manatee/Sarasota (service-area map lists it under both) — neither the tax map
+    // nor the USPS city "Sarasota" may decide it; the technician's profile county does, else no plan.
+    expect(resolveRestrictionCounty({ city: 'Sarasota', zip: '34243' })).toBe(null);
+    expect(resolveRestrictionCounty({ county: 'Manatee', zip: '34243', city: 'Sarasota' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ county: 'Sarasota', zip: '34243' })).toBe('Sarasota');
+    expect(resolveRestrictionCounty({ county: 'Sarasota', zip: '34205' })).toBe('Manatee'); // stale profile vs an unambiguous current ZIP
     expect(resolveRestrictionCounty({ city: 'Parrish' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties
@@ -111,16 +115,26 @@ describe('jurisdiction', () => {
 describe('resolveRestrictionCounty covers the whole service area (codex gh-r29)', () => {
   const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
   const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
-  test('a service-area ZIP the tax map omits (Cortez 34215) still resolves; the tax map stays authoritative where it speaks', () => {
+  test('a service-area ZIP the tax map omits (Cortez 34215) still resolves; the tax map speaks first for unshared ZIPs', () => {
     expect(resolveRestrictionCounty({ zip: '34215' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ zip: '34216', city: 'Anna Maria' })).toBe('Manatee');
-    expect(resolveRestrictionCounty({ zip: '34243', city: 'Sarasota' })).toBe('Manatee'); // tax map
+    expect(resolveRestrictionCounty({ zip: '34205', city: 'Sarasota' })).toBe('Manatee'); // tax map over a contradicting city
     expect(SERVICE_AREA_COUNTY_ZIPS.Manatee).toContain('34215');
   });
-  test('a ZIP shared across county lines never decides jurisdiction on its own (city map / fail closed)', () => {
+  test('a ZIP shared across county lines is decided by NO address-level source — tax map and city map included (codex gh-r29/r33)', () => {
     // 34223 (Englewood) sits in both the Sarasota and Charlotte service-area sets and not in the tax map.
     expect(resolveRestrictionCounty({ zip: '34223', city: 'Englewood' })).toBe(null);
-    expect(resolveRestrictionCounty({ zip: '34223', city: 'Venice' })).toBe('Sarasota'); // whole-county city map
+    expect(resolveRestrictionCounty({ zip: '34223', city: 'Venice' })).toBe(null); // the city cannot rescue a straddling ZIP
+    // 34228 (Longboat Key) files as Sarasota in the tax map but its north end is Manatee's: the tax shortcut must not force it.
+    expect(SERVICE_AREA_COUNTY_ZIPS.Manatee).toContain('34228');
+    expect(SERVICE_AREA_COUNTY_ZIPS.Sarasota).toContain('34228');
+    expect(resolveRestrictionCounty({ zip: '34228', city: 'Longboat Key' })).toBe(null);
+    expect(resolveRestrictionCounty({ zip: '34228', city: 'Sarasota' })).toBe(null);
+    expect(resolveRestrictionCounty({ county: 'Manatee', zip: '34228', city: 'Longboat Key' })).toBe('Manatee'); // technician's profile county
+    // Every shared service-area ZIP behaves the same way.
+    const counts = {};
+    for (const zips of Object.values(SERVICE_AREA_COUNTY_ZIPS)) for (const z of zips) counts[z] = (counts[z] || 0) + 1;
+    for (const [z, n] of Object.entries(counts)) if (n > 1) expect(resolveRestrictionCounty({ zip: z, city: 'Sarasota' })).toBe(null);
   });
 });
 
@@ -149,7 +163,12 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     const path = require('path');
     const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
     // Same transaction as the profile upsert (the turf fence's trx), never a second one after commit (hook P1 on 45beb0731).
-    expect(route).toMatch(/withTurfProfileFence\(db, customerId, async \(trx\) => \{[\s\S]*?\.returning\('\*'\);[\s\S]*?if \(typeof fields\.county === 'string' && fields\.county\.trim\(\)\) \{\s*await confirmIrrigationFields\(trx, customerId, \[COUNTY_CONFIRMED_FIELD\]\);\s*\}\s*return rows;\s*\}\);/);
+    expect(route).toMatch(/withTurfProfileFence\(db, customerId, async \(trx\) => \{[\s\S]*?\.returning\('\*'\);[\s\S]*?if \(countyConfirmed\) \{\s*await confirmIrrigationFields\(trx, customerId, \[COUNTY_CONFIRMED_FIELD\]\);\s*\}\s*return rows;\s*\}\);/);
+    // gh-r33: an EXPLICIT review flag, never payload presence (the form re-sends every loaded field on every save).
+    expect(route).toMatch(/const countyConfirmed = \(req\.body \|\| \{\}\)\.county_confirmed === true\s*&& typeof fields\.county === 'string' && !!fields\.county\.trim\(\);/);
+    const panel = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'admin', 'LawnAssessmentPanel.jsx'), 'utf8');
+    expect(panel).toMatch(/county_confirmed: countyTouched/);
+    expect(panel).toMatch(/if \(key === "county"\) setCountyTouched\(true\);/);
     expect(route).not.toMatch(/confirmIrrigationFields\(db,/);
     const assessment = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
     expect(assessment).not.toMatch(/confirmIrrigationFields|COUNTY_CONFIRMED_FIELD/);

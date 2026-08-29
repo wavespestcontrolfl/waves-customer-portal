@@ -57,24 +57,31 @@ const CITY_COUNTY = Object.freeze({
  * (coverage cannot be established).
  */
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, SERVICE_AREA_COUNTY_ZIPS } = require('./county-zips');
-// Watering jurisdiction by ZIP: the tax/compliance map is authoritative where
-// it speaks (34243 "Sarasota" is Manatee); the FULLER service-area map covers
-// the ZIPs it deliberately omits (Cortez 34215, Anna Maria, Ellenton…) when
-// the ZIP sits in exactly ONE county — a ZIP shared across county lines
-// cannot decide jurisdiction (left to the city map / fail closed) — codex
-// #3565 gh-r29.
-const SERVICE_AREA_ZIP_COUNTY = Object.freeze((() => {
+// Watering jurisdiction by ZIP. A ZIP the service-area map lists under MORE
+// THAN ONE county straddles a line (34228 Longboat Key, 34243 University
+// Park / SRQ, 34223–34224 Englewood): NOTHING address-level may decide it —
+// not the tax map (a filing convention, not a jurisdiction: 34228 files as
+// Sarasota while its north end is Manatee's) and not the city map either,
+// because the USPS city spans the same line ("Sarasota" 34243 reaches into
+// Manatee). Such a ZIP fails closed to the technician-confirmed profile
+// county, else no plan (codex gh-r29, gh-r33). Elsewhere the tax map speaks
+// first and the FULLER service-area map covers the ZIPs it omits (Cortez
+// 34215, Anna Maria, Ellenton…).
+const { SERVICE_AREA_ZIP_COUNTY, SHARED_SERVICE_AREA_ZIPS } = (() => {
   const seen = {};
   for (const [county, zips] of Object.entries(SERVICE_AREA_COUNTY_ZIPS)) {
     for (const z of zips) seen[z] = seen[z] ? 'shared' : county;
   }
-  return Object.fromEntries(Object.entries(seen).filter(([, c]) => c !== 'shared'));
-})());
+  return {
+    SERVICE_AREA_ZIP_COUNTY: Object.freeze(Object.fromEntries(Object.entries(seen).filter(([, c]) => c !== 'shared'))),
+    SHARED_SERVICE_AREA_ZIPS: Object.freeze(new Set(Object.entries(seen).filter(([, c]) => c === 'shared').map(([z]) => z))),
+  };
+})();
 const ZIP_COUNTY = Object.freeze(Object.fromEntries([
   ...MANATEE_ZIPS.map((z) => [z, 'Manatee']),
   ...SARASOTA_ZIPS.map((z) => [z, 'Sarasota']),
   ...CHARLOTTE_ZIPS.map((z) => [z, 'Charlotte']),
-]));
+].filter(([z]) => !SHARED_SERVICE_AREA_ZIPS.has(z))));
 
 function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null, homeMoved = false, movedAt = null, countyConfirmed = false } = {}) {
   // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
@@ -87,7 +94,10 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // The customer's CURRENT county: ZIP first (the tax/compliance county map —
   // a USPS city of "Sarasota" at 34243 is Manatee), then a whole-county city.
   const zip5 = String(zip || '').trim().slice(0, 5);
-  const currentCounty = ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null;
+  // A straddling ZIP is decided by no address-level source (see above).
+  const currentCounty = SHARED_SERVICE_AREA_ZIPS.has(zip5)
+    ? null
+    : (ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null);
   const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
   const profileCounty = norm(county);
   const profileDiverges = !!pCity && !!cCity && pCity !== cCity;

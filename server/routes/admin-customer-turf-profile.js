@@ -164,6 +164,8 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // is the merge set; customer_id stays the conflict key and is
     // never mutated.
     const insertRow = { customer_id: customerId, ...fields };
+    const countyConfirmed = (req.body || {}).county_confirmed === true
+      && typeof fields.county === 'string' && !!fields.county.trim();
     // Customer-lock fence (#3391 GitHub round): FOR UPDATE on the turf row
     // cannot serialize the NO-ROW case, so this upsert could insert the
     // customer's first profile between the click-to-estimate mint's null
@@ -176,15 +178,19 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
-      // A county saved here is the technician's statement about the CURRENT
-      // home: it confirms the turf county in the sprinkler-settings ledger,
-      // so the weekly watering plan may trust it for jurisdiction again
-      // after a move (the profile's row-wide updated_at proves nothing —
-      // codex #3565 gh-r32). SAME transaction as the profile write, under
-      // the customer row lock every address move also takes first: a move
-      // can never land between the two and be followed by a confirmation
-      // of the former home's county (hook P1 on 45beb0731).
-      if (typeof fields.county === 'string' && fields.county.trim()) {
+      // A county the technician EXPLICITLY reviewed on this save
+      // (`county_confirmed: true` — the client sets it only when the county
+      // field was edited in this session) is their statement about the
+      // CURRENT home: it confirms the turf county in the sprinkler-settings
+      // ledger, so the weekly watering plan may trust it for jurisdiction
+      // again after a move. Payload presence alone proves nothing — the
+      // form re-sends every loaded field on every save, so a grass-type
+      // edit would otherwise re-confirm the former home's county (codex
+      // #3565 gh-r32/r33). SAME transaction as the profile write, under the
+      // customer row lock every address move also takes first: a move can
+      // never land between the two and be followed by a confirmation of
+      // the former home's county (hook P1 on 45beb0731).
+      if (countyConfirmed) {
         await confirmIrrigationFields(trx, customerId, [COUNTY_CONFIRMED_FIELD]);
       }
       return rows;

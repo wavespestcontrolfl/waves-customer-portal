@@ -112,6 +112,11 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   const [turfProfile, setTurfProfile] = useState(EMPTY_TURF_PROFILE);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  // The county field was EDITED in this session. The save re-sends every
+  // loaded field, so the server needs an explicit signal that the county
+  // was reviewed for the current address — after a move, that review is
+  // what lets the weekly watering plan trust the profile county again.
+  const [countyTouched, setCountyTouched] = useState(false);
   // Tech-confirmed scores. Initialized from the server-adjusted /assess
   // scores; the tech can nudge any tile up/down before confirm.
   // recordTechCalibration on the server uses the AI vs tech delta to
@@ -321,6 +326,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
             }
           : EMPTY_TURF_PROFILE,
       );
+      setCountyTouched(false);
       setStep("profile");
     } catch (e) {
       alert("Failed to load turf profile: " + e.message);
@@ -333,9 +339,12 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     if (!selectedCustomer) return;
     // Strip empty strings so the API receives null/undefined instead of
     // empty strings that fail numeric/date parsing on the server.
-    const payload = Object.fromEntries(
-      Object.entries(turfProfile).filter(([, v]) => v !== "" && v !== null),
-    );
+    const payload = {
+      ...Object.fromEntries(
+        Object.entries(turfProfile).filter(([, v]) => v !== "" && v !== null),
+      ),
+      county_confirmed: countyTouched,
+    };
     setProfileSaving(true);
     try {
       const d = await adminFetch(
@@ -346,6 +355,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         },
       );
       alert("Turf profile saved");
+      setCountyTouched(false);
       // Reflect the saved row back into form state so the user sees
       // any server-applied normalisation immediately.
       const p = d.profile;
@@ -1315,9 +1325,19 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                         : undefined
                     }
                     value={turfProfile[key] ?? ""}
-                    onChange={(e) => updateProfileField(key, e.target.value)}
+                    onChange={(e) => {
+                      if (key === "county") setCountyTouched(true);
+                      updateProfileField(key, e.target.value);
+                    }}
                     style={{ ...inputStyle, marginBottom: 0 }}
                   />{" "}
+                  {key === "county" && (
+                    <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
+                      Sets the watering-restriction jurisdiction. After an
+                      address change, re-enter it here to confirm it for the
+                      new home.
+                    </div>
+                  )}
                 </div>
               ))}
               {/* Boolean history flags */}

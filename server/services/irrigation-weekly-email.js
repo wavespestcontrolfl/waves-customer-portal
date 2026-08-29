@@ -1117,10 +1117,18 @@ async function logEmailAttempt({ customerId, templateKey, status, providerMessag
  * or overlapping deploy tick dedupes inside the template library, and
  * runExclusive in the cron wiring prevents concurrent sweeps.
  */
-async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
+async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSendAttempts = MAX_SEND_ATTEMPTS_PER_RUN, inProgressRetryMs = IN_PROGRESS_RETRY_MS,
 } = {}) {
-  const weekEnding = lastCompletedWeekEnding(now);
-  const candidates = await findEligibleCustomers({ now });
+  const startedAt = now || new Date();
+  // The wall clock is re-read PER CUSTOMER (and again at each queue
+  // transition): a degraded provider can drag this sequential sweep hours
+  // past the plan window, and a plan decided at 7 a.m. must not dispatch at
+  // 2 p.m. when the assigned watering window may already be gone (codex
+  // gh-r33). A pinned `now` (tests) freezes the clock unless a `clock` is
+  // given.
+  const tick = clock || (now ? () => now : () => new Date());
+  const weekEnding = lastCompletedWeekEnding(startedAt);
+  const candidates = await findEligibleCustomers({ now: startedAt });
 
   if (!isEnabled('irrigationWeeklyEmail')) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
@@ -1138,19 +1146,20 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
-    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0 },
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0, window_closed: 0 },
   };
   // Plan mode only inside the plan week's MONDAY MORNING window (the cron
   // runs ~7 a.m. ET; PLAN_WINDOW_END_HOUR_ET closes it): a retry later on
   // Monday — after a customer's permitted watering window may have passed —
   // or Tue–Sun cannot know whether the assigned day is gone under a one-day
   // policy, so it must not send an actionable "this week" plan. Those
-  // customers get the pre-plan templates (counted as late_retry).
-  const { dayOfWeek, hour } = etParts(now);
-  const isMondayET = dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;
+  // customers get the pre-plan templates (counted as late_retry). Judged
+  // per customer from the live clock, never once at sweep start.
+  const planWindowOpen = (at) => {
+    const { dayOfWeek, hour } = etParts(at);
+    return dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;
+  };
   const weekPlanGate = isEnabled('irrigationWeekPlan');
-  const weekPlanEnabled = weekPlanGate && isMondayET;
-  const planAsOf = now;
   // Plan-week horizon: the Sunday after the completed week (ET).
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
@@ -1165,6 +1174,15 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     // LOST to another worker), null (unreadable after retries) — the abort
     // below is counted by cause, never all as "claimed elsewhere".
     let claimRenewal = null;
+    // The plan window closed between this customer's decision and the queue
+    // transition: the plan is withheld (an actionable plan must never go
+    // out after the cutoff), counted window_closed.
+    let windowClosedAtQueue = false;
+    // THIS customer's clock reading: the window verdict and the snapshot's
+    // planAsOf come from it, not from the sweep's start time.
+    const planAsOf = tick();
+    const isMondayET = planWindowOpen(planAsOf);
+    const weekPlanEnabled = weekPlanGate && isMondayET;
     try {
       if (!isEmailLike(customer.email)) {
         summary.skipped.missing_email += 1;
@@ -1383,6 +1401,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // followed by this worker's older decision).
         onQueued: snapshotArgs?.claimToken
           ? async () => {
+            // Re-read the clock at dispatch: a plan decided inside the
+            // window must not leave after it (codex gh-r33).
+            if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
             claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
             return claimRenewal === true;
           }
@@ -1408,6 +1429,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // library aborted before dispatch — nothing to stamp, and the discard
       // is the new owner's to make (codex gh-r20).
       if (result.aborted) {
+        if (windowClosedAtQueue) {
+          // The cutoff passed while this send waited on the provider: the
+          // plan is withheld and its unsent snapshot discarded (this
+          // worker's claim), so a later run sends the pre-plan email
+          // instead of an out-of-window instruction.
+          summary.plan.window_closed += 1;
+          logger.warn(`[irrigation-weekly-email] plan window closed before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+          continue;
+        }
         if (claimRenewal === null) {
           // Unreadable renewal even after retries: NOT evidence of another
           // owner. Fail closed on the send, but say so — this customer's

@@ -122,7 +122,7 @@ describe('sweep — plan mode only on Monday', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../services/irrigation-weekly-email.js'), 'utf8');
-    expect(src).toMatch(/const isMondayET = dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;/);
+    expect(src).toMatch(/const planWindowOpen = \(at\) => \{\s*const \{ dayOfWeek, hour \} = etParts\(at\);\s*return dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;\s*\};/);
     expect(require('../services/irrigation-weekly-email').PLAN_WINDOW_END_HOUR_ET).toBe(12);
     // A late (legacy-path) retry still dedupes on the customer-week before sending.
     expect(src).toMatch(/if \(!decision\.weekPlan\) \{[\s\S]{0,700}summary\.deduped \+= 1;\s*continue;/); // gate-independent (hook P1 on 41705b745)
@@ -180,11 +180,16 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
-    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{\s*claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
+    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{[^}]*if \(!planWindowOpen\(tick\(\)\)\) \{ windowClosedAtQueue = true; return false; \}\s*claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
+    // gh-r33: the plan window is judged PER CUSTOMER from the live clock, never once at sweep start.
+    expect(sweep).toMatch(/for \(const customer of candidates\) \{[\s\S]*?const planAsOf = tick\(\);\s*const isMondayET = planWindowOpen\(planAsOf\);\s*const weekPlanEnabled = weekPlanGate && isMondayET;/);
+    expect(sweep).not.toMatch(/const planAsOf = now;/);
+    expect(sweep).toMatch(/const tick = clock \|\| \(now \? \(\) => now : \(\) => new Date\(\)\);/);
+    expect(sweep).toMatch(/if \(windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
     expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
-    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*if \(windowClosedAtQueue\) \{[\s\S]*?continue;\s*\}\s*if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
     // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
     expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);
