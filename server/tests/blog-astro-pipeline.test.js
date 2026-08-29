@@ -5455,6 +5455,16 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
   });
 
+  test('bodyImageRefs: ENTERING a would-be list inside an active raw HTML block is raw text — only the OPENING container ending terminates it (#3593 r2)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    // No blank line: the list-looking line is raw text inside the div block.
+    const body = '<div>\n- ![literal](/images/blog/x/body-1.webp)\n</div>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // Leaving the opening quote still terminates (regression from GH r30).
+    const quote = '> <div>\n> ![in](/images/blog/x/body-1.webp)\n![out](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(quote, { mdx: false }).map((r) => r.alt)).toEqual(['out']);
+  });
+
   test('bodyImageRefs: an INDENTED marker at content depth stays inside an active raw HTML block; only a sibling/outer marker terminates it (#3593 r1)', () => {
     const { bodyImageRefs } = AstroPublisher._internals;
     const body = '- <div>\n  - nested ![in](/images/blog/x/body-1.webp)\n  ![in2](/images/blog/x/body-2.webp)\n- ![next](/images/blog/x/body-3.webp)';

@@ -2287,6 +2287,8 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null, rawLines 
     return { indent, marker, contentCol: marker ? indent + marker[0].length : indent };
   };
   let blockContentCol = 0; // the opening item's content column (raw)
+  let blockDepth = 0; // quote depth the block opened at
+  let blockInList = false; // whether the block opened inside a list item
   let closeRe = null; // type 1: ends on the line carrying the closing tag
   let inBlock = false; // types 6/7: end at a blank line
   // A type-7 block needs a BLOCK BOUNDARY, not specifically a blank line
@@ -2307,13 +2309,16 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null, rawLines 
       || (inList && !!inList[i] !== !!inList[i - 1]));
     const raw = rawView(i);
     if (inBlock || closeRe) {
-      // A leaf block cannot outlive its container: leaving the quote, or a
-      // marker at a SHALLOWER raw indent than the opening item's content
-      // column (a sibling or outer item), ends the active block and this
-      // line is processed as the first line of its new context (GH r30).
-      // A marker AT content depth is raw text inside the block — the
-      // stripper removed the indentation that told them apart (#3593 r1).
-      if (containerMoved || (raw.marker && raw.indent < blockContentCol)) {
+      // A leaf block ends only when the container it OPENED in ends —
+      // leaving that quote depth, leaving its list, or a marker at a
+      // SHALLOWER raw indent than the opening item's content column (a
+      // sibling/outer item, #3593 r1). ENTERING a would-be container
+      // (`<div>` then `- ![x]` with no blank line) is raw text inside the
+      // block, not a transition (#3593 r2): the stripper's `inList` flip
+      // false→true must not terminate.
+      const leftQuote = depths && (depths[i] || 0) < blockDepth;
+      const leftList = inList && blockInList && !inList[i];
+      if (leftQuote || leftList || (raw.marker && raw.indent < blockContentCol)) {
         inBlock = false;
         closeRe = null;
         atBoundary = true;
@@ -2324,12 +2329,13 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null, rawLines 
     if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
     if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
     const core = l.replace(LIST_MARKER_PREFIX_RE, '');
+    const openAt = () => { blockContentCol = raw.contentCol; blockDepth = (depths && depths[i]) || 0; blockInList = !!(inList && inList[i]); };
     const t1 = core.match(HTML_BLOCK_TYPE1_RE);
     if (t1) {
       closeRe = new RegExp(`</${t1[1]}>`, 'i');
       const done = closeRe.test(l);
       if (done) closeRe = null;
-      else blockContentCol = raw.contentCol;
+      else openAt();
       atBoundary = done;
       return blankLine(l);
     }
@@ -2338,11 +2344,11 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null, rawLines 
       closeRe = delim.close;
       const done = closeRe.test(core.replace(delim.open, ''));
       if (done) closeRe = null;
-      else blockContentCol = raw.contentCol;
+      else openAt();
       atBoundary = done;
       return blankLine(l);
     }
-    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; blockContentCol = raw.contentCol; atBoundary = false; return blankLine(l); }
+    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; openAt(); atBoundary = false; return blankLine(l); }
     atBoundary = blank || contentGuardrails.isInterruptingBlock(l);
     return l;
   }).join('\n');
