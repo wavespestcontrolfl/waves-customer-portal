@@ -185,10 +185,10 @@ describe('windowedMembersConnected (codex #3590 r8/r12: one transitive chain = o
 
 describe('siblingEligibleFor (live fan-out, doc §3)', () => {
   const { siblingEligibleFor } = require('../services/visit-groups')._test;
-  test('en_route accepts the pre-en-route statuses only', () => {
+  test('en_route accepts the pre-en-route statuses only; a rescheduled placeholder never follows a sibling', () => {
     expect(siblingEligibleFor('en_route', 'pending')).toBe(true);
     expect(siblingEligibleFor('en_route', 'confirmed')).toBe(true);
-    expect(siblingEligibleFor('en_route', 'rescheduled')).toBe(true);
+    expect(siblingEligibleFor('en_route', 'rescheduled')).toBe(false);
     expect(siblingEligibleFor('en_route', 'on_site')).toBe(false);
     expect(siblingEligibleFor('en_route', 'completed')).toBe(false);
   });

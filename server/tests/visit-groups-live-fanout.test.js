@@ -54,7 +54,7 @@ const trackTransitions = require('../services/track-transitions');
 const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
-const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', ...over });
+const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', window_start: '09:00', window_end: '10:00', ...over });
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1' };
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
@@ -205,11 +205,14 @@ describe('fanOutLiveTransition', () => {
       scheduled_services: { first: lockedPrimary(), select: () => [
         { scheduled_date: '2026-09-02', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
         { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p9', id: 's2', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's3', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '14:00', window_end: '15:00' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's4', status: 'rescheduled', technician_id: 't1', track_state: 'scheduled' },
       ] },
     };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
     expect(out.siblingIds).toEqual([]);
-    expect(out.skipped.map((x) => x.reason)).toEqual(['stop_changed', 'stop_changed']);
+    // s3: same-day window moved off the primary's 09-10 (r7); s4: withdrawn placeholder never advanced
+    expect(out.skipped.map((x) => x.reason)).toEqual(['stop_changed', 'stop_changed', 'stop_changed', 'status:rescheduled']);
     expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 

@@ -997,9 +997,13 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
 // gets exactly one "on the way" / "arrived" text, from the primary — and
 // the visit records the one-shot in visit_effects (tracker_en_route /
 // tracker_arrived), which also starts the membership freeze (canDissolve).
+// Implicit SIBLING eligibility only — a `rescheduled` row is a withdrawn
+// placeholder awaiting replacement (JOIN_INELIGIBLE_STATUSES) and is never
+// advanced by another member's tap (codex #3603 r7); the explicit primary
+// keeps its route-level rules.
 const LIVE_TRANSITION_FROM = Object.freeze({
-  en_route: ['pending', 'confirmed', 'rescheduled'],
-  on_site: ['pending', 'confirmed', 'rescheduled', 'en_route'],
+  en_route: ['pending', 'confirmed'],
+  on_site: ['pending', 'confirmed', 'en_route'],
 });
 
 function siblingEligibleFor(toStatus, siblingStatus) {
@@ -1133,7 +1137,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       // primary that is still this visit's member, on the same technician,
       // and actually at the target status leads its siblings.
       const lockedPrimary = await t('scheduled_services').where({ id: primary.id }).forUpdate()
-        .first('id', 'visit_id', 'technician_id', 'status');
+        .first('id', 'visit_id', 'technician_id', 'status', 'window_start', 'window_end');
       if (!lockedPrimary
           || String(lockedPrimary.visit_id || '') !== String(visit.id)
           || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')) {
@@ -1153,7 +1157,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .forUpdate()
         .select('id', 'status', 'technician_id', 'track_state', 'source_action', 'customer_confirmed',
-          'customer_id', 'property_id', 'scheduled_date',
+          'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end',
           'actual_start_time', 'check_in_time', 'arrived_at');
       const { transitionJobStatus } = require('./job-status');
       const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
@@ -1173,9 +1177,13 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         // reschedule that committed before its post-commit detach seam ran
         // still carries the old visit_id — never advance a row that is no
         // longer physically at this stop.
+        // Same window rule handleChildStopChanged applies (r7): a same-day
+        // window move that no longer overlaps the primary's window is a
+        // separate stop, whatever its stale visit_id still says.
         if (dateOnly(s.scheduled_date) !== dateOnly(visit.scheduled_date)
             || String(s.customer_id) !== String(visit.customer_id)
-            || String(s.property_id || '') !== String(visit.property_id || '')) {
+            || String(s.property_id || '') !== String(visit.property_id || '')
+            || !windowsOverlap(s.window_start, s.window_end, lockedPrimary.window_start, lockedPrimary.window_end)) {
           skipped.push({ id: s.id, reason: 'stop_changed' });
           continue;
         }

@@ -368,12 +368,18 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
   if (smsOutcome === 'claim_error') {
     return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: 'notification claim failed' };
   }
-  if (notificationOwner && !fan) {
-    // Owned claim but the fan-out did not run (primary detached / visit no
-    // longer open between claim and lock): finalize the ledger row anyway —
-    // the text this row sent was for that stop.
+  // Owned claim whose ledger row the fan-out did not finalize — because it
+  // did not run (primary detached / visit no longer open) OR because it
+  // aborted before its finalize step (codex r7): finalize here, so the row
+  // never stays `claimed` and a retryable miss is reclaimable next signal.
+  const finalizeAttempted = fan && (fan.effect || (fan.trackerFailures || []).some((f) => f.id === 'effect_finalize'));
+  if (notificationOwner && !finalizeAttempted) {
     const fin = await visitGroups.finalizeVisitNotification(row.visit_id, kind, smsOutcome);
-    if (!fin.ok) fan = { ok: false, visitId: row.visit_id, reason: fin.reason, siblingIds: [], trackerIds: [], skipped: [] };
+    if (!fin.ok) {
+      fan = { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: fin.reason };
+    } else if (fan && fin.status) {
+      fan.effect = { effectType: fin.effectType, status: fin.status };
+    }
   }
   return fan;
 }
@@ -1111,7 +1117,11 @@ async function markOnProperty(serviceId, opts = {}) {
     // with _visitSibling and never fan out again. Audit actor: opts.actorId
     // (admin flips pass the authenticated admin here, NOT as actingTechId —
     // that one names the tech in the customer text).
-    if (!opts._visitSibling) {
+    // A suppressed arrival is a geofence DRIVE-PAST (the tech is still on
+    // another job) — it is not a live grouped-stop transition and must not
+    // start the siblings (codex r7); the real arrival (manual / time clock /
+    // a later ENTER) fans out.
+    if (!opts._visitSibling && !opts.suppressArrivalSms) {
       const fan = await applyVisitFanOut({
         row: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
         actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
