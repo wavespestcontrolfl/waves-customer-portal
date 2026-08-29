@@ -613,6 +613,7 @@ const CONFIRM_REASON_TEXT = {
   secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
+  address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2563,7 +2564,11 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
 // restores the field to its old baseline — often null — erasing a value
 // an ACCEPTED later call independently stated. A supplied value that
 // DIFFERS from the lead's is not a reaffirmation and claims nothing.
-// Phone compares on the last 10 digits; other fields case-insensitively.
+// Phone compares on the last 10 digits; address on the canonical
+// street + unit key (so "Apt 4" / "#4" / "Unit 4" restate the same door —
+// the same canonicalization composeLeadAddress dedupes with, codex r2 P1);
+// other fields case-insensitively. A reaffirmation claims the lead's
+// CURRENT value, never the supplied spelling.
 function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
   const out = {};
   if (!lockedLead || !suppliedValues) return out;
@@ -2580,9 +2585,71 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     const lockedVal = lockedLead[f];
     if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
     const supplied = norm(f, suppliedValues[f]);
-    if (supplied && supplied === norm(f, lockedVal)) out[f] = lockedVal;
+    if (!supplied) continue;
+    const literal = supplied === norm(f, lockedVal);
+    // EVERY address comparison requires the place check — an exact
+    // street/unit string in another city/ZIP is a different property just
+    // as much as a canonical-key match is (codex r5 P1).
+    const same = f === 'address'
+      ? (literal || leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal))
+        && leadAddressPlaceCorroborates(suppliedValues, lockedLead)
+      : literal;
+    if (same) out[f] = lockedVal;
   }
   return out;
+}
+
+// A same street+unit key is NOT the same property when the call names a
+// different place (two "100 Main St, Apt 4" in different cities/ZIPs — the
+// same rule addressKey identity and the fan-out's snapshot match apply,
+// codex r4 P1). Reuses the fan-out's placeCorroborates against BOTH place
+// sources the locked lead carries: its city/zip columns and any city/ZIP
+// tail inside its address string. ZIP wins when both sides have one; city
+// only when no ZIP compare is possible; a call that names no place cannot
+// corroborate a lead that does (no claim, so the predecessor's rollback
+// stays authoritative — conservative by design).
+function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
+  const { placeCorroborates, snapshotTailPlace } = require('./customer-address-fanout');
+  // A full-address line1 with empty city/zip fields (the customer-create
+  // fallback shape) carries its place in the composed address tail — read
+  // it from there so a restated full address can still reaffirm (codex r7).
+  const suppliedTail = leadAddressTailPlace(suppliedValues.address) || {};
+  const contact = {
+    city: String(suppliedValues.city || '').trim() || suppliedTail.city || null,
+    zip: String(suppliedValues.zip || '').trim() || suppliedTail.zip || null,
+  };
+  if (!placeCorroborates(contact, { city: lockedLead.city, zip: lockedLead.zip })) return false;
+  const tail = leadAddressTailPlace(lockedLead.address);
+  return !tail || placeCorroborates(contact, tail);
+}
+
+// Place evidence in a leads.address value, read through the UNIT-AWARE
+// parser: the unit segments ("Apt 4", and "Fl 2" — the fan-out's own tail
+// reader must skip 'fl' to tell a floor from Florida, so it would read a
+// floor unit as the city) are consumed first, and only the remaining place
+// tail is handed to snapshotTailPlace. null for a bare street (codex r9 P1).
+function leadAddressTailPlace(address) {
+  const raw = String(address == null ? '' : address).trim();
+  if (!raw) return null;
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  const { snapshotTailPlace } = require('./customer-address-fanout');
+  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
+  return tail ? snapshotTailPlace(`street, ${tail}`) : null;
+}
+
+// Canonical street|unit key for a leads.address value, tolerant of every
+// notation the composer accepts and of the fan-out's city/state tail:
+// "100 Main St, Apt 4" / "100 Main St #4" / "100 Main St, Unit 4, Sarasota,
+// FL 34236" all key to "100 main st|4". Empty when there is no street.
+function leadAddressCompareKey(v) {
+  const raw = String(v == null ? '' : v).trim();
+  if (!raw) return '';
+  const { splitStreetLineUnit, normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { street, unit } = splitStreetLineUnit(raw);
+  const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!streetKey) return '';
+  const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
+  return unitK ? `${streetKey}|${unitK}` : streetKey;
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
@@ -9192,6 +9259,26 @@ const CallRecordingProcessor = {
         if (leadId) {
           let current = existingLead || (await db('leads').where({ id: leadId }).first());
           const isEmpty = (v) => v === null || v === undefined || v === '';
+          // leads.address is ONE free-text varchar(255) (migration
+          // 20260401000095): compose the unit in, or the lead card / pipeline
+          // card / estimate prefill all lose it even though the extractor
+          // captured it in address_line2 (2026-08-29: a prod lead rendered
+          // without the caller's unit while the customer row had it).
+          // Composed ONCE and reused by every ledger path below (fill,
+          // chronological-restamp resupply, stamp-ownership identity) so the
+          // stored value and the supplied identity always compare equal —
+          // a restated street+unit must record successor ownership, or a
+          // later rollback of the earlier call erases the accepted address.
+          // extracted.address_line2 ONLY, no V2 fallback — same reasoning as
+          // the customer insert: adoptV2PrimaryFields already copies a SAFE
+          // paired unit under primary mode, and reading V2 directly here
+          // would glue a V2 unit onto an unrelated V1 street in shadow /
+          // kill-switch mode.
+          const leadAddressShape = analyzeLeadAddress(extracted.address_line1, extracted.address_line2);
+          const composedLeadAddress = leadAddressShape.address;
+          if (leadAddressShape.unitConflict && !bridgeNeedsConfirmation.includes('address_unit_conflict')) {
+            bridgeNeedsConfirmation.push('address_unit_conflict');
+          }
 
           // The enrichment below runs as a PASS over `current` so the
           // claim-race recovery can re-run the SAME pass against a freshly
@@ -9213,7 +9300,7 @@ const CallRecordingProcessor = {
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-            if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+            if (composedLeadAddress && isEmpty(current?.address)) leadUpdates.address = composedLeadAddress;
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
             // Multi-service calls: matched_service is single-slot, so append the
@@ -9658,7 +9745,7 @@ const CallRecordingProcessor = {
                     resupply('first_name', extracted.first_name ? capitalizeName(extracted.first_name) : null);
                     resupply('last_name', extracted.last_name ? capitalizeName(extracted.last_name) : null);
                     resupply('email', extracted.email);
-                    resupply('address', extracted.address_line1);
+                    resupply('address', composedLeadAddress);
                     resupply('city', extracted.city);
                     resupply('zip', extracted.zip);
                     if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
@@ -9717,7 +9804,7 @@ const CallRecordingProcessor = {
                   first_name: extracted.first_name,
                   last_name: extracted.last_name,
                   email: extracted.email,
-                  address: extracted.address_line1,
+                  address: composedLeadAddress,
                   city: extracted.city,
                   zip: extracted.zip,
                 };
@@ -10014,7 +10101,11 @@ const CallRecordingProcessor = {
                   first_name: capitalizeName(extracted.first_name) || null,
                   last_name: capitalizeName(extracted.last_name) || null,
                   email: extracted.email || null,
-                  address: extracted.address_line1 || null,
+                  // Composed (street + unit) — this row loops back as
+                  // `current`, and the fill-only pass above skips a
+                  // non-empty address, so a bare street here would strand
+                  // the replacement lead unit-less (codex r2 P2).
+                  address: composedLeadAddress || null,
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
@@ -14558,7 +14649,141 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
+/**
+ * leads.address is ONE free-text varchar(255), so the unit/suite from
+ * address_line2 has to be composed into it ("100 Main St" + "Apt 4" →
+ * "100 Main St, Apt 4"). A street that already embeds the same unit
+ * ("100 Main St Apt 4", "100 Main St Bldg 2 Apt 4") is re-emitted from its
+ * parsed street + unit ("100 Main St, Apt 4") so a legacy inline-unit street
+ * + a separately captured unit never renders the unit twice — duplicate detection goes through the shared address-normalizer
+ * parser (splitStreetLineUnit / normalizeUnitLine / unitLineValueKey) so
+ * multipart and structural designators (Bldg, Floor, Lot, Space) compare the
+ * same way everywhere. Bounded to the column via formatAddressBounded, which
+ * trims the STREET and keeps the unit tail (the same mechanism the customer
+ * address fan-out uses for leads.address). Pure.
+ */
+function composeLeadAddress(line1, line2) {
+  return analyzeLeadAddress(line1, line2).address;
+}
+
+/**
+ * Street / inline unit / place tail of a lead street line, for EITHER shape
+ * the extractor produces: comma-separated ("100 Main St, Apt 4, Sarasota, FL
+ * 34236") through splitStreetLineUnitParts, and the comma-FREE full-address
+ * fallback ("100 Main St Apt 4 Sarasota FL 34236") through the shared
+ * splitStreetAndCity locality split first — otherwise the trailing-unit
+ * parser stops at the state/ZIP, reports no unit, and a repeated line2 is
+ * appended again / a conflicting one is stored without the read-back flag
+ * (codex r9 P1). splitStreetAndCity keeps ONE designator pair on the street
+ * side; any further unit pairs it pushed into the locality ("Bldg 2 Apt 4")
+ * are pulled back so the multipart unit peels whole. The place tail is
+ * clamped so a runaway locality can never crowd the street out of the 255
+ * bound — the tail is the protected part of formatAddressBounded (codex r9
+ * P2).
+ */
+function splitLeadStreetParts(street) {
+  const { splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const clampTail = (parts, locality = '') => ({
+    street: parts.street,
+    unit: parts.unit,
+    tail: [parts.tail, locality].filter(Boolean).join(', ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
+  });
+  // The unit-aware parser first: a comma-separated line, or a comma-free
+  // line whose unit is the trailing token pair, is fully understood here
+  // and needs no locality guess (which would misread "Apt # 4" as a city).
+  const direct = splitStreetLineUnitParts(street);
+  if (street.includes(',') || direct.unit) return clampTail(direct);
+  // Comma-free with no trailing unit: the locality (city / state / ZIP) is
+  // what stopped the unit peel — split it off, then peel again.
+  const split = splitStreetAndCity(street);
+  let line = split.line1;
+  const cityTokens = String(split.city || '').split(' ').filter(Boolean);
+  while (cityTokens.length >= 2) {
+    const first = cityTokens[0].replace(/\./g, '').toLowerCase();
+    if (!(first.startsWith('#') || UNIT_DESIGNATORS.has(first))) break;
+    line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
+  }
+  const locality = cityTokens.join(' ');
+  // A locality that does not start with a letter is a unit fragment or
+  // noise, not a place — keep the line whole.
+  if (!/^[A-Za-z]/.test(locality)) return clampTail(direct);
+  return clampTail(splitStreetLineUnitParts(line), locality);
+}
+
+/**
+ * composeLeadAddress plus the shape verdict: `unitConflict` is true when the
+ * inline unit in line1 and the dedicated line2 name DIFFERENT doors ("…Apt 4"
+ * + "Apt 5"). A contradictory address is never stored as two doors — the
+ * caller's inline street wins and the dedicated unit is dropped, exactly as
+ * normalizeLeadAddress resolves the same input for the public intake — and
+ * the call is flagged address_unit_conflict for read-back (codex r7 P1).
+ */
+function analyzeLeadAddress(line1, line2) {
+  const street = String(line1 || '').trim();
+  if (!street) return { address: null, unitConflict: false };
+  const { formatAddressBounded } = require('./customer-address-fanout');
+  const { normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const clampUnit = (u) => String(u || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
+  // Same 100-char unit clamp as the customer insert / booking linkage —
+  // the extraction schema bounds street_line_2 by type only, and an
+  // overlong unit would otherwise consume the whole 255 budget as the
+  // protected tail and drop the street (codex r4 P2).
+  let unit = clampUnit(line2);
+  // Rebuild from the PARSED parts — street, its inline unit, and the place
+  // tail a full-address line1 may carry ("100 Main St, Apt 4, Sarasota, FL
+  // 34236") — so the unit and the place are the protected tail of the
+  // bound, never the first thing a long street's truncation eats, and a
+  // full-address line1 never loses its city/ZIP (codex r3 + r6 P2). The
+  // no-line2 shape takes the same path: an inline-only unit is a supported
+  // legacy shape and must survive the bound too (codex r8 P2).
+  const parts = splitLeadStreetParts(street);
+  const embedded = clampUnit(parts.unit);
+  if (!unit) {
+    return {
+      address: formatAddressBounded({ line1: parts.street, line2: embedded || null, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict: false,
+    };
+  }
+  // A BARE unit ("4B", "102") gains its designator ("Unit 4B") before it is
+  // stored: the shared parser and the ownership key only recognize a
+  // comma-separated unit that leads with a designator or '#', so a bare
+  // segment would key the address as unitless and read as a city in the
+  // place tail — a later call restating the exact address could never
+  // reaffirm it (codex r6 P1). Designator-bearing spellings are kept as
+  // the caller said them.
+  const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
+  if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
+  const key = (u) => unitLineValueKey(normalizeUnitLine(u));
+  const duplicate = !!embedded && key(embedded) === key(unit);
+  const unitConflict = !!embedded && !duplicate;
+  if (unitConflict) {
+    return {
+      address: formatAddressBounded({ line1: `${parts.street} ${embedded}`, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
+  return {
+    address: formatAddressBounded({
+      line1: parts.street,
+      line2: duplicate ? embedded : unit,
+      city: parts.tail || null,
+    }, LEAD_ADDRESS_MAX_LENGTH),
+    unitConflict,
+  };
+}
+// leads.address column width (migration 20260401000095: default string →
+// varchar(255)); a longer composed value makes Postgres reject the whole
+// enrichment update and fails the call-processing attempt.
+const LEAD_ADDRESS_MAX_LENGTH = 255;
+const LEAD_UNIT_MAX_LENGTH = 100;
+// Place tail budget: leaves ≥ 255 − 100 (unit) − 80 − separators ≈ 70 chars of street.
+const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
+
 CallRecordingProcessor._test = {
+  composeLeadAddress,
+  analyzeLeadAddress,
+  leadAddressCompareKey,
+  leadAddressTailPlace,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,
