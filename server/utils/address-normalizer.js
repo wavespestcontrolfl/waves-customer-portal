@@ -1,4 +1,9 @@
 const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+// Spelled-out forms count as a post-directional for the street-suffix
+// lookahead ONLY ("100 Main Street North Apt 4" abbreviates the same as
+// "100 Main Street N Apt 4"); they are deliberately not in DIRECTIONALS,
+// which also drives token upper-casing ("north" must never become "NORTH").
+const POST_DIRECTIONAL_LOOKAHEAD = new Set([...DIRECTIONALS, 'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest']);
 const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key', 'ridge']);
 const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
@@ -231,11 +236,21 @@ function normalizeStreetLine(value) {
     if (!alias) continue;
 
     const tail = tokens.slice(i + 1);
-    const suffixIsTerminal = tail.length === 0;
-    const suffixBeforeDirection = tail.length > 0 && tail.every((token) => DIRECTIONALS.has(token.replace(/[.,]/g, '').toLowerCase()));
-    const nextToken = tail[0]?.replace(/[.,]/g, '').toLowerCase() || '';
-    const suffixBeforeUnit = !!tail[0] && (tail[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
-    if (!suffixIsTerminal && !suffixBeforeDirection && !suffixBeforeUnit) continue;
+    // A suffix counts when it ends the street, or is followed by a post-directional run
+    // ("St N", "St NE") that itself ends the street or precedes a unit ("St N Apt 4 …").
+    // The directional run is skipped, not required to be the whole tail, so a whole-line
+    // address ("100 Main Street N Apt 4 Sarasota FL 34236") canonicalizes the same as its
+    // comma-separated street ("100 Main Street N"). "Street North Port" still does not
+    // qualify — "Port" is neither a directional nor a unit, so the suffix is left alone.
+    let afterDirectionals = 0;
+    while (afterDirectionals < tail.length && POST_DIRECTIONAL_LOOKAHEAD.has(tail[afterDirectionals].replace(/[.,]/g, '').toLowerCase())) {
+      afterDirectionals += 1;
+    }
+    const rest = tail.slice(afterDirectionals);
+    const nextToken = rest[0]?.replace(/[.,]/g, '').toLowerCase() || '';
+    const suffixIsTerminal = rest.length === 0;
+    const suffixBeforeUnit = !!rest[0] && (rest[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
+    if (!suffixIsTerminal && !suffixBeforeUnit) continue;
 
     tokens[i] = titleToken(alias);
     for (let j = i - 1; j >= 0; j -= 1) {
@@ -628,6 +643,9 @@ module.exports = {
   // street from city apply the same protection splitStreetAndCity does.
   CITY_PREFIX_TOKENS,
   UNIT_DESIGNATORS,
+  // A unit VALUE token per the shared peel grammar — shared so callers that
+  // recognize inline units elsewhere never accept a street word as a value.
+  UNIT_VALUE,
   // The canonical 'fl' disambiguation: 'fl' followed by a ZIP-shaped value
   // is the STATE marker ("FL 34236"), otherwise the FLOOR designator.
   // Shared so unit extraction elsewhere applies the identical rule.

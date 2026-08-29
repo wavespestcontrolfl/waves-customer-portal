@@ -2631,9 +2631,20 @@ function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
 function leadAddressTailPlace(address) {
   const raw = String(address == null ? '' : address).trim();
   if (!raw) return null;
-  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
   const { snapshotTailPlace } = require('./customer-address-fanout');
-  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  // The UNBOUNDED tail: LEAD_PLACE_TAIL_MAX_LENGTH is a write-time clamp for
+  // values being composed; a stored legacy value with a long tail must
+  // still surrender its trailing state/ZIP as evidence (#3608 codex r5).
+  const parts = splitStreetLineUnitParts(raw);
+  const tail = String(parts.tail || '').trim();
+  // A comma-free WHOLE line ("100 Main St Apt 4 Bradenton FL 34205") has no
+  // parsed tail and offers NO place evidence — deliberately. Inferring the
+  // locality from the text after the inline unit was tried and misread
+  // every trailing subpremise qualifier ("Apt 4 Rear" → city "Rear"),
+  // which blocked an exact restatement with the real city from recording
+  // ownership. Ownership on that legacy shape rests on the exact string,
+  // which already carries whatever place the caller gave.
   return tail ? snapshotTailPlace(`street, ${tail}`) : null;
 }
 
@@ -2644,12 +2655,107 @@ function leadAddressTailPlace(address) {
 function leadAddressCompareKey(v) {
   const raw = String(v == null ? '' : v).trim();
   if (!raw) return '';
-  const { splitStreetLineUnit, normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const { street, unit } = splitStreetLineUnit(raw);
-  const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!streetKey) return '';
+  const { normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  // Through the lead-shape splitter, not the raw parser: a LEGACY comma-free
+  // stored value ("100 Main St Apt 4 Sarasota FL 34236") must key the same
+  // as its composed restatement ("100 Main St, Apt 4, Sarasota FL 34236"),
+  // or a restated address never records successor ownership (codex r10 P1).
+  const { street, unit } = splitLeadStreetParts(raw);
+  const rawStreetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!rawStreetKey) return '';
+  // Every inline unit run inside the street is rewritten to its canonical
+  // unit key ("apt 4" / "#4" / "apt # 4" / "unit 4" → "{u:4}", "bldg 2 apt
+  // 4" → "{u:bldg 2 unit 4}"), so a comma-free legacy value keys the same
+  // as any equivalent spelling of itself (#3608 codex r6 P1).
+  const { streetKey, unitKeys } = canonicalizeInlineUnits(rawStreetKey);
   const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
+  // A comma-free full address is stored WHOLE (its inline unit stays inside
+  // the street); a later restatement of that same line carries the unit
+  // again as a dedicated segment ("…Apt 4 Sarasota FL 34236, Apt 4"). When
+  // the street already embeds the same door, the appended unit adds no
+  // identity — collapse to the street key so the two compare equal and
+  // successor ownership is recorded (#3608 codex r4 P1).
+  if (unitK && unitKeys.includes(unitK)) return streetKey;
   return unitK ? `${streetKey}|${unitK}` : streetKey;
+}
+
+// Ownership compares keys for EXACT equality. A comma-free legacy whole line
+// ("100 Main St Apt 4 Sarasota FL 34236") and the composed comma form
+// ("100 Main St, Apt 4, …") therefore key differently and a restatement in
+// the other shape records no successor ownership — the ratified #3608 r3
+// scope-out. A prefix/equivalence rule bridging the two shapes was tried
+// (pre-push audit → codex r7/r8) and every round found a new class it got
+// wrong (spelled vs abbreviated directionals, Road/Rd before a route
+// number, open-ended Rear/Front/Upper qualifiers): the comma-free shape has
+// no delimiter that makes "same door" lexically decidable, so it is not
+// guessed. The writer has composed the comma form since #3602; the
+// whole-line shape only exists in pre-#3602 rows.
+
+// Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
+// street key to "{u:<canonical unit key>}" and list the keys found. A run
+// is consecutive "<designator> <value>" pairs — a designator may be followed
+// by a separated hash then the value ("apt # 4") — or a lone "#4" / "# 4";
+// compared whole through the shared normalizeUnitLine / unitLineValueKey,
+// so "Apt 4" never equals "Bldg 2 Apt 4" (different door, same rule as the
+// composer's dedupe) while Apt / Unit / Suite / hash spellings do
+// (#3608 codex r5 + r6).
+// A hash is ALWAYS a unit here, exactly as the shared parser and the
+// customer-properties path treat it. A route-number exception ("State Road
+// #64") was tried and produced five successive wrong classes (terminal,
+// leading, named highway, spacing…); SWFL numbered routes are written
+// "State Road 64" without a hash, so the rare hashed spelling is accepted
+// as a unit conflict held for read-back (Adam ruling 2026-08-29).
+function canonicalizeInlineUnits(streetKey) {
+  const {
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
+  } = require('../utils/address-normalizer');
+  const tokens = String(streetKey || '').split(' ').filter(Boolean);
+  // Same grammar as the shared peel: a designator counts only when the
+  // value that follows is unit-shaped ("apt 4", "unit ph1", "ste 200-a") —
+  // never a street word ("Space Coast Blvd", "Apartment Road", "Unit Road");
+  // 'fl' is also the floor designator — "fl 34236" is the state tail.
+  const isValue = (t) => !!t && UNIT_VALUE.test(t);
+  const isDesignator = (t, next, after) => UNIT_DESIGNATORS.has(t)
+    && !isStateZipPair(t, next || '')
+    && (isValue(next) || (next === '#' && isValue(after)));
+  // Attached hash takes ANY value, same as the shared parser's `/^#\S+$/`
+  // branch — "#A" / "#PH" are units there, so they must be units here too or
+  // the whole-line key drifts from the comma form's (#3608 pre-push audit).
+  const isHashValue = (t) => /^#\S+$/.test(t);
+  const hashAt = (idx) => isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1]));
+  const out = [];
+  const unitKeys = [];
+  const runs = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (!(isDesignator(t, tokens[i + 1], tokens[i + 2]) || hashAt(i))) { out.push(t); i += 1; continue; }
+    const run = [];
+    let j = i;
+    while (j < tokens.length) {
+      const c = tokens[j];
+      if (hashAt(j) && isHashValue(c)) { run.push(c); j += 1; continue; }
+      if (hashAt(j) && c === '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
+      break;
+    }
+    if (!run.length) { out.push(t); i += 1; continue; }
+    // A unit boundary must be defensible: the run comes after the house
+    // number and at least one street-name token — "123 Lot 5 Road" is a
+    // street NAME, not a lot, and reading it as a unit made a real
+    // dedicated "Apt 2" a conflict that was dropped (pre-push audit P1 on
+    // f65b5046d). Deliberately NOT "and not followed by a street-suffix
+    // word": cities begin with suffix words ("Apt 4 Lake Wales", "Apt 4 St
+    // Petersburg") and that rule silently persisted two doors (codex r11).
+    if (i < 2) { out.push(t); i += 1; continue; }
+    const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
+    unitKeys.push(key);
+    runs.push({ start: i, end: j });
+    out.push(`{u:${key}}`);
+    i = j;
+  }
+  return { streetKey: out.join(' '), unitKeys, runs };
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
@@ -14667,47 +14773,29 @@ function composeLeadAddress(line1, line2) {
 }
 
 /**
- * Street / inline unit / place tail of a lead street line, for EITHER shape
- * the extractor produces: comma-separated ("100 Main St, Apt 4, Sarasota, FL
- * 34236") through splitStreetLineUnitParts, and the comma-FREE full-address
- * fallback ("100 Main St Apt 4 Sarasota FL 34236") through the shared
- * splitStreetAndCity locality split first — otherwise the trailing-unit
- * parser stops at the state/ZIP, reports no unit, and a repeated line2 is
- * appended again / a conflicting one is stored without the read-back flag
- * (codex r9 P1). splitStreetAndCity keeps ONE designator pair on the street
- * side; any further unit pairs it pushed into the locality ("Bldg 2 Apt 4")
- * are pulled back so the multipart unit peels whole. The place tail is
- * clamped so a runaway locality can never crowd the street out of the 255
- * bound — the tail is the protected part of formatAddressBounded (codex r9
- * P2).
+ * Street / inline unit / place tail of a lead street line, through the
+ * shared unit-aware parser (splitStreetLineUnitParts). Comma-separated lines
+ * ("100 Main St, Apt 4, Sarasota, FL 34236") and comma-free lines whose unit
+ * is the trailing token pair ("100 Main St Apt 4") are fully understood; a
+ * comma-free FULL address ("100 Main St Apt 4 Sarasota FL 34236") is kept
+ * whole as the street — deliberately NOT locality-split. Directional-vs-city
+ * is not lexically decidable here ("100 Main St North, Sarasota" vs
+ * "100 Main St North Port"), and five review rounds of heuristics each
+ * produced a new wrong-street or wrong-place case; storing that rare shape
+ * whole (unit appended after it) can never misidentify the property, at
+ * the cost of inline-unit dedupe / conflict detection for that shape only.
+ * The place tail is clamped so a runaway locality can never crowd the
+ * street out of the 255 bound — the tail is the protected part of
+ * formatAddressBounded.
  */
 function splitLeadStreetParts(street) {
-  const { splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
-  const clampTail = (parts, locality = '') => ({
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  const parts = splitStreetLineUnitParts(street);
+  return {
     street: parts.street,
     unit: parts.unit,
-    tail: [parts.tail, locality].filter(Boolean).join(', ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
-  });
-  // The unit-aware parser first: a comma-separated line, or a comma-free
-  // line whose unit is the trailing token pair, is fully understood here
-  // and needs no locality guess (which would misread "Apt # 4" as a city).
-  const direct = splitStreetLineUnitParts(street);
-  if (street.includes(',') || direct.unit) return clampTail(direct);
-  // Comma-free with no trailing unit: the locality (city / state / ZIP) is
-  // what stopped the unit peel — split it off, then peel again.
-  const split = splitStreetAndCity(street);
-  let line = split.line1;
-  const cityTokens = String(split.city || '').split(' ').filter(Boolean);
-  while (cityTokens.length >= 2) {
-    const first = cityTokens[0].replace(/\./g, '').toLowerCase();
-    if (!(first.startsWith('#') || UNIT_DESIGNATORS.has(first))) break;
-    line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
-  }
-  const locality = cityTokens.join(' ');
-  // A locality that does not start with a letter is a unit fragment or
-  // noise, not a place — keep the line whole.
-  if (!/^[A-Za-z]/.test(locality)) return clampTail(direct);
-  return clampTail(splitStreetLineUnitParts(line), locality);
+    tail: String(parts.tail || '').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
+  };
 }
 
 /**
@@ -14739,8 +14827,14 @@ function analyzeLeadAddress(line1, line2) {
   const parts = splitLeadStreetParts(street);
   const embedded = clampUnit(parts.unit);
   if (!unit) {
+    // An overlong comma-free whole line with its door only inline gets the
+    // same protected split as the dedicated-unit branches — the inline unit
+    // and the place must survive the bound here too (codex r11 P1).
+    const protectedParts = !embedded && parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street, line2: embedded || null };
     return {
-      address: formatAddressBounded({ line1: parts.street, line2: embedded || null, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
       unitConflict: false,
     };
   }
@@ -14754,11 +14848,33 @@ function analyzeLeadAddress(line1, line2) {
   const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
   if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
   const key = (u) => unitLineValueKey(normalizeUnitLine(u));
-  const duplicate = !!embedded && key(embedded) === key(unit);
-  const unitConflict = !!embedded && !duplicate;
-  if (unitConflict) {
+  // A comma-free FULL address is kept whole, so its inline unit is not the
+  // trailing pair — find it anywhere in the street through the same
+  // canonicalizer the ownership key uses, so a repeated dedicated unit is
+  // not appended and a DIFFERENT one is a conflict held for read-back
+  // rather than a second door persisted silently (pre-push audit P1).
+  const inlineKeys = embedded ? [] : canonicalizeInlineUnits(parts.street.replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()).unitKeys;
+  const duplicate = embedded ? key(embedded) === key(unit) : inlineKeys.includes(key(unit));
+  const unitConflict = embedded ? !duplicate : (inlineKeys.length > 0 && !duplicate);
+  if (!embedded && (duplicate || unitConflict)) {
+    // Whole-line street already names the door: never append a second one.
+    // Kept verbatim when it fits; an overlong line is bounded with its last
+    // inline unit run and the place after it as the protected tail, so the
+    // slice eats street text, never the door or the locality (codex r8 P1).
+    const protectedParts = parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street };
     return {
-      address: formatAddressBounded({ line1: `${parts.street} ${embedded}`, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
+  if (unitConflict) {
+    // The retained inline unit is the protected tail here too — an overlong
+    // street must not truncate the one door this policy chose to keep
+    // (codex r10 P2).
+    return {
+      address: formatAddressBounded({ line1: parts.street, line2: embedded, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
       unitConflict,
     };
   }
@@ -14771,6 +14887,36 @@ function analyzeLeadAddress(line1, line2) {
     unitConflict,
   };
 }
+// Split a comma-free whole line at its LAST inline unit run, in the raw
+// text: { line1: street before the run, line2: the run as written, city:
+// everything after }. Token positions come from canonicalizeInlineUnits over
+// the same tokens lower-cased and punctuation-stripped (empties dropped
+// with an index map), so the raw spelling is preserved. No run → line1 only.
+function wholeLineProtectedParts(street) {
+  const rawTokens = String(street || '').trim().split(/\s+/).filter(Boolean);
+  const normTokens = [];
+  const rawIndex = [];
+  rawTokens.forEach((t, idx) => {
+    const n = t.replace(/[.,]/g, '').toLowerCase();
+    if (n) { normTokens.push(n); rawIndex.push(idx); }
+  });
+  const { runs } = canonicalizeInlineUnits(normTokens.join(' '));
+  if (!runs.length) return { line1: rawTokens.join(' ') };
+  const last = runs[runs.length - 1];
+  const startRaw = rawIndex[last.start];
+  const endRaw = last.end < rawIndex.length ? rawIndex[last.end] : rawTokens.length;
+  return {
+    line1: rawTokens.slice(0, startRaw).join(' '),
+    // Same 100-char unit clamp as the dedicated / terminal unit paths — an
+    // oversized inline run must not take the whole budget either (codex r10).
+    line2: rawTokens.slice(startRaw, endRaw).join(' ').slice(0, LEAD_UNIT_MAX_LENGTH).trim() || null,
+    // Same write-time clamp as splitLeadStreetParts' tail: a runaway
+    // locality must never take the whole budget and drop the street
+    // (codex r9 P2).
+    city: rawTokens.slice(endRaw).join(' ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim() || null,
+  };
+}
+
 // leads.address column width (migration 20260401000095: default string →
 // varchar(255)); a longer composed value makes Postgres reject the whole
 // enrichment update and fails the call-processing attempt.
