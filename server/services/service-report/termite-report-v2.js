@@ -35,6 +35,8 @@ function isTermiteBaitServiceName(serviceType) {
   // fallback must not admit them either (codex P2 #3600 r21).
   if (INSTALLATION_NAME_RE.test(name)) return false;
   if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return false;
+  // one-time cartridge replacement follow-ons are not the routine check
+  if (/\breplacement\b/i.test(name)) return false;
   return true;
 }
 
@@ -48,8 +50,16 @@ function stageForServiceKey(key) {
   if (key === TERMITE_DETECTION_KEY) return 'detection';
   return 'monitoring';
 }
+// Recurring active-bait monitoring keys are the only "next monitoring
+// visit" candidates: installation, detection-only, AND the one-time
+// per-cartridge replacement follow-on are excluded (codex P2 #3600 r24 —
+// a replacement scheduled ahead of the routine check must not hide it).
+const TERMITE_CARTRIDGE_REPLACEMENT_KEY = 'termite_cartridge_replacement';
 function isMonitoringServiceKey(key) {
-  return Boolean(key) && key !== TERMITE_INSTALLATION_KEY && key !== TERMITE_DETECTION_KEY;
+  return Boolean(key)
+    && key !== TERMITE_INSTALLATION_KEY
+    && key !== TERMITE_DETECTION_KEY
+    && key !== TERMITE_CARTRIDGE_REPLACEMENT_KEY;
 }
 
 const ACTIVITY_VALUES = {
@@ -68,6 +78,10 @@ const CONSUMPTION_DETAIL = {
 const FEEDING_VALUES = new Set(['Light feeding', 'Moderate feeding', 'Heavy feeding']);
 
 function toCount(value) {
+  // Blank optional counts (null / '' / whitespace) are ABSENT, never 0 —
+  // Number('') is 0, and an invented zero would fail reconciliation against
+  // a positive persisted summary (codex P2 #3600 r24).
+  if (value == null || (typeof value === 'string' && !value.trim())) return null;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
 }

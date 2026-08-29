@@ -8927,8 +8927,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             visits (flag-gated server-side; mounts purely on payload presence,
             same rule as pest/mosquito V2). Mutually exclusive with the other
             V2 payloads (one service line per report). */}
+        {/* A companion dashboard (combined pest + termite) shares the page
+            with the pest V2 block that owns #visit-summary — distinct anchor
+            so the ids never collide (codex P3 #3600 r24). */}
         {data.termiteReportV2 && (
-          <div id="visit-summary">
+          <div id={termiteV2Companion ? 'termite-visit-summary' : 'visit-summary'}>
             <TermiteReportV2Section
               data={data.termiteReportV2}
               print={mode === 'pdf' || mode === 'static'}

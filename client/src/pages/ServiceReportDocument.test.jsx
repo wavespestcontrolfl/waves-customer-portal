@@ -500,6 +500,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.match(/No termite activity observed/g)).toHaveLength(1);
   });
 
+  it('primary-source: the PDF prints the reconciled next step, never the frozen no-action one', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      typedReport: { type: 'termite_bait_station', todaysResult: { headline: 'No termite activity observed.', nextStep: 'No action needed.' }, findings: [], nextStepChips: [] },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Pins escalated.',
+        statusEscalatedByPins: true,
+        nextStep: 'We will re-check the active stations at your next monitoring visit.',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/re-check the active stations at your next monitoring visit/);
+    expect(container.textContent).not.toMatch(/No action needed/);
+  });
+
   it('primary-source: the PDF visit-history current row restates the reconciled headline', () => {
     const data = {
       ...BASE_DATA,

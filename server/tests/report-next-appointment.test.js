@@ -385,22 +385,26 @@ test('termite report: next monitoring visit skips an earlier liquid visit for th
   });
 });
 
-test('upcoming installation and detection-only (termite_monitoring) appointments are skipped when searching for the next monitoring visit', async () => {
+test('upcoming installation, detection-only, and cartridge-replacement appointments are skipped when searching for the next monitoring visit', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
     services: [
       { id: 'svc-install', service_key: 'termite_installation_setup', name: 'Termite Bait Station Installation', short_name: 'Install', category: 'termite' },
       { id: 'svc-detect', service_key: 'termite_monitoring', name: 'Termite Monitoring Service', short_name: 'Termite Monitor', category: 'termite' },
+      { id: 'svc-cartridge', service_key: 'termite_cartridge_replacement', name: 'Termite Bait Cartridge Replacement', short_name: 'Cartridge', category: 'termite' },
       { id: 'svc-monitor', service_key: 'termite_bait', name: 'Termite Bait Station Service', short_name: 'Bait', category: 'termite' },
     ],
     service_completion_profiles: [
       { service_key: 'termite_installation_setup', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
       { service_key: 'termite_monitoring', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+      { service_key: 'termite_cartridge_replacement', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
       { service_key: 'termite_bait', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
     ],
     scheduled_services: [
       { id: 'scheduled-install', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Bait Station Installation', window_start: '09:00:00', service_id: 'svc-install' },
       { id: 'scheduled-detect', customer_id: 'customer-1', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Termite Monitoring Service', window_start: '09:00:00', service_id: 'svc-detect' },
+      // one-time per-cartridge follow-on ahead of the routine check → skipped
+      { id: 'scheduled-cartridge', customer_id: 'customer-1', scheduled_date: '2999-02-10', status: 'confirmed', service_type: 'Termite Bait Cartridge Replacement', window_start: '09:00:00', service_id: 'svc-cartridge' },
       // unlinked legacy detection-only label — the name fallback rejects it too
       { id: 'scheduled-detect-legacy', customer_id: 'customer-1', scheduled_date: '2999-03-03', status: 'confirmed', service_type: 'Termite Monitoring Check', window_start: '09:00:00' },
       { id: 'scheduled-check', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00', service_id: 'svc-monitor' },

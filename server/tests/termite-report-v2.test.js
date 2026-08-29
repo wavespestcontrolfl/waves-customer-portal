@@ -30,10 +30,10 @@ const CLEAN_VALUES = {
 };
 
 describe('isTermiteBaitServiceName — next-visit predicate (bait-station appointments only)', () => {
-  it('accepts bait-station termite names', () => {
+  it('accepts bait-station termite names; a one-time cartridge replacement is not the routine check', () => {
     expect(isTermiteBaitServiceName('Termite Bait Station Service')).toBe(true);
     expect(isTermiteBaitServiceName('Termite Bait Monitoring (Quarterly)')).toBe(true);
-    expect(isTermiteBaitServiceName('Termite Bait Cartridge Replacement')).toBe(true);
+    expect(isTermiteBaitServiceName('Termite Bait Cartridge Replacement')).toBe(false);
   });
 
   it('rejects installation / setup visits and detection-only monitoring names (no bait token)', () => {
@@ -222,6 +222,16 @@ describe('buildStationNetwork — a RECONCILED station-map summary drives the co
     });
     expect(feeding.items[1].detail).toBe('2 stations — bait engaged');
     expect(net.summary).toBe('Your protective ring: 12 inspected · 2 with activity · 2 inaccessible.');
+  });
+
+  it('blank optional counts are absent, never 0 — a reconciled summary still drives the counts', () => {
+    const values = { ...CLEAN_VALUES, total_stations: '', stations_inaccessible: null };
+    const summary = { total: 12, checked: 12, activity: 1, serviced: 0, inaccessible: 0 };
+    const net = buildStationNetwork({ values, stationSummary: summary });
+    expect(net.counts).toEqual({ total: 12, checked: 12, activity: 1, inaccessible: 0 });
+    const out = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station', stationSummary: summary });
+    expect(out.stationSyncPartial).toBe(false);
+    expect(out.status.label).toBe('Termite activity observed at 1 station');
   });
 
   it('ignores a registry-only map summary (no per-visit statuses) and keeps the frozen typed counts', () => {

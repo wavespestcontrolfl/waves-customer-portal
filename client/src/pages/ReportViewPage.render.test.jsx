@@ -272,11 +272,13 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     // counts the product only (the section below lists the product only)
     combined.applications.push({ id: 'app-perim', method: 'perimeter_spray', totalAmount: '1', amountUnit: 'gal', product: { name: 'Demand CS', category: 'insecticide', epa_reg: '100-1066', active_ingredient: 'Lambda-cyhalothrin' } });
     const { container } = renderReport(combined);
-    // dashboard mounts once
+    // dashboard mounts once, under its OWN anchor (the pest block owns #visit-summary)
     await screen.findByText('Termite activity observed at 2 stations', { selector: 'h2' });
     expect(screen.getByText(/^1 product applied/)).toBeInTheDocument();
     expect(screen.queryByText(/2 products applied/)).toBeNull();
-    const hero = container.querySelector('#visit-summary');
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    const hero = container.querySelector('#termite-visit-summary');
+    expect(hero).not.toBeNull();
     expect(within(hero).getByText('Baseline recorded today — trend starts next visit.')).toBeInTheDocument();
     expect(within(hero).queryByText(/increased since the last visit/)).toBeNull();
     // the primary's own gauge still renders; the companion's does not

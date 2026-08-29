@@ -610,7 +610,12 @@ export default function ServiceReportDocument({ data, token }) {
     const t = String(text || '').trim();
     if (t && !recommendations.includes(t)) recommendations.push(t);
   };
-  pushRec(result?.nextStep);
+  // A primary termite dashboard owns the next-step commitment: the builder
+  // reconciles a frozen "No action needed" against escalating station pins
+  // (codex P2 #3600 r24) — the raw typed step never prints beside it.
+  // (falls back to the typed step only when the payload carries none — an
+  // escalated visit always carries the builder's replacement)
+  pushRec(termiteV2Primary ? (termiteV2?.nextStep || result?.nextStep) : result?.nextStep);
   (typed?.nextStepChips || []).forEach((chip) => {
     // chips restate nextStep in shorthand — only add ones that say something new
     if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
