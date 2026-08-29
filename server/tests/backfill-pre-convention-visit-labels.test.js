@@ -163,8 +163,9 @@ function seedDb() {
       // DIVERGENT slot (c6/T6): one stale label, two targets — a quarterly and a
       // monthly visit both stored as bare "Pest Control". Visits relabel; the
       // shared reminder rows must fail closed.
-      { id: 'd1', service_id: null, service_type: 'Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
-      { id: 'd2', service_id: null, service_type: 'Pest Control', recurring_pattern: 'monthly', status: 'pending', self_booking_id: null },
+      // Both also link ONE self-booking (sb-div) — its snapshot must fail closed too.
+      { id: 'd1', service_id: null, service_type: 'Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: 'sb-div' },
+      { id: 'd2', service_id: null, service_type: 'Pest Control', recurring_pattern: 'monthly', status: 'pending', self_booking_id: 'sb-div' },
       // add-on-only parents: label fine, add-ons stale (open / terminal)
       { id: 'p-open', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       { id: 'p-done', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'completed', self_booking_id: null },
@@ -224,6 +225,8 @@ function seedDb() {
       { id: 'sb-4', service_type: 'Quarterly Pest Control' },
       // linked from l5 but carries a label that isn't l5's stale name — untouched
       { id: 'sb-5', service_type: 'Owner Custom Booking Label' },
+      // linked from d1 (→ Quarterly) AND d2 (→ Monthly): one label, two targets — fail closed
+      { id: 'sb-div', service_type: 'Pest Control' },
     ],
     invoices: [
       // draft for u1: title + service_type + one line item swap. line_items
@@ -319,8 +322,8 @@ describe('20260829000040 backfill up()', () => {
       { id: 'a-linked', from: 'Pest Control', to: 'Quarterly Pest Control Service', parent_id: 'p-open', service_id: 'svc-q' }
     );
     // The cadence each name-only mapping rested on, and where it came from.
-    expect(state.addons.find((r) => r.id === 'a-legacy')).toMatchObject({ pattern: 'quarterly', pattern_source: 'parent' });
-    expect(state.addons.find((r) => r.id === 'a-own')).toMatchObject({ pattern: 'quarterly', pattern_source: 'addon' });
+    expect(state.addons.find((r) => r.id === 'a-legacy')).toMatchObject({ pattern: 'quarterly', pattern_source: 'parent', own_cadence_col: true });
+    expect(state.addons.find((r) => r.id === 'a-own')).toMatchObject({ pattern: 'quarterly', pattern_source: 'addon', own_cadence_col: true });
     // The add-on-only parent's copies carry the add-on name → swept too.
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
     // Both add-on passes touched the parent's draft — neither skipped the other.
@@ -391,8 +394,11 @@ describe('20260829000040 backfill up()', () => {
     expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control Service (Quarterly)');
     expect(sb(db, 'sb-4').service_type).toBe('Quarterly Pest Control'); // only a terminal visit links it
     expect(sb(db, 'sb-5').service_type).toBe('Owner Custom Booking Label'); // label ≠ the visit's stale name
+    // d1 (→ Quarterly) and d2 (→ Monthly) share sb-div: divergent across groups → untouched, listed.
+    expect(sb(db, 'sb-div').service_type).toBe('Pest Control');
 
     const state = readState(db);
+    expect(state.divergent.filter((d) => d.scope === 'self_booking').map((d) => d.key)).toEqual(['sb-div', 'sb-div']);
     // sb-1 is linked from u1 (Quarterly Pest Control → …) and l1 (Pest
     // Control → …); only the u1 pass matched its label.
     expect(state.selfBookings).toEqual([
@@ -613,6 +619,50 @@ describe('20260829000040 down()', () => {
     // i-p-open's LAST step came from a-linked's pass → retained, so the
     // whole invoice stays (an earlier component is never restored underneath).
     expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service + Quarterly Pest Control Service');
+  });
+
+  test('a parent-fallback add-on that gained its OWN cadence in flight is missed by the write, and one that gained it after up() is kept on rollback', async () => {
+    // In flight: the owner assigns a-legacy its own cadence before its write executes.
+    const db = seedDb();
+    const orig = fakeKnex(db);
+    let assigned = false;
+    const wrapped = (t) => {
+      const q = orig(t);
+      const update = q.update;
+      q.update = async (payload) => {
+        if (!assigned && t === 'scheduled_service_addons' && addon(db, 'a-legacy').service_name === 'Quarterly Pest Control') {
+          assigned = true;
+          addon(db, 'a-legacy').recurring_pattern = 'monthly';
+        }
+        return update(payload);
+      };
+      return q;
+    };
+    wrapped.schema = orig.schema; wrapped.fn = orig.fn; wrapped.raw = orig.raw;
+    await migration.up(wrapped);
+    expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control'); // parent-cadence write missed
+    expect(readState(db).addons.map((r) => r.id)).not.toContain('a-legacy');
+
+    // After up(): the same assignment makes the rollback leave the add-on (and its copies).
+    const db2 = seedDb();
+    const knex2 = fakeKnex(db2);
+    await migration.up(knex2);
+    addon(db2, 'a-legacy').recurring_pattern = 'monthly';
+    await migration.down(knex2);
+    expect(addon(db2, 'a-legacy').service_name).toBe('Quarterly Pest Control Service');
+    expect(rem(db2, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
+  });
+
+  test('invoice rollback compares jsonb line items key-order-insensitively', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    // Simulate a jsonb round trip that reorders object keys (and decodes to an array).
+    const reordered = JSON.parse(inv(db, 'i-u1').line_items).map((item) => Object.fromEntries(Object.entries(item).reverse()));
+    inv(db, 'i-u1').line_items = reordered;
+    await migration.down(knex);
+    expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control');
+    expect(JSON.parse(inv(db, 'i-u1').line_items)[0].description).toBe('Quarterly Pest Control');
   });
 
   test('a self-booking edited since up() (new prefix, new qualifier) is the owner\'s — not rewritten', async () => {

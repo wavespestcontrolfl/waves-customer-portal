@@ -211,14 +211,22 @@ function relabelInvoiceSnapshot(inv, fromName, toName) {
 // string swap: two different stale components can map to the SAME target
 // ("Quarterly Pest Control" and "Pest Control" both → "Quarterly Pest
 // Control Service"), after which a swap back cannot tell them apart.
-// line_items compare structurally (jsonb round-trips reorder nothing, but
-// the driver may hand back an object where up() wrote a string).
+// line_items compare structurally and KEY-ORDER-INSENSITIVELY: jsonb does
+// not preserve object key order on a round trip, and the driver may hand
+// back an object where up() wrote a string (r9 P2).
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
 function sameSnapshotValue(a, b) {
   if (a === b) return true;
   if (a == null || b == null) return false;
   const pa = parseLineItems(a);
   const pb = parseLineItems(b);
-  return pa !== null && pb !== null && JSON.stringify(pa) === JSON.stringify(pb);
+  return pa !== null && pb !== null && canonicalJson(pa) === canonicalJson(pb);
 }
 
 // Frozen (non-open) payer statements among these invoices' links — their
@@ -321,8 +329,12 @@ async function buildDivergence(knex, groups) {
     if (!byFrom.has(from)) byFrom.set(from, new Set());
     byFrom.get(from).add(to);
   };
+  const perBooking = new Map(); // self_booking_id → Map(from → Set(to)), across ALL groups (r9 P2)
   for (const { from, to, visits } of groups.values()) {
-    for (const v of visits) note(perVisit, v.id, from, to);
+    for (const v of visits) {
+      note(perVisit, v.id, from, to);
+      if (v.self_booking_id) note(perBooking, v.self_booking_id, from, to);
+    }
   }
   const perSlot = new Map(); // slotKey → Map(from → Set(to))
   if (perVisit.size && (await knex.schema.hasTable('appointment_reminders'))) {
@@ -340,7 +352,7 @@ async function buildDivergence(knex, groups) {
   return {
     atVisit: (visitId, from) => divergent(perVisit, visitId, from),
     atSlot: (key, from) => divergent(perSlot, key, from),
-    acrossVisits: (visitIds, from) => new Set(visitIds.flatMap((id) => [...((perVisit.get(id) || new Map()).get(from) || [])])).size > 1,
+    atBooking: (sbId, from) => divergent(perBooking, sbId, from),
   };
 }
 
@@ -414,7 +426,9 @@ async function fanOutSnapshots(knex, { from, to, visits }, state, divergence) {
       const next = swapRenamedPrefix(sb.service_type, from, to);
       if (!next) continue;
       const linkedVisits = bookingToVisits.get(sb.id);
-      if (divergence.acrossVisits(linkedVisits, from)) { skipDivergent('self_booking', sb.id); continue; }
+      // Scope = EVERY relabeled visit sharing this booking, across all
+      // groups — not just this group's (r9 P2).
+      if (divergence.atBooking(sb.id, from)) { skipDivergent('self_booking', sb.id); continue; }
       const count = await knex('self_booked_appointments')
         .where({ id: sb.id, service_type: sb.service_type })
         .update({ service_type: next });
@@ -569,7 +583,13 @@ exports.up = async function up(knex) {
         // A name-only add-on's mapping rests on a cadence — its own, or the
         // parent's as the legacy fallback — recorded with its source so
         // down() re-checks exactly that (r4 P2, r7 P1).
-        if (cadence) { rec.pattern = cadence.pattern; rec.pattern_source = cadence.source; }
+        if (cadence) {
+          rec.pattern = cadence.pattern;
+          rec.pattern_source = cadence.source;
+          // Whether the row had a recurring_pattern column to hold its own
+          // cadence — down() re-checks "still NULL" only when it could.
+          rec.own_cadence_col = addonHasPattern;
+        }
         state.addons.push(rec);
         noteRelabel(a.service_name, to, { id: a.scheduled_service_id, self_booking_id: null, addon_id: a.id });
       }
@@ -586,11 +606,14 @@ exports.up = async function up(knex) {
         : { pattern: parent.recurring_pattern, source: 'parent' };
       const to = mappingTarget(a.service_name, cadence.pattern);
       if (!to || !catalog.has(to)) continue;
-      // The add-on's own cadence is part of its identity for the CAS; the
-      // mapped target is re-checked as still active at write time (r8 P2).
+      // The add-on's cadence identity is part of the CAS either way: its own
+      // pattern when that drove the mapping, or STILL NULL when the parent
+      // fallback did (an owner assigning the add-on its own cadence in
+      // between must make the write miss — r9 P2); the mapped target is
+      // re-checked as still active at write time (r8 P2).
       const scope = (q) => targetStillActive(cadence.source === 'addon'
         ? q.whereNull('service_id').where({ recurring_pattern: cadence.pattern })
-        : q.whereNull('service_id'), to);
+        : (addonHasPattern ? q.whereNull('service_id').whereNull('recurring_pattern') : q.whereNull('service_id')), to);
       await relabelAddon(a, to, scope, cadence);
     }
   }
@@ -707,9 +730,11 @@ exports.down = async function down(knex) {
       if (parentCadenceBased && !recordedVisits.has(rec.parent_id) && parentPattern.get(rec.parent_id) !== rec.pattern) continue;
       let q = knex('scheduled_service_addons').where({ id: rec.id, service_name: rec.to });
       q = rec.service_id ? q.where({ service_id: rec.service_id }) : q.whereNull('service_id');
-      // An add-on mapped through its OWN cadence re-checks that cadence on
-      // the row itself (r7 P1) — the identity the forward CAS used.
+      // The cadence identity the forward CAS used: the add-on's OWN cadence
+      // (r7 P1), or — for the parent fallback — its cadence still NULL (an
+      // owner assigned one since → the add-on is theirs, r9 P2).
       if (rec.pattern_source === 'addon') q = q.where({ recurring_pattern: rec.pattern });
+      else if (rec.pattern_source === 'parent' && rec.own_cadence_col) q = q.whereNull('recurring_pattern');
       const count = await q.update({ service_name: rec.from });
       if (count) revertedAddons.add(rec.id);
     }
