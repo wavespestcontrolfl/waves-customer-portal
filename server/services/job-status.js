@@ -895,7 +895,7 @@ async function transitionJobStatus({
       // surface can forget it. Gate-independent by design: existing visits
       // keep their lifecycle even if the creation gate is later unset.
       // Idempotent + best-effort inside the helper.
-      if (['cancelled', 'skipped'].includes(String(toStatus || ''))) {
+      if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
         void require('./visit-groups').handleChildTerminal(jobId).catch((e) => {
           logger.warn(`[job-status] visit-group terminal seam failed for ${jobId}: ${e.message}`);
         });

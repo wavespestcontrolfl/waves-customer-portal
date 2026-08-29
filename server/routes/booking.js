@@ -3532,6 +3532,11 @@ async function createSelfBooking(payload = {}) {
             }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
+            // Grouping runs AFTER the occupancy sweep below (codex #3590
+            // r5): the sweep can demote a seeded row to windowless, and a
+            // pre-sweep group would make the sweep see the visit sibling
+            // as a clash.
+            visitGrouping: false,
             pattern: wizardSeriesPlan.pattern,
             plannedCount: wizardSeriesPlan.visits,
             skipWeekends: true,
@@ -3634,6 +3639,18 @@ async function createSelfBooking(payload = {}) {
               // arm 72/24h reminders for the demoted time (codex #3504 r5).
               row.window_start = null;
               row.window_end = null;
+            }
+          }
+          // Visit-group seam, post-sweep (codex #3590 r5): group each
+          // surviving seeded row against existing compatible stops using
+          // its NORMALIZED window/tech. Demoted (windowless) rows are
+          // skipped — the office places them first. Best-effort savepoint
+          // inside maybeGroupRow.
+          {
+            const { maybeGroupRow } = require('../services/visit-groups');
+            for (const row of seededRows) {
+              if (!row?.id || !row.window_start) continue;
+              await maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
             }
           }
           if (setupFeeHandoffEligible) {

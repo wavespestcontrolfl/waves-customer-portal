@@ -13179,9 +13179,18 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
-    if (recapLegacyVisitId) {
-      void require('../services/visit-groups').dissolveForLegacyCompletion(recapLegacyVisitId);
-    }
+    // Dissolve from a FRESH read, not the preflight capture (codex r5): a
+    // stamp can commit between the preflight and submitRecap's row lock,
+    // in which case the preflight saw null. Either way the row completed
+    // through the legacy path, so any open packet-less visit it belongs
+    // to must dissolve; the helper no-ops on anything else.
+    try {
+      const nowRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('visit_id');
+      const dissolveId = (nowRow && nowRow.visit_id) || recapLegacyVisitId;
+      if (dissolveId) {
+        void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveId);
+      }
+    } catch { /* best-effort */ }
     res.json(result);
   } catch (err) { next(err); }
 });

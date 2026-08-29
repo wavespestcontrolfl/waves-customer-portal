@@ -70,6 +70,7 @@ describe('canJoin', () => {
     ['row_terminal', { status: 'completed' }],
     ['row_terminal', { status: 'cancelled' }],
     ['row_terminal', { status: 'skipped' }],
+    ['row_terminal', { status: 'no_show' }],
     ['customer', { customer_id: 'other' }],
     ['property', { property_id: 'other' }],
     ['date', { scheduled_date: '2026-08-31' }],

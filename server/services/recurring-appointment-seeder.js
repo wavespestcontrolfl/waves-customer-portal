@@ -1208,7 +1208,10 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // caller), so a grouping failure never fails a seed.
   try {
     const { maybeGroupRow } = require('./visit-groups');
-    for (const seededRow of insertedRows) {
+    // A caller that normalizes conflicts AFTER seeding (booking wizard
+    // occupancy sweep) opts out and groups post-sweep itself (codex r5).
+    const seededForGrouping = opts.visitGrouping === false ? [] : insertedRows;
+    for (const seededRow of seededForGrouping) {
       if (seededRow && seededRow.id) {
         await maybeGroupRow(seededRow.id, { database: conn, createdBy: 'seeder' });
       }

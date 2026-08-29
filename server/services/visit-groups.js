@@ -27,7 +27,7 @@ const db = require('../models/db');
 const OPEN_STATUSES = ['open'];
 // Terminal scheduled_services statuses (CHECK constraint,
 // 20260426000004): rows in these states never join a visit.
-const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped'];
+const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // A 'rescheduled' row is a live visit AWAITING RE-PLACEMENT
 // (recurring-appointment-seeder.js:834) — its date/window are stale, so it
 // never JOINS a visit; it is not terminal for member counting.
@@ -319,7 +319,13 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         .orderBy('stop_seq', 'asc');
       for (const v of openVisits) {
         if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
-        if (fresh.every((r) => canJoin(r, v).ok)) { visit = v; break; }
+        if (!fresh.every((r) => canJoin(r, v).ok)) continue;
+        // Membership freeze applies here too (codex r5): a visit whose
+        // packet/artifact/link/payment froze its member set never absorbs
+        // new rows, even fully unattached ones — skip to a fresh seq.
+        const vActivity = await visitActivity(v.id, t);  
+        if (!canSplit(vActivity).ok) continue;
+        visit = v; break;
       }
     }
 
@@ -521,10 +527,29 @@ async function handleChildStopChanged(scheduledServiceId) {
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
       if (!fresh || String(fresh.visit_id) !== String(visit.id)) return false;
+      // Window test runs against the OTHER members, not the stale parent
+      // union (codex r5): a child that no longer overlaps any sibling is a
+      // second physical stop even when it grazes the old union.
+      const others = await t('scheduled_services').where({ visit_id: visit.id })
+        .whereNot('id', fresh.id)
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .select('window_start', 'window_end');
+      const overlapsMembers = others.length === 0
+        || others.some((o) => windowsOverlap(fresh.window_start, fresh.window_end, o.window_start, o.window_end));
+      // Tech: a conflicting assignment detaches; an assignment landing on
+      // an UNASSIGNED visit is ADOPTED — the visit owns assignment, so the
+      // parent and every unassigned member align (codex r5).
+      const techConflict = Boolean(fresh.technician_id && visit.technician_id
+        && String(fresh.technician_id) !== String(visit.technician_id));
+      if (!techConflict && fresh.technician_id && !visit.technician_id) {
+        await t('service_visits').where({ id: visit.id }).update({ technician_id: fresh.technician_id });
+        await t('scheduled_services').where({ visit_id: visit.id })
+          .whereNull('technician_id').update({ technician_id: fresh.technician_id });
+        visit.technician_id = fresh.technician_id;
+      }
       const stillMatches = dateOnly(fresh.scheduled_date) === dateOnly(visit.scheduled_date)
-        && windowsOverlap(fresh.window_start, fresh.window_end, visit.window_start, visit.window_end)
-        && !(fresh.technician_id && visit.technician_id
-          && String(fresh.technician_id) !== String(visit.technician_id))
+        && overlapsMembers
+        && !techConflict
         && !JOIN_INELIGIBLE_STATUSES.includes(String(fresh.status || ''));
       if (stillMatches) {
         // The move stayed inside the stop but may have shifted the union —
