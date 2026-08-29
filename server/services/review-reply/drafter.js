@@ -312,10 +312,13 @@ const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|
 // Words that may sit between a conjunction / comma and the coordinated word
 // without changing what it is ("and even Marcus", "and not just the ants").
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
-// Where a coordinated noun phrase ends: a plural-only verb or a determiner /
-// preposition / pronoun (the same words ORDINARY_FOLLOWER_RE treats as
-// ordinary-word evidence).
-const PHRASE_STOP_WORDS = new Set("are were have aren't weren't haven't do don't love hate need tend come go get keep make take know seem look stay find want like thrive show mean matter help a an the this that these those your our my its their every any some no each all both of in on at to for from by about around down up out off over under into through after before during without within you we it they us them than as".split(' '));
+// Where a coordinated noun phrase ends: punctuation or a plural-only verb.
+// Determiners / prepositions are ordinary continuation tokens ("and some of
+// our team" must be scanned through to "our team" — codex #3580 r9).
+const PHRASE_STOP_WORDS = new Set("are were have aren't weren't haven't do don't love hate need tend come go get keep make take know seem look stay find want like thrive show mean matter help".split(' '));
+// A possessive or role noun ANYWHERE in the coordinated phrase is an
+// attribution (codex #3580 r9: "and some of our team").
+const PHRASE_ATTRIBUTION_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
 const POSSESSIVE_ROLE_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'its', 'the', 'a', 'an', 'one', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {
@@ -362,6 +365,7 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
       if (/^\p{Lu}/u.test(t)) return false;
       const lt = t.toLowerCase();
       if (names.has(lt) || COMMON_FIRST_NAMES.has(lt)) return false;
+      if (PHRASE_ATTRIBUTION_ITEMS.has(lt)) return false;
       if (PHRASE_STOP_WORDS.has(lt)) break;
       // …and an UNKNOWN lowercase word is not evidence either (hook: "and very
       // talented tasha", "and very tasha"): without a dictionary it cannot be

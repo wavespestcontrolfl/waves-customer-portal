@@ -492,6 +492,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     // hook: an unknown lowercase word inside the coordinated phrase is not evidence.
     expect(verify(good('Hi Dana,\n\nRoaches and very talented tasha are glad the kitchen is quiet. Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches and very tasha are glad the kitchen is quiet. Marcus says thanks.'))).toBe('unlisted_name');
+    // codex #3580 r9: a possessive / role complement deeper in the phrase is still attribution.
+    expect(verify(good('Hi Dana,\n\nFinding and some of our team appreciate your note about Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches and all of his crew are glad Marcus could help.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nAnts and roaches in the kitchen are gone, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
