@@ -15,7 +15,7 @@
  * tests import, and an unprimed cache simply falls back to the regex map.
  */
 
-const { CADENCE_CONVENTION_RENAMES } = require('../config/service-name-aliases');
+const { CADENCE_CONVENTION_RENAMES, renamedCatalogName, legacyCatalogName } = require('../config/service-name-aliases');
 
 // Migration-owned rename history is always resolvable, primed or not: an
 // unlinked terminal visit (service_id null, completed/cancelled) keeps its
@@ -102,4 +102,64 @@ function __setCatalogNamesForTest(names = []) {
   byLower = new Map([...renameSeed(), ...names.map((n) => [n.trim().toLowerCase(), n.trim()])]);
 }
 
-module.exports = { canonicalCatalogName, refreshCatalogNames, startCatalogNameRefresh, __setCatalogNamesForTest };
+/**
+ * The identity a series CHILD is born with.
+ *
+ * Children used to copy parent.service_type verbatim. Series parents that
+ * went terminal keep the label they closed under (Invariant 1 of the label
+ * backfills, 20260829000010/000040), so a parent stamped before a catalog
+ * rename kept birthing children with the retired name — and the reminder,
+ * invoice and booking copies made from those children inherited it.
+ *
+ * Resolution, fail-closed to the parent's own label + linkage:
+ *  1. Linked parent → the catalog row's CURRENT name (a rename after the
+ *     parent was stamped propagates to every new child), same service_id.
+ *  2. Unlinked parent → the label is bridged to a current name through the
+ *     rename aliases (pre-rename form → current) or the legacy
+ *     (label, cadence) map, then matched against exactly ONE active catalog
+ *     row by name — the child is born linked to it (service_id +
+ *     service_key). No active row, or an ambiguous name (two active rows),
+ *     or the row lookup failing → verbatim label, unlinked: never a name
+ *     the catalog doesn't carry, never a guessed linkage.
+ *
+ * Read on the caller's connection so a series spawn inside a transaction
+ * sees its own snapshot and never waits on a second pool slot.
+ */
+async function resolveSeriesChildIdentity(conn, parent) {
+  const verbatim = {
+    service_type: (parent && parent.service_type) || 'Service',
+    service_id: (parent && parent.service_id) || null,
+    service_key: null,
+  };
+  if (!parent || !conn) return verbatim;
+  try {
+    if (parent.service_id) {
+      const row = await conn('services').where({ id: parent.service_id }).first('id', 'name', 'service_key');
+      return row && row.name
+        ? { service_type: row.name, service_id: row.id, service_key: row.service_key || null }
+        : verbatim;
+    }
+    const label = String(parent.service_type || '').trim();
+    if (!label) return verbatim;
+    const candidate = renamedCatalogName(label) || legacyCatalogName(label, parent.recurring_pattern) || label;
+    const rows = await conn('services')
+      .whereRaw('lower(name) = lower(?)', [candidate])
+      .where({ is_active: true })
+      .select('id', 'name', 'service_key');
+    if (rows.length !== 1) return verbatim;
+    return { service_type: rows[0].name, service_id: rows[0].id, service_key: rows[0].service_key || null };
+  } catch (err) {
+    try {
+      require('./logger').warn(`[service-catalog-names] child identity resolution failed for parent ${parent.id || '?'} — using the parent label verbatim: ${err.message}`);
+    } catch { /* logger unavailable in a pure-util context */ }
+    return verbatim;
+  }
+}
+
+module.exports = {
+  canonicalCatalogName,
+  refreshCatalogNames,
+  startCatalogNameRefresh,
+  resolveSeriesChildIdentity,
+  __setCatalogNamesForTest,
+};
