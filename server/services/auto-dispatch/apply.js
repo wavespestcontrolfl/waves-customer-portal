@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const { classifyServiceCategory } = require('./service-category');
+const { etDateString } = require('../../utils/datetime-et');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -101,6 +102,10 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     request the mover would otherwise treat as movable)
  *   - reminder freeze (route tiers on): any sibling inside the sendable
  *     band, or an unreadable check, refuses (fail closed)
+ *   - drift / tier legality (route tiers on): each sibling's OWN durable
+ *     anchor and tier radius must admit best.date (the orchestrator checks
+ *     the tapped row only) — a sibling at its cumulative ±5-day limit must
+ *     not be dragged past it; unreadable anchor evidence refuses (fail closed)
  *   - technician reassignment: the chosen tech must not be DEACTIVATED for
  *     a sibling's service category (the scorer's hard filter)
  *   - same-series date (codex r14 P1): the target date must not already
@@ -120,14 +125,32 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     for (const m of siblings) {
       if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
     }
+    const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id))
+      .select('id', 'service_type', 'recurring_parent_id', 'is_recurring', 'scheduled_date', 'auto_dispatch_change_count');
+    const memberIds = (members || []).map((m) => m.id);
     if (config.routeTiersEnabled === true) {
       const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
       if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
       const frozen = siblings.find((m) => freeze.frozen.has(m.id));
       if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
+      // Same legality math as the orchestrator's pass-1/apply-time checks,
+      // per SIBLING: its own anchor (durable evidence, fail closed), its own
+      // days-out tier radius, the destination floor — best.date must fall
+      // inside the sibling's window or the grouped move is refused.
+      const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
+      if (anchorMap === null) throw refuse(siblings[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
+      const today = etDateString(new Date());
+      for (const r of rows) {
+        const anchor = routeTiers.resolveAnchor(r, anchorMap);
+        if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');
+        const daysOut = routeTiers.daysBetween(today, toDateStr(r.scheduled_date));
+        const radius = routeTiers.tierRadiusForDaysOut(daysOut);
+        const window = radius > 0 ? routeTiers.tierMoveWindow({ origDate: r.scheduled_date, anchorDate: anchor, today, radius }) : null;
+        if (!window || best.date < window.dateFrom || best.date > window.dateTo) {
+          throw refuse(r.id, `cannot legally move to ${best.date} (${daysOut} days out, tier radius ±${radius}, drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor})`);
+        }
+      }
     }
-    const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id)).select('id', 'service_type', 'recurring_parent_id', 'is_recurring');
-    const memberIds = (members || []).map((m) => m.id);
     for (const r of rows) {
       if (!r.recurring_parent_id && r.is_recurring !== true) continue;
       const parentId = r.recurring_parent_id || r.id;

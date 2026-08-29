@@ -500,6 +500,11 @@ describe('grouped visits are refused before slot selection (codex #3609 r4)', ()
     expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: null }, NOW)).toEqual({ ok: true });
     expect(mockDb).not.toHaveBeenCalled();
   });
+  test('an unreadable membership lookup fails CLOSED (not_available), never as ungrouped (local codex audit)', async () => {
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => { throw new Error('db down'); } };
+    mockDb.mockImplementation(() => api);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'not_available' });
+  });
   test('terminal verdicts win without a membership query', async () => {
     mockDb.mockClear();
     expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });

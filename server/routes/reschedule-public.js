@@ -269,15 +269,20 @@ async function groupedVisit(svc) {
       .count({ n: 'id' }).first();
     return Number(row?.n || 0) >= 2;
   } catch (err) {
+    // Unknown membership is NOT "ungrouped" (local codex audit): the surfaces
+    // would advertise self-service for a possibly grouped visit and the
+    // rebooker would refuse the picked slot at commit. Fail closed.
     logger.warn(`[reschedule-public] grouped-visit lookup failed for ${svc.id}: ${err.message}`);
-    return false;
+    return 'unknown';
   }
 }
 
 async function eligibilityAsync(svc, now = new Date()) {
   const elig = eligibility(svc, now);
   if (!elig.ok) return elig;
-  return (await groupedVisit(svc)) ? { ok: false, reason: 'grouped' } : elig;
+  const grouped = await groupedVisit(svc);
+  if (grouped === 'unknown') return { ok: false, reason: 'not_available' };
+  return grouped ? { ok: false, reason: 'grouped' } : elig;
 }
 
 async function loadByToken(token) {

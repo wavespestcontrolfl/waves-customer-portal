@@ -4,7 +4,11 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
-jest.mock('../services/auto-dispatch/route-tiers', () => ({ loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }) }));
+jest.mock('../services/auto-dispatch/route-tiers', () => ({
+  ...jest.requireActual('../services/auto-dispatch/route-tiers'),
+  loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }),
+  loadAnchorMap: jest.fn().mockResolvedValue(new Map()),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
@@ -12,6 +16,8 @@ const AppointmentReminders = require('../services/appointment-reminders');
 const { applyAutoDispatchMove, makeMemberGuard } = require('../services/auto-dispatch/apply');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { shiftDateStr } = require('../services/auto-dispatch/dates');
 
 const SERVICE = {
   id: 's1', status: 'confirmed', scheduled_date: '2026-08-04',
@@ -309,6 +315,39 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }] });
     await expect(same({ trx, members })).resolves.toBeUndefined();
     expect(trx.__calls).not.toContain('technician_capabilities');
+  });
+
+  test('route tiers on: each sibling must admit best.date inside its OWN tier/drift window; unknown anchor evidence refuses (local codex audit)', async () => {
+    const today = etDateString(new Date());
+    const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${today}T12:00`), n));
+    const sibDate = dayOffset(30); // tier 1: widest radius
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const sib = { id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: 'p2', is_recurring: true, scheduled_date: sibDate, auto_dispatch_change_count: 0 };
+    const win = routeTiers.tierMoveWindow({ origDate: sibDate, anchorDate: sibDate, today, radius: routeTiers.tierRadiusForDaysOut(30) });
+    expect(win).toBeTruthy();
+    const on = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: { routeTiersEnabled: true }, techChanged: false });
+    // inside the sibling's window ⇒ passes (anchor = its own date, never moved)
+    await expect(on(win.dateTo)({ trx: fakeTrx({ siblings: [sib] }), members })).resolves.toBeUndefined();
+    // one day past the sibling's drift budget ⇒ refused, even though the PRIMARY may have budget left
+    await expect(on(shiftDateStr(win.dateTo, 1))({ trx: fakeTrx({ siblings: [sib] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    // a sibling already moved by auto-dispatch: its DURABLE anchor bounds the budget
+    routeTiers.loadAnchorMap.mockResolvedValueOnce(new Map([['s2', shiftDateStr(sibDate, -5)]]));
+    await expect(on(shiftDateStr(sibDate, 1))({ trx: fakeTrx({ siblings: [{ ...sib, auto_dispatch_change_count: 1 }] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    // change_count > 0 with no durable record ⇒ anchor unknown ⇒ refuse
+    await expect(on(win.dateTo)({ trx: fakeTrx({ siblings: [{ ...sib, auto_dispatch_change_count: 1 }] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    // evidence unreadable ⇒ refuse (fail closed)
+    routeTiers.loadAnchorMap.mockResolvedValueOnce(null);
+    await expect(on(win.dateTo)({ trx: fakeTrx({ siblings: [sib] }), members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' });
+    // inside the <7-day no-move tier ⇒ refuse
+    await expect(on(dayOffset(8))({ trx: fakeTrx({ siblings: [{ ...sib, scheduled_date: dayOffset(3) }] }), members }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    // tiers off ⇒ no anchor read at all
+    routeTiers.loadAnchorMap.mockClear();
+    await expect(makeMemberGuard({ service: SERVICE, best: { ...BEST, date: shiftDateStr(win.dateTo, 20) }, config: {}, techChanged: false })({ trx: fakeTrx({ siblings: [sib] }), members })).resolves.toBeUndefined();
+    expect(routeTiers.loadAnchorMap).not.toHaveBeenCalled();
   });
 
   test('same-series date: a sibling whose recurring series already has another visit on the target date refuses (codex r14 P1)', async () => {
