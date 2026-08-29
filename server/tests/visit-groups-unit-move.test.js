@@ -102,14 +102,14 @@ describe('moveVisitAsUnit', () => {
     expect(pCall[0]).toBe('a'); expect(pCall[2]).toBe('13:00-14:00');
     expect(pCall[5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, expect: { scheduled_date: '2026-08-30', window_start: '09:00' }, expectOccurrenceIds: ['x'] });
     expect(sCall[0]).toBe('b'); expect(sCall[2]).toBe('14:00-15:00');
-    expect(sCall[5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, expect: { scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00' } });
+    expect(sCall[5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, expect: { scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', visit_id: 'v1', technician_id: 't1' } });
     expect(sCall[5].expectOccurrenceIds).toBeUndefined();
     // each move hides only the OTHER participating rows from its probes (codex r6)
     expect(rebooker.reschedule.mock.calls[0][5].excludeServiceIds).toEqual(['b']);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
     // every moved SIBLING gets its reminder row synced (notice suppressed); the primary's is the caller's job
     expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
-    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
     // parent retarget AFTER the moves: both stop keys locked in sorted order, patch from the landed rows, lifecycle reset + tracker effects re-armed on the date change, technician carried
     const rawKeys = db.__rawCalls.map((a) => a[1][1]);
     const pairIdx = rawKeys.findIndex((k, i) => k === 'p1:2026-08-30' && rawKeys[i + 1] === 'p1:2026-09-02');
@@ -210,7 +210,7 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b')] });
     let rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' });
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1' });
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectAnchor: { scheduled_date: '2026-08-30' } } });
@@ -221,7 +221,7 @@ describe('moveVisitAsUnit', () => {
   test('sibling reminder sync is fenced with expectSchedule against a newer move', async () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
-    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
   });
 
   test('exact retry of a committed move on a recurring primary re-enters the rebooker (series replay contract) ONLY when the request could have created a series operation', async () => {
@@ -275,7 +275,7 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
-    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00' }]);
+    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' }]);
     // the sibling's own move verifies the PRIMARY at its landed target (codex r6)
     expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
@@ -356,12 +356,18 @@ describe('moveVisitAsUnit', () => {
     expect(out.visitMove.members.find((m) => m.id === 'b').previousStatus).toBe('confirmed');
   });
 
-  test('a silently moved sibling whose creation confirmation was still pending gets it re-armed', async () => {
+  test('a silently moved sibling keeps a still-pending creation confirmation pending (keepPendingConfirmation) — no supersede, no re-arm write', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'rem-b', confirmation_sent: false });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    const rearm = db.__calls.find((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rearm.values).toEqual({ confirmation_sent: false, confirmation_sent_at: null });
-    expect(rearm.ops).toEqual(expect.arrayContaining([['where', { id: 'rem-b' }]]));
+    expect(AppointmentReminders.handleReschedule.mock.calls[0][2]).toMatchObject({ sendNotification: false, keepPendingConfirmation: true });
+    expect(db.__calls.some((c) => c.table === 'appointment_reminders' && c.op === 'update')).toBe(false);
+  });
+
+  test('each member\'s own CAS carries its planned visit membership and technician', async () => {
+    db.__script = script({ members: [member('a'), member('b', { technician_id: 't2' })] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(rebooker.reschedule.mock.calls[1][5].expect).toMatchObject({ visit_id: 'v1', technician_id: 't2' });
   });
 });

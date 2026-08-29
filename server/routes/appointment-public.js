@@ -572,6 +572,15 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // must fail the confirm rather than silently succeed without it.
     let updated = 0;
     await db.transaction(async (trx) => {
+      // Visit writers (createOrJoinVisit, split, unit move) take the STOP
+      // lock before any member row lock; this confirm follows the same
+      // stop→row order so the two can never form a lock cycle (codex #3609
+      // r7). Taken for grouped rows only — an ungrouped confirm never
+      // touches visit state.
+      if (svc.visit_id) {
+        const { lockStopForRow } = require('../services/visit-groups');
+        await lockStopForRow(trx, svc.id);
+      }
       updated = await trx('scheduled_services')
         // scheduled_date/window_start come straight off the row we read, so
         // the predicate closes the read->update gap without re-parsing
@@ -582,6 +591,12 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
           status: 'pending',
           scheduled_date: svc.scheduled_date,
           window_start: svc.window_start,
+          // The observed visit membership is part of the CAS: a row split
+          // from its visit between the page read and this write misses,
+          // so the sibling fan-out below can never confirm members of a
+          // visit the row no longer belongs to (knex renders null as
+          // IS NULL for ungrouped rows).
+          visit_id: svc.visit_id || null,
         })
         // customer_confirmed + confirmed_at ride along for parity with the
         // logged-in confirm route (routes/schedule.js) and self-booking
@@ -609,8 +624,8 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // same guarded write + history row. Members already confirmed or in
       // any other state are untouched.
       if (svc.visit_id) {
-        const { lockStopForRow } = require('../services/visit-groups');
-        await lockStopForRow(trx, svc.id);
+        // Stop lock already held (above) and the CAS just proved the row
+        // still belongs to svc.visit_id.
         const siblings = await trx('scheduled_services')
           .where({ visit_id: svc.visit_id, status: 'pending' })
           .whereNot('id', svc.id)

@@ -19,7 +19,7 @@ const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibil
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
-const { applyAutoDispatchMove, revalidatePlacement } = require('./apply');
+const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr } = require('./dates');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
@@ -453,14 +453,17 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          if (totals.changed >= config.maxChangesPerRun) {
+          // A grouped row moves its whole visit: reserve EVERY member row
+          // against the per-run cap before applying (codex #3609 r7).
+          const unitSize = await unitMoveSize(pm.service);
+          if (totals.changed + unitSize > config.maxChangesPerRun) {
             totals.recommended++; // cap-held but still a valid move — count it in the summary
-            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement})`, ...fresh.audit });
+            await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${unitSize > 1 ? `, grouped visit of ${unitSize}` : ''})`, ...fresh.audit });
             continue;
           }
 
           const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, config);
-          totals.changed++;
+          totals.changed += result.movedCount || 1;
           await audit.logDecision(runId, {
             action: 'changed',
             service: pm.service,
@@ -476,6 +479,8 @@ async function runAutoDispatch(opts = {}) {
           });
         } catch (applyErr) {
           totals.failed++;
+          // A partial grouped move already changed rows — they count.
+          if (applyErr && applyErr.movedCount) totals.changed += applyErr.movedCount;
           logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
           try {
             // Prefer the fresh (actually-attempted) placement in the failure row;

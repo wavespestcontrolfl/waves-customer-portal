@@ -163,3 +163,39 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
   expect(updateSibPlain.mock.calls[0][0].status).toBeUndefined();
   expect(insert).not.toHaveBeenCalled();
 });
+
+test('a grouped visit that only PARTLY moved is an explicit failure carrying movedCount (rows that moved still get bookkeeping)', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    visitMove: { visitId: 'v1', moved: ['s1'], failed: [{ id: 's2', reason: 'member s2 boom', code: 'SLOT_TAKEN' }], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+    ] },
+  });
+  const updateTapped = jest.fn().mockResolvedValue(1);
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: updateTapped },
+  ];
+  db.mockImplementation(() => queue.shift());
+  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false }))
+    .rejects.toMatchObject({ code: 'VISIT_PARTIAL_MOVE', movedCount: 1, failedMembers: ['s2'] });
+  expect(updateTapped).toHaveBeenCalledTimes(1);
+});
+
+test('a full grouped move reports movedCount = every moved row', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'confirmed' },
+    ] },
+  });
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+  ];
+  db.mockImplementation(() => queue.shift());
+  const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
+  expect(res.movedCount).toBe(2);
+});

@@ -1653,7 +1653,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             original: { date: dateOnly(m.scheduled_date), window: m.window_start ? `${norm(m.window_start)}-${norm(m.window_end) || norm(m.window_start)}` : null },
             // Per-member fence from the LOCKED row (codex r1): the caller's
             // expect / expectAnchor / expectOccurrenceIds pin the primary only.
-            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null },
+            // visit_id + technician_id fence the member's own move to the
+            // planned unit (codex r7): a row split from the visit or
+            // reassigned after the plan fails ITS CAS instead of moving.
+            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null },
           };
         });
         return {
@@ -1754,18 +1757,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         try {
           // expectSchedule fences this sync against a NEWER move that landed
           // after the row moved (codex r3): a stale pass never overwrites it.
-          const rec = await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
+          // keepPendingConfirmation: nobody sends a replacement notice for a
+          // sibling, so a still-pending creation confirmation stays pending
+          // (delivered by the deferred sendConfirmation) instead of being
+          // superseded and re-armed after the fact (codex r6/r7).
+          await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
             sendNotification: false,
+            keepPendingConfirmation: true,
             expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
           });
-          // handleReschedule flips confirmation_sent→true assuming the
-          // caller sends a replacement notice; nobody sends one for a
-          // sibling. If its creation confirmation was still pending, re-arm
-          // it (same as auto-dispatch does for the tapped row) so an
-          // independently messaged sibling gets neither nothing (codex r6).
-          if (rec && rec.id && rec.confirmation_sent === false) {
-            await db('appointment_reminders').where({ id: rec.id }).update({ confirmation_sent: false, confirmation_sent_at: null });
-          }
         } catch (remErr) {
           logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
         }

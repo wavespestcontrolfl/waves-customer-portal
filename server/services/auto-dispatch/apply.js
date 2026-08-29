@@ -38,7 +38,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded');
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -157,6 +157,14 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
   }
 
+  // A grouped stop that only PARTLY moved (primary committed, a sibling
+  // lost its CAS / hit a conflict) is an explicit failure for auto-dispatch
+  // (codex #3609 r7): no operator consumes the warning here, so the run
+  // must not report the optimization as applied. Bookkeeping for the rows
+  // that DID move still runs below; the throw carries movedCount so the
+  // orchestrator's change count and cap stay honest.
+  const partialFailed = Array.isArray(moveResult?.visitMove?.failed) ? moveResult.visitMove.failed : [];
+
   // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit): every
   // sibling went through the same reschedule() and was forced 'confirmed'
   // too. Apply the identical restoration + bookkeeping per moved sibling
@@ -216,6 +224,14 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.warn(`[auto-dispatch] reminder sync failed for ${service.id} (move already applied): ${remErr.message}`);
   }
 
+  const movedCount = 1 + siblingMembers.length;
+  if (partialFailed.length) {
+    throw Object.assign(
+      new Error(`grouped visit only partly moved — ${partialFailed.map((f) => `${f.id}: ${f.reason}`).join('; ')}`),
+      { code: 'VISIT_PARTIAL_MOVE', movedCount, failedMembers: partialFailed.map((f) => f.id) },
+    );
+  }
+
   let notification = null;
   try {
     notification = await emitAutoDispatchChanged(service, best, runId, config);
@@ -223,7 +239,27 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
 
-  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification };
+  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount };
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement };
+/**
+ * How many scheduled_services rows an auto-dispatch move of `service` would
+ * change: 1, or every live member of its visit group (moveVisitAsUnit moves
+ * them together). The orchestrator reserves this many changes against
+ * maxChangesPerRun BEFORE applying (codex #3609 r7). Fail-safe: a lookup
+ * error counts as 1 (the tapped row) so the cap is never a reason to skip
+ * on a transient read failure — the apply path revalidates everything.
+ */
+async function unitMoveSize(service) {
+  try {
+    const row = await db('scheduled_services').where({ id: service.id }).first('visit_id');
+    if (!row || !row.visit_id) return 1;
+    const members = await require('../visit-groups').openMembers(db, row.visit_id);
+    return Math.max(1, members.length);
+  } catch (err) {
+    logger.warn(`[auto-dispatch] unit size lookup failed for ${service.id}: ${err.message}`);
+    return 1;
+  }
+}
+
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize };

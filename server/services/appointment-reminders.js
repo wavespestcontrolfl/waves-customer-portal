@@ -2962,7 +2962,13 @@ const AppointmentReminders = {
       // landing in that window must claim the slot. This suppresses the deferred
       // sendConfirmation (which skips confirmation_sent rows) so the customer
       // gets the reschedule notice below, not a stale-time confirmation after it.
-      if (!record.confirmation_sent) {
+      // options.keepPendingConfirmation: the caller sends NO replacement
+      // notice for this row (a grouped sibling moved silently by
+      // moveVisitAsUnit) — leave a still-pending creation confirmation
+      // pending so the deferred sendConfirmation delivers it, instead of
+      // superseding it here and re-arming afterwards (that re-arm raced a
+      // worker send in between — codex #3609 r7).
+      if (!record.confirmation_sent && options.keepPendingConfirmation !== true) {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
