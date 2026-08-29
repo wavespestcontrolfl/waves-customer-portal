@@ -306,8 +306,10 @@ coming letting giving working watching checking
 // is glad …" — origin phrases cannot be enumerated); no follower may lead
 // into a role noun ("Finding the technician …"); and a plural verb may not
 // take a feeling / speech / thanks complement ("Ants are glad …", "Ants have
-// thanked …", "Ants love that …" — a pest plural reading as a speaker).
-const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help)\b(?!\s+(?:so\s+|very\s+|really\s+|truly\s+|especially\s+|also\s+|always\s+|all\s+)?(?:glad|happy|pleased|proud|thrilled|delighted|sorry|grateful|thankful|excited|honou?red|humbled|blessed|lucky|fortunate|here|back|thanked|thanking|thank|thanks|appreciat\w*|said|saying|say|told|telling|tell|hoping|hope|wishing|wish|looking\s+forward|that|how|what|when|why|whether|if|to)\b)|(?:a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them)\b)(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
+// thanked …", "Ants love that …" — a pest plural reading as a speaker); and
+// the verb followers are only the non-agentive ones the dry run used (r13:
+// "Pests know Marcus did well" — know / want / like / make / keep … are out).
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|thrive)\b(?!\s+(?:so\s+|very\s+|really\s+|truly\s+|especially\s+|also\s+|always\s+|all\s+)?(?:glad|happy|pleased|proud|thrilled|delighted|sorry|grateful|thankful|excited|honou?red|humbled|blessed|lucky|fortunate|here|back|thanked|thanking|thank|thanks|appreciat\w*|said|saying|say|told|telling|tell|hoping|hope|wishing|wish|looking\s+forward|that|how|what|when|why|whether|if|to)\b)|(?:a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them)\b)(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);

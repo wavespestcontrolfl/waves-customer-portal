@@ -442,6 +442,10 @@ describe('verifyReplyText — public-surface safety net', () => {
       'Roaches have thanked Marcus for handling the ants.',
       'Roaches love that Marcus handled the ants.',
       'Roaches are so glad Marcus handled the ants.',
+      'Pests know Marcus did well and we appreciate him.',
+      'Roaches want Marcus, and the ants are gone.',
+      'Roaches like Marcus, and the ants are gone.',
+      'Roaches keep Marcus busy, and the ants are gone.',
       'Roaches Smith helped with the ants alongside Marcus.',
     ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
     // …and a word that is NOT on the list needs provenance whatever follows it
