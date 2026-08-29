@@ -101,6 +101,19 @@ describe('RescheduleConfirmModal — collective series moves', () => {
     expect(onConfirm.mock.calls[0][0]).not.toHaveProperty('seriesAck');
   });
 
+  it('a failed preview never offers the series chooser — the move goes this_only and the server discloses', async () => {
+    global.fetch = vi.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error', json: async () => ({}), text: async () => 'boom' }));
+    const { onConfirm } = renderModal();
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reschedule appointment' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Reschedule series' })).toBeNull();
+    expect(screen.queryByTestId('series-move-notice')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reschedule appointment' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({ notificationType: 'none', scope: 'this_only' }));
+  });
+
   it('never fetches a preview for a one-time visit', async () => {
     mockPreview(PREVIEW);
     renderModal({ isRecurring: false });

@@ -19,7 +19,15 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
-import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
+import {
+  SERIES_ACK_REQUIRED,
+  apiErrorMessage,
+  fetchSeriesMovePreview,
+  isCollectivePreview,
+  parseSeriesAckError,
+  seriesAckPayload,
+  seriesMoveSummary,
+} from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1256,6 +1264,35 @@ export default function TimeGridDay({
     const ids = Array.from(selection);
     const toMove = allServices.filter((s) => ids.includes(s.id));
     if (toMove.length === 0) return;
+    // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): a recurring visit
+    // in the selection moves with its later visits. Read every recurring
+    // plan up front, disclose the sets once, and carry each visit's ack —
+    // otherwise the gated server refuses every recurring row while the
+    // one-time rows commit, an avoidable partial batch (hook P1). A plan
+    // that can't be read aborts BEFORE anything moves.
+    const seriesAcks = new Map();
+    const recurring = toMove.filter((s) => s.isRecurring);
+    if (recurring.length > 0) {
+      const previews = await Promise.allSettled(
+        recurring.map((svc) => fetchSeriesMovePreview(svc.id, newDate)),
+      );
+      const unreadable = previews.filter((p) => p.status !== 'fulfilled').length;
+      if (unreadable > 0) {
+        alert(`Couldn't read the recurring plan for ${unreadable} selected visit${unreadable === 1 ? '' : 's'} — nothing was moved. Try again.`);
+        return;
+      }
+      const lines = [];
+      previews.forEach((p, i) => {
+        if (!isCollectivePreview(p.value)) return;
+        seriesAcks.set(recurring[i].id, seriesAckPayload(p.value));
+        lines.push(`${recurring[i].customerName || 'Unassigned'} — ${seriesMoveSummary(p.value)}`);
+      });
+      if (lines.length > 0 && !window.confirm(
+        `Recurring plans in this selection move with their later visits:\n\n${lines.join('\n')}\n\nMove all ${toMove.length} selected visit${toMove.length === 1 ? '' : 's'} to ${newDate}?`,
+      )) {
+        return;
+      }
+    }
     setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
     setBusy(true);
     try {
@@ -1278,6 +1315,8 @@ export default function TimeGridDay({
               reasonCode: 'dispatch_bulk',
               reasonText: `Bulk reschedule (${toMove.length} items) via Day grid`,
               notifyCustomer: false,
+              // Ack bound to the previewed occurrence set the operator confirmed.
+              ...(seriesAcks.get(svc.id) || {}),
             }),
           });
         }),

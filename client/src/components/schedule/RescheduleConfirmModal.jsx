@@ -74,15 +74,23 @@ export default function RescheduleConfirmModal({
   const [staleAck, setStaleAck] = useState('');
 
   // Collective-move disclosure: the server's preview of what a date move of
-  // this recurring visit touches. Same-day drags (Day grid) never fetch —
-  // the choke point only widens DATE moves.
+  // this recurring visit touches. Every recurring drag previews — including
+  // a same-day time move (Day grid), where the server answers
+  // `collective: false` from one row read — so the gate state is always
+  // known and the gate-off chooser below never vanishes on a same-day drag.
   const seriesPreview = useSeriesMovePreview({
     serviceId,
-    fromDate,
     newDate: toDate,
     enabled: open && !!isRecurring,
   });
   const collective = isCollectivePreview(seriesPreview.preview);
+  // The explicit "Reschedule series" button is the gate-OFF chooser. It only
+  // renders once the preview has said so (`enabled: false`): while the plan
+  // is still being read, or when the preview request failed, offering
+  // `scope: 'series'` would move the series past the disclosure the server
+  // enforces on `this_only` (hook P1). Without it the primary submits
+  // `this_only`; a gated server answers with the preview to confirm.
+  const gateKnownOff = !!seriesPreview.preview && seriesPreview.preview.enabled === false;
   // Hold the confirm while the plan is still being read — submitting ahead
   // of the preview would only bounce off the server's ack check.
   const awaitingPreview = !!isRecurring && seriesPreview.loading && !seriesPreview.preview;
@@ -269,9 +277,9 @@ export default function RescheduleConfirmModal({
             {busy ? 'Saving…' : (collective ? 'Move visit + later visits' : 'Reschedule appointment')}
           </Button>
           {/* With collective moves on the server decides the scope — no
-              this/series chooser; the explicit series button stays for the
-              gate-off world and for a refusal that carried no preview. */}
-          {isRecurring && !collective && (
+              this/series chooser; the explicit series button is the gate-off
+              world only (never on a failed or pending preview). */}
+          {isRecurring && gateKnownOff && (
             <Button
               variant="secondary"
               onClick={() => submit('series')}
