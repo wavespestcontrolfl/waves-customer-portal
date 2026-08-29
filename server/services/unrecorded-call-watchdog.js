@@ -20,6 +20,10 @@
  * the sweep's own `no_completed_recording` results, AFTER the Twilio lookup,
  * so a recording recovered in the same pass can never race a bell.
  *
+ * The sweep's candidate ORDER also reads this module's constants
+ * (MIN_DURATION_SECONDS, EXEMPT_ANSWERED_BY) so alert-eligible unsettled
+ * rows get the 25-row window first — one definition of eligibility.
+ *
  * What rings: a call whose recording-callback grace has elapsed since the
  * call ENDED (created_at + duration_seconds + GRACE_MINUTES ≤ now), with a
  * real conversation length (≥ MIN_DURATION_SECONDS), and not one of the
@@ -186,6 +190,7 @@ async function alertUnrecordedCalls(rows, { now = new Date() } = {}) {
 
 module.exports = {
   alertUnrecordedCalls,
+  EXEMPT_ANSWERED_BY,
   isUnrecordedCall,
   findUnrecordedCalls,
   MIN_DURATION_SECONDS,

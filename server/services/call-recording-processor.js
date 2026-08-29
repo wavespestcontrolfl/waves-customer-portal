@@ -14321,16 +14321,34 @@ const CallRecordingProcessor = {
     } catch { /* unparseable metadata -> treat as unstamped */ }
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
-    let recordings;
+    // A <Dial record> recording attaches to the CHILD dial leg (the
+    // recording-status webhook lands it on the parent row via
+    // ParentCallSid); the parent's own list is where voicemail/<Record>
+    // audio lives. Ask Twilio for both — the accepted leg's SID is
+    // persisted at /inbound-forward-accept as metadata.forward_acceptance
+    // .dial_call_sid — so a lost child-leg callback is recovered here and
+    // never misreported downstream as "Twilio has no recording".
+    let childSid = null;
     try {
-      recordings = await client.recordings.list({ callSid, limit: 10 });
-    } catch (err) {
-      logger.warn(`[call-proc] Recording recovery lookup failed for ${maskSid(callSid)}: ${err.message}`);
-      return { success: false, reason: 'twilio_lookup_failed', error: err.message };
-    }
+      const rawMeta = call.metadata;
+      const callMeta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      childSid = callMeta?.forward_acceptance?.dial_call_sid || null;
+    } catch { childSid = null; }
+    const lookupSids = childSid && childSid !== callSid ? [callSid, childSid] : [callSid];
 
-    const recording = newestCompletedRecording(recordings);
-    if (!recording) return { success: true, skipped: true, reason: 'no_completed_recording' };
+    let recording = null;
+    for (const sid of lookupSids) {
+      let recordings;
+      try {
+        recordings = await client.recordings.list({ callSid: sid, limit: 10 });
+      } catch (err) {
+        logger.warn(`[call-proc] Recording recovery lookup failed for ${maskSid(sid)}: ${err.message}`);
+        return { success: false, reason: 'twilio_lookup_failed', error: err.message };
+      }
+      recording = newestCompletedRecording(recordings);
+      if (recording) break;
+    }
+    if (!recording) return { success: true, skipped: true, reason: 'no_completed_recording', checkedSids: lookupSids };
 
     const url = recordingMediaUrl(recording);
     if (!url) return { success: false, reason: 'recording_url_missing' };
@@ -14361,13 +14379,18 @@ const CallRecordingProcessor = {
 
   async recoverMissingRecentRecordings() {
     // The extra columns feed the unrecorded-call alert below (the row's
-    // identity + timing; nothing the recovery itself needs). Rows whose
-    // unrecorded-call bell has already rung (per-call dedupeKey, or
-    // membership in an aggregate bell's unrecorded_call_sids) sort LAST so
-    // the 25-row cap is spent on rows that still need a Twilio look + a
-    // bell — under an outage with >25 permanent misses the newest settled
-    // rows would otherwise pin the window and older misses never ring.
-    // Settled rows still get recovery retries whenever capacity allows.
+    // identity + timing; nothing the recovery itself needs). Rows that can
+    // still ring an unrecorded-call bell — alert-eligible by the alert's
+    // own constants (long enough, not voicemail / AI relay) AND not yet
+    // settled (no per-call dedupeKey bell, no membership in an aggregate
+    // bell's unrecorded_call_sids) — sort FIRST, so the 25-row cap is spent
+    // on rows that still need a Twilio look + a bell. Under an outage with
+    // >25 permanent misses the newest rows would otherwise pin the window
+    // (settled ones, or short/voicemail ones that can never settle) and
+    // older answered calls never ring. Everything else keeps its recovery
+    // retries in the remaining capacity, newest first.
+    const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
+    const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
     const rows = await db('call_log')
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
         'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
@@ -14379,12 +14402,15 @@ const CallRecordingProcessor = {
       .where('created_at', '>=', db.raw("NOW() - INTERVAL '7 days'"))
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
       .where('duration_seconds', '>', 10)
-      .orderByRaw(`EXISTS (
-        SELECT 1 FROM notifications n
-        WHERE n.recipient_type = 'admin'
-          AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
-               OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
-      ) ASC`)
+      .orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
+          AND COALESCE(call_log.answered_by, '') NOT IN (${exemptList})
+          AND COALESCE(call_log.call_outcome, '') <> 'voicemail'
+          AND NOT EXISTS (
+            SELECT 1 FROM notifications n
+            WHERE n.recipient_type = 'admin'
+              AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
+                   OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
+          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS])
       .orderBy('created_at', 'desc')
       .limit(25);
 
