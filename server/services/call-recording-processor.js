@@ -14672,77 +14672,29 @@ function composeLeadAddress(line1, line2) {
 }
 
 /**
- * Street / inline unit / place tail of a lead street line, for EITHER shape
- * the extractor produces: comma-separated ("100 Main St, Apt 4, Sarasota, FL
- * 34236") through splitStreetLineUnitParts, and the comma-FREE full-address
- * fallback ("100 Main St Apt 4 Sarasota FL 34236") through the shared
- * splitStreetAndCity locality split first — otherwise the trailing-unit
- * parser stops at the state/ZIP, reports no unit, and a repeated line2 is
- * appended again / a conflicting one is stored without the read-back flag
- * (codex r9 P1). splitStreetAndCity keeps ONE designator pair on the street
- * side; any further unit pairs it pushed into the locality ("Bldg 2 Apt 4")
- * are pulled back so the multipart unit peels whole. The place tail is
- * clamped so a runaway locality can never crowd the street out of the 255
- * bound — the tail is the protected part of formatAddressBounded (codex r9
- * P2).
+ * Street / inline unit / place tail of a lead street line, through the
+ * shared unit-aware parser (splitStreetLineUnitParts). Comma-separated lines
+ * ("100 Main St, Apt 4, Sarasota, FL 34236") and comma-free lines whose unit
+ * is the trailing token pair ("100 Main St Apt 4") are fully understood; a
+ * comma-free FULL address ("100 Main St Apt 4 Sarasota FL 34236") is kept
+ * whole as the street — deliberately NOT locality-split. Directional-vs-city
+ * is not lexically decidable here ("100 Main St North, Sarasota" vs
+ * "100 Main St North Port"), and five review rounds of heuristics each
+ * produced a new wrong-street or wrong-place case; storing that rare shape
+ * whole (unit appended after it) can never misidentify the property, at
+ * the cost of inline-unit dedupe / conflict detection for that shape only.
+ * The place tail is clamped so a runaway locality can never crowd the
+ * street out of the 255 bound — the tail is the protected part of
+ * formatAddressBounded.
  */
 function splitLeadStreetParts(street) {
-  const {
-    splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS, DIRECTIONALS, isStateZipPair,
-  } = require('../utils/address-normalizer');
-  const clampTail = (parts, locality = '') => ({
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  const parts = splitStreetLineUnitParts(street);
+  return {
     street: parts.street,
     unit: parts.unit,
-    tail: [parts.tail, locality].filter(Boolean).join(', ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
-  });
-  // The unit-aware parser first: a comma-separated line, or a comma-free
-  // line whose unit is the trailing token pair, is fully understood here
-  // and needs no locality guess (which would misread "Apt # 4" as a city).
-  const direct = splitStreetLineUnitParts(street);
-  if (street.includes(',') || direct.unit) return clampTail(direct);
-  // Comma-free with no trailing unit: the locality (city / state / ZIP) is
-  // what stopped the unit peel — split it off, then peel again.
-  const split = splitStreetAndCity(street);
-  let line = split.line1;
-  const cityTokens = String(split.city || '').split(' ').filter(Boolean);
-  const tok = (t) => String(t || '').replace(/[.,]/g, '').toLowerCase();
-  // splitStreetAndCity cuts right after the suffix, so what lands at the
-  // head of the "city" may still belong to the street. Conservative rules
-  // (#3608 codex r1 + r2) — when the shape is ambiguous, keep the WHOLE
-  // line as the street rather than guess a wrong street or a wrong place:
-  //   - a lone trailing directional ("100 Main St N") goes back on the
-  //     street; a directional followed by more words is ambiguous between
-  //     a post-directional and a directional city ("N Fort Myers", "W Palm
-  //     Beach") — no split;
-  //   - a unit pair goes back on the street, EXCEPT the "FL <zip>" state
-  //     tail (shared isStateZipPair — 'fl' is also the floor designator);
-  //   - a remainder that starts with a digit is a route number ("State
-  //     Road 64 …") or a unit fragment — no split, nothing dropped.
-  for (;;) {
-    if (cityTokens.length === 1 && DIRECTIONALS.has(tok(cityTokens[0]))) {
-      line = `${line} ${cityTokens.shift()}`;
-      continue;
-    }
-    if (cityTokens.length >= 2 && DIRECTIONALS.has(tok(cityTokens[0]))) {
-      // Directly followed by the state/ZIP tail ("N FL 34236", "N 34236")
-      // there is no city for it to prefix — it is a post-directional.
-      const stateTail = isStateZipPair(tok(cityTokens[1]), tok(cityTokens[2])) || /^\d{5}(-\d{4})?$/.test(tok(cityTokens[1]));
-      if (!stateTail) return clampTail(direct);
-      line = `${line} ${cityTokens.shift()}`;
-      continue;
-    }
-    if (cityTokens.length >= 2
-      && (tok(cityTokens[0]).startsWith('#') || UNIT_DESIGNATORS.has(tok(cityTokens[0])))
-      && !isStateZipPair(tok(cityTokens[0]), tok(cityTokens[1]))) {
-      line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
-      continue;
-    }
-    break;
-  }
-  const locality = cityTokens.join(' ');
-  if (!locality) return clampTail(splitStreetLineUnitParts(line));
-  if (!/^[A-Za-z]/.test(locality)) return clampTail(direct);
-  return clampTail(splitStreetLineUnitParts(line), locality);
+    tail: String(parts.tail || '').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
+  };
 }
 
 /**

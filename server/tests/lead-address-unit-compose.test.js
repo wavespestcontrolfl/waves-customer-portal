@@ -91,38 +91,34 @@ describe('composeLeadAddress', () => {
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St', '4B'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Unit 4B');
   });
 
-  test('comma-free full-address fallback: locality is split before the unit is deduped', () => {
-    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
-    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', '#4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
-    expect(composeLeadAddress('100 Main St Sarasota FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
-    expect(composeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Bldg 2 Apt 4')).toBe('100 Main St, Bldg 2 Apt 4, Sarasota FL 34236');
-    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 5')).toEqual({ address: '100 Main St, Apt 4, Sarasota FL 34236', unitConflict: true });
-    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', null)).toBe('100 Main St, Apt 4, Sarasota FL 34236');
-    // Street names that carry a suffix word mid-line are not split.
+  test('comma-free FULL address: kept whole as the street, unit appended — never locality-split', () => {
+    // Directional-vs-city is not lexically decidable ("St North, Sarasota"
+    // vs "St North Port"), so this rare shape is stored whole rather than
+    // risk a wrong street or place. Inline-unit dedupe / conflict detection
+    // is deliberately out of scope for it.
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St Apt 4 Sarasota FL 34236, Apt 4');
+    expect(composeLeadAddress('100 Main St Sarasota FL 34236', 'Apt 4')).toBe('100 Main St Sarasota FL 34236, Apt 4');
+    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 5').unitConflict).toBe(false);
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', null)).toBe('100 Main St Apt 4 Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St North Port FL 34287', 'Apt 4')).toBe('100 Main St North Port FL 34287, Apt 4');
+    expect(composeLeadAddress('100 Main St W Palm Beach FL 33401', 'Apt 4')).toBe('100 Main St W Palm Beach FL 33401, Apt 4');
+    expect(composeLeadAddress('123 State Road 64 Bradenton FL 34208', 'Apt 4')).toBe('123 State Road 64 Bradenton FL 34208, Apt 4');
+    // A comma-free line whose unit is the trailing pair IS understood.
+    expect(composeLeadAddress('100 Main St Apt 4', 'Apt 4')).toBe('100 Main St, Apt 4');
+    expect(composeLeadAddress('100 Main St N Apt 4', '#4')).toBe('100 Main St N, Apt 4');
     expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
   });
 
   test('a trailing directional stays on the street and is never read as a city', () => {
     expect(composeLeadAddress('100 Main St N', 'Apt 4')).toBe('100 Main St N, Apt 4');
+    expect(composeLeadAddress('100 Main St North', 'Apt 4')).toBe('100 Main St North, Apt 4');
     expect(composeLeadAddress('100 Main St N', null)).toBe('100 Main St N');
-    expect(composeLeadAddress('100 Main St N Apt 4', 'Apt 4')).toBe('100 Main St N, Apt 4');
-    // A directional followed by more words is ambiguous (post-directional vs
-    // "N Fort Myers" / "W Palm Beach") — the line is kept whole, never a
-    // wrong street or a wrong place.
-    expect(composeLeadAddress('100 Main St N Sarasota FL 34236', 'Apt 4')).toBe('100 Main St N Sarasota FL 34236, Apt 4');
-    expect(composeLeadAddress('100 Main St W Palm Beach FL 33401', 'Apt 4')).toBe('100 Main St W Palm Beach FL 33401, Apt 4');
-    expect(composeLeadAddress('100 Main St N Fort Myers FL 33903', null)).toBe('100 Main St N Fort Myers FL 33903');
-    // "FL <zip>" after a directional is the state tail, not a floor.
-    expect(composeLeadAddress('100 Main St N FL 34236', 'Apt 4')).toBe('100 Main St N, Apt 4, FL 34236');
-    expect(leadAddressTailPlace('100 Main St N, Apt 4, FL 34236')).toEqual({ zip: '34236', city: expect.any(String) });
-    // Route numbers after a suffix word are never dropped.
-    expect(composeLeadAddress('123 State Road 64 Bradenton FL 34208', 'Apt 4')).toBe('123 State Road 64 Bradenton FL 34208, Apt 4');
-    expect(composeLeadAddress('123 State Road 64', 'Apt 4')).toBe('123 State Road 64, Apt 4');
     expect(leadAddressTailPlace('100 Main St N')).toBeNull();
+    expect(leadAddressTailPlace('100 Main St North')).toBeNull();
     expect(leadAddressCompareKey('100 Main St N')).not.toBe(leadAddressCompareKey('100 Main St'));
-    const locked = { address: '100 Main St N, Apt 4', city: 'Sarasota', zip: '34236' };
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St N, Apt 4', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St N, Apt 4');
-    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St N', '#4'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St N, Apt 4');
+    const locked = { address: '100 Main St North, Apt 4', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St North, Apt 4', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St North, Apt 4');
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St North', '#4'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St North, Apt 4');
   });
 
   test('a runaway place tail never crowds the street out of the bound', () => {
@@ -232,15 +228,19 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, Fl 2', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
   });
 
-  test('a LEGACY comma-free stored address keys and places the same as its composed restatement', () => {
-    const legacy = '100 Main St Apt 4 Sarasota FL 34236';
+  test('a LEGACY comma-separated full address keys and places the same as its composed restatement', () => {
+    const legacy = '100 Main St Apt 4, Sarasota, FL 34236';
     const composed = composeLeadAddress(legacy, 'Apt 4');
+    expect(composed).toBe('100 Main St, Apt 4, Sarasota, FL 34236');
     expect(leadAddressCompareKey(legacy)).toBe(leadAddressCompareKey(composed));
     expect(leadAddressCompareKey(legacy)).toBe('100 main st|4');
     expect(leadAddressTailPlace(legacy)).toEqual({ zip: '34236', city: expect.stringMatching(/Sarasota/) });
     const locked = { address: legacy, city: null, zip: null };
     expect(reaffirmedFilledLeadFields({ address: composed, city: null, zip: null }, locked).address).toBe(legacy);
-    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St Apt 4 Bradenton FL 34205', 'Apt 4'), city: null, zip: null }, locked).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St Apt 4, Bradenton, FL 34205', 'Apt 4'), city: null, zip: null }, locked).address).toBeUndefined();
+    // A comma-free legacy value is stored whole and restates as itself.
+    const commaFree = '100 Main St Apt 4 Sarasota FL 34236';
+    expect(reaffirmedFilledLeadFields({ address: commaFree, city: null, zip: null }, { address: commaFree, city: null, zip: null }).address).toBe(commaFree);
   });
 
   test('conflict branch keeps the retained inline unit through the bound', () => {
