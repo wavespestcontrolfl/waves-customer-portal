@@ -860,6 +860,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('100-1498');
   });
 
+  it('keeps an EPA-registered mosquito station (In2Care) as a real application — only termite/rodent devices are excluded', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'mosquito',
+      applications: [{ id: 'a1', method: 'station_check', totalAmount: '2', amountUnit: 'ea', product: { name: 'In2Care Mosquito Station', category: 'mosquito station', epa_reg: '91050-1', active_ingredient: 'Pyriproxyfen, Beauveria bassiana' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('In2Care Mosquito Station');
+    expect(container.textContent).toContain('91050-1');
+  });
+
   it('never lists a bait cartridge recorded under bait_placement (device identity beats the method)', () => {
     const data = {
       ...BASE_DATA,

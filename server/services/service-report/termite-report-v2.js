@@ -413,7 +413,13 @@ function buildTermiteReportV2({
     servicedCount,
     servicedToday,
     inaccessible,
-    activeLocation: values.active_station_location ? String(values.active_station_location).trim() : null,
+    // The hand-typed location is not reconciled against the check rows, so
+    // whenever visit-backed pins are authoritative for the count/status the
+    // body uses count wording instead of naming stations the pins may not
+    // agree with (codex P2 #3600 r16).
+    activeLocation: !visitBackedSummary(stationSummary) && values.active_station_location
+      ? String(values.active_station_location).trim()
+      : null,
     baitFeeding: FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')),
   });
   const status = { ...statusBase, label: copy.headline };

@@ -772,6 +772,24 @@ test('a basemap outage keeps the visit-check evidence as checkSummary (status bu
   expect(context.summary).toBeUndefined();
 });
 
+test('stale marks (a malformed stored pin) still carry checkSummary', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3)),
+      stationRow('st-2', 2, { type: 'circle', cx: 'nope', cy: 0.5 }),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'activity' },
+      { station_id: 'st-2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+  });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context.checkSummary).toEqual({ total: 2, checked: 2, activity: 1, serviced: 0, inaccessible: 0 });
+});
+
 test('a companion termite_bait_station type also renders (combined pest+termite visits)', () => {
   const context = buildStationMapReportContext({
     stationRows: [stationRow('st-1', 1, pin(0.2, 0.3))],

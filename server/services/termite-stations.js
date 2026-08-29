@@ -761,7 +761,9 @@ function buildStationMapReportContext({
   // stations inspected") that contradicts the visit's frozen typed findings
   // and check rows. Every station this visit covered renders, or no map.
   if (pins.length !== visitRows.length || !pins.length) {
-    return { available: false, reason: 'marks_stale' };
+    // The check evidence is still real — only the drawing failed
+    // (codex P2 #3600 r16).
+    return { available: false, reason: 'marks_stale', checkSummary: summary };
   }
 
   // (pins.length === visitRows.length was enforced above, so the pin

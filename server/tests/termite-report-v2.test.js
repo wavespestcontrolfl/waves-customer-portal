@@ -342,6 +342,19 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(undocumented.statusSummary).not.toMatch(/serviced/);
   });
 
+  it('a hand-typed activity location yields to visit-backed pins (count wording), and stands without them', () => {
+    const values = { ...CLEAN_VALUES, termite_activity: 'Active termites present', stations_with_activity: 1, active_station_location: 'Station 7, rear wall' };
+    const typedOnly = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station' });
+    expect(typedOnly.statusSummary).toMatch(/Station 7, rear wall/);
+    const pinned = buildTermiteReportV2({
+      typedSnapshotValues: values,
+      typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 },
+    });
+    expect(pinned.statusSummary).not.toMatch(/Station 7/);
+    expect(pinned.statusSummary).toMatch(/2 of the 12 stations inspected/);
+  });
+
   it('activity recorded without a station count → "observed" headline and metric, no invented count', () => {
     const out = buildTermiteReportV2({
       typedSnapshotValues: { stations_checked: 10, termite_activity: 'Previous feeding noted', bait_consumption: 'Light feeding' },

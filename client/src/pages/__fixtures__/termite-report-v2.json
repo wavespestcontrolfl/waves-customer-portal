@@ -344,7 +344,7 @@
       "tone": "watch",
       "label": "Termite activity observed at 2 stations"
     },
-    "statusSummary": "Termite activity was observed at Stations 6 and 10 on the north side of the home. Bait was serviced at 3 stations today, and the active stations will continue to be monitored. 2 stations could not be accessed today and will be checked next visit.",
+    "statusSummary": "Termite activity was observed at 2 of the 12 stations inspected. Bait was serviced at 3 stations today, and the active stations will continue to be monitored. 2 stations could not be accessed today and will be checked next visit.",
     "metrics": [
       {
         "label": "Stations inspected",
