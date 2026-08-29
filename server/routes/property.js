@@ -235,6 +235,7 @@ router.get('/preferences', async (req, res, next) => {
           hoaLawnHeight: '', hoaSignageRules: '', hoaTimingRestrictions: '',
           hoaInspectionPeriod: '',
           accessNotes: '', specialInstructions: '',
+          irrigationHomeChangedAt: null,
           updatedAt: null,
         },
         hasLawnCare,
@@ -337,6 +338,17 @@ router.put('/preferences', async (req, res, next) => {
     // The rain-sensor toggle is home-bound too — re-saving it after a move
     // is the customer's statement about the CURRENT controller (gh-r41).
     const confirmedNow = [...IRRIGATION_SIZING_FIELDS, 'rain_sensor'].filter((f) => f in updates);
+    // Freshness token (codex gh-r43): confirmations count only when the
+    // request was RENDERED against the current home. A pre-move autosave
+    // that waited out the advisory lock carries the old stamp (or none) and
+    // must not union its field into the new home's confirmation set — lock
+    // serialization orders the writes but says nothing about when the form
+    // was rendered. The fields themselves still save; only the ledger entry
+    // is withheld (fail closed — the customer re-saves after reloading).
+    const stampMs = (v) => (v ? new Date(v).getTime() : null);
+    const bodyRaw = req.body || {};
+    const hasRenderStamp = 'confirmed_as_of' in bodyRaw || 'confirmedAsOf' in bodyRaw;
+    const renderedAgainstMs = stampMs(bodyRaw.confirmed_as_of ?? bodyRaw.confirmedAsOf ?? null);
 
     // The read-then-upsert holds the customer-scoped preference advisory
     // lock (`property-preferences:<customerId>`): a collective series move
@@ -352,11 +364,16 @@ router.put('/preferences', async (req, res, next) => {
       const current = await trx('property_preferences')
         .where({ customer_id: req.customerId })
         .first();
+      // Rendered against the current home? No move on record always passes;
+      // after a move the request must carry the matching stamp (an absent
+      // token — an old bundle — fails closed, gh-r43).
+      const requestFresh = stampMs(current?.irrigation_home_changed_at) == null
+        || (hasRenderStamp && renderedAgainstMs === stampMs(current.irrigation_home_changed_at));
       // The confirmation union is ONE atomic statement over the row's
       // CURRENT value — an unlocked pre-move read could write a full pre-move
       // set back over the fan-out's reset when an autosave overlaps an
       // address change (codex #3565 gh-r26).
-      const confirmFields = confirmedNow.length
+      const confirmFields = (confirmedNow.length && requestFresh)
         ? {
           irrigation_confirmed_fields: trx.raw(
             "(SELECT COALESCE(jsonb_agg(DISTINCT v), '[]'::jsonb) FROM jsonb_array_elements_text(COALESCE(irrigation_confirmed_fields, '[]'::jsonb) || ?::jsonb) AS t(v))",

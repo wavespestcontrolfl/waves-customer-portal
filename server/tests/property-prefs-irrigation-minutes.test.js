@@ -97,6 +97,12 @@ describe('property preferences — irrigation on by default', () => {
     // gh-r25: the sizing list + confirmation parser live in the shared module (sweep + report use the same).
     expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
     expect(src).toMatch(/const confirmedNow = \[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor'\]\.filter\(\(f\) => f in updates\);/);
+    // gh-r43: confirmations require the request's rendered-against stamp to match the CURRENT move stamp —
+    // a queued pre-move autosave (old/absent token) saves its fields but never re-confirms them.
+    expect(src).toMatch(/const requestFresh = stampMs\(current\?\.irrigation_home_changed_at\) == null\s*\|\| \(hasRenderStamp && renderedAgainstMs === stampMs\(current\.irrigation_home_changed_at\)\);/);
+    expect(src).toMatch(/const confirmFields = \(confirmedNow\.length && requestFresh\)/);
+    const portal = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'PortalPage.jsx'), 'utf8');
+    expect(portal).toMatch(/toSave\.confirmed_as_of = lastSavedRef\.current\?\.irrigationHomeChangedAt \?\? null;/);
     // gh-r26: the union is ONE atomic statement over the row's CURRENT value (no read-modify-write race with the move reset).
     expect(src).toMatch(/jsonb_array_elements_text\(COALESCE\(irrigation_confirmed_fields, '\[\]'::jsonb\) \|\| \?::jsonb\)/);
     expect(src).toMatch(/irrigation_confirmed_fields: trx\.raw\(/);
