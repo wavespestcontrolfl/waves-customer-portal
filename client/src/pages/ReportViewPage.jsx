@@ -8923,9 +8923,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  top-level nextAppointment may be ANY service line. */
               nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
-              /* Cross-visit trend from the activity gauge payload — the
-                 standalone ActivityCard is suppressed for termite V2. */
-              activityTrend={data.activity || null}
+              /* Cross-visit trend from the activity gauge payload OF THE
+                 REPORT ENTRY THAT OWNS THE DASHBOARD — the primary's gauge
+                 for a primary dashboard, the bait companion's gauge for a
+                 companion dashboard (a roach trend must never read as a
+                 termite trend; codex P1 #3600 r14). The owning entry's
+                 standalone ActivityCard is suppressed. */
+              activityTrend={termiteV2Companion
+                ? ((data.companionReports || []).find((c) => c?.type === 'termite_bait_station' && !c.internalOnly)?.activity || null)
+                : (data.activity || null)}
               bondLines={(data.termiteBonds || [])
                 .map((bond) => ({ serviceType: bond.serviceType || null, label: formatTermiteBondRenewalLabel(bond) }))
                 .filter((entry) => entry.label)}

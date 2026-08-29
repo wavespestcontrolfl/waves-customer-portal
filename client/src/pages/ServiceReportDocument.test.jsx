@@ -423,14 +423,30 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
           { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
         ],
       }],
+      // BOTH dashboards on a combined visit (pest_termite_bait_quarterly)
+      pestReportV2: {
+        status: { label: 'Home protected' }, statusSummary: 'Perimeter shield applied.',
+        defense: { summary: 'Perimeter protected.', items: [{ key: 'perimeter_shield', label: 'Perimeter shield', status: 'active', detail: 'Exterior protection was applied today.' }] },
+        primaryMove: { title: 'Clear the mulch bed', why: 'It holds moisture.', impact: 'Cuts harborage.', dueLabel: 'Before next service' },
+      },
       termiteReportV2: {
         source: 'companion',
         status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
         statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        defense: { summary: 'Your protective ring: 12 inspected · 2 with activity.', items: [{ key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' }, { key: 'bait', label: 'Bait condition', status: 'watched', detail: 'Moderate bait feeding.' }] },
+        primaryMove: { title: 'Pull mulch back from foundation', why: 'Keeps the ring working.', impact: 'Protects the system', dueLabel: 'Before your next visit' },
       },
     };
     const { container } = render(<ServiceReportDocument data={data} token="t" />);
     const text = container.textContent;
+    // pest dashboard rows AND termite dashboard rows both print
+    expect(text).toMatch(/Protection status: Home protected/);
+    expect(text).toMatch(/Perimeter shield/);
+    expect(text).toMatch(/Clear the mulch bed/);
+    expect(text).toMatch(/Station protection: Termite activity observed at 2 stations/);
+    expect(text).toMatch(/12 inspected · 2 with activity/);
+    expect(text).toMatch(/Moderate bait feeding/);
+    expect(text).toMatch(/Pull mulch back from foundation/);
     expect(text).toMatch(/Roach activity was light today/);
     expect(text).toMatch(/We treated the kitchen/);
     expect(text).toMatch(/Station protection/);
@@ -440,6 +456,46 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).toMatch(/Recheck active stations sooner/);
     expect(text).toMatch(/Station condition issues: Station obstructed/);
     expect(text).not.toMatch(/Stations checked: 12/);
+  });
+
+  it('companion-source: the bait companion\'s frozen gauge bullet is suppressed and its current history row is reconciled', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        todaysResult: { headline: 'No termite activity observed.' }, findings: [],
+        activity: { label: 'Termite Activity', levelWord: 'No active signs observed today', score: 0 },
+        visitTimeline: { visits: [
+          { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+          { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+        ] },
+      }],
+      termiteReportV2: { source: 'companion', status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' }, statusSummary: 'Pins escalated.' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text).not.toMatch(/No active signs observed today/);
+    expect(text.match(/Termite activity observed at 2 stations/g).length).toBeGreaterThanOrEqual(2);
+    expect(text.match(/No termite activity observed/g)).toHaveLength(1);
+  });
+
+  it('primary-source: the PDF visit-history current row restates the reconciled headline', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      typedReport: { type: 'termite_bait_station', todaysResult: { headline: 'No termite activity observed.' }, findings: [] },
+      typedVisitTimeline: { visits: [
+        { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+        { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+      ] },
+      termiteReportV2: { status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' }, statusSummary: 'Pins escalated.' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text.match(/No termite activity observed/g)).toHaveLength(1);
+    expect(text.match(/Termite activity observed at 2 stations/g).length).toBeGreaterThanOrEqual(2);
   });
 
   it('termite V2 suppresses the frozen activity-gauge bullet that could contradict the reconciled status', () => {

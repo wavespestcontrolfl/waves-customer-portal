@@ -196,13 +196,17 @@ const BAIT_CONDITION_METRIC = {
   'Heavy feeding': 'Heavy feeding',
 };
 
-function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0, servicedToday = false, baitConsumption = null }) {
+function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, feedingNoted = false, servicedCount = 0, servicedToday = false, baitConsumption = null }) {
   if (checked == null) return null;
   // Nothing inspected (every station inaccessible) → no absence claim in
   // the metric either, matching the headline's guard (codex P2 #3600 r9).
   let activityValue = checked > 0 ? 'None observed' : 'Not assessed';
   if (activityCount != null && activityCount > 0) activityValue = `${activityCount} station${plural(activityCount)}`;
   else if (activityObserved) activityValue = 'Observed';
+  // Feeding-backed monitoring is evidence, not absence — the metric must
+  // not say "None observed" under a "Bait feeding noted" headline
+  // (codex P2 #3600 r14).
+  else if (feedingNoted && checked > 0) activityValue = 'Feeding noted';
   // Form-documented bait/station work with no per-station serviced pins
   // (fail-soft sync) proves service happened but gives no count — never
   // print "0" under a body that says service was performed.
@@ -216,7 +220,11 @@ function buildTodaysMetrics({ checked, total, activityCount = null, activityObse
     { label: 'Termite activity', value: activityValue },
     { label: 'Stations serviced', value: servicedValue },
   ];
-  const baitValue = BAIT_CONDITION_METRIC[baitConsumption] || (baitConsumption ? String(baitConsumption) : null);
+  // No station was opened → no current bait-condition claim (codex P2
+  // #3600 r14).
+  const baitValue = checked > 0
+    ? BAIT_CONDITION_METRIC[baitConsumption] || (baitConsumption ? String(baitConsumption) : null)
+    : null;
   if (baitValue) metrics.push({ label: 'Bait condition', value: baitValue });
   return metrics;
 }
@@ -288,7 +296,9 @@ function buildStationNetwork({ values = {}, stationSummary = null }) {
       detail: `${activityCount} station${plural(activityCount)} — ${engaged ? 'bait engaged' : 'activity observed'}`,
     });
   }
-  const consumptionDetail = CONSUMPTION_DETAIL[values.bait_consumption];
+  // Bait condition is a claim about stations that were opened — none when
+  // nothing was inspected (codex P2 #3600 r14).
+  const consumptionDetail = checked > 0 ? CONSUMPTION_DETAIL[values.bait_consumption] : null;
   if (consumptionDetail) {
     items.push({
       key: 'bait',
@@ -393,6 +403,8 @@ function buildTermiteReportV2({
     ? { key: 'action', tone: 'watch' }
     : formStatus;
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
+  const feedingNoted = statusBase.key === 'monitoring'
+    && (FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')));
   const copy = buildTodaysResultCopy({
     statusKey: statusBase.key,
     checked,
@@ -423,7 +435,7 @@ function buildTermiteReportV2({
   return {
     status,
     statusSummary,
-    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount, servicedToday, baitConsumption: values.bait_consumption || null }),
+    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, feedingNoted, servicedCount, servicedToday, baitConsumption: values.bait_consumption || null }),
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
     nextStep: nextStepText,

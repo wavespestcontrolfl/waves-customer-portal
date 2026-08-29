@@ -243,14 +243,26 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     expect(out.metrics[1].value).toBe('Observed');
   });
 
-  it('zero stations inspected → the activity metric reads "Not assessed", never "None observed"', () => {
-    expect(buildTodaysMetrics({ checked: 0, total: 12, activityCount: 0, servicedCount: 0 })[1].value).toBe('Not assessed');
+  it('zero stations inspected → "Not assessed", and NO bait-condition claim anywhere', () => {
+    expect(buildTodaysMetrics({ checked: 0, total: 12, activityCount: 0, servicedCount: 0, baitConsumption: 'None — bait intact' })[1].value).toBe('Not assessed');
     const out = buildTermiteReportV2({
       typedSnapshotValues: { stations_checked: 0, stations_inaccessible: 12, total_stations: 12, termite_activity: 'None observed', bait_consumption: 'None — bait intact' },
       typedReportType: 'termite_bait_station',
     });
     expect(out.status.label).toBe('Bait stations being monitored');
     expect(out.metrics[1]).toEqual({ label: 'Termite activity', value: 'Not assessed' });
+    expect(out.metrics.find((m) => m.label === 'Bait condition')).toBeUndefined();
+    expect(out.defense.items.map((i) => i.key)).not.toContain('bait');
+  });
+
+  it('feeding-backed monitoring never prints "None observed" as the activity metric', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, bait_consumption: 'Light feeding' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status.label).toBe('Bait feeding noted — monitoring continues');
+    expect(out.metrics[1]).toEqual({ label: 'Termite activity', value: 'Feeding noted' });
+    expect(out.metrics[3]).toEqual({ label: 'Bait condition', value: 'Light feeding' });
   });
 
   it('clamps a recorded total below the documented counts — never "10 of 8"', () => {

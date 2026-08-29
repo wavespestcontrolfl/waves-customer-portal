@@ -544,11 +544,6 @@ export default function ServiceReportDocument({ data, token }) {
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
     if (mosquitoV2?.status?.label) return { label: 'Yard usability', value: mosquitoV2.status.label, detail: mosquitoV2.statusSummary };
-    // detail deliberately omitted — the summary paragraphs above already
-    // print statusSummary (sole-summary rule).
-    // (companion source: the summary paragraphs are the primary's, so the
-    // row carries the bait statusSummary itself)
-    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2Companion ? termiteV2.statusSummary : null };
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
@@ -575,7 +570,7 @@ export default function ServiceReportDocument({ data, token }) {
   // The principal SPATIAL result for recurring pest/mosquito V2 visits —
   // what is protected, what was watched, what is clear. Shapes are
   // { summary, items:[{ key, label, status, detail }] } in both builders.
-  const defenseBlock = pestV2?.defense || mosquitoV2?.habitat || termiteV2?.defense || null;
+  const defenseBlock = pestV2?.defense || mosquitoV2?.habitat || null;
   const defenseItems = (Array.isArray(defenseBlock?.items) ? defenseBlock.items : [])
     .filter((item) => item && (item.label || item.detail));
   // PEST_REPORT_V2 puts the approved concern card here; non-V2 pest reports
@@ -584,11 +579,25 @@ export default function ServiceReportDocument({ data, token }) {
   // buildPrimaryMove returns { title, why, impact, dueLabel } in BOTH builders
   // (pest-report-v2.js / mosquito-report-v2.js) — an earlier customerText/text
   // lookup here silently always resolved to null (codex P1 r2).
-  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || termiteV2?.primaryMove || null;
-  const v2NextMove = primaryMove?.title
-    ? [primaryMove.title, primaryMove.why, primaryMove.impact].filter(Boolean).join(' ')
-      + (primaryMove.dueLabel ? ` (${primaryMove.dueLabel})` : '')
+  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || null;
+  const moveText = (move) => (move?.title
+    ? [move.title, move.why, move.impact].filter(Boolean).join(' ')
+      + (move.dueLabel ? ` (${move.dueLabel})` : '')
+    : null);
+  const v2NextMove = moveText(primaryMove);
+  // Termite V2 rows render INDEPENDENTLY of the pest/mosquito/lawn chain —
+  // a combined pest + termite visit carries BOTH pestReportV2 and a
+  // companion termiteReportV2, and the permanent PDF must print both
+  // (codex P1 #3600 r14). Status detail: the summary paragraphs already
+  // carry statusSummary for a primary dashboard (sole-summary rule); a
+  // companion dashboard's row carries it itself.
+  const termiteStatusLine = termiteV2?.status?.label
+    ? { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2Companion ? termiteV2.statusSummary : null }
     : null;
+  const termiteDefenseBlock = termiteV2?.defense || null;
+  const termiteDefenseItems = (Array.isArray(termiteDefenseBlock?.items) ? termiteDefenseBlock.items : [])
+    .filter((item) => item && (item.label || item.detail));
+  const termiteNextMove = moveText(termiteV2?.primaryMove);
 
 
   const recommendations = [];
@@ -633,6 +642,7 @@ export default function ServiceReportDocument({ data, token }) {
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
   pushRec(v2NextMove);
+  pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
@@ -712,8 +722,15 @@ export default function ServiceReportDocument({ data, token }) {
   // cross-visit history the old PDF rendered: buildTypedVisitTimeline returns
   // { indicatorKey, label, visits:[{serviceDate, headline, levelWord,
   // isCurrent}] } and only exists once there are 2+ visits.
+  // Termite V2 (primary): the current row restates the reconciled dashboard
+  // headline — visit-backed pins may escalate a frozen "None observed" —
+  // the same rewrite the live report applies (codex P2 #3600 r14).
+  const reconcileTermiteVisit = (visit) => (visit?.isCurrent && termiteV2?.status?.label
+    ? { ...visit, headline: termiteV2.status.label }
+    : visit);
   const visitHistory = (Array.isArray(data.typedVisitTimeline?.visits) ? data.typedVisitTimeline.visits : [])
-    .filter((visit) => visit && (visit.serviceDate || visit.headline));
+    .filter((visit) => visit && (visit.serviceDate || visit.headline))
+    .map((visit) => (termiteV2Primary ? reconcileTermiteVisit(visit) : visit));
 
   // When reportV2 exists the live report renders LawnReportV2Section INSTEAD of
   // LawnAssessmentCard, so the raw assessment paragraph would duplicate the
@@ -883,7 +900,7 @@ export default function ServiceReportDocument({ data, token }) {
         {/* Findings */}
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
           || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
-          || defenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
+          || defenseItems.length > 0 || termiteStatusLine || termiteDefenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
             {pressure && (
@@ -913,6 +930,18 @@ export default function ServiceReportDocument({ data, token }) {
             {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
             {defenseItems.map((item) => (
               <Bullet key={item.key || item.label}>
+                <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
+              </Bullet>
+            ))}
+            {termiteStatusLine && (
+              <Bullet>
+                <strong>{termiteStatusLine.label}:</strong> {termiteStatusLine.value}
+                {termiteStatusLine.detail ? ` — ${termiteStatusLine.detail}` : ''}
+              </Bullet>
+            )}
+            {termiteDefenseBlock?.summary && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
+            {termiteDefenseItems.map((item) => (
+              <Bullet key={`termite-${item.key || item.label}`}>
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
               </Bullet>
             ))}
@@ -1356,11 +1385,15 @@ export default function ServiceReportDocument({ data, token }) {
                   <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}
                 </Bullet>
               ))}
-            {companion.activity?.levelWord && (
+            {/* owned by the termite dashboard: its reconciled status is the
+                one activity reading (frozen gauge bullet suppressed), and
+                the current history row restates that headline. */}
+            {companion.activity?.levelWord && !(termiteV2Companion && companion.type === 'termite_bait_station') && (
               <Bullet><strong>{companion.activity.label}:</strong> {companion.activity.levelWord}</Bullet>
             )}
             {(companion.visitTimeline?.visits || [])
               .filter((visit) => visit && (visit.serviceDate || visit.headline))
+              .map((visit) => (termiteV2Companion && companion.type === 'termite_bait_station' ? reconcileTermiteVisit(visit) : visit))
               .map((visit) => (
                 <Bullet key={visit.serviceRecordId || visit.serviceDate}>
                   <strong>{fmtServiceDate(visit.serviceDate)}{visit.isCurrent ? ' (today)' : ''}:</strong>{' '}

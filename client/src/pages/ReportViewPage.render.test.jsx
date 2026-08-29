@@ -252,9 +252,19 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
         { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
       ],
     }];
+    // the PRIMARY (roach) gauge trends up; the bait companion's gauge is
+    // baseline — the termite hero must read the companion's, never the roach's
+    combined.activity = { score: 4, label: 'Roach Activity', levelWord: 'high', trend: 'up', trendWord: 'increased since the last visit', isBaseline: false };
+    combined.companionReports[0].activity = { score: 1, label: 'Termite Activity', levelWord: 'low', trend: null, trendWord: null, isBaseline: true };
     const { container } = renderReport(combined);
     // dashboard mounts once
     await screen.findByText('Termite activity observed at 2 stations', { selector: 'h2' });
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).getByText('Baseline recorded today — trend starts next visit.')).toBeInTheDocument();
+    expect(within(hero).queryByText(/increased since the last visit/)).toBeNull();
+    // the primary's own gauge still renders; the companion's does not
+    expect(container.querySelector('#activity')).not.toBeNull();
+    expect(container.querySelector('#companion-termite_bait_station-activity')).toBeNull();
     // the PRIMARY (roach) Today's Result and header status stay
     expect(container.querySelector('#todays-result')).not.toBeNull();
     expect(screen.getByText('Roach activity was light today')).toBeInTheDocument();

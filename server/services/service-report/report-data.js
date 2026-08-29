@@ -4418,7 +4418,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // cached PDF goes stale across a renewal (same rule as nextAppointment).
   // Fail-soft like the portal endpoint: any error just omits the line.
   let termiteBonds = null;
-  if (serviceLine === 'termite' && opts.mode === 'live') {
+  // Termite line, OR any live report carrying a customer-visible bait-
+  // station snapshot (combined pest + termite visits keep serviceLine
+  // 'pest' while the companion dashboard renders the warranty card —
+  // codex P2 #3600 r14).
+  if (opts.mode === 'live' && (serviceLine === 'termite' || termiteBaitSnapshotOf(service))) {
     try {
       // Shared with /api/property/termite-bond so the hero cell and the
       // My Plan card it links to can never disagree (codex inline). EVERY

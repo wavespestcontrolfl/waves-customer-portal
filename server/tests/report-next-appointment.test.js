@@ -447,6 +447,36 @@ test('a combined visit whose bait-station snapshot is an auto_send COMPANION sti
   expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-04-03');
 });
 
+test('the live termite bond lookup runs for a combined visit whose bait snapshot is a companion (serviceLine stays pest)', async () => {
+  const reads = [];
+  const base = makeKnex({ ...BASE_FIXTURES, scheduled_services: [] });
+  const spy = (table) => { reads.push(table); return base(table); };
+  spy.schema = base.schema;
+  const combined = {
+    ...BASE_SERVICE,
+    id: 'service-combined-bond',
+    service_data: JSON.stringify({
+      typedReportSnapshot: { type: 'cockroach', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: { stations_checked: 12 } }],
+    }),
+  };
+  // the bond lookup rides the portal card's gate (termite-bonds.js)
+  const originalBondGate = process.env.GATE_PORTAL_TERMITE_BOND;
+  process.env.GATE_PORTAL_TERMITE_BOND = 'true';
+  try {
+    await buildReportV1Data(combined, 'token-combined-bond', spy, LIVE_V2);
+    expect(reads).toContain('termite_bonds');
+    const pestOnlyReads = [];
+    const spy2 = (table) => { pestOnlyReads.push(table); return base(table); };
+    spy2.schema = base.schema;
+    await buildReportV1Data(BASE_SERVICE, 'token-pest-bond', spy2, LIVE_V2);
+    expect(pestOnlyReads).not.toContain('termite_bonds');
+  } finally {
+    if (originalBondGate === undefined) delete process.env.GATE_PORTAL_TERMITE_BOND;
+    else process.env.GATE_PORTAL_TERMITE_BOND = originalBondGate;
+  }
+});
+
 test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
