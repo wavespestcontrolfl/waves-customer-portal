@@ -354,6 +354,11 @@ function unitLineValueKey(normalizedUnitLine) {
 // designator words ("4501 Space Coast Blvd") stay intact — and the remaining
 // street must still lead with a house number, so a line that is ONLY units
 // never splits down to a nonsense street.
+// A unit VALUE token: "4", "4B", "A", "#4", and hyphenated identifiers
+// ("200-A", "4-B", "A-12") — ordinary suite/apartment spellings. Only ever
+// tested AFTER a designator or hash, so a hyphenated street token never
+// qualifies on its own.
+const UNIT_VALUE = /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$|^#?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
 function splitStreetLineUnit(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   let line = segments[0] || '';
@@ -386,9 +391,22 @@ function splitStreetLineUnit(value) {
       }
       continue;
     }
+    // Separated hash — "100 Main St # 4" / "Apt # 4": the '#' is its own
+    // token, the value follows it. Same ownership rule as the attached form.
+    if (secondLast === '#' && tokens.length >= 3 && UNIT_VALUE.test(last)) {
+      const thirdLast = (tokens[tokens.length - 3] || '').replace(/[.,]/g, '').toLowerCase();
+      if (tokens.length >= 4 && UNIT_DESIGNATORS.has(thirdLast)) {
+        unitParts.unshift(`${tokens[tokens.length - 3]} # ${last}`);
+        tokens = tokens.slice(0, -3);
+      } else {
+        unitParts.unshift(`# ${last}`);
+        tokens = tokens.slice(0, -2);
+      }
+      continue;
+    }
     if (tokens.length >= 3 && UNIT_DESIGNATORS.has(secondLast)
         && !isStateZipPair(secondLast, last)
-        && /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$/.test(last)) {
+        && UNIT_VALUE.test(last)) {
       unitParts.unshift(`${tokens[tokens.length - 2]} ${last}`);
       tokens = tokens.slice(0, -2);
       continue;

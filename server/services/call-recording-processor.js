@@ -14514,9 +14514,9 @@ CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
  * leads.address is ONE free-text varchar(255), so the unit/suite from
  * address_line2 has to be composed into it ("100 Main St" + "Apt 4" →
  * "100 Main St, Apt 4"). A street that already embeds the same unit
- * ("100 Main St Apt 4", "100 Main St Bldg 2 Apt 4") is left alone so a
- * legacy inline-unit street + a separately captured unit never renders the
- * unit twice — duplicate detection goes through the shared address-normalizer
+ * ("100 Main St Apt 4", "100 Main St Bldg 2 Apt 4") is re-emitted from its
+ * parsed street + unit ("100 Main St, Apt 4") so a legacy inline-unit street
+ * + a separately captured unit never renders the unit twice — duplicate detection goes through the shared address-normalizer
  * parser (splitStreetLineUnit / normalizeUnitLine / unitLineValueKey) so
  * multipart and structural designators (Bldg, Floor, Lot, Space) compare the
  * same way everywhere. Bounded to the column via formatAddressBounded, which
@@ -14530,9 +14530,12 @@ function composeLeadAddress(line1, line2) {
   const { formatAddressBounded } = require('./customer-address-fanout');
   if (!unit) return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
   const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const embedded = String(splitStreetLineUnit(street)?.unit || '').trim();
+  const split = splitStreetLineUnit(street);
+  const embedded = String(split?.unit || '').trim();
   if (embedded && unitLineValueKey(normalizeUnitLine(embedded)) === unitLineValueKey(normalizeUnitLine(unit))) {
-    return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
+    // Bound from the PARSED parts so the embedded unit is the protected
+    // tail, not the first thing a long street's truncation eats.
+    return formatAddressBounded({ line1: split.street, line2: embedded }, LEAD_ADDRESS_MAX_LENGTH);
   }
   return formatAddressBounded({ line1: street, line2: unit }, LEAD_ADDRESS_MAX_LENGTH);
 }

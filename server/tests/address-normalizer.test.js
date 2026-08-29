@@ -373,6 +373,12 @@ describe('splitStreetLineUnit', () => {
 
   test('splits a trailing # token', () => {
     expect(splitStreetLineUnit('123 Main St #4')).toEqual({ street: '123 Main St', unit: '#4' });
+    expect(splitStreetLineUnit('123 Main St # 4')).toEqual({ street: '123 Main St', unit: '# 4' });
+    expect(splitStreetLineUnit('123 Main St Apt # 4')).toEqual({ street: '123 Main St', unit: 'Apt # 4' });
+    expect(splitStreetLineUnit('123 Main St Suite 200-A')).toEqual({ street: '123 Main St', unit: 'Suite 200-A' });
+    expect(splitStreetLineUnit('123 Main St Unit 4-B')).toEqual({ street: '123 Main St', unit: 'Unit 4-B' });
+    expect(splitStreetLineUnit('123 Main St, FL 34236-1234')).toEqual({ street: '123 Main St', unit: '' });
+    expect(splitStreetLineUnit('123 Winston-Salem Rd')).toEqual({ street: '123 Winston-Salem Rd', unit: '' });
   });
 
   test('drops trailing city/state segments before splitting', () => {
