@@ -451,6 +451,10 @@ function buildTermiteReportV2({
   // falls back to the customer's next visit of ANY line, which must never
   // render as the next termite monitoring visit (codex P2 #3600 r1).
   nextVisit = null,
+  // True only when an actual termite station map RENDERS (pins with
+  // labels) — the only thing that can replace the typed location as the
+  // customer-visible location evidence (codex P2 #3600 r31).
+  stationMapRendered = false,
 } = {}) {
   if (typedReportType !== TERMITE_BAIT_TYPED_TYPE) return null;
   const values = typedSnapshotValues && typeof typedSnapshotValues === 'object' ? typedSnapshotValues : {};
@@ -523,10 +527,11 @@ function buildTermiteReportV2({
     // whenever visit-backed pins are authoritative for the count/status the
     // body uses count wording instead of naming stations the pins may not
     // agree with (codex P2 #3600 r16).
-    // …only when the visit-backed counts were ACCEPTED: a partial sync falls
-    // back to the frozen counts and must keep the frozen location with them
-    // (codex P2 #3600 r26).
-    activeLocation: !reconciled && values.active_station_location
+    // …only when the visit-backed counts were ACCEPTED AND a station map
+    // actually renders to carry the location instead: a partial sync keeps
+    // the frozen location with the frozen counts (codex P2 r26), and so
+    // does a reconciled visit whose basemap / marks cannot draw (r31).
+    activeLocation: !(reconciled && stationMapRendered) && values.active_station_location
       ? String(values.active_station_location).trim()
       : null,
     baitFeeding: FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')),
@@ -670,6 +675,8 @@ function attachTermiteReportV2(data, service = {}) {
       stationSummary: data.stationMap?.program === 'termite'
         ? data.stationMap?.summary || data.stationMap?.checkSummary || null
         : null,
+      stationMapRendered: data.stationMap?.program === 'termite' && data.stationMap?.available === true
+        && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length > 0,
       visitSequence: report.visitSequence || 1,
       // The dashboard replaces the typed Today's Result card, so it must
       // carry the tech's required next-step commitment itself.

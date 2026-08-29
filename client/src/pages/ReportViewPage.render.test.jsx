@@ -173,7 +173,8 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(nextVisit).getByText(/Termite Bait Station Service · Mon, Nov 16/)).toBeInTheDocument();
     expect(within(nextVisit).getByText(/Renews Mar 14, 2027/)).toBeInTheDocument();
     expect(within(nextVisit).getByText('ACTIVE')).toBeInTheDocument();
-    expect(within(nextVisit).getByRole('link', { name: /View termite protection plan/ })).toHaveAttribute('href', '/?tab=plan');
+    // TermiteBondCard is mounted by the portal's DocumentsTab
+    expect(within(nextVisit).getByRole('link', { name: /View termite protection plan/ })).toHaveAttribute('href', '/?tab=documents');
     // Tech's top recommendation is highlighted in "Your one move" and still
     // listed in full (as a chip) in the typed record.
     const oneMove = (await screen.findByText('Your one move')).closest('section');

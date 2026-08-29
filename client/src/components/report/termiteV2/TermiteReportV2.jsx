@@ -350,9 +350,11 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
           </div>
         ))}
       </div>
-      {/* My Plan tab renders the termite bond card (PortalPage MyPlanTab). */}
+      {/* TermiteBondCard is mounted by the portal's DocumentsTab
+          (PortalPage.jsx) — the CTA lands where the bond actually renders
+          (codex P2 #3600 r31; r1's My Plan pointer was wrong). */}
       <a
-        href="/?tab=plan"
+        href="/?tab=documents"
         style={{
           display: 'inline-block',
           marginTop: 18,

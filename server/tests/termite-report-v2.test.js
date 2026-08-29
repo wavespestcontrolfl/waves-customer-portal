@@ -409,17 +409,18 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(undocumented.statusSummary).not.toMatch(/serviced/);
   });
 
-  it('a hand-typed activity location yields to visit-backed pins (count wording), and stands without them', () => {
+  it('a hand-typed activity location yields only to a RENDERED reconciled map; it stands otherwise', () => {
     const values = { ...CLEAN_VALUES, termite_activity: 'Active termites present', stations_with_activity: 1, active_station_location: 'Station 7, rear wall' };
     const typedOnly = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station' });
     expect(typedOnly.statusSummary).toMatch(/Station 7, rear wall/);
-    const pinned = buildTermiteReportV2({
-      typedSnapshotValues: values,
-      typedReportType: 'termite_bait_station',
-      stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 },
-    });
+    const summary = { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 };
+    const pinned = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station', stationSummary: summary, stationMapRendered: true });
     expect(pinned.statusSummary).not.toMatch(/Station 7/);
     expect(pinned.statusSummary).toMatch(/2 of the 12 stations inspected/);
+    // reconciled checks but no drawable map (basemap outage / stale marks):
+    // the pins cannot show the customer WHERE, so the typed location stays
+    const noMap = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station', stationSummary: summary, stationMapRendered: false });
+    expect(noMap.statusSummary).toMatch(/Station 7, rear wall/);
   });
 
   it('activity recorded without a station count → "observed" headline and metric, no invented count', () => {
@@ -643,14 +644,15 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     expect(detection).not.toHaveProperty('termiteBaitStage');
   });
 
-  it('reconciles against the persisted check rows even when only the basemap failed (checkSummary)', () => {
+  it('reconciles against the persisted check rows even when only the basemap failed (checkSummary) — and keeps the typed location', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
-    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: { ...CLEAN_VALUES, active_station_location: 'Station 7, rear wall' } } }) };
     const data = attachTermiteReportV2({
       typedReport: { type: 'termite_bait_station', visitSequence: 2 },
       stationMap: { available: false, reason: 'provider_unavailable', program: 'termite', checkSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 } },
     }, service);
     expect(data.termiteReportV2.status.label).toBe('Termite activity observed at 2 stations');
+    expect(data.termiteReportV2.statusSummary).toMatch(/Station 7, rear wall/);
   });
 
   it('never consumes a non-termite program map (rodent primary + termite companion renders the RODENT pins)', () => {
