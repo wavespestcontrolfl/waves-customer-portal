@@ -299,6 +299,11 @@ describe('reaffirmedFilledLeadFields — address', () => {
     // ("Street N Apt 4 …" keys as "st n", same as the comma form's "100 Main Street N").
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street N Apt 4 Sarasota FL 34236'), leadAddressCompareKey('100 Main Street N, Apt 4, Sarasota, FL 34236'))).toBe(true);
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street NE #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St NE, Unit 4'))).toBe(true);
+    // Attached-hash alphabetic units ("#A", "#PH") are units in the shared parser — the whole-line
+    // key must canonicalize them too, and the composer must not append a second copy.
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #A Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #A, Sarasota, FL 34236'))).toBe(true);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #PH Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #PH, Sarasota, FL 34236'))).toBe(true);
+    expect(composeLeadAddress('100 Main St #A Sarasota FL 34236', '#A')).toBe('100 Main St #A Sarasota FL 34236');
     // "Street North Port" is a city, not a post-directional — the suffix stays unabbreviated, and it is a different street.
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Port FL 34287'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
     // Different unit, different street, or a unit-less side: never.

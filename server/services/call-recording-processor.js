@@ -2713,7 +2713,10 @@ function canonicalizeInlineUnits(streetKey) {
   const isDesignator = (t, next, after) => UNIT_DESIGNATORS.has(t)
     && !isStateZipPair(t, next || '')
     && (isValue(next) || (next === '#' && isValue(after)));
-  const isHashValue = (t) => t.length > 1 && t.startsWith('#') && isValue(t);
+  // Attached hash takes ANY value, same as the shared parser's `/^#\S+$/`
+  // branch — "#A" / "#PH" are units there, so they must be units here too or
+  // the whole-line key drifts from the comma form's (#3608 pre-push audit).
+  const isHashValue = (t) => /^#\S+$/.test(t);
   const out = [];
   const unitKeys = [];
   let i = 0;
