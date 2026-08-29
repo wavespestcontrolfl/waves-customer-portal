@@ -127,8 +127,13 @@ service_visits
   created_at / updated_at
 
 visit_completion_packets                       ← rev 2 (§3)
-  id · visit_id · idempotency_key unique · payload jsonb · status
-  (accepted | processing | done | failed) · child_results jsonb · error · timestamps
+  id · visit_id · idempotency_key unique · request_hash (sha256 over visit_id + canonical
+  payload) · payload jsonb · status (accepted | processing | done | failed) · child_results
+  jsonb · error · timestamps
+  — same key + same request_hash ⇒ return the existing packet (202/200 replay); same key +
+  different hash (other visit or changed payload) ⇒ **409 idempotency_conflict**, nothing
+  stored — the request-hash rule the per-row `/complete` claim already enforces
+  (`admin-dispatch.js:5236`), so a stale key on a fresh visit can never look accepted.
 
 scheduled_services
   + visit_id  uuid → service_visits (nullable, indexed)
@@ -296,8 +301,15 @@ is off, no `service_visits` row is ever *closed* through the grouped path — th
 returns 404 and the tech app shows the per-row closeout, so each row runs the legacy
 `/complete` (its own text, its own review ask) exactly as today. A group is never closed and
 then followed by multiple child messages; the "one visit message owns delivery" rule in §4 holds
-whenever a visit closes at all. Turning the page gate off after launch dissolves nothing — open
-groups simply complete per row until it is back on.
+whenever a visit closes at all. To keep a visit from being closed twice: the moment any child of an
+open visit is completed through the legacy per-row `/complete` (page gate off, or an admin
+completing one row directly), that transaction stamps the visit `dissolved`
+(`dissolved_reason = 'legacy_completion'`) before the row's own sends fire, so the stuck-visit
+sweep and the packet worker never see it again. Conversely, grouped close (`visit-close.js`)
+**rejects** a visit whose children include a row completed outside its packet (status already
+`completed` with no packet id) — it dissolves the visit and returns the per-row result instead of
+sending a visit message. Re-enabling the page gate therefore never produces a second completion
+text or review ask for a visit whose rows already spoke for themselves.
 
 **Portal billing history (rev 3, new surface).** The customer portal Billing tab
 (`client/src/pages/PortalPage.jsx` `BillingTab` :5105, Payment History card) groups invoices
@@ -369,7 +381,7 @@ or accounting genuinely require it.
 | Phase | Ships | Gate | Depends on |
 |---|---|---|---|
 | **0 — sizing + rulings** | prod count (§8), R1–R9 | — | owner |
-| **1 — model + grouping** | `service_visits` + `visit_completion_packets` migrations, converter stamp, seeder join rule (self-pay only), admin group/split, collective-move scope, grouped route card, en-route/on-site fan-out, reminder dedupe | `GATE_VISIT_GROUPS` — **stays off** until Phase 2 is merged; creates no groups | — |
+| **1 — model + grouping** | `service_visits` + `visit_completion_packets` migrations, converter stamp, seeder join rule (self-pay only), admin group/split, collective-move scope, grouped route card, en-route/on-site fan-out, reminder dedupe | `GATE_VISIT_GROUPS` split in two (rev 4): `GATE_VISIT_GROUPS_STAMP` — may go on after Phase 1 merges; stamps `visit_id` at scheduling and shows the grouped route card, but every row still completes per row exactly as today (no comms change, no packet). `GATE_VISIT_GROUPS` (customer-facing grouped completion) **stays off** until Phase 2 is merged | — |
 | **2 — one packet, one message, one page** | `/complete` body extracted to `dispatch-complete.js`; visit-complete endpoint + packet worker; exception-driven CompletionPanel; `visit-close.js`; `visit_complete*` templates; single review ask; `/visit/:token` page + visit-scoped payment + visit receipt; **portal billing history grouped by visit**; late-payment/collections copy names the visit; stuck-visit sweep | `GATE_VISIT_GROUPS` + `GATE_VISIT_SUMMARY_PAGE` (conjunction = launch) | 1 |
 | **3 — grouped autopay** | closer charge via visit allocation, receipts, failure notice, `autopay_log` codes; seeder join rule extends to autopay customers | `GATE_VISIT_GROUP_AUTOPAY` | 2 |
 | later | retire `COMBINED_SERVICE_ROUTES` + combo catalog rows **only after Phase 3** (summary, self-pay, and grouped autopay at parity — retiring earlier would push autopay combo customers from one automatic charge into office review); combined visit PDF only if customers ask | — | 3 |
@@ -409,7 +421,8 @@ payment" problem is currently small in count but real when it occurs. Phase-2's 
 (extracting the 8,580-line `/complete` body into a service) is a fixed cost that does not shrink
 with volume; the value case rests on the sales direction (rodent bait as an add-on row, combo-row
 retirement per 08-28 ruling) rather than on current calendar counts. Recommendation: build
-Phase 1 (model + grouping, gate off, cheap) so groups start being stamped as bundles are sold;
+Phase 1 (model + grouping) with only `GATE_VISIT_GROUPS_STAMP` on, so groups start being stamped
+as bundles are sold and the adoption count is measurable from `service_visits` itself;
 hold Phase 2 until future multi-row days reach ~10 per 120d or the owner GOes on sales direction.
 
 ---
