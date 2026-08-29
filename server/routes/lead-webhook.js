@@ -874,7 +874,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             // termite rental gate can turn an instant product into quote-on-
             // request after the map was written, and the draft must follow the
             // catalog as it is NOW, not the static map (pre-push codex P1).
-            readiness: { ...estimateAutomationReadiness, serviceKey: leadServiceKey, serviceKeyInstant: keyedService ? keyedService.instant === true : null },
+            // A submitted key that could NOT be verified (catalog read failed,
+            // or the key is not publicly selectable) must never fall back to
+            // label inference — the label lookalike is exactly the mispricing
+            // the key exists to prevent (GH codex #3585 r4 P1). The lead is
+            // still captured; only the automated draft parks.
+            readiness: {
+              ...estimateAutomationReadiness,
+              serviceKey: leadServiceKey,
+              serviceKeyInstant: keyedService ? keyedService.instant === true : null,
+              serviceKeyUnverified: !!serviceKey && !keyedService,
+            },
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');

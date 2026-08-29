@@ -372,9 +372,14 @@ function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
 function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
   const serviceKey = readiness.serviceKey || null;
-  const mapped = serviceKey
-    ? mapServiceKeyToEstimateServices(serviceKey, { instant: readiness.serviceKeyInstant })
-    : mapServiceInterestToEstimateServices(serviceInterest);
+  // A key that was submitted but never verified (catalog read failed, or not
+  // publicly selectable) parks instead of degrading to label inference: the
+  // whole point of the key is that the label alone can name the wrong product.
+  const mapped = readiness.serviceKeyUnverified
+    ? { services: {}, supported: false, unsupportedReason: 'quote_on_request', review: ['Submitted service key could not be verified against the catalog'] }
+    : serviceKey
+      ? mapServiceKeyToEstimateServices(serviceKey, { instant: readiness.serviceKeyInstant })
+      : mapServiceInterestToEstimateServices(serviceInterest);
   const automation = {
     status: 'not_generated',
     generated: false,

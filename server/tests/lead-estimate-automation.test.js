@@ -467,6 +467,16 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
     expect(draft.estimateData.services).toBeUndefined();
   });
+  test('a submitted key that could not be verified parks — never falls back to label inference', () => {
+    // publicSelectableService returned null (catalog read failed / not
+    // selectable): the label alone would have drafted mosquito as monthly.
+    const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: null, serviceKeyInstant: null, serviceKeyUnverified: true };
+    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    expect(draft.automation.generated).toBe(false);
+    expect(draft.automation.status).toBe('manual_review_required');
+    expect(draft.automation.unsupportedReason).toBe('quote_on_request');
+    expect(draft.automation.services).toEqual({});
+  });
   test('a keyed lead with NO live verdict fails closed to quote-on-request', () => {
     const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal' };
     const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
