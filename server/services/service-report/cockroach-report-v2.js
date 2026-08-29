@@ -88,8 +88,10 @@ const PREP_COPY = [
 ];
 
 // The mandatory German-cockroach cooperation set (owner spec §8B "critical
-// warning"): shipped even when the tech picked no prep chips.
-const GERMAN_DEFAULT_PREP_KEYS = ['no_sprays', 'keep_bait', 'food_debris'];
+// warning"): shipped even when the tech picked no prep chips. `keep_bait`
+// joins only when bait was actually recorded today (local codex P1 —
+// never instruct the customer about placements that were not made).
+const GERMAN_DEFAULT_PREP_KEYS = ['no_sprays', 'food_debris'];
 
 function chips(value) {
   if (Array.isArray(value)) return value.map((v) => String(v || '').trim()).filter(Boolean);
@@ -151,20 +153,23 @@ function buildWork(workChips) {
   return items;
 }
 
-function buildHelp({ prepChips, species }) {
+function buildHelp({ prepChips, species, baitRecorded = false }) {
   const picked = [];
   for (const chip of prepChips) {
     const rule = PREP_COPY.find((r) => r.match.test(chip));
     if (rule) { if (!picked.some((p) => p.key === rule.key)) picked.push({ key: rule.key, text: rule.text }); } else picked.push({ key: chip, text: chip });
   }
   if (isGerman(species)) {
-    for (const key of GERMAN_DEFAULT_PREP_KEYS) {
+    const defaults = baitRecorded ? ['no_sprays', 'keep_bait', 'food_debris'] : GERMAN_DEFAULT_PREP_KEYS;
+    for (const key of defaults) {
       if (!picked.some((p) => p.key === key)) picked.push({ key, text: PREP_COPY.find((r) => r.key === key).text });
     }
   }
   let why = null;
   if (isGerman(species)) {
-    why = 'German cockroach control fails most often when sprays are used between visits. The bait only works if roaches can reach it.';
+    why = baitRecorded
+      ? 'German cockroach control fails most often when sprays are used between visits. The bait only works if roaches can reach it.'
+      : 'German cockroach control fails most often when sprays are used between visits — they scatter roaches into new harborage.';
   } else if (isLargeRoach(species)) {
     why = 'Some activity may be seen temporarily as roaches are flushed from hiding areas. Moisture and exterior entry points are what keep large roaches coming in.';
   } else if (picked.length) {
@@ -174,14 +179,17 @@ function buildHelp({ prepChips, species }) {
 }
 
 /**
- * Treatment program position. `visitSequence` (frozen at completion from the
- * roach_activity indicator history) is the treatment number. The total is a
- * catalog fact for the packaged keys; otherwise the calendar decides:
- * upcoming roach-family visits (live view only) extend the program, and a
- * program with no upcoming visit past treatment 1 is complete.
+ * Treatment program position. `treatmentNumber` is PACKAGE-scoped (report-
+ * data: 1 + the customer's earlier completed records of the SAME frozen
+ * service key inside the program window) — never the customer-wide
+ * roach_activity history, which spans other roach services and earlier
+ * programs (local codex P1). The total is a catalog fact for the packaged
+ * keys; otherwise the calendar decides: upcoming visits of the SAME program
+ * (live view only) extend it, and a program with no upcoming visit past
+ * treatment 1 is complete.
  */
-function resolveProgram({ serviceKey = null, visitSequence = 1, upcomingRoachVisits = null }) {
-  const number = Math.max(1, Number(visitSequence) || 1);
+function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachVisits = null }) {
+  const number = Math.max(1, Number(treatmentNumber) || 1);
   const packageTotal = PACKAGE_TREATMENTS_BY_KEY[String(serviceKey || '')] || null;
   let total = packageTotal;
   if (!total && upcomingRoachVisits != null) {
@@ -203,9 +211,47 @@ function programTitle(program) {
  * pdf/static strip it), so the permanent record never claims OR disclaims a
  * date. `nextVisit` = the first upcoming roach-family appointment.
  */
-function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, monitorsPlaced = false, nextStep = null }) {
+// Treatment-aware copy (local codex P1): what the next visit "will do" and
+// what keeps working after the last one is built ONLY from the work the tech
+// recorded today — a report never promises bait or a growth regulator that
+// was not applied.
+function recordedWork(work = []) {
+  const shorts = new Set(work.map((w) => String(w.short || '')));
+  return {
+    bait: shorts.has('Bait'),
+    igr: shorts.has('IGR'),
+    monitors: shorts.has('Monitors') || shorts.has('Glue boards'),
+    any: work.length > 0,
+  };
+}
+
+function nextVisitPlan(rw) {
+  const refresh = [];
+  if (rw.bait) refresh.push('the bait');
+  if (rw.igr) refresh.push('the growth regulator');
+  const parts = ['Re-check every harborage point'];
+  if (refresh.length) parts.push(`refresh ${refresh.join(' and ')}`);
+  if (rw.monitors) parts.push('read the monitors');
+  parts.push('compare against today');
+  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}.`;
+}
+
+function betweenVisitsCopy({ german, large, rw }) {
+  if (german) {
+    return rw.bait
+      ? 'Expect to still see some roaches for 7–10 days as the bait spreads through the colony. Text us if activity gets worse rather than better.'
+      : 'Expect to still see some roaches for 7–10 days as the treatment works through the harborage. Text us if activity gets worse rather than better.';
+  }
+  if (large) return 'Some activity may be seen temporarily as roaches are flushed from hiding areas. Text us if it does not taper off within a week.';
+  return rw.bait
+    ? 'Bait keeps working after we leave, so activity usually tapers over the first week. Text us if it gets worse rather than better.'
+    : 'Activity usually tapers over the first week after treatment. Text us if it gets worse rather than better.';
+}
+
+function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, work = [], nextStep = null }) {
   const german = isGerman(species);
   const large = isLargeRoach(species);
+  const rw = recordedWork(work);
   const lines = [];
   let nextVisitMissing = false;
   if (!program.complete) {
@@ -217,22 +263,14 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
         lines.push({ label: 'Next treatment', text: 'We will confirm your next treatment date by text shortly.' });
       }
     }
-    lines.push({
-      label: 'What we will do',
-      text: `Re-check every harborage point, refresh the bait and growth regulator${monitorsPlaced ? ', read the monitors' : ''} and compare against today.`,
-    });
-    lines.push({
-      label: 'Between now and then',
-      text: german
-        ? 'Expect to still see some roaches for 7–10 days as the bait spreads through the colony. Text us if activity gets worse rather than better.'
-        : large
-          ? 'Some activity may be seen temporarily as roaches are flushed from hiding areas. Text us if it does not taper off within a week.'
-          : 'Bait keeps working after we leave, so activity usually tapers over the first week. Text us if it gets worse rather than better.',
-    });
+    lines.push({ label: 'What we will do', text: nextVisitPlan(rw) });
+    lines.push({ label: 'Between now and then', text: betweenVisitsCopy({ german, large, rw }) });
   } else {
     lines.push({
       label: 'What to expect',
-      text: 'The bait keeps working for several weeks. Occasional sightings over the next 2–3 weeks are normal; a return of steady activity is not.',
+      text: rw.bait
+        ? 'The bait keeps working for several weeks. Occasional sightings over the next 2–3 weeks are normal; a return of steady activity is not.'
+        : 'The treatment keeps working for several weeks. Occasional sightings over the next 2–3 weeks are normal; a return of steady activity is not.',
     });
     lines.push({ label: 'If activity returns', text: 'Text us and we will take a look.' });
   }
@@ -276,6 +314,9 @@ function buildCockroachReportV2({
   typedSnapshotValues = null,
   typedReportType = null,
   visitSequence = 1,
+  // PACKAGE-scoped treatment number (report-data); visitSequence stays the
+  // customer-wide gauge position used only for the trend sentence.
+  treatmentNumber = null,
   activity = null,
   technicianReport = null,
   todaysResultBody = null,
@@ -293,13 +334,12 @@ function buildCockroachReportV2({
   const evidence = chips(values.evidence_observed);
   const conditions = chips(values.conducive_conditions);
   const work = buildWork(chips(values.work_completed));
-  const help = buildHelp({ prepChips: chips(values.customer_prep), species });
+  const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait });
   if (!species && !activityLevel && !locations.length && !work.length) return null;
 
   const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence });
-  const program = resolveProgram({ serviceKey, visitSequence, upcomingRoachVisits });
-  const monitorsPlaced = work.some((w) => /monitor|glue/i.test(w.short));
-  const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, monitorsPlaced, nextStep });
+  const program = resolveProgram({ serviceKey, treatmentNumber: treatmentNumber != null ? treatmentNumber : 1, upcomingRoachVisits });
+  const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, work, nextStep });
 
   const metrics = [
     { label: 'Activity today', value: activityLevel ? (activityLevel === 'None observed' ? 'None observed' : activityLevel) : 'Not recorded' },
@@ -367,8 +407,14 @@ function attachCockroachReportV2(data, service = {}) {
   const upcomingRoachVisits = Object.prototype.hasOwnProperty.call(data, 'cockroachUpcomingRoachVisits')
     ? data.cockroachUpcomingRoachVisits
     : null;
+  // Package-scoped position from report-data (all modes — earlier completed
+  // records of the same program are immutable, so the PDF may print it).
+  const treatmentNumber = data.cockroachProgramPosition && Number.isFinite(Number(data.cockroachProgramPosition.treatmentNumber))
+    ? Number(data.cockroachProgramPosition.treatmentNumber)
+    : null;
   delete data.cockroachNextTreatmentVisit;
   delete data.cockroachUpcomingRoachVisits;
+  delete data.cockroachProgramPosition;
   if (process.env.COCKROACH_REPORT_V2 !== 'true') return data;
   const snapshot = cockroachSnapshotOf(service);
   if (!snapshot) return data;
@@ -379,6 +425,7 @@ function attachCockroachReportV2(data, service = {}) {
       typedSnapshotValues: snapshot.values || null,
       typedReportType: COCKROACH_TYPED_TYPE,
       visitSequence: report.visitSequence || snapshot.visitSequence || 1,
+      treatmentNumber,
       activity: data.activity || null,
       technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
         && typeof data.summary === 'string'
@@ -441,4 +488,5 @@ module.exports = {
   buildWhatsNext,
   buildHelp,
   buildWork,
+  recordedWork,
 };

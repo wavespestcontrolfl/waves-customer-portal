@@ -98,11 +98,15 @@ describe('resolveCockroachStatus — progress visits read the gauge trend', () =
 
 describe('buildHelp — the German cooperation language is mandatory', () => {
   it('ships the three German defaults even when the tech picked nothing, without duplicating picked chips', () => {
-    const none = buildHelp({ prepChips: [], species: 'German' });
+    const none = buildHelp({ prepChips: [], species: 'German', baitRecorded: true });
     expect(none.items.map((i) => i.key)).toEqual(['no_sprays', 'keep_bait', 'food_debris']);
     expect(none.why).toMatch(/sprays are used between visits/);
-    const picked = buildHelp({ prepChips: ['No over-the-counter sprays', 'Empty trash nightly'], species: 'German' });
+    const picked = buildHelp({ prepChips: ['No over-the-counter sprays', 'Empty trash nightly'], species: 'German', baitRecorded: true });
     expect(picked.items.map((i) => i.key)).toEqual(['no_sprays', 'trash', 'keep_bait', 'food_debris']);
+    // no bait recorded today → never instructs about placements that were not made
+    const noBait = buildHelp({ prepChips: [], species: 'German', baitRecorded: false });
+    expect(noBait.items.map((i) => i.key)).toEqual(['no_sprays', 'food_debris']);
+    expect(noBait.why).not.toMatch(/bait/i);
   });
 
   it('large roaches get the flush disclosure and no invented interior defaults', () => {
@@ -119,18 +123,18 @@ describe('buildHelp — the German cooperation language is mandatory', () => {
 
 describe('resolveProgram — honest about what the catalog and calendar say', () => {
   it('packaged keys fix the total; the calendar fills in for the severity-priced cleanout', () => {
-    expect(resolveProgram({ serviceKey: 'cockroach_control', visitSequence: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
-    expect(resolveProgram({ serviceKey: 'cockroach_control', visitSequence: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
-    expect(resolveProgram({ serviceKey: 'german_roach_initial', visitSequence: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
+    expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false });
     // german_roach: 1 upcoming roach visit → 2 total
-    expect(resolveProgram({ serviceKey: 'german_roach', visitSequence: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
-    expect(resolveProgram({ serviceKey: 'german_roach', visitSequence: 2, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
     // treatment 1 with nothing on the calendar: total UNKNOWN, not complete
-    expect(resolveProgram({ serviceKey: 'german_roach', visitSequence: 1, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 1, treatmentsTotal: null, complete: false });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 1, treatmentsTotal: null, complete: false });
     // pdf/static (calendar not resolved): total unknown, never "complete"
-    expect(resolveProgram({ serviceKey: 'german_roach', visitSequence: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: null, complete: false });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: null, complete: false });
     // a package never reads "3 of 2"
-    expect(resolveProgram({ serviceKey: 'cockroach_control', visitSequence: 3 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 3, complete: true });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 3 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 3, complete: true });
   });
 });
 
@@ -159,12 +163,25 @@ describe('buildWhatsNext — the next date is a live-view fact', () => {
     expect(done.lines[2].text).toBe('Keep the bait undisturbed.');
   });
 
-  it('monitors placed today add the read-the-monitors promise; species picks the between-visits copy', () => {
-    const german = buildWhatsNext({ program: program1, species: 'German', monitorsPlaced: true });
-    expect(german.lines[0].text).toMatch(/read the monitors/);
+  it('the next-visit plan and the between-visits copy are built ONLY from the work recorded today', () => {
+    const full = buildWork(['Bait placement', 'Insect growth regulator', 'Monitoring stations placed']);
+    const german = buildWhatsNext({ program: program1, species: 'German', work: full });
+    expect(german.lines[0].text).toBe('Re-check every harborage point, refresh the bait and the growth regulator, read the monitors and compare against today.');
     expect(german.lines[1].text).toMatch(/7–10 days as the bait spreads/);
-    const large = buildWhatsNext({ program: program1, species: 'American' });
-    expect(large.lines[1].text).toMatch(/flushed from hiding areas/);
+    // crack & crevice only: no bait / IGR / monitor promise anywhere
+    const cc = buildWhatsNext({ program: program1, species: 'German', work: buildWork(['Crack & crevice treatment']) });
+    expect(cc.lines[0].text).toBe('Re-check every harborage point and compare against today.');
+    expect(cc.lines[0].text).not.toMatch(/bait|regulator|monitor/i);
+    expect(cc.lines[1].text).not.toMatch(/bait/i);
+    // nothing recorded at all (only species + level are required)
+    const none = buildWhatsNext({ program: program1, species: 'American', work: [] });
+    expect(none.lines[0].text).not.toMatch(/bait|regulator|monitor/i);
+    expect(none.lines[1].text).toMatch(/flushed from hiding areas/);
+    // completed program: "bait keeps working" only when bait was recorded
+    const doneNoBait = buildWhatsNext({ program: { treatmentNumber: 2, treatmentsTotal: 2, complete: true }, species: 'German', work: buildWork(['Dust application']) });
+    expect(doneNoBait.lines[0].text).toMatch(/^The treatment keeps working/);
+    const doneBait = buildWhatsNext({ program: { treatmentNumber: 2, treatmentsTotal: 2, complete: true }, species: 'German', work: full });
+    expect(doneBait.lines[0].text).toMatch(/^The bait keeps working/);
   });
 });
 
@@ -183,6 +200,7 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     summary: 'Reviewed copy.',
     cockroachNextTreatmentVisit: { scheduledDate: '2026-09-10', windowStart: '09:00:00', serviceType: 'Cockroach Treatment' },
     cockroachUpcomingRoachVisits: 1,
+    cockroachProgramPosition: { treatmentNumber: 1 },
   });
 
   it('attaches from the frozen snapshot, consumes the live-only schedule fields, and reads presence as "schedule resolved"', () => {
@@ -197,6 +215,18 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     expect(data.cockroachReportV2.whatsNext.nextVisitMissing).toBe(false);
     expect(data).not.toHaveProperty('cockroachNextTreatmentVisit');
     expect(data).not.toHaveProperty('cockroachUpcomingRoachVisits');
+    expect(data).not.toHaveProperty('cockroachProgramPosition');
+  });
+
+  it('the treatment number is the PACKAGE position from report-data, never the customer-wide gauge visitSequence', () => {
+    process.env.COCKROACH_REPORT_V2 = 'true';
+    // an older roach job put the gauge at visit 3; this package is on its first treatment
+    const data = attachCockroachReportV2({ ...payload(), typedReport: { ...payload().typedReport, visitSequence: 3 }, cockroachProgramPosition: { treatmentNumber: 1 } }, service);
+    expect(data.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(data.cockroachReportV2.whatsNext.title).toBe('Treatment 1 of 2 complete');
+    // …and without a position (legacy / lookup failed) the builder falls back to treatment 1, not the gauge
+    const noPos = payload(); delete noPos.cockroachProgramPosition; noPos.typedReport.visitSequence = 3;
+    expect(attachCockroachReportV2(noPos, service).cockroachReportV2.program.treatmentNumber).toBe(1);
   });
 
   it('live view with the field present but null → exception copy; pdf (fields absent) → no date line either way', () => {
