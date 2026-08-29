@@ -4794,6 +4794,8 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(keep("<div style={{ display: 'none' }} {...props}>![v](/x.webp)</div>")).toContain('![v]');
     // Unquoted value with interior slashes — the later display:none still hides.
     expect(keep('<div style=background:url(/x);display:none>![h2](/x.webp)</div>')).not.toContain('![h2]');
+    // A multiline spread (many whitespace chars before the dots) still overrides (#3595 late r2).
+    expect(keep("<div style={{ display: 'none' }} {\n          ...props}>![v2](/x.webp)</div>")).toContain('![v2]');
   });
 
   test('opensDefinitelyHidden: attribute scans are quote-aware; falsy literals are case-sensitive; a spread after a hidden style makes it unprovable (#3593 r2)', () => {

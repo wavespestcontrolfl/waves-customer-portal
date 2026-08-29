@@ -223,7 +223,9 @@ function hasAttrSpreadAfter(attrs, from = 0) {
         if (ch === '{') d += 1;
         else if (ch === '}') { d -= 1; if (d === 0) break; }
       }
-      if (attrPos && /^\{\s*\.\.\./.test(a.slice(i, i + 8))) return true;
+      // The whole remaining text — a multiline spread may hold more than a
+      // few whitespace chars between `{` and `...` (#3595 late r2).
+      if (attrPos && /^\{\s*\.\.\./.test(a.slice(i))) return true;
       i = j;
       continue;
     }
