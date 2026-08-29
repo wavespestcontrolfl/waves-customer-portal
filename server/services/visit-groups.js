@@ -1062,8 +1062,11 @@ async function claimVisitNotification(row, kind) {
       // Full stop tuple, not just the id (codex r9): a same-day window move
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
-        .first('id', 'visit_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
+        .first('id', 'visit_id', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
       if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      // The visit owns assignment: a one-child reassignment that committed
+      // ahead of its detach seam is a detached row (codex r12).
+      if (visit.technician_id && String(fresh.technician_id || '') !== String(visit.technician_id)) return { state: 'detached', token: null };
       if (!rowStillAtVisitStop(fresh, visit, await otherLiveMembers(t, visit.id, fresh.id))) return { state: 'detached', token: null };
       // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
       // miss) is RECLAIMED — the retry the ledger promised (codex r6) — and
@@ -1185,9 +1188,30 @@ const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'g
 const NOTIFICATION_CLAIM_LEASE_MS = 10 * 60 * 1000;
 
 /**
- * Is the owner's claim still live (status claimed, inside the lease)? The
- * owner calls this immediately before its provider call: an expired lease
- * means a reclaim may already own the notice — do not send.
+ * Atomically RENEW the owner's lease (claimed_at = now) — succeeds only
+ * while the row is still `claimed` under OUR token (codex #3603 r12). The
+ * owner calls this immediately before its provider call so ownership stays
+ * valid through the send even if the preceding work ate the lease; a
+ * reclaim (new token) or a terminal row makes this fail — do not send.
+ */
+async function renewNotificationLease(visitId, kind, token) {
+  if (!visitId || !token) return false;
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  try {
+    const n = await db('visit_effects')
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
+      .update({ claimed_at: new Date() });
+    return Number(n) > 0;
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] lease renew ${effectType} for visit ${visitId} failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Is the owner's claim still live (status claimed, inside the lease)? Used
+ * before slow pre-send work; the send itself is guarded by
+ * renewNotificationLease.
  */
 async function notificationLeaseLive(visitId, kind, token) {
   if (!visitId || !token) return false;
@@ -1228,6 +1252,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       if (!lockedPrimary
           || String(lockedPrimary.visit_id || '') !== String(visit.id)
           || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')
+          || (visit.technician_id && String(lockedPrimary.technician_id || '') !== String(visit.technician_id))
           || !rowStillAtVisitStop(lockedPrimary, visit, await otherLiveMembers(t, visit.id, lockedPrimary.id))) {
         logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}) — skipped`);
         return null;
@@ -1465,6 +1490,7 @@ module.exports = {
   fanOutLiveTransition,
   claimVisitNotification,
   notificationLeaseLive,
+  renewNotificationLease,
   finalizeVisitNotification,
   visitSummariesForRows,
   _test: {

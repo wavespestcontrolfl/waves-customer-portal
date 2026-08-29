@@ -52,7 +52,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
-const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification, notificationLeaseLive } = require('../services/visit-groups');
+const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification, notificationLeaseLive, renewNotificationLease } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
 const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', ...over });
@@ -308,6 +308,11 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
   test('a row a split just detached (or moved off the stop, or a visit no longer open) never claims', async () => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '15:00', window_end: '16:00' }), select: () => [{ id: 's1', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', window_start: '09:00', window_end: '10:00' }] }, visit_effects: { returning: () => [{ id: 'e1' }] } };
     expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
+    // reassigned to another tech ahead of its detach seam (r12) ⇒ detached
+    db.__script.service_visits = { first: () => ({ ...VISIT, technician_id: 't1' }) };
+    db.__script.scheduled_services.first = () => ({ id: 'p', visit_id: 'v1', technician_id: 't9', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' });
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
+    db.__script.service_visits = { first: () => VISIT };
     // moved INSIDE the stale union but away from every sibling (r11) ⇒ detached too
     db.__script.scheduled_services.first = () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '11:15', window_end: '11:30' });
     expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
@@ -367,6 +372,14 @@ describe('notificationLeaseLive (token-keyed)', () => {
     expect(await notificationLeaseLive('v1', 'on_site', 'tok-a')).toBe(false);
     db.__script = { visit_effects: { first: () => null } };
     expect(await notificationLeaseLive('v1', 'on_site', 'tok-a')).toBe(false);
+  });
+  test('renewNotificationLease is an atomic token-bound update (predicated on status claimed + our token)', async () => {
+    db.__script = {};
+    expect(await renewNotificationLease('v1', 'en_route', 'tok-a')).toBe(true);
+    const upd = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'update');
+    expect(upd.ops).toEqual(expect.arrayContaining([['where', { visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', claim_token: 'tok-a' }]]));
+    expect(upd.values).toHaveProperty('claimed_at');
+    expect(await renewNotificationLease('v1', 'en_route', null)).toBe(false);
   });
   test('finalize is predicated on the owner token', async () => {
     db.__script = {};

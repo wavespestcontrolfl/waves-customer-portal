@@ -455,11 +455,12 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         serviceId: svc.id,
       });
 
-      // Ownership re-checked IMMEDIATELY before the provider call (codex
-      // r11): the ETA lookup above can stall across the lease boundary and a
-      // reclaim (new token) may own the notice by now — never send twice.
+      // Lease RENEWED atomically under our token IMMEDIATELY before the
+      // provider call (codex r11/r12): ownership stays valid through the
+      // send even if the ETA lookup ate the lease; a reclaim (new token)
+      // makes the renew fail — never send twice.
       if (visitClaim === 'owner'
-          && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
+          && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'en_route', claimToken))) {
         smsOutcome = 'lease_expired';
         throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
       }
@@ -1152,7 +1153,7 @@ async function markOnProperty(serviceId, opts = {}) {
       visitClaim = claim && claim.state;
       claimToken = claim && claim.token;
     }
-    if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'on_site', claimToken))) {
+    if (visitClaim === 'owner' && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'on_site', claimToken))) {
       arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
     } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
       arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
