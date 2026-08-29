@@ -455,6 +455,8 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     expect(arg.members.map((m) => m.id)).toEqual(['a', 'b']);
     expect(arg).toMatchObject({ primaryId: 'a', visitId: 'v1' });
     expect(typeof arg.trx).toBe('function');
+    // the guard sees each member's DERIVED target (codex r16 P1)
+    expect(arg.targets.map((t) => [t.id, t.isPrimary, t.startHHMM])).toEqual([['a', true, '09:00'], ['b', false, '09:00']]);
     // the guard ran AFTER the stop lock (a trx.raw lock call precedes it) and nothing was written
     expect(db.__rawCalls.length).toBeGreaterThan(0);
     expect(rebooker.reschedule).not.toHaveBeenCalled();
@@ -526,7 +528,8 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(rebooker.reschedule.mock.calls[2][5]).not.toHaveProperty('technicianId');
     // b (t1 → t9) re-pointed through the canonical writer on a transaction; c already on t9 is not touched
     expect(assignDispatchJob).toHaveBeenCalledTimes(1);
-    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function) });
+    // skipVisitSeam: the per-row seam must not run on a half-reassigned visit (codex r16 P1) — step 4 runs it per member after the retarget
+    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true });
     // and the parent still carries the technician
     const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.scheduled_date);
     expect(patch.values).toMatchObject({ technician_id: 't9' });

@@ -350,6 +350,20 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadAnchorMap).not.toHaveBeenCalled();
   });
 
+  test('preferred time: a sibling whose DERIVED start falls outside the explicit preferred window refuses (codex r16 P1)', async () => {
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const prefs = { preferred_time_window: { startMin: 13 * 60, endMin: 17 * 60 } }; // 13:00–17:00
+    const guard = (p) => makeMemberGuard({ service: SERVICE, best: BEST, config: { prefs: p }, techChanged: false });
+    const targets = (sibStart) => [{ id: 's1', isPrimary: true, startHHMM: '15:00' }, { id: 's2', isPrimary: false, startHHMM: sibStart }];
+    const sib = { id: 's2', service_type: 'Lawn Fertilization', is_recurring: false };
+    await expect(guard(prefs)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('17:00') })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    await expect(guard(prefs)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('16:00') })).resolves.toBeUndefined();
+    // windowless sibling / no explicit window / no prefs ⇒ nothing to check
+    await expect(guard(prefs)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets(null) })).resolves.toBeUndefined();
+    await expect(guard({ preferred_time_window: null })({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('17:00') })).resolves.toBeUndefined();
+    await expect(guard(undefined)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('17:00') })).resolves.toBeUndefined();
+  });
+
   test('skip_weekends: a Saturday target refuses when any sibling skips weekends (codex r15 P1)', async () => {
     const today = etDateString(new Date());
     let n = 1; let sat = null;

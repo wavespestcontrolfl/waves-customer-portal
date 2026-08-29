@@ -385,6 +385,8 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
       .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
+    // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
+    expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
     expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
   });
 });

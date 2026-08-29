@@ -115,7 +115,7 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -240,8 +240,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // through this writer on commit paths that matter.
   const runVisitSeam = () => require('./visit-groups').handleChildStopChanged(jobId)
     .catch((vgErr) => logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`));
-  const seamCommitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
-  if (seamCommitPromise) {
+  // skipVisitSeam (codex #3609 r16): the unit mover re-points EVERY member
+  // and the parent itself, then runs the seam once per member after the
+  // retarget — a per-row seam here would observe a half-reassigned visit
+  // (mixed technicians) and detach the first sibling for good.
+  const seamCommitPromise = skipVisitSeam ? null : require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (skipVisitSeam) {
+    // no seam — the caller owns it
+  } else if (seamCommitPromise) {
     // Transactional callers (admin-schedule assign) — run after THEIR
     // outermost commit, same pattern as the broadcast above (codex #3590
     // r4: the canonical schedule-assignment route always passes a trx;

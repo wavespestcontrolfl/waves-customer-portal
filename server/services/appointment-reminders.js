@@ -4464,7 +4464,6 @@ AppointmentReminders._test = {
   getReminderPrefs,
   liveReminderServiceLabel,
   buildMergedServiceLabel,
-  buildServiceLabel,
 };
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
@@ -4477,5 +4476,8 @@ AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTempla
 // Exported for the other two confirmation senders (call-recording-processor,
 // estimate-public) so all three quote the arrival window identically.
 AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
+// Per-row customer-facing label (parent + add-ons) — the grouped appointment
+// page / calendar list members with it (codex #3609 r15/r16).
+AppointmentReminders.buildServiceLabel = buildServiceLabel;
 
 module.exports = AppointmentReminders;

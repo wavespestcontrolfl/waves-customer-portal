@@ -18,7 +18,7 @@ const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const { classifyServiceCategory } = require('./service-category');
 const { etDateString } = require('../../utils/datetime-et');
-const { _internals: { isSaturday } } = require('./candidate-slots');
+const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -109,6 +109,10 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     not be dragged past it; unreadable anchor evidence refuses (fail closed)
  *   - technician reassignment: the chosen tech must not be DEACTIVATED for
  *     a sibling's service category (the scorer's hard filter)
+ *   - preferred time (codex r16 P1): each sibling's DERIVED start (the plan
+ *     shifts siblings by the primary's offset) must sit inside the
+ *     customer's explicit preferred_time_window — the candidate filter
+ *     checked the primary's start only
  *   - skip_weekends (codex r15 P1): a sibling whose series skips weekends
  *     never lands on a Saturday (the candidate generator's HARD filter,
  *     evaluated for the tapped row only)
@@ -123,11 +127,17 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     new Error(`Cannot auto-move this stop: grouped service ${memberId} ${why}`),
     { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId, isOperational: true },
   );
-  return async ({ trx, members }) => {
+  return async ({ trx, members, targets }) => {
     const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
     if (!siblings.length) return;
     for (const m of siblings) {
       if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
+    }
+    if (config.prefs && config.prefs.preferred_time_window) {
+      for (const t of (targets || [])) {
+        if (t.isPrimary || !t.startHHMM) continue;
+        if (violatesPreferredTime(t.startHHMM, config.prefs)) throw refuse(t.id, `would start at ${t.startHHMM}, outside the customer's preferred time window`);
+      }
     }
     const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id))
       .select('id', 'service_type', 'recurring_parent_id', 'is_recurring', 'scheduled_date', 'auto_dispatch_change_count', 'skip_weekends');

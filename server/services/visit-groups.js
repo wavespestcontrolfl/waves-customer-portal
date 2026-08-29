@@ -229,9 +229,9 @@ async function openMembers(t, visitId) {
  * write left dispatch state disagreeing with visit ownership. Runs on the
  * caller's transaction; no-op when the row already carries the tech.
  */
-async function alignMemberTechnician(t, rowId, technicianId) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t });
+  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam });
 }
 
 /**
@@ -1641,14 +1641,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
           }
         }
-        // Caller-supplied member guard (codex r13 P1): auto-dispatch's
-        // apply-time HARD guards (72h reminder freeze, technician capability,
-        // live status) are evaluated for the tapped row only; the caller
-        // re-validates EVERY locked member here — under the stop lock, before
-        // the first write — or the grouped automatic move is refused.
-        if (typeof options.memberGuard === 'function') {
-          await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id });
-        }
         const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
         const validateSibling = (m, start, end) => {
           try {
@@ -1699,6 +1691,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null },
           };
         });
+        // Caller-supplied member guard (codex r13 P1): auto-dispatch's
+        // apply-time HARD guards (72h reminder freeze, technician capability,
+        // live status, preferences) are evaluated for the tapped row only;
+        // the caller re-validates EVERY locked member here — under the stop
+        // lock, with each member's DERIVED target window (codex r16 P1),
+        // before the first write — or the grouped automatic move is refused.
+        if (typeof options.memberGuard === 'function') {
+          await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id, targets });
+        }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
           customerId: visit.customer_id, propertyId: visit.property_id,
@@ -1848,7 +1849,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null));
+          // skipVisitSeam: the per-row seam would see a half-reassigned visit
+          // (later siblings + the parent still on the old tech) and detach
+          // this row for good (codex r16 P1); step 4 runs the seam for every
+          // member AFTER the parent retarget carries the new technician.
+          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true }));
           return;
         } catch (err) {
           lastErr = err;
