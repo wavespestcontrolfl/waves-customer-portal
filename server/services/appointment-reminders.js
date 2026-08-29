@@ -205,21 +205,48 @@ function apptChannel(value) {
 }
 
 // Effective channel for the 72h reminder leg. Email-first 72h reminders
-// (owner ruling 2026-08-29, GATE_REMINDER_72H_EMAIL_FIRST): under the gate
-// the DEFAULT 'sms' resolution is promoted to 'email' — the
+// (owner ruling 2026-08-29, GATE_REMINDER_72H_EMAIL_FIRST, scoped to
+// ONE-TIME visits by the follow-up ruling the same day): under the gate a
+// one-time visit's DEFAULT 'sms' resolution is promoted to 'email' — the
 // appointment.reminder_72h template with the self-serve reschedule CTA and
 // the card-hold fee-policy note — and deliverAppointmentNotice's 'email'
 // path already falls back to SMS when there's no usable address. An
 // explicit 'email'/'both' preference is returned untouched, and the 24h
-// leg never routes through this (day-of nudges stay SMS-led). A stored
-// 'sms' value is indistinguishable from the migration default, so under
-// the gate email-first IS the sms-pref behavior — the kill switch is
-// unsetting the gate.
-function resolve72hChannel(prefChannel) {
+// leg never routes through this (day-of nudges stay SMS-led).
+//
+// Why one-time only: inspections and estimate-accept one-offs (termite/WDO,
+// rodent, one-time treatments) are the visits that get rescheduled — no
+// habit, often a third party (realtor/buyer) who the email can be forwarded
+// to — and card holds exist ONLY on one-time accepts (owner ruling
+// 2026-06-24), so the durable fee-policy email doubles as dispute evidence.
+// Recurring customers keep their established SMS rhythm.
+//
+// One-time = NOT (is_recurring OR recurring_parent_id OR recurring_pattern)
+// — the canonical lineage test (routes/pay-v2.js; a series "booster" visit
+// carries is_recurring=false WITH recurring_parent_id set, so a bare
+// is_recurring check under-matches). Fail-safe: a missing row, a reminder
+// with no scheduled_service_id, or a thrown lookup promotes NOTHING —
+// today's SMS-led behavior. Kill switch = unset the gate.
+async function isOneTimeVisit(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
+  try {
+    const ss = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    if (!ss) return false;
+    return !(ss.is_recurring || ss.recurring_parent_id || ss.recurring_pattern);
+  } catch (err) {
+    logger.warn(`[appt-remind] one-time lineage lookup failed for ${scheduledServiceId}: ${err.message} — keeping SMS-led channel`);
+    return false;
+  }
+}
+
+async function resolve72hChannel(prefChannel, scheduledServiceId) {
   const ch = apptChannel(prefChannel);
   if (ch !== 'sms') return ch;
   const { isEnabled } = require('../config/feature-gates');
-  return isEnabled('reminder72hEmailFirst') ? 'email' : 'sms';
+  if (!isEnabled('reminder72hEmailFirst')) return 'sms';
+  return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
 }
 
 // Send-window pre-check for the 72h/24h reminder legs (GATE_SMS_SEND_WINDOW,
@@ -2343,9 +2370,9 @@ const AppointmentReminders = {
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id);
-          // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST —
-          // see resolve72hChannel for the full contract.
-          const channel72 = resolve72hChannel(prefs.reminder72hChannel);
+          // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
+          // (one-time visits only) — see resolve72hChannel for the contract.
+          const channel72 = await resolve72hChannel(prefs.reminder72hChannel, r.scheduled_service_id);
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
@@ -4382,6 +4409,7 @@ AppointmentReminders._test = {
   estimateBackedServiceName,
   apptChannel,
   resolve72hChannel,
+  isOneTimeVisit,
   deliverAppointmentNotice,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
