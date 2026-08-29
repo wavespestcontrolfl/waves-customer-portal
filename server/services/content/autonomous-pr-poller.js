@@ -693,12 +693,6 @@ async function finalizeClosed(run, prNumber) {
  * was built from the PR's CURRENT head commit, AND Codex review is clear —
  * each condition individually blocking.
  */
-function parseDraftPayload(raw) {
-  if (!raw) return null;
-  if (typeof raw === 'object') return raw;
-  try { return JSON.parse(raw); } catch (_) { return null; }
-}
-
 async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
   const branch = pr.head?.ref;
@@ -986,7 +980,7 @@ async function maybeAutoMerge(run, pr) {
   if (['new_supporting_blog', 'refresh_existing_page'].includes(run.action_type) && typeof publisher.assertBodyImagesAtHead === 'function') {
     let bodyImages;
     try {
-      const draftForImages = parseDraftPayload(run.draft_payload);
+      const draftForImages = parseJsonObject(run.draft_payload);
       // The brief's category signals decide the route exactly as the
       // publisher derived it (a lookup blip throws → withheld this tick).
       const briefForImages = await briefCategorySignalsForRun(run);

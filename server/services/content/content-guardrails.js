@@ -282,7 +282,9 @@ function isInterruptingBlock(line) {
 // destination may sit on the NEXT line (`[label]:` then `  /dest` — one
 // line ending is allowed between label and destination). Callers pass the
 // code/comment-stripped text (a definition inside a fence is code).
-const REF_DEFINITION_LABEL_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*/;
+// Labels honour backslash escapes (`[body\]shot]`); matching keeps the raw
+// escaped text on both sides (CommonMark does not unescape labels).
+const REF_DEFINITION_LABEL_RE = /^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:[ \t]*/;
 // The WHOLE remainder must be a destination plus an optional quoted or
 // parenthesized title — trailing junk (`/dest.webp trailing-junk`) makes the
 // line an ordinary paragraph in CommonMark, so its label defines nothing and
@@ -424,9 +426,17 @@ function* eachMarkdownLink(text) {
     if (j >= str.length || str[j] !== ']') continue;
     const span = { isImage, start: isImage ? i - 1 : i, labelStart: i, labelEnd: j, kind: 'none', end: j };
     if (str[j + 1] === '[') {
-      const tailEnd = str.indexOf(']', j + 2);
-      const tail = tailEnd > 0 ? str.slice(j + 2, tailEnd) : '';
-      if (tailEnd >= 0 && !tail.includes('\n')) {
+      // Reference tail: escape-aware (`[body\]shot]`), no unescaped `[`,
+      // single line — otherwise the tail is not a label and the span stays
+      // a bare `[label]`.
+      let tailEnd = -1;
+      for (let k = j + 2; k < str.length; k += 1) {
+        const ch = str[k];
+        if (ch === '\\') { k += 1; continue; }
+        if (ch === ']') { tailEnd = k; break; }
+        if (ch === '[' || ch === '\n') break;
+      }
+      if (tailEnd >= 0) {
         span.kind = 'reference'; span.refStart = j + 2; span.refEnd = tailEnd - 1; span.end = tailEnd;
       }
     } else if (str[j + 1] === '(') {

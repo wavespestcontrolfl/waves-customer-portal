@@ -1843,8 +1843,12 @@ function bodyImagesEnabled() {
 // indices hold. Bare destinations are percent-DECODED when resolved so the
 // committed-file check sees the real path.
 const ANGLE_DESTINATION_RE = /\]\(<([^<>\n]*)>/g;
+// Characters that are structural in a bare destination — spaces and
+// parentheses — are percent-encoded (`</a.webp)variant>` → `/a.webp%29variant`)
+// and decoded back when the destination is resolved, so the path the
+// browser requests is the path that gets validated.
 function normalizeAngleDestinations(text) {
-  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, dest) => `](${dest.trim().replace(/ /g, '%20')}`);
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, dest) => `](${dest.trim().replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
 }
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }
@@ -2898,9 +2902,19 @@ async function publishRefresh(draft, brief = {}) {
   const bodyChanged = newBody !== oldBody;
   const metaChanged = REFRESH_EDITABLE_META_FIELDS.some((f) => nextFrontmatter[f] !== currentFrontmatter[f]);
 
+  // Under the body-image gate the refresh lane is what brings an image-poor
+  // legacy post up to the contract, so an otherwise unchanged draft is NOT
+  // a no-op while the live body is short of the minimum (hero references
+  // do not count).
+  let liveShortOfImages = false;
+  if (refreshBlogTarget && bodyImagesEnabled()) {
+    const hero = String(nextFrontmatter?.hero_image?.src || '');
+    const nonHero = bodyImageRefs(oldBody).map((r) => String(r.src || '')).filter((src) => !((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)));
+    liveShortOfImages = new Set(nonHero).size < BODY_IMAGE_MIN;
+  }
   // Semantic no-op check (a parse→stringify round-trip rarely reproduces the
   // source byte-for-byte, so compare meaning, not text).
-  if (!bodyChanged && !metaChanged) {
+  if (!bodyChanged && !metaChanged && !liveShortOfImages) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
       status: 'no_changes', live: false, pr_number: null, pr_url: null, branch: null, preview_url: null, commit_sha: null,

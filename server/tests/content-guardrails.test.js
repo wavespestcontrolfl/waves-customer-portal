@@ -4727,6 +4727,14 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)')).toBe('                                 ');
   });
 
+  test('reference labels honour backslash escapes in tails and definitions (GH r15)', () => {
+    const t = '![detail][body\\]shot] [x][a[b]';
+    const spans = [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.kind, sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
+    expect(spans).toEqual([['reference', 'body\\]shot'], ['none', null], ['none', null]]);
+    const defs = guardrails.markdownReferenceDefinitions('[Body\\]Shot]: /images/blog/x/body-1.webp');
+    expect([...defs.entries()]).toEqual([['body\\]shot', '/images/blog/x/body-1.webp']]);
+  });
+
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {
     const body = ['  ## Indented', '', '- item', '  continued', 'lazy continuation', '', '  still item', '', 'after list', '', ' - - -', 'x'].join('\n');
     const { inList } = guardrails.blankNonRenderedMarkdownWithDepths(body);

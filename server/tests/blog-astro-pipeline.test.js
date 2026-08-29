@@ -3732,7 +3732,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       '',
       '![real](/images/blog/x/body-4.webp)',
     ].join('\n');
-    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-4.webp']);
+    // `[label][![r](…)]` is NOT a full reference (a label may not contain an unescaped `[`, CommonMark 6.3): it renders as
+    // literal `[label]` + bracketed text whose image DOES render — so body-3 counts (escape-aware tail, GH r15).
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-3.webp', '/images/blog/x/body-4.webp']);
   });
 
   test('imageDHash: an RGBA picture hashes like its opaque twin (alpha flattened, channel-aware indexing); undecodable bytes are a deterministic BLOG_BODY_IMAGES_FAILED (GH r5)', async () => {
@@ -4213,6 +4215,39 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       return null;
     });
     expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
+  });
+
+  test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);
+  });
+
+  test('refresh lane: an unchanged draft is NOT a no-op while the live blog body is short of its images — the refresh backfills them; a non-blog unchanged draft stays no_changes (GH r15)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `![shrub diseases](${heroSrc})\n\n## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === 'src/content/services/pest-control-venice-fl.md') return { content: '---\ntitle: S\nmeta_description: d\n---\nService body.', sha: 's' };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    // Identical body + meta: previously no_changes; under the gate the image-poor post gets its two pictures.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
+    // Non-blog target, identical → still a no-op.
+    const svc = await AstroPublisher.publishRefresh({ type: 'draft', page_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', frontmatter: {}, body: 'Service body.' }, { action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/' });
+    expect(svc.status).toBe('no_changes');
   });
 
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {
