@@ -299,9 +299,11 @@ nested transactions plus Stripe, PDF, and SMS side effects; it cannot be made at
 guarantee (rev 5):** *the packet is deduplicated by its idempotency key; child processing is
 at-least-once with idempotent effects that produce an effectively-once customer and accounting
 result.* Every external action (SMS, email, review ask, Stripe charge, receipt) is a
-`visit_effects` row with its own durable dedupe key used as the provider idempotency key, so a
-crash between "SMS sent" and "row marked sent" retries into the provider's dedupe, not into a
-second text. The advisory lock orders workers; the ledger makes retries safe.
+`visit_effects` row with its own durable dedupe key. Money (Stripe) retries to success under a
+true provider idempotency key; email dedupes on `email_messages.idempotency_key`; **SMS is
+at-most-once** — a claim with no provider id is never re-sent, it becomes `unknown_delivery`
+with an office bell (§2 handoff rule). The advisory lock orders workers; the ledger makes
+retries safe without ever producing a second customer message.
 
 **Exception-driven closeout (rev 2, #2).** Not two stacked forms:
 - Shared block once: access, overall visit note, shared photos. Each photo carries a tag set
