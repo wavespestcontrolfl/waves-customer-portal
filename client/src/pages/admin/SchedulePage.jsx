@@ -211,6 +211,11 @@ const AREAS_BY_SERVICE = {
     "Yard",
     "Fence line",
     "Trash area",
+    // Landscape treatment surfaces on a general-pest visit (owner
+    // 2026-08-29): ornamental plantings and the mulched bedding areas
+    // around them. Labels never contain commas (comma-joined per product).
+    "Ornamentals",
+    "Bedding areas",
   ],
   // Bed bug is an interior treatment — yard/fence chips read wrong on its
   // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
@@ -286,6 +291,64 @@ function toggleProductAreaValue(currentValue, area, orderedChoices) {
     ? selected.filter((a) => a !== area)
     : orderedChoices.filter((a) => selected.includes(a) || a === area);
   return next.join(", ");
+}
+// Default tank mix for recurring general-pest and pest re-service
+// completions (owner 2026-08-29): the Products list always STARTS with
+// Taurus SC, Talstar P, and the non-ionic surfactant, with the house totals
+// prefilled — 4 oz of each concentrate, 0.25 oz of surfactant. Every row
+// stays editable/removable; the seed runs once per panel open, never
+// re-adds a row the tech removed, and never fights a restored draft or a
+// hand-built list. Matching is by catalog name — patterns are ordered
+// most-specific-first so the pest tank-mix adjuvant wins over the LESCO
+// lawn surfactant; an entry the catalog no longer carries is skipped.
+const PEST_DEFAULT_MIX = [
+  { patterns: [/^taurus\s*sc\b/i], totalAmount: 4 },
+  { patterns: [/^talstar\s*p\b/i], totalAmount: 4 },
+  { patterns: [/^non-?ionic\s+surfactant$/i, /surfactant/i], totalAmount: 0.25 },
+];
+
+// The default mix belongs on recurring general-pest maintenance visits and
+// pest re-services (callbacks) ONLY — one-time and specialty pest lanes
+// (rodent, bed bug, flea/tick, bee/wasp, roach cleanouts, ant jobs) keep
+// their own product flows. Mirrors the CompletionPanel's own callback
+// detection (serviceType token or the isCallback flag).
+export function isPestDefaultMixVisit(service) {
+  const raw =
+    service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
+  if (detectServiceCategory(raw) !== "pest") return false;
+  const s = String(raw).toLowerCase();
+  if (
+    /rodent|\brats?\b|\bmice\b|\bmouse\b|\bmoles?\b|bed\s*bug|flea|tick|\bbees?\b|wasp|roach|\bants?\b|cleanout|exclusion/.test(
+      s,
+    )
+  )
+    return false;
+  const isReservice =
+    service?.isCallback === true || /re-?service|callback/.test(s);
+  const isRecurringGeneralPest = /quarterly|bi-?monthly|monthly|general pest/.test(s);
+  return isReservice || isRecurringGeneralPest;
+}
+
+// Resolve the mix against the loaded catalog: first row matching each
+// entry's ordered patterns wins, no row claimed twice.
+export function pestDefaultMixSelections(products) {
+  const rows = Array.isArray(products) ? products : [];
+  const used = new Set();
+  const selections = [];
+  for (const entry of PEST_DEFAULT_MIX) {
+    let match = null;
+    for (const pattern of entry.patterns) {
+      match = rows.find(
+        (p) => p && !used.has(p.id) && pattern.test(String(p.name || "").trim()),
+      );
+      if (match) break;
+    }
+    if (match) {
+      used.add(match.id);
+      selections.push({ product: match, totalAmount: entry.totalAmount });
+    }
+  }
+  return selections;
 }
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
@@ -10731,6 +10794,35 @@ export function CompletionPanel({
         : prev
     ));
   }, [areasTreatedHidden, areasServiced, selectedProducts]);
+  // Default pest tank mix (owner 2026-08-29): recurring general-pest and
+  // pest re-service completions open with Taurus SC + Talstar P + the
+  // non-ionic surfactant already on the Products list, totals prefilled
+  // (4 oz / 4 oz / 0.25 oz, marked manual so a rate/area edit can't
+  // recompute them). Seeds ONCE per panel open, only into an empty list —
+  // a restored draft or a hand-built list is never touched, and a default
+  // the tech removes is not re-added. The snapshot lets the draft autosave
+  // ignore the untouched seed (merely opening the panel must not mint a
+  // restore-prompt draft).
+  const pestDefaultMixSeededRef = useRef(false);
+  const pestDefaultMixSnapshotRef = useRef(null);
+  useEffect(() => {
+    if (pestDefaultMixSeededRef.current) return;
+    if (isTypedFindings || isBedBugVisit || !isPestDefaultMixVisit(service)) return;
+    if (!Array.isArray(products) || products.length === 0) return;
+    if (selectedProducts.length) {
+      pestDefaultMixSeededRef.current = true;
+      return;
+    }
+    pestDefaultMixSeededRef.current = true;
+    const rows = pestDefaultMixSelections(products).map(({ product, totalAmount }) => ({
+      ...buildSelectedProduct(product),
+      totalAmount,
+      totalAmountManual: true,
+    }));
+    if (!rows.length) return;
+    pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
+    setSelectedProducts(rows);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -11374,7 +11466,12 @@ export function CompletionPanel({
     const hasDraftContent =
       notes.trim() ||
       customerRecap.trim() ||
-      selectedProducts.length ||
+      // The untouched default pest tank mix is a starting state, not tech
+      // input — opening the panel must not mint a draft (and a restore
+      // prompt). Any edit, removal, or addition changes the JSON and
+      // drafts as before.
+      (selectedProducts.length > 0 &&
+        JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current) ||
       areasServiced.length ||
       customerInteraction ||
       customerConcern.trim() ||
@@ -12577,6 +12674,12 @@ export function CompletionPanel({
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
+    setSelectedProducts((prev) => [...prev, buildSelectedProduct(product)]);
+    setProductSearch("");
+  }
+  // One construction path for a selected-product row — the picker
+  // (addProduct) and the default pest tank-mix seed build identical rows.
+  function buildSelectedProduct(product) {
     const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
@@ -12619,9 +12722,7 @@ export function CompletionPanel({
       perBasisUnit || areaRequirement?.unit === "linear_ft"
         ? ""
         : derivedTotalAmount(prefillRate, prefillArea);
-    setSelectedProducts((prev) => [
-      ...prev,
-      {
+    return {
         productId: product.id,
         name: product.name,
         // Card display only — the submitted record keeps the canonical name.
@@ -12690,9 +12791,7 @@ export function CompletionPanel({
           ),
           allowedTargetLinesForVisit(service),
         ),
-      },
-    ]);
-    setProductSearch("");
+    };
   }
   function addSubstitutionProduct(substitution) {
     if (!substitution?.substituteProductId) return;
@@ -18799,6 +18898,7 @@ const PEST_TARGET_SUGGESTIONS = [
   "Wolf spiders",
   "Widow spiders",
   "Orb-weaver spiders",
+  "Jumping spiders",
   "Silverfish",
   "Earwigs",
   "Millipedes",
