@@ -373,6 +373,22 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Keep mulch off the slab/);
   });
 
+  it('prints the documented serviced count in the termite block (static PDFs draw no map)', () => {
+    const data = {
+      ...BASE_DATA,
+      termiteReportV2: {
+        status: { key: 'protected', tone: 'good', label: 'No termite activity observed' },
+        statusSummary: 'We inspected all 12 bait stations around the property today.',
+        metrics: [{ label: 'Stations inspected', value: '12 of 12' }, { label: 'Termite activity', value: 'None observed' }, { label: 'Stations serviced', value: '3' }],
+        defense: { summary: 'Your protective ring: 12 inspected.', items: [{ key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' }] },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/Stations serviced: 3/);
+    const none = render(<ServiceReportDocument data={{ ...data, termiteReportV2: { ...data.termiteReportV2, metrics: [{ label: 'Stations serviced', value: '0' }] } }} token="t" />);
+    expect(none.container.textContent).not.toMatch(/Stations serviced/);
+  });
+
   it('termite V2 is the sole result summary — the typed headline/body never print beside it', () => {
     const data = {
       ...BASE_DATA,

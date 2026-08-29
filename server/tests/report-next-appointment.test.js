@@ -503,6 +503,19 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
     LIVE_V2,
   );
   expect(monitor.termiteBaitStage).toBe('monitoring');
+  // the seeded detection-only program (no active bait) → 'detection'
+  const detectFixtures = {
+    ...fixtures,
+    services: [...fixtures.services, { id: 'svc-detect', service_key: 'termite_monitoring', name: 'Termite Monitoring Service', short_name: 'Termite Monitor', category: 'termite' }],
+    service_completion_profiles: [...fixtures.service_completion_profiles, { service_key: 'termite_monitoring', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' }],
+  };
+  const detect = await buildReportV1Data(
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-detect' },
+    'token-stage-detect',
+    makeKnex({ ...detectFixtures, scheduled_services: [{ id: 'sched-detect', customer_id: 'customer-1', service_id: 'svc-detect', service_type: 'Termite Monitoring Service', scheduled_date: '2026-08-27', status: 'completed' }] }),
+    LIVE_V2,
+  );
+  expect(detect.termiteBaitStage).toBe('detection');
   // a non-bait record carries no stage at all
   const pest = await buildReportV1Data(BASE_SERVICE, 'token-stage-pest', makeKnex({ ...fixtures, scheduled_services: [] }), LIVE_V2);
   expect(pest.termiteBaitStage).toBeNull();

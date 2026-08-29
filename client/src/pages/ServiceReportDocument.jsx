@@ -597,6 +597,11 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteDefenseBlock = termiteV2?.defense || null;
   const termiteDefenseItems = (Array.isArray(termiteDefenseBlock?.items) ? termiteDefenseBlock.items : [])
     .filter((item) => item && (item.label || item.detail));
+  // The serviced count lives only in the hero metrics (the network block
+  // carries inspected / activity / bait / access) and static PDFs draw no
+  // map — print it so the documented servicing survives (codex P2 #3600 r18).
+  const termiteServicedMetric = (Array.isArray(termiteV2?.metrics) ? termiteV2.metrics : [])
+    .find((m) => m && m.label === 'Stations serviced' && m.value && m.value !== '0') || null;
   const termiteNextMove = moveText(termiteV2?.primaryMove);
 
 
@@ -945,6 +950,9 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
               </Bullet>
             ))}
+            {termiteServicedMetric && (
+              <Bullet><strong>Stations serviced:</strong> {termiteServicedMetric.value}</Bullet>
+            )}
             {pestBugFiles.map((bug, i) => (
               <Bullet key={bug.pestKey || i}>
                 <strong>{bug.suspectLabel}{bug.confirmedByTech === false ? ' (covered by today\u2019s treatment \u2014 not observed on this visit)' : ''}:</strong>{' '}

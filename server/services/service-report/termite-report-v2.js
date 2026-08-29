@@ -249,6 +249,27 @@ function visitBackedSummary(stationSummary) {
 }
 
 /**
+ * Visit-backed COUNTS may replace the frozen typed counts only when they
+ * reconcile with them: completion sync can skip an invalid / foreign /
+ * over-cap station entry while applying the rest, and a summary of 11
+ * successful rows must not turn a documented 12-of-12 visit into "all 11"
+ * (codex P2 #3600 r18). Status evidence (activity / serviced pins) still
+ * escalates from the raw visit-backed summary; only the numbers are
+ * gated here.
+ */
+function reconciledSummary(stationSummary, values = {}) {
+  const summary = visitBackedSummary(stationSummary);
+  if (!summary) return null;
+  const typedChecked = toCount(values.stations_checked);
+  const typedInaccessible = toCount(values.stations_inaccessible);
+  const typedTotal = toCount(values.total_stations);
+  if (typedChecked != null && Number(summary.checked) !== typedChecked) return null;
+  if (typedInaccessible != null && Number(summary.inaccessible) !== typedInaccessible) return null;
+  if (typedTotal != null && Number(summary.total) !== typedTotal) return null;
+  return summary;
+}
+
+/**
  * Denominator for "N of M": the recorded total, else — when stations were
  * explicitly inaccessible — checked + inaccessible. total_stations is
  * optional on the form, so a null total must never turn a partial visit into
@@ -265,7 +286,7 @@ function stationDenominator({ total, checked, inaccessible }) {
 }
 
 function buildStationNetwork({ values = {}, stationSummary = null }) {
-  const summary = visitBackedSummary(stationSummary);
+  const summary = reconciledSummary(stationSummary, values);
   const checked = summary?.checked ?? toCount(values.stations_checked);
   let activityCount = summary?.activity ?? toCount(values.stations_with_activity);
   // The typed validator checks each count's shape, not their relationship:
@@ -377,6 +398,8 @@ function buildTermiteReportV2({
   const total = network?.counts?.total ?? toCount(values.total_stations);
   const activityCount = network?.counts?.activity ?? null;
   const inaccessible = network?.counts?.inaccessible || 0;
+  // Serviced pins are status evidence (a count of documented work), read
+  // from the raw visit-backed summary like the activity escalation.
   const servicedCount = visitBackedSummary(stationSummary)?.serviced ?? 0;
   // "Serviced today" is a VISIT fact claimed only on documented evidence:
   // serviced pins on the station map, or bait/station work recorded on the
@@ -516,7 +539,12 @@ function attachTermiteReportV2(data, service = {}) {
   const stage = data.termiteBaitStage || null;
   delete data.termiteBaitStage;
   if (process.env.TERMITE_REPORT_V2 !== 'true') return data;
-  if (stage === 'installation') return data;
+  // Installation visits and detection-only monitoring programs (no active
+  // bait) keep the typed record — the dashboard speaks active-bait language
+  // (codex P1 #3600 r15 / r18). The PDF signature stays a superset: a
+  // record it keys as -termv2 that renders without the dashboard only
+  // re-renders once on the flip, never serves a stale render as current.
+  if (stage === 'installation' || stage === 'detection') return data;
   const resolved = termiteBaitSnapshotOf(service);
   if (!resolved) return data;
   // The customer-visible report entry that matches the snapshot: the

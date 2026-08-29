@@ -182,10 +182,10 @@ describe('buildTodaysMetrics', () => {
   });
 });
 
-describe('buildStationNetwork — station-map summary wins over typed counts', () => {
-  it('uses the station-map summary when present', () => {
+describe('buildStationNetwork — a RECONCILED station-map summary drives the counts', () => {
+  it('uses the station-map summary when it agrees with the typed counts', () => {
     const net = buildStationNetwork({
-      values: { ...CLEAN_VALUES, stations_checked: 3 },
+      values: { ...CLEAN_VALUES, total_stations: 14, stations_checked: 12, stations_inaccessible: 2 },
       stationSummary: { total: 14, checked: 12, activity: 2, serviced: 2, inaccessible: 2 },
     });
     expect(net.counts).toEqual({ total: 14, checked: 12, activity: 2, inaccessible: 2 });
@@ -193,7 +193,7 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     // bait intact + activity pins (live termites / mud tubing) → never "bait engaged"
     expect(net.items[1].detail).toBe('2 stations — activity observed');
     const feeding = buildStationNetwork({
-      values: { ...CLEAN_VALUES, bait_consumption: 'Moderate feeding' },
+      values: { ...CLEAN_VALUES, total_stations: 14, stations_checked: 12, stations_inaccessible: 2, bait_consumption: 'Moderate feeding' },
       stationSummary: { total: 14, checked: 12, activity: 2, serviced: 2, inaccessible: 2 },
     });
     expect(feeding.items[1].detail).toBe('2 stations — bait engaged');
@@ -217,6 +217,22 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     expect(out.status.label).toBe('Termite activity observed at 2 stations');
     expect(out.metrics[0].value).toBe('12 of 12');
     expect(out.metrics[2].value).toBe('0');
+  });
+
+  it('a partially synced summary (counts disagree with the typed snapshot) never replaces the typed totals — status evidence still escalates', () => {
+    // 12-of-12 documented; sync applied 11 checks (one entry skipped)
+    const partial = { total: 11, checked: 11, activity: 1, serviced: 2, inaccessible: 0 };
+    const net = buildStationNetwork({ values: CLEAN_VALUES, stationSummary: partial });
+    expect(net.counts).toEqual({ total: 12, checked: 12, activity: 0, inaccessible: 0 });
+    const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: partial });
+    expect(out.metrics[0].value).toBe('12 of 12');
+    expect(out.statusSummary).not.toMatch(/all 11/);
+    // the activity pin still escalates the status; serviced pins still count as work
+    expect(out.status.key).toBe('action');
+    expect(out.metrics[2]).toEqual({ label: 'Stations serviced', value: '2' });
+    // a reconciled summary DOES drive the counts
+    const agreed = buildStationNetwork({ values: CLEAN_VALUES, stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } });
+    expect(agreed.counts.activity).toBe(1);
   });
 
   it('partial access without a recorded total derives a safe denominator — never "all N"', () => {
@@ -514,6 +530,14 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     const monitoring = attachTermiteReportV2({ typedReport: { type: 'termite_bait_station', visitSequence: 2 }, termiteBaitStage: 'monitoring' }, service);
     expect(monitoring.termiteReportV2.status.label).toBe('No termite activity observed');
     expect(monitoring).not.toHaveProperty('termiteBaitStage');
+  });
+
+  it('a detection-only monitoring visit keeps the typed record (no active-bait copy)', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+    const detection = attachTermiteReportV2({ typedReport: { type: 'termite_bait_station', visitSequence: 3 }, termiteBaitStage: 'detection' }, service);
+    expect(detection.termiteReportV2).toBeUndefined();
+    expect(detection).not.toHaveProperty('termiteBaitStage');
   });
 
   it('reconciles against the persisted check rows even when only the basemap failed (checkSummary)', () => {

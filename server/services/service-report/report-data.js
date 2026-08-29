@@ -4893,11 +4893,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // 'installation' keeps the typed record; 'monitoring' may render the
     // dashboard. Consumed and removed by attachTermiteReportV2. Name tokens
     // decide only when no profile resolved (fail toward the typed record).
+    // 'detection' = the seeded termite_monitoring program (in-ground
+    // monitoring stations, NO active bait) — its completion profile freezes
+    // the same typed type, but bait-deployed copy would misstate it
+    // (codex P1 #3600 r18); it keeps the typed record too.
     termiteBaitStage: termiteBaitSnapshotOf(service)
-      ? ((laneProfile?.serviceKey === 'termite_installation_setup'
-        || (!laneProfile && /\b(install|installation|setup|set-up)\b/i.test(`${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`)))
-        ? 'installation'
-        : 'monitoring')
+      ? (() => {
+        const names = `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`;
+        if (laneProfile?.serviceKey === 'termite_installation_setup') return 'installation';
+        if (laneProfile?.serviceKey === 'termite_monitoring') return 'detection';
+        if (!laneProfile) {
+          if (/\b(install|installation|setup|set-up)\b/i.test(names)) return 'installation';
+          if (/\bmonitor(?:ing)?\b/i.test(names) && !/\bbait\b/i.test(names)) return 'detection';
+        }
+        return 'monitoring';
+      })()
       : null,
     termiteBonds,
     relatedDocuments,
