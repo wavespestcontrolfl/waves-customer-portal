@@ -44,6 +44,9 @@ function makeConn(rowsByTable) {
   conn.__updates = updates;
   return conn;
 }
+// The lead/estimate fan-out statements only — the irrigation home-moved stamp
+// (property_preferences, gh-r19) is asserted by its own tests below.
+const fanout = (conn) => conn.__updates.filter((u) => u.table !== 'property_preferences');
 
 const BEFORE = {
   id: 'cust-1',
@@ -163,7 +166,7 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 1 });
     const leadUpdate = conn.__updates.find((u) => u.table === 'leads');
     expect(leadUpdate.ids).toEqual(['lead-match']);
     expect(leadUpdate.patch).toMatchObject({
@@ -183,7 +186,7 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: afterWithUnit }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 1 });
     expect(conn.__updates.find((update) => update.table === 'leads').patch.address)
       .toBe('4867 Tobermorey Way, Unit 4');
     expect(conn.__updates.find((update) => update.table === 'estimates').patch.address)
@@ -202,8 +205,8 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before, after }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 0 });
-    expect(conn.__updates[0].patch.address).toBe('123 Main St, Unit 5');
+    expect(counts).toMatchObject({ leads: 1, estimates: 0 });
+    expect(fanout(conn)[0].patch.address).toBe('123 Main St, Unit 5');
   });
 
   test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {
@@ -256,7 +259,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(1);
-    expect(conn.__updates[0].patch).toMatchObject({ city: 'Bradenton', zip: '34211' });
+    expect(fanout(conn)[0].patch).toMatchObject({ city: 'Bradenton', zip: '34211' });
   });
 
   test('an address removal propagates nothing', async () => {
@@ -270,8 +273,8 @@ describe('propagateCustomerAddressChange', () => {
       conn,
     );
 
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
-    expect(conn.__updates).toHaveLength(0);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('no matching rows → no update statements at all', async () => {
@@ -282,8 +285,8 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
-    expect(conn.__updates).toHaveLength(0);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('a FULL-string lead snapshot is rewritten with the full address, not just the street line', async () => {
@@ -352,7 +355,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('an unchanged lead resave is a no-op write (updated_at is never bumped for nothing)', async () => {
@@ -364,7 +367,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('a spelled-out state in the proposal is the same place — proposalDelivery survives', async () => {
@@ -400,7 +403,7 @@ describe('propagateCustomerAddressChange', () => {
       conn,
     );
 
-    expect(counts).toEqual({ leads: 1, estimates: 0 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 0 });
     const leadPatch = conn.__updates.find((u) => u.table === 'leads').patch;
     expect(leadPatch.address).toBe('4857 Tobermory Way');
     expect(leadPatch).not.toHaveProperty('city');
@@ -417,7 +420,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('the proposal patch revalidates the proposal address at update time (concurrent-save guard)', async () => {
@@ -546,6 +549,23 @@ describe('propagateCustomerAddressChange', () => {
   test('missing customer id is a safe no-op', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     const counts = await propagateCustomerAddressChange({ before: null, after: null }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+  });
+});
+
+describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
+  test('a primary-address move stamps property_preferences.irrigation_home_changed_at', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+    const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
+    expect(stamp).toBeTruthy();
+    expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at']); // never touches the settings themselves
+    expect(counts.property_preferences).toBe(0); // mock: no prefs row
+  });
+  test('a same-home correction (unit / formatting only) does not stamp', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange({ before: BEFORE, after: { ...BEFORE, address_line2: 'Unit 4' } }, conn);
+    expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeUndefined();
   });
 });

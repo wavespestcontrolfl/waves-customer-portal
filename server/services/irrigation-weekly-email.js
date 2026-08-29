@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaim, loadPriorWeekPlanEvents } = require('./irrigation-week-plan');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -358,6 +358,11 @@ function buildWeeklyEmailDecision({
   irrigationRunMinutes = null,
   wateringDays = null,
   irrigationSystemType = null,
+  // The home moved after the sprinkler settings were saved (the sweep has
+  // already withheld them) — the plan email says why it has no minutes.
+  scheduleUnconfirmed = false,
+  // Last week's SENT plan's event count — cool-season cadence input.
+  priorWeekEvents = null,
   rainSensor = null,
   rainSource = null,
   rainfallInches7d = null,
@@ -645,6 +650,7 @@ function buildWeeklyEmailDecision({
       county,
       home,
       planWeekEnd,
+      priorWeekEvents,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -656,6 +662,7 @@ function buildWeeklyEmailDecision({
       firstName, grassLabel, runMinutes: runtimeInputs.runMinutes, restriction,
       omitRateNote: scheduleSource === 'portal_derived',
       omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
+      scheduleUnconfirmed,
     });
     if (planCopy) {
       // LAST week's narrative only — the plan owns the week ahead, so the
@@ -930,6 +937,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'pp.irrigation_run_minutes',
       'pp.watering_days',
       'pp.irrigation_system_type',
+      // Sprinkler settings belong to the home they were saved for: a
+      // primary-address change stamps irrigation_home_changed_at (address
+      // fan-out) and settings saved before it are withheld from the plan
+      // until re-saved (codex #3565 gh-r19).
+      'pp.updated_at as prefs_updated_at',
+      'pp.irrigation_home_changed_at',
       // A schedule can also have been recorded by a tech rather than typed by
       // the customer (codex #3138 r1 P2). The lawn report already treats
       // portal → turf profile → assessment as one fallback chain
@@ -1079,18 +1092,27 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         serviceDate: weekEnding,
       });
 
+      const scheduleUnconfirmed = !!customer.irrigation_home_changed_at
+        && (!customer.prefs_updated_at || new Date(customer.irrigation_home_changed_at) >= new Date(customer.prefs_updated_at));
+      const priorWeekEvents = weekPlanEnabled ? await loadPriorWeekPlanEvents({ customerId: customer.id, weekEnding }) : null;
       const decisionInputs = {
         firstName: customer.first_name,
         grassType: resolveGrassType(customer),
         weekEnding,
-        irrigationInchesPerWeek: customer.irrigation_inches_per_week,
-        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
-        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
+        // Settings saved BEFORE the home moved describe the former property's
+        // sprinkler system — withheld (events-only plan, reconfirm ask), never
+        // turned into exact controller minutes for the new home. `>=`: the
+        // stamp and a same-transaction updated_at bump compare equal.
+        irrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.irrigation_inches_per_week,
+        turfIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.turf_irrigation_inches_per_week,
+        assessmentIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.assessment_irrigation_inches_per_week,
         turfIrrigationType: customer.turf_irrigation_type,
         irrigationSystem: customer.irrigation_system,
-        irrigationRunMinutes: customer.irrigation_run_minutes,
-        wateringDays: customer.watering_days,
-        irrigationSystemType: customer.irrigation_system_type,
+        irrigationRunMinutes: scheduleUnconfirmed ? null : customer.irrigation_run_minutes,
+        wateringDays: scheduleUnconfirmed ? null : customer.watering_days,
+        irrigationSystemType: scheduleUnconfirmed ? null : customer.irrigation_system_type,
+        scheduleUnconfirmed,
+        priorWeekEvents,
         rainSensor: customer.rain_sensor === true || customer.rain_sensor === 't',
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
@@ -1252,6 +1274,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // sendOne must not log the raw SendGrid body (it can echo the
         // recipient address) — this sweep logs sanitizeFailureReason instead.
         suppressProviderErrorLog: true,
+        // Renew the snapshot claim on the SAME transition the library's own
+        // in-flight lease starts (the queued row), so the two leases can't
+        // drift apart across template resolution / suppression checks.
+        onQueued: snapshotArgs?.claimToken
+          ? () => renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })
+          : null,
       });
 
       // Idempotency-dedupe and suppression short-circuit inside the library

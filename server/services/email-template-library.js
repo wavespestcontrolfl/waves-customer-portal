@@ -911,6 +911,13 @@ async function sendTemplate({
   // caller is responsible for logging a sanitized reason itself; the thrown
   // error (status/body) still propagates for classification.
   suppressProviderErrorLog = false,
+  // Called with the durable email row the moment it is QUEUED (the point the
+  // library's own in-flight lease starts) — lets a caller holding a sibling
+  // lease (the weekly watering-plan snapshot claim) renew it on the same
+  // transition instead of a lease that began before template resolution
+  // and suppression checks (codex #3565 gh-r19). Failures are logged, never
+  // fatal to the send.
+  onQueued = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1170,6 +1177,13 @@ async function sendTemplate({
       [message] = await db('email_messages').insert(queuedPayload).returning('*');
     } catch (err) {
       return await resolveIdempotencyCollision(err, idempotencyKey);
+    }
+  }
+  if (typeof onQueued === 'function') {
+    try {
+      await onQueued(message);
+    } catch (err) {
+      logger.warn(`[email-template-library] onQueued hook failed for ${templateKey}: ${err.message}`);
     }
   }
 

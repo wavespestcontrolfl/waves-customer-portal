@@ -60,6 +60,22 @@ describe('buildWeekPlan — sizing', () => {
     expect(rotor.minutesPerEvent).toBe(60);
   });
 
+  test('cool season honors the advertised 10–14-day cadence: a run last week → hold this week (codex gh-r19)', () => {
+    const after = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 1, ...SPRAY });
+    expect(after.action).toBe('hold');
+    expect(after.events).toBe(0);
+    expect(after.reasons).toContain('cool_season_cadence');
+    expect(after.fallbackMinutesPerEvent).toBeGreaterThan(0); // wilt override still offered
+    // No run last week (or unknown) → sized normally; warm seasons ignore the input.
+    expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 0, ...SPRAY }).action).toBe('run');
+    expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: null, ...SPRAY }).action).toBe('run');
+    expect(buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: TWO_DAYS, priorWeekEvents: 2, ...SPRAY }).action).toBe('run');
+    // A legal ban still wins (no wilt-override cycle on a prohibited week).
+    const banned = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: { maxDaysPerWeek: 0 }, priorWeekEvents: 1, ...SPRAY });
+    expect(banned.reasons).toContain('restriction_prohibits');
+    expect(banned.fallbackMinutesPerEvent).toBe(null);
+  });
+
   test('cool season caps at one event and flags cool_season even under a 2-day policy', () => {
     const p = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, ...SPRAY });
     expect(p.seasonalMaxEvents).toBe(1);

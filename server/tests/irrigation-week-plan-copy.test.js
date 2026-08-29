@@ -102,6 +102,18 @@ describe('renderWeekPlanEmail', () => {
     expect(renderWeekPlanReport(plan).detail).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
   });
 
+  test('cool-season cadence hold says WHY (you watered last week); an unconfirmed schedule after a move gets the reconfirm note, not the head-type ask (codex gh-r19)', () => {
+    const cadence = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: ONE_DAY, priorWeekEvents: 1, ...SPRAY });
+    expect(cadence.reasons).toContain('cool_season_cadence');
+    expect(renderWeekPlanEmail(cadence, CTX).week_plan).toContain('You watered last week, and December through March your St. Augustine is barely growing — every 10–14 days if needed is plenty');
+    const eventsOnly = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY });
+    expect(eventsOnly.minutesPerEvent).toBe(null);
+    const moved = renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null, scheduleUnconfirmed: true });
+    expect(moved.plan_note).toContain('Your address changed after your sprinkler settings were saved, so this plan leaves them out.');
+    expect(moved.plan_note).not.toContain('Add your sprinkler head type');
+    expect(renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null }).plan_note).toContain('Add your sprinkler head type');
+  });
+
   test('a single run under a multi-day policy says "one of your permitted watering days" everywhere', () => {
     const two = { maxDaysPerWeek: 2 };
     const run = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'peak', restriction: two, ...SPRAY });
@@ -326,6 +338,31 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null, strict: true })).toBeNull();
     stubSelect(row(POLICY));
     expect((await loadCurrentWeekPlan('c1', strictPin)).plan.action).toBe('run');
+  });
+
+  test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlanEvents reads last week\'s SENT plan (codex gh-r19)', async () => {
+    const { renewWeekPlanClaim, loadPriorWeekPlanEvents } = require('../services/irrigation-week-plan');
+    const cap = {};
+    db.mockImplementation(() => ({
+      where(w) { cap.where = w; return this; },
+      whereNull(c) { cap.whereNull = c; return this; },
+      whereNotNull(c) { cap.whereNotNull = c; return this; },
+      update(p) { cap.update = p; return Promise.resolve(1); },
+      first: async (col) => { cap.first = col; return { week_plan: JSON.stringify({ action: 'run', events: 1 }) }; },
+    }));
+    db.fn = { now: () => 'now()' };
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(true);
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', claim_token: 'tok' });
+    expect(cap.whereNull).toBe('sent_at');
+    expect(Object.keys(cap.update)).toEqual(['claimed_at', 'updated_at']);
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: null })).toBe(false);
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-16' });
+    expect(cap.whereNotNull).toBe('sent_at');
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => null }));
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('db down'); } }));
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
   });
 
   test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {

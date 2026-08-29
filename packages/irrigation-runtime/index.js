@@ -274,6 +274,8 @@ function buildWeekPlan({
   explicitInchesPerWeek = null,
   rainSensor = false,
   rainKnown = true,
+  // Last week's SENT plan's event count (null = unknown / no plan).
+  priorWeekEvents = null,
 } = {}) {
   const reasons = [];
   const legalMaxEvents = restriction && Number.isInteger(Number(restriction.maxDaysPerWeek)) && Number(restriction.maxDaysPerWeek) >= 0
@@ -351,6 +353,14 @@ function buildWeekPlan({
   if (maxEvents === 0) {
     reasons.push('restriction_prohibits');
     return { ...common, action: 'hold', events: 0, fallbackMinutesPerEvent: null };
+  }
+  // Cool season is "every 10–14 days if needed": a run last week means a
+  // hold this week — the one-event-per-week ceiling alone would prescribe a
+  // run every Monday while the copy promises the longer cadence.
+  if (season === 'cool' && Number(priorWeekEvents) > 0) {
+    reasons.push('cool_season_cadence');
+    const fallback = sizeRun(EVENT_DEPTH_MIN_INCHES);
+    return { ...common, action: 'hold', events: 0, depthInches: null, minutesPerEvent: null, fallbackMinutesPerEvent: fallback.minutesPerEvent };
   }
   if (need < HOLD_BELOW_INCHES) {
     reasons.push('need_below_event_minimum');

@@ -193,6 +193,22 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
+  // The primary HOME moved (street, city or zip): the customer's sprinkler
+  // settings on property_preferences describe the former property's system.
+  // Stamp the move so the weekly watering plan withholds exact controller
+  // minutes until the settings are re-saved for the new home (codex #3565
+  // gh-r19). Only the stamp is written — the settings themselves stay for
+  // the customer to reconfirm or edit.
+  const homeMoved = !!before && (
+    addressMatchKey(before.address_line1) !== addressMatchKey(after.address_line1)
+    || addressMatchKey(before.zip) !== addressMatchKey(after.zip)
+    || addressMatchKey(before.city) !== addressMatchKey(after.city)
+  );
+  if (homeMoved) {
+    counts.property_preferences = await conn('property_preferences')
+      .where({ customer_id: customerId })
+      .update({ irrigation_home_changed_at: now });
+  }
   const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
   };

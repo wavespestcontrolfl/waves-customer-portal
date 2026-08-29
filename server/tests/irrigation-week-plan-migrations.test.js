@@ -62,3 +62,27 @@ describe('irrigation.weekly_plan template seed', () => {
     expect(text).not.toMatch(/controller/i);
   });
 });
+
+describe('20260829000001 property_preferences.irrigation_home_changed_at (codex gh-r19)', () => {
+  const mig = require('../models/migrations/20260829000001_property_preferences_irrigation_home_changed_at');
+  const rig = ({ hasTable = true, hasColumn = false } = {}) => {
+    const cols = [];
+    const builder = { timestamp: jest.fn((n) => { cols.push(n); return {}; }), dropColumn: jest.fn((n) => cols.push(`-${n}`)) };
+    const knex = { schema: { hasTable: jest.fn(async () => hasTable), hasColumn: jest.fn(async () => hasColumn), alterTable: jest.fn(async (_t, cb) => cb(builder)) } };
+    return { knex, cols, builder };
+  };
+  test('adds the timestamptz once; a second run is a no-op; down drops it', async () => {
+    const a = rig();
+    await mig.up(a.knex);
+    expect(a.knex.schema.alterTable).toHaveBeenCalledWith('property_preferences', expect.any(Function));
+    expect(a.builder.timestamp).toHaveBeenCalledWith('irrigation_home_changed_at', { useTz: true });
+    const b = rig({ hasColumn: true });
+    await mig.up(b.knex);
+    expect(b.knex.schema.alterTable).not.toHaveBeenCalled();
+    await mig.down(b.knex);
+    expect(b.cols).toEqual(['-irrigation_home_changed_at']);
+    const c = rig({ hasTable: false });
+    await mig.up(c.knex); await mig.down(c.knex);
+    expect(c.knex.schema.alterTable).not.toHaveBeenCalled();
+  });
+});

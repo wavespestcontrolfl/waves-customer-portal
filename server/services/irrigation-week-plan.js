@@ -106,6 +106,8 @@ function decideWeekPlan({
   // The plan week's Sunday: a policy that expires before it does not cover
   // the instruction and yields no plan.
   planWeekEnd = null,
+  // Last week's SENT plan's event count — cool-season cadence input.
+  priorWeekEvents = null,
   now = new Date(),
 } = {}) {
   const restriction = currentRestrictionPolicy(now, { county, horizonEnd: planWeekEnd });
@@ -129,6 +131,7 @@ function decideWeekPlan({
     explicitInchesPerWeek,
     rainSensor,
     rainKnown: advice?.rainKnown !== false,
+    priorWeekEvents,
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
   // Everything the decision was made from, for the snapshot (the report
@@ -137,6 +140,7 @@ function decideWeekPlan({
     targetInches: targetInchesPerWeek,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     appliedInches: advice?.appliedInchesPerWeek ?? null,
+    priorWeekEvents,
     lastWeekRainInches,
     rainKnown: advice?.rainKnown !== false,
     forecastRainInches,
@@ -190,7 +194,7 @@ function eventsOnlyClause() {
  * Email copy for a decision. Returns null for an 'unavailable' plan so the
  * sender keeps its pre-plan template.
  */
-function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false } = {}) {
+function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false, scheduleUnconfirmed = false } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const name = String(firstName || '').trim() || 'there';
   const notes = [];
@@ -216,7 +220,9 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action === 'hold') {
     subject = `Skip your turf watering this week, ${name}`;
     heading = `Your lawn is set for the week, ${name}`;
-    const why = plan.reasons.includes('prior_week_rain_surplus')
+    const why = plan.reasons.includes('cool_season_cadence')
+      ? `You watered last week, and December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
+      : plan.reasons.includes('prior_week_rain_surplus')
       ? `Last week's rain alone left more in the soil than your ${grassLabel} can use this week`
       : overwatered
       ? `Last week's rain and irrigation left more in the soil than your ${grassLabel} can use this week`
@@ -256,7 +262,11 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     const dayWord = restriction.maxDaysPerWeek === 1 ? 'one watering day' : `${restriction.maxDaysPerWeek} watering days`;
     notes.push(`Your area is limited to ${dayWord} a week right now, so this plan stays inside that even though your ${grassLabel} could use a little more — one deeper soak does more good than two light ones.`);
   }
-  if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
+  if (scheduleUnconfirmed && plan.action !== 'hold') {
+    // The home moved after the sprinkler settings were saved — the plan
+    // deliberately left them out (events-only), and says so.
+    notes.push('Your address changed after your sprinkler settings were saved, so this plan leaves them out. Reconfirm your zone minutes, watering days and head type under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
+  } else if (plan.action !== 'hold' && plan.minutesPerEvent == null) {
     notes.push('Add your sprinkler head type (spray or rotor) under Irrigation in your portal and next week\'s plan comes in minutes for your system.');
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {
     notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates from University of Florida turf guidance. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
@@ -423,6 +433,47 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
     // Distinct from contention: the caller falls back to the pre-plan email
     // rather than silencing the week's communication.
     return { claimed: false, hash: null, claimToken: token, error: true };
+  }
+}
+
+// Renew the claimant's lease on the SAME transition the email library's
+// in-flight lease starts (its onQueued hook): the claim was taken before
+// weather fetches, rendering, template resolution and suppression checks, so
+// a lease of equal length that started earlier could expire while the email
+// is still legitimately in flight — another sweep would replace the snapshot
+// and this worker's claim-scoped stamp would then miss (codex #3565 gh-r19).
+async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
+  if (!customerId || !weekEnding || !claimToken) return false;
+  try {
+    const n = await db('irrigation_week_plans')
+      .where({ customer_id: customerId, week_ending: weekEnding, claim_token: claimToken })
+      .whereNull('sent_at')
+      .update({ claimed_at: db.fn.now(), updated_at: db.fn.now() });
+    return n > 0;
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] claim renew failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return false;
+  }
+}
+
+// The PRIOR week's sent plan's event count (null when none / unreadable):
+// the cool-season cadence ("every 10–14 days if needed") holds the week
+// after a run instead of prescribing one every Monday (codex #3565 gh-r19).
+async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
+  const prior = etDateStringPlusDays(weekEnding, -7);
+  if (!customerId || !prior) return null;
+  try {
+    const row = await db('irrigation_week_plans')
+      .where({ customer_id: customerId, week_ending: prior })
+      .whereNotNull('sent_at')
+      .first('week_plan');
+    if (!row) return null;
+    const plan = typeof row.week_plan === 'string' ? JSON.parse(row.week_plan) : row.week_plan;
+    const events = Number(plan?.events);
+    return Number.isFinite(events) ? events : null;
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] prior-week lookup failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return null;
   }
 }
 
@@ -684,6 +735,8 @@ module.exports = {
   renderWeekPlanEmail,
   renderWeekPlanReport,
   visitInPlanWeek,
+  renewWeekPlanClaim,
+  loadPriorWeekPlanEvents,
   PinnedWeekPlanUnavailable,
   persistWeekPlan,
   markWeekPlanSent,
