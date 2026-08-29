@@ -2654,7 +2654,26 @@ function leadAddressCompareKey(v) {
   const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!streetKey) return '';
   const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
+  // A comma-free full address is stored WHOLE (its inline unit stays inside
+  // the street); a later restatement of that same line carries the unit
+  // again as a dedicated segment ("…Apt 4 Sarasota FL 34236, Apt 4"). When
+  // the street already embeds the same door, the appended unit adds no
+  // identity — collapse to the street key so the two compare equal and
+  // successor ownership is recorded (#3608 codex r4 P1).
+  if (unitK && streetEmbedsUnitKey(streetKey, unitK)) return streetKey;
   return unitK ? `${streetKey}|${unitK}` : streetKey;
+}
+
+// True when a (lower-cased, punctuation-free) street key carries an inline
+// "<designator> <value>" pair anywhere whose unit key equals unitK.
+function streetEmbedsUnitKey(streetKey, unitK) {
+  const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const re = /\b(apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|#)\s*#?\s*([a-z0-9-]+)\b/g;
+  let m;
+  while ((m = re.exec(streetKey)) !== null) {
+    if (unitLineValueKey(normalizeUnitLine(`${m[1]} ${m[2]}`)) === unitK) return true;
+  }
+  return false;
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED

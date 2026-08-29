@@ -238,9 +238,21 @@ describe('reaffirmedFilledLeadFields — address', () => {
     const locked = { address: legacy, city: null, zip: null };
     expect(reaffirmedFilledLeadFields({ address: composed, city: null, zip: null }, locked).address).toBe(legacy);
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St Apt 4, Bradenton, FL 34205', 'Apt 4'), city: null, zip: null }, locked).address).toBeUndefined();
-    // A comma-free legacy value is stored whole and restates as itself.
+    // A comma-free legacy value is stored whole and restates as itself…
     const commaFree = '100 Main St Apt 4 Sarasota FL 34236';
     expect(reaffirmedFilledLeadFields({ address: commaFree, city: null, zip: null }, { address: commaFree, city: null, zip: null }).address).toBe(commaFree);
+    // …and its composed restatement (same line + dedicated "Apt 4") keys the
+    // same: the street already embeds that door, so the appended unit adds
+    // no identity. A DIFFERENT dedicated unit still keys differently.
+    const restated = composeLeadAddress(commaFree, 'Apt 4');
+    expect(restated).toBe('100 Main St Apt 4 Sarasota FL 34236, Apt 4');
+    expect(leadAddressCompareKey(restated)).toBe(leadAddressCompareKey(commaFree));
+    expect(leadAddressCompareKey(composeLeadAddress(commaFree, '#4'))).toBe(leadAddressCompareKey(commaFree));
+    expect(leadAddressCompareKey(composeLeadAddress(commaFree, 'Apt 5'))).not.toBe(leadAddressCompareKey(commaFree));
+    const lockedCF = { address: commaFree, city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: restated, city: 'Sarasota', zip: '34236' }, lockedCF).address).toBe(commaFree);
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress(commaFree, 'Apt 5'), city: 'Sarasota', zip: '34236' }, lockedCF).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: restated, city: 'Bradenton', zip: '34205' }, lockedCF).address).toBeUndefined();
   });
 
   test('conflict branch keeps the retained inline unit through the bound', () => {
