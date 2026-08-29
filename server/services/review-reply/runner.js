@@ -8,10 +8,12 @@
  *   off    — nothing is queued or drafted (kill switch; queued rows wait)
  *   shadow — drafts land as "[DRAFT] …" in review_reply (existing needs-reply
  *            queue + Agent Ops card + "Use Draft" button), nothing posts
- *   auto   — 4-5★ replies post to Google; 1-3★ and unrated always park
+ *   auto   — 4-5★ replies post to Google; under 4★ (and unrated) are never
+ *            touched by the lane at all (owner ruling 2026-08-29)
  *
  * Owner rulings 2026-08-27:
- *   - 1-3★ (and unrated) never auto-post: draft + park + bell.
+ *   - Under 4★ (and unrated): not enqueued, not drafted, no bell — the row
+ *     stays a normal needs-reply item for a person (owner ruling 2026-08-29).
  *   - Jitter anchored on Google's review creation time; already-overdue
  *     reviews (hourly sync lag) get a short clamped delay instead.
  *   - Unlinked 4-5★ reviews auto-reply from review-only context.
@@ -119,8 +121,15 @@ function locationAllowed(locationId, cfg = config()) {
  * never retry). Returns {} when the review must not be queued. Deploy-forward
  * by construction: only inserts carry these fields.
  */
-function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review_created_at, dismissed } = {}, { now = new Date(), cfg = config() } = {}) {
+// Under 4★ (and unrated / unknown) never enters the lane — owner ruling
+// 2026-08-29: those reviews are not responded to by the pipeline at all.
+function ratingEligible(star_rating) {
+  return (Number(star_rating) || 0) >= 4;
+}
+
+function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review_created_at, dismissed, star_rating } = {}, { now = new Date(), cfg = config() } = {}) {
   if (cfg.mode === 'off') return {};
+  if (!ratingEligible(star_rating)) return {};
   if (!reviewer_name || reviewer_name === '_stats') return {};
   if (dismissed) return {};
   if (hasRealReply(owner_reply)) return {};
@@ -177,6 +186,9 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
     .where('reviewer_name', '!=', '_stats')
     .whereRaw('COALESCE(dismissed, false) = false')
     .where('review_created_at', '>=', cutoff)
+    // Under 4★ never enters the lane (owner ruling 2026-08-29); in SQL so a
+    // run of low-star rows cannot occupy the batch.
+    .where('star_rating', '>=', 4)
     // Row INSERT time (not the review's Google time) after the rollout: a
     // review that existed locally before the hook shipped is history.
     .where('created_at', '>=', new Date(since).toISOString())
@@ -184,7 +196,7 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
     .orderBy('review_created_at', 'asc')
     .limit(limit);
   if (cfg.locations.length) q.whereRaw('lower(location_id) = ANY(?)', [cfg.locations]);
-  const candidates = await q.select('id', 'location_id', 'reviewer_name', 'review_reply', 'review_created_at', 'dismissed');
+  const candidates = await q.select('id', 'location_id', 'reviewer_name', 'review_reply', 'review_created_at', 'dismissed', 'star_rating');
   let n = 0;
   for (const c of (candidates || [])) {
     const fields = autoReplyInsertFields({ ...c, owner_reply: c.review_reply }, { now, cfg });
@@ -527,7 +539,17 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'parked', reason: 'location_disabled' };
   }
   const rating = Number(merged.star_rating) || 0;
-  // Hard invariant, independent of config: unrated and 1-3★ never auto-post.
+  // Under 4★ / unrated: the lane does not respond at all (owner ruling
+  // 2026-08-29) — a row that reached a claim (edited down after it was queued,
+  // or queued before this rule) is released with no draft and no bell. Post
+  // now is an explicit human action and keeps its own path below.
+  if (intent !== 'post_now' && (rating === 0 || rating <= 3)) {
+    const reason = rating === 0 ? 'unrated' : 'low_rating';
+    await releaseClaim(row, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: reason, auto_reply_draft: null, auto_reply_drafted_at: null });
+    return { outcome: 'skipped', reason };
+  }
+  // Hard invariant, independent of config: unrated and 1-3★ never auto-post
+  // (Post now on such a row parks the freshly drafted text for the person).
   const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
 
   // A publish retry reuses the verifier-approved draft it already produced —
@@ -1591,6 +1613,7 @@ module.exports = {
   config,
   computeDueAt,
   autoReplyInsertFields,
+  ratingEligible,
   enqueueMissedReviews,
   rolloutCutoff,
   _resetRolloutCutoffCache: () => { rolloutCutoffCache = undefined; },

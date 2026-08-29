@@ -945,6 +945,7 @@ class GoogleBusinessService {
           reviewer_name: normalized.reviewer_name,
           owner_reply: normalized.owner_reply,
           review_created_at: normalized.review_created_at,
+          star_rating: normalized.star_rating,
         });
         const [insertedReview] = await db('google_reviews').insert({ ...row, ...autoReply }).returning('id');
         result = { id: insertedReview?.id || insertedReview, inserted: true };
@@ -1310,7 +1311,7 @@ class GoogleBusinessService {
           review_created_at: placesCreatedAt,
           customer_id: customerId,
           synced_at: sampleSyncStart.toISOString(),
-          ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt }),
+          ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt, star_rating: review.rating || 0 }),
         }).returning('id');
         newCount++;
       }
