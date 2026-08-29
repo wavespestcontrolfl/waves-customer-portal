@@ -765,6 +765,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Trelona');
   });
 
+  it('a bait device under bait_placement with zone IDs never heads a "Where we treated" schematic', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      zones: [{ id: 'z1', letter: 'A', label: 'Front', geometry_image: null }],
+      applications: [{ id: 'a1', method: 'bait_placement', zone_ids: ['z1'], totalAmount: '6', amountUnit: 'cartridges', product: { name: 'Trelona Compressed Termite Bait Cartridges', category: 'termite bait', epa_reg: '499-557' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
   it('never lists a bait cartridge as an application, even EPA-registered', () => {
     const data = {
       ...BASE_DATA,

@@ -213,6 +213,28 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     expect(out.metrics[0].value).toBe('10 of 12');
   });
 
+  it('an activity count above the inspected count is treated as uncounted — never "12 of the 10"', () => {
+    const net = buildStationNetwork({ values: { ...CLEAN_VALUES, stations_checked: 10, stations_with_activity: 12, termite_activity: 'Active termites present' } });
+    expect(net.counts.activity).toBeNull();
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, stations_checked: 10, stations_with_activity: 12, termite_activity: 'Active termites present' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status.label).toBe('Termite activity observed');
+    expect(out.statusSummary).not.toMatch(/12 of the 10/);
+    expect(out.metrics[1].value).toBe('Observed');
+  });
+
+  it('zero stations inspected → the activity metric reads "Not assessed", never "None observed"', () => {
+    expect(buildTodaysMetrics({ checked: 0, total: 12, activityCount: 0, servicedCount: 0 })[1].value).toBe('Not assessed');
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { stations_checked: 0, stations_inaccessible: 12, total_stations: 12, termite_activity: 'None observed', bait_consumption: 'None — bait intact' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status.label).toBe('Bait stations being monitored');
+    expect(out.metrics[1]).toEqual({ label: 'Termite activity', value: 'Not assessed' });
+  });
+
   it('clamps a recorded total below the documented counts — never "10 of 8"', () => {
     const net = buildStationNetwork({ values: { ...CLEAN_VALUES, total_stations: 8, stations_checked: 10 } });
     expect(net.counts.total).toBe(10);

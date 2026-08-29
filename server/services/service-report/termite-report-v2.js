@@ -181,7 +181,9 @@ const BAIT_CONDITION_METRIC = {
 
 function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0, servicedToday = false, baitConsumption = null }) {
   if (checked == null) return null;
-  let activityValue = 'None observed';
+  // Nothing inspected (every station inaccessible) → no absence claim in
+  // the metric either, matching the headline's guard (codex P2 #3600 r9).
+  let activityValue = checked > 0 ? 'None observed' : 'Not assessed';
   if (activityCount != null && activityCount > 0) activityValue = `${activityCount} station${plural(activityCount)}`;
   else if (activityObserved) activityValue = 'Observed';
   // Form-documented bait/station work with no per-station serviced pins
@@ -240,7 +242,12 @@ function stationDenominator({ total, checked, inaccessible }) {
 function buildStationNetwork({ values = {}, stationSummary = null }) {
   const summary = visitBackedSummary(stationSummary);
   const checked = summary?.checked ?? toCount(values.stations_checked);
-  const activityCount = summary?.activity ?? toCount(values.stations_with_activity);
+  let activityCount = summary?.activity ?? toCount(values.stations_with_activity);
+  // The typed validator checks each count's shape, not their relationship:
+  // an activity count above the inspected count is impossible, so it is
+  // treated as UNCOUNTED (activity still reads "observed", never
+  // "12 of the 10 stations") — codex P2 #3600 r9.
+  if (activityCount != null && checked != null && activityCount > checked) activityCount = null;
   const inaccessible = summary?.inaccessible ?? toCount(values.stations_inaccessible);
   const total = stationDenominator({ total: summary?.total ?? toCount(values.total_stations), checked, inaccessible: inaccessible || 0 });
   if (checked == null) return null;

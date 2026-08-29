@@ -431,6 +431,28 @@ test('termite report: no bait-station appointment → null (never the cross-line
   expect(pest.termiteNextMonitoringVisit).toBeNull();
 });
 
+test('termite report: the bait row is found behind dozens of earlier non-bait rows, resolving each distinct service once', async () => {
+  const weekly = Array.from({ length: 60 }, (_, i) => ({
+    id: `scheduled-lawn-${i}`, customer_id: 'customer-1', status: 'confirmed', service_type: 'Lawn Care Treatment', window_start: '08:00:00',
+    scheduled_date: `2999-01-${String(1 + (i % 28)).padStart(2, '0')}`,
+  }));
+  const reads = [];
+  const base = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      ...weekly,
+      { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-06-01', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
+    ],
+  });
+  const spy = (table) => { reads.push(table); return base(table); };
+  spy.schema = base.schema;
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-deep', spy, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-06-01');
+  // 60 identical lawn rows + 1 bait row → two identities → two resolutions,
+  // each a handful of catalog reads, never one per row
+  expect(reads.filter((t) => t === 'services').length).toBeLessThan(20);
+});
+
 test('termite report: the lookup never runs (no catalog reads) when the gate is off, in pdf mode, or for a non-bait termite form', async () => {
   const bait = { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' };
   const build = (service, opts) => {

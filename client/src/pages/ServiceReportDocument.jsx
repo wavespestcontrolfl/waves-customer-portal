@@ -485,10 +485,14 @@ export default function ServiceReportDocument({ data, token }) {
   // silently stripped watering and re-entry instructions from those visits.
   const hasActualTreatment = applications.some(isProductApplication);
 
+  // …and the schematic additionally requires a REAL product application: a
+  // bait cartridge placed under bait_placement with zone IDs is a monitoring
+  // device, so it must never head a "Where we treated" map (codex P1 #3600
+  // r9) — same identity rule as the products list.
   const hasRenderableTreatment = applications.some((app) => {
     const method = app.method || 'perimeter_spray';
     const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
-    return method !== 'station_check' && zoneIds.length > 0;
+    return method !== 'station_check' && zoneIds.length > 0 && isProductApplication(app);
   });
 
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length

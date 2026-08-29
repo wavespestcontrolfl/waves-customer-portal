@@ -4382,15 +4382,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       let baitRow = null;
-      // Bounded: each resolution is a few catalog reads; the next bait
-      // visit is normally within the first handful of upcoming rows.
-      for (const row of rows.slice(0, 40)) {
-        let profile = null;
-        try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { profile = null; }
-        let isBait;
-        if (profile?.findingsType) isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE;
-        else if (profile?.projectType) isBait = false;
-        else isBait = isTermiteBaitServiceName(row?.service_type);
+      // The WHOLE candidate window (a customer on weekly service can have
+      // dozens of non-bait rows ahead of the annual check — codex P2 #3600
+      // r9). Resolution is memoized per identity (service_id ·
+      // service_key_snapshot · label): repeated weekly rows resolve once,
+      // so the cost is one resolution per DISTINCT service, not per row.
+      const verdictByIdentity = new Map();
+      for (const row of rows) {
+        const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
+        let isBait = verdictByIdentity.get(identity);
+        if (isBait === undefined) {
+          let profile = null;
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { profile = null; }
+          if (profile?.findingsType) isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE;
+          else if (profile?.projectType) isBait = false;
+          else isBait = isTermiteBaitServiceName(row?.service_type);
+          verdictByIdentity.set(identity, isBait);
+        }
         if (isBait) { baitRow = row; break; }
       }
       termiteNextMonitoringVisit = toNextAppointment(baitRow);
