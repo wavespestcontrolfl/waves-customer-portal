@@ -1156,10 +1156,9 @@ const EDIT_FALLBACK_SERVICES = [
       {
         name: "Rodent Bait Station Service",
         serviceKey: "rodent_bait_quarterly",
-        // rodent_bait is a percent-excluded family (pricing-engine
-        // WAVEGUARD.excludedFromPercentDiscount) — the only such family in
-        // this static list; stamped so the preview matches the save.
-        excludedFromPercentDiscount: true,
+        // rodent_bait joined WaveGuard 2026-08-29 (owner directive) and is
+        // percent-DISCOUNTABLE — the stale exclusion here made the fallback
+        // preview show a higher total than the server persists on save.
       },
     ],
   },

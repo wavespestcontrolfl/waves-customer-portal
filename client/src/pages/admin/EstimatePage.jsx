@@ -5891,7 +5891,12 @@ function EstimateToolView() {
                               </span>{" "}
                             </div>
                           )}
-                          {E.recurring.rodentBaitMo > 0 && (
+                          {/* Legacy scalar-only results only: since 2026-08-29
+                              a rodent_bait services row rides INSIDE the
+                              recurring totals — rendering the scalar beside it
+                              would show the plan twice (codex #3591 r7). */}
+                          {E.recurring.rodentBaitMo > 0
+                            && !(E.recurring.services || []).some((s) => (s.service || '') === 'rodent_bait') && (
                             <div
                               style={{
                                 display: "flex",

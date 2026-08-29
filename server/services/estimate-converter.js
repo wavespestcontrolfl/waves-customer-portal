@@ -5665,10 +5665,15 @@ const EstimateConverter = {
               // the coverage-slicing basis (renewals split it across covered
               // visits), so the setup share is excluded — otherwise every
               // covered visit is over-credited by setup/visits during the
-              // payment-pending window. Residential prepay is untaxed, so
-              // subtracting the face amount is exact.
+              // payment-pending window. TAX-INCLUSIVE subtraction (codex r7
+              // P1): a taxable commercial prepay taxes the setup line too,
+              // so the coverage basis drops the setup's gross share — the
+              // blended prepayTaxRate is exactly the rate create() applies
+              // to the whole subtotal. Residential passes no rate (gross ==
+              // face), keeping the r5 behavior byte-identical there.
               prepayAmount: draftInvoiceAmount != null
-                ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit - prepayRodentSetupAmount) * 100) / 100)
+                ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
+                  - prepayRodentSetupAmount * (1 + (Number(prepayTaxRate) || 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get

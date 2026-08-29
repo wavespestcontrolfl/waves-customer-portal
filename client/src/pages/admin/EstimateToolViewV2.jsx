@@ -9406,7 +9406,11 @@ export default function EstimateToolViewV2({
                               </span>{" "}
                             </div>
                           )}
-                          {E.recurring.rodentBaitMo > 0 && (
+                          {/* Legacy scalar-only results only — a 2026-08-29+
+                              rodent_bait services row is already inside the
+                              recurring totals (codex #3591 r7). */}
+                          {E.recurring.rodentBaitMo > 0
+                            && !(E.recurring.services || []).some((s) => (s.service || '') === 'rodent_bait') && (
                             <div className="flex justify-between items-center py-1.5 text-14">
                               {" "}
                               <span className="text-ink-secondary">

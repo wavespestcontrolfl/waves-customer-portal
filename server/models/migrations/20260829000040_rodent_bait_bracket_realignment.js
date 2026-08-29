@@ -273,21 +273,30 @@ exports.down = async function down(knex) {
     await audit(knex, configKey, JSON.parse(auditRow.new_value || 'null'), JSON.parse(auditRow.old_value), DOWN_REASON);
   }
 
-  // Restore the Discount Rules row to the pre-realignment policy (only when
-  // it still holds this migration's values — same admin-edit guard).
+  // Restore the Discount Rules row from ITS OWN up() audit snapshot (codex
+  // #3591 r7 P2 — never hardcoded historical defaults: the row may have
+  // carried customized flags/notes before deployment), only when it still
+  // holds this migration's values (same admin-edit guard as above).
   if (await knex.schema.hasTable('service_discount_rules')) {
+    const ruleAudit = await knex('pricing_config_audit')
+      .where({ config_key: 'service_discount_rules.rodent_bait', changed_by: MIGRATION_TAG, reason: UP_REASON })
+      .orderBy('id', 'desc')
+      .first();
     const rule = await knex('service_discount_rules').where({ service_key: 'rodent_bait' }).first();
-    if (rule && rule.tier_qualifier === true && rule.exclude_from_pct_discount === false) {
-      await knex('service_discount_rules')
-        .where({ service_key: 'rodent_bait' })
-        .update({
-          tier_qualifier: false,
-          exclude_from_pct_discount: true,
-          notes: 'Fully excluded from WaveGuard credits, coupons, setup credits, discounts, and tier benefits.',
-        });
-      await audit(knex, 'service_discount_rules.rodent_bait',
-        { tier_qualifier: true, exclude_from_pct_discount: false },
-        { tier_qualifier: false, exclude_from_pct_discount: true }, DOWN_REASON);
+    if (ruleAudit?.old_value && rule && rule.tier_qualifier === true && rule.exclude_from_pct_discount === false) {
+      let snapshot = null;
+      try { snapshot = JSON.parse(ruleAudit.old_value); } catch { snapshot = null; }
+      if (snapshot && typeof snapshot === 'object') {
+        await knex('service_discount_rules')
+          .where({ service_key: 'rodent_bait' })
+          .update({
+            tier_qualifier: snapshot.tier_qualifier === true,
+            exclude_from_pct_discount: snapshot.exclude_from_pct_discount === true,
+            ...(snapshot.notes !== undefined ? { notes: snapshot.notes } : {}),
+          });
+        await audit(knex, 'service_discount_rules.rodent_bait',
+          { tier_qualifier: true, exclude_from_pct_discount: false }, snapshot, DOWN_REASON);
+      }
     }
   }
 

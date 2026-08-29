@@ -941,6 +941,14 @@ function mapV1ToLegacyShape(v1Result) {
       ...(li.legacyFloorArmed === true ? { legacyFloorArmed: true } : {}),
       taxable: li.taxable === true,
       taxCategory: li.taxCategory || null,
+      // Bracket provenance (codex #3591 r7 P1): commercial rodent lines
+      // prove their 2026-08-29+ pricing through stations/pricingBasis —
+      // dropping them here made rodentBaitLegacyReplaySignal read every
+      // mapped commercial bracket quote as pre-realignment legacy, so the
+      // FIRST recompute pinned it and suppressed the setup line. Forwarded
+      // generically (other commercial lines carry their own basis).
+      ...(Number(li.stations) > 0 ? { stations: Number(li.stations) } : {}),
+      ...(li.pricingBasis ? { pricingBasis: li.pricingBasis } : {}),
       discountable: false,
       discountEligible: false,
       waveGuardDiscountEligible: false,

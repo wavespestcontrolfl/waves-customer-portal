@@ -3675,14 +3675,19 @@ function recurringServicesWithSupplements(estResult = {}) {
       service: 'rodent_bait',
       name: 'Rodent Bait Stations',
       displayName: 'Rodent Bait Stations',
-      perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
-      visitsPerYear,
       cadenceLabel: 'Quarterly monitoring',
       tierLabel: 'Recurring service',
+      // With a new-model row present, NO money fields ride the supplement
+      // (codex #3591 r7 P1): the scalar is a ROUNDED monthly equivalent, so
+      // reconstructing perTreatment from it drifts ($89 → $29.67/mo →
+      // $89.01) and first-application invoicing consumes that figure. The
+      // row's engine-authorized amounts are already exact.
       ...(hasRodentRow ? {} : {
         mo: rodentMonthly,
         monthly: rodentMonthly,
         annual,
+        perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
+        visitsPerYear,
         detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
         waveGuardDiscountEligible: false,
       }),
