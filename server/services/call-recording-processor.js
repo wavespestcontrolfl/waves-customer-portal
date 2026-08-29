@@ -9213,7 +9213,17 @@ const CallRecordingProcessor = {
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-            if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+            // leads.address is a single free-text column (migration
+            // 20260401000095): compose the unit in, or the lead card / pipeline
+            // card / estimate prefill all lose it even though the extractor
+            // captured it in address_line2 (2026-08-29: a prod lead rendered
+            // without the caller's unit while the customer row had it).
+            if (extracted.address_line1 && isEmpty(current?.address)) {
+              leadUpdates.address = composeLeadAddress(
+                extracted.address_line1,
+                extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null,
+              );
+            }
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
             // Multi-service calls: matched_service is single-slot, so append the
@@ -14468,7 +14478,24 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
+/**
+ * leads.address is ONE free-text column, so the unit/suite from address_line2
+ * has to be composed into it ("100 Main St" + "Apt 4" → "100 Main St, Apt 4").
+ * A street that already embeds the same unit ("100 Main St Apt 4") is left
+ * alone so a V1 street + V2 unit never renders the unit twice. Pure.
+ */
+function composeLeadAddress(line1, line2) {
+  const street = String(line1 || '').trim();
+  const unit = String(line2 || '').trim();
+  if (!street) return null;
+  if (!unit) return street;
+  const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+  if (unitKey(unit) && streetEmbeddedUnitKey(street) === unitKey(unit)) return street;
+  return `${street}, ${unit}`;
+}
+
 CallRecordingProcessor._test = {
+  composeLeadAddress,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,
