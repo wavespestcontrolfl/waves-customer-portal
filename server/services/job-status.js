@@ -889,6 +889,17 @@ async function transitionJobStatus({
       void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
         logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
       });
+      // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
+      // child leaves its group; the last remaining row dissolves it.
+      // Guarded HERE — the one shared status writer — so no transition
+      // surface can forget it. Gate-independent by design: existing visits
+      // keep their lifecycle even if the creation gate is later unset.
+      // Idempotent + best-effort inside the helper.
+      if (['cancelled', 'skipped'].includes(String(toStatus || ''))) {
+        void require('./visit-groups').handleChildTerminal(jobId).catch((e) => {
+          logger.warn(`[job-status] visit-group terminal seam failed for ${jobId}: ${e.message}`);
+        });
+      }
     } else {
       // Reverse direction: a compensated cancellation (offboarding /
       // cancellation-processor revert a cancel when tracker state raced) or

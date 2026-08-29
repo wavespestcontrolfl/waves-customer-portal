@@ -387,10 +387,12 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
 }
 
 /**
- * Explicit split (doc §2): move one child to a fresh visit (new stop_seq)
- * subject to the membership freeze. Dissolves the source when one row
- * remains AND dissolution conditions still hold; otherwise the source stays
- * a preserved one-service visit.
+ * Explicit split / "Separate these services" (doc §2): DETACH one child to
+ * a plain ungrouped row, subject to the membership freeze. Until Phase-2
+ * grouped completion exists, a one-row visit is pointless (the doc says it
+ * auto-dissolves), so detaching IS the split; when the source is left with
+ * one untouched row it dissolves too, returning both rows to the legacy
+ * per-row path.
  */
 async function splitChild({ visitId, scheduledServiceId, createdBy }) {
   return db.transaction(async (t) => {
@@ -408,25 +410,12 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
       .where({ id: scheduledServiceId, visit_id: visitId }).first();
     if (!child) throw new Error('row is not a member of this visit');
 
-    const seq = await nextStopSeq(t, visit.stop_base_key);
-    const [fresh] = await t('service_visits')
-      .insert({
-        customer_id: visit.customer_id,
-        property_id: visit.property_id,
-        scheduled_date: visit.scheduled_date,
-        window_start: child.window_start || visit.window_start,
-        window_end: child.window_end || visit.window_end,
-        stop_base_key: visit.stop_base_key,
-        stop_seq: seq,
-        technician_id: child.technician_id || null,
-        group_family: visit.group_family,
-        status: 'open',
-        created_by: createdBy || 'admin:unknown',
-      })
-      .returning('*');
-    await t('scheduled_services').where({ id: child.id }).update({ visit_id: fresh.id });
+    await t('scheduled_services').where({ id: child.id }).update({ visit_id: null });
 
-    const remaining = await t('scheduled_services').where({ visit_id: visitId }).count('id as n').first();
+    const remaining = await t('scheduled_services')
+      .where({ visit_id: visitId })
+      .whereNotIn('status', TERMINAL_ROW_STATUSES)
+      .count('id as n').first();
     if (Number(remaining.n) <= 1) {
       const still = await visitActivity(visitId, t);
       if (canDissolve(still).ok) {
@@ -435,27 +424,45 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
           .update({ status: 'dissolved', close_reason: 'operator', closed_at: t.fn.now() });
       }
     }
-    return fresh;
+    return { detached: child.id, visitId };
   });
 }
 
 /**
- * Auto-dissolve when a cancel/skip leaves one untouched row (doc §2).
+ * Canonical cancel/skip hook (doc §2: "Cancel/skip leaves the group; the
+ * last remaining row dissolves it"). Called from the status-transition
+ * path after a child goes terminal. Detaches the terminal row and, when at
+ * most one non-terminal member remains on an untouched visit, dissolves
+ * it. Best-effort: never fails the committed status flip.
  */
-async function dissolveIfLastRow({ visitId }) {
-  return db.transaction(async (t) => {
-    const visit = await t('service_visits').where({ id: visitId }).first();
-    if (!visit || visit.status !== 'open') return false;
-    await lockStop(t, visit.stop_base_key);
-    const remaining = await t('scheduled_services').where({ visit_id: visitId }).count('id as n').first();
-    if (Number(remaining.n) > 1) return false;
-    const activity = await visitActivity(visitId, t);
-    if (!canDissolve(activity).ok) return false;
-    await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
-    await t('service_visits').where({ id: visitId })
-      .update({ status: 'dissolved', close_reason: 'row_cancelled', closed_at: t.fn.now() });
-    return true;
-  });
+async function handleChildTerminal(scheduledServiceId) {
+  try {
+    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
+    if (!row || !row.visit_id) return false;
+    return await db.transaction(async (t) => {
+      const visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || !['open'].includes(String(visit.status))) return false;
+      await lockStop(t, visit.stop_base_key);
+      // Terminal child leaves the group (its record keeps history via the
+      // packet items / service_records, not via visit_id).
+      await t('scheduled_services').where({ id: row.id }).update({ visit_id: null });
+      const remaining = await t('scheduled_services')
+        .where({ visit_id: visit.id })
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .count('id as n').first();
+      if (Number(remaining.n) > 1) return false;
+      const activity = await visitActivity(visit.id, t);
+      if (!canDissolve(activity).ok) return false;
+      await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
+      await t('service_visits').where({ id: visit.id })
+        .update({ status: 'dissolved', close_reason: 'row_cancelled', closed_at: t.fn.now() });
+      return true;
+    });
+  } catch (err) {
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] handleChildTerminal(${scheduledServiceId}) skipped: ${err.message}`);
+    return false;
+  }
 }
 
 /**
@@ -474,6 +481,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
       .where('ss.id', rowId)
       .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.window_start', 'ss.window_end', 'ss.technician_id',
         'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
     if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
     if (TERMINAL_ROW_STATUSES.includes(String(row.status || ''))) return null;
@@ -490,10 +498,26 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       .select('ss.id');
     if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
     else partnersQ.whereNull('ss.property_id');
+    partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
+      'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
+      'svc.groupable', 'svc.group_family');
     const partners = await partnersQ.limit(10);
     if (!partners.length) return null;
+    // Mutually compatible subset (codex r1 P1): one incompatible same-day
+    // row must not poison the whole grouping. Treat the new row as a
+    // pseudo-visit and keep only partners that would join it, then keep at
+    // most ONE attached visit's members (createOrJoinVisit refuses rows
+    // spanning two visits).
+    const pseudoVisit = { ...row, status: 'open' };
+    const compatible = partners.filter((p) => canJoin(p, pseudoVisit).ok
+      && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
+    if (!compatible.length) return null;
+    const attachedVisit = compatible.find((p) => p.visit_id);
+    const subset = attachedVisit
+      ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
+      : compatible;
     return await createOrJoinVisit({
-      rows: [{ id: row.id }, ...partners.map((p) => ({ id: p.id }))],
+      rows: [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))],
       createdBy: createdBy || 'dispatch',
       // Inside a caller transaction (converter/seeder), group on the SAME
       // trx — the new rows aren't visible outside it and a second
@@ -511,7 +535,7 @@ module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,
-  dissolveIfLastRow,
+  handleChildTerminal,
   visitActivity,
   _test: {
     stopBaseKey,
