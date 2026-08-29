@@ -340,6 +340,7 @@ async function markEnRoute(serviceId, opts = {}) {
     const fan = await require('./visit-groups').fanOutLiveTransition({
       primary: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
       smsOutcome: result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled'),
+      notificationOwner: result.visitNotificationOwner === true,
     });
     if (fan) result.visitFanOut = fan;
   }
@@ -592,10 +593,27 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // deterministic suppression (opt-out / covered sibling / already handled)
   // must read differently from a provider failure ('retry').
   let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
+  // Visit-scoped claim BEFORE the per-row sender (codex #3603 r4): two
+  // members signalled concurrently must not both text — only the claim
+  // owner sends; the other stamps itself covered.
+  let visitClaim = null;
+  if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling
+      && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
+    visitClaim = await require('./visit-groups').claimVisitNotification(svc.visit_id, 'en_route');
+    if (visitClaim !== 'owner') {
+      smsOutcome = visitClaim === 'taken' ? 'covered' : 'claim_error';
+      try {
+        await db('scheduled_services').where({ id: serviceId }).whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+      } catch (err) {
+        logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
+      }
+    }
+  }
   // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
   // way" text came from the visit's primary row; the visit stamps this row
   // as covered afterwards (visit-groups.fanOutLiveTransition).
-  if (!opts.suppressCustomerSms && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
+  if (!opts.suppressCustomerSms && (visitClaim === null || visitClaim === 'owner')
+      && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
@@ -677,6 +695,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
     enRouteAt: now,
     smsSent,
     smsOutcome,
+    visitNotificationOwner: visitClaim === 'owner',
     alreadyEnRoute: false,
     _row: svc,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
@@ -1004,8 +1023,22 @@ async function markOnProperty(serviceId, opts = {}) {
   // the flip leaves the guard NULL so a later real arrival still sends.
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
   let arrivalSms = 'not_attempted';
+  let visitClaim = null;
   if (arrivalRow && !opts.suppressArrivalSms) {
-    arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+    // Visit-scoped claim before the per-row arrival sender (codex r4).
+    if (svc.visit_id && !opts._visitSibling && !arrivalRow.arrival_sms_sent_at) {
+      visitClaim = await require('./visit-groups').claimVisitNotification(svc.visit_id, 'on_site');
+    }
+    if (visitClaim === null || visitClaim === 'owner') {
+      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+    } else {
+      arrivalSms = visitClaim === 'taken' ? 'covered' : 'claim_error';
+      try {
+        await db('scheduled_services').where({ id: serviceId }).whereNull('arrival_sms_sent_at').update({ arrival_sms_sent_at: new Date() });
+      } catch (err) {
+        logger.error(`[track-transitions] arrival covered stamp failed for ${serviceId}: ${err.message}`);
+      }
+    }
   }
   if (result && result.ok) {
     result.arrivalSms = arrivalSms;
@@ -1020,6 +1053,7 @@ async function markOnProperty(serviceId, opts = {}) {
       const fan = await require('./visit-groups').fanOutLiveTransition({
         primary: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
         actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
+        notificationOwner: visitClaim === 'owner',
       });
       if (fan) result.visitFanOut = fan;
     }

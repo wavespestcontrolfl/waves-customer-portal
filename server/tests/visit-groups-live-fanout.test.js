@@ -18,10 +18,11 @@ jest.mock('../models/db', () => {
       first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops) : null); },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
-      insert(values) { log.push({ table, op: 'insert', values }); return chain; },
+      insert(values) { chain._insert = values; log.push({ table, op: 'insert', values }); return chain; },
       onConflict() { chain._ops.push(['onConflict', ...arguments]); return chain; },
       merge(values) { chain._merge = values; log.push({ table, op: 'merge', values }); return chain; },
-      ignore() { return Promise.resolve([]); },
+      ignore() { return chain; },
+      returning() { log.push({ table, op: 'returning', values: chain._insert }); return Promise.resolve(script[table] && script[table].returning ? script[table].returning() : []); },
       then(res, rej) { return Promise.resolve([]).then(res, rej); },
     };
     return chain;
@@ -50,7 +51,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
-const { fanOutLiveTransition } = require('../services/visit-groups');
+const { fanOutLiveTransition, claimVisitNotification } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
 const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', ...over });
@@ -81,7 +82,7 @@ describe('fanOutLiveTransition', () => {
         ],
       },
     };
-    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', actorType: 'tech', actorId: 't1', smsOutcome: 'sent' });
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', actorType: 'tech', actorId: 't1', smsOutcome: 'sent', notificationOwner: true });
     expect(out.ok).toBe(true);
     expect(out.visitId).toBe('v1');
     expect(out.siblingIds).toEqual(['s1']);
@@ -112,7 +113,7 @@ describe('fanOutLiveTransition', () => {
       service_visits: { first: () => VISIT },
       scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
     };
-    const out = await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorId: 't1', smsOutcome: 'gate_off' });
+    const out = await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorId: 't1', smsOutcome: 'gate_off', notificationOwner: true });
     expect(out.siblingIds).toEqual(['s1']);
     const lifecycle = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.arrived_at);
     expect(lifecycle.values).toMatchObject({ arrived_at: expect.any(Date), check_in_time: expect.any(Date), actual_start_time: expect.any(Date) });
@@ -124,7 +125,7 @@ describe('fanOutLiveTransition', () => {
 
   test.each([['retry', 'failed'], ['suppressed', 'suppressed'], ['sent', 'sent']])('smsOutcome %s → effect %s', async (outcome, status) => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => [] } };
-    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome });
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome, notificationOwner: true });
     expect(out.effect.status).toBe(status);
   });
 
@@ -140,6 +141,34 @@ describe('fanOutLiveTransition', () => {
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
     expect(out).toMatchObject({ ok: false, visitId: 'v1', reason: 'boom', siblingIds: [] });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
+  });
+
+  test('non-owner / non-attempt outcomes never touch the effect ledger (a recorded failure stays visible)', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => [] } };
+    for (const [outcome, owner] of [['already_handled', true], ['covered', false], ['sent', false], ['claim_error', false]]) {
+      db.__calls.length = 0;
+      const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome, notificationOwner: owner });
+      expect(out.ok).toBe(true);
+      expect(out.effect).toBe(null);
+      expect(db.__calls.some((c) => c.table === 'visit_effects')).toBe(false);
+    }
+  });
+
+  test('a covered-stamp write failure is surfaced as ok:false', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
+    };
+    const origDb = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const chain = origDb(table);
+      if (table === 'scheduled_services') { const u = chain.update; chain.update = (v) => (v.track_sms_sent_at ? Promise.reject(new Error('stamp boom')) : u(v)); }
+      return chain;
+    });
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'sent', notificationOwner: true });
+    db.mockImplementation(origDb);
+    expect(out.ok).toBe(false);
+    expect(out.trackerFailures).toEqual([{ id: 'covered_stamp', reason: 'stamp boom' }]);
   });
 
   test('a sibling tracker write failure after the status commit is SURFACED as ok:false with the failures listed', async () => {
@@ -181,5 +210,21 @@ describe('fanOutLiveTransition', () => {
     expect(trackTransitions.markEnRoute).not.toHaveBeenCalled();
     const lockRead = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
     expect(lockRead.ops).toEqual(expect.arrayContaining([['forUpdate']]));
+  });
+});
+
+describe('claimVisitNotification (visit-scoped at-most-once claim)', () => {
+  test('first claimant owns the send; a concurrent member sees taken', async () => {
+    db.__script = { visit_effects: { returning: () => [{ id: 'e1' }] } };
+    expect(await claimVisitNotification('v1', 'en_route')).toBe('owner');
+    const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
+    expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0 });
+    db.__script = { visit_effects: { returning: () => [] } };
+    expect(await claimVisitNotification('v1', 'on_site')).toBe('taken');
+  });
+  test('an unknown claim state never sends (error) and no visit means no claim', async () => {
+    db.__script = { visit_effects: { returning: () => { throw new Error('db down'); } } };
+    expect(await claimVisitNotification('v1', 'en_route')).toBe('error');
+    expect(await claimVisitNotification(null, 'en_route')).toBe(null);
   });
 });

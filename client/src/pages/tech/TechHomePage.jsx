@@ -395,17 +395,23 @@ export default function TechHomePage() {
   // survives reloads and does not depend on having seen the 409.
   const stopOutOfSync = Boolean(
     nextVisitStop && nextVisitStop.isVisit && nextStop
-      && ['en_route', 'on_site'].includes(nextStop.status)
+      && nextVisitStop.services.some((s) => ['en_route', 'on_site'].includes(s.status))
       && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status)
         && (s.status !== nextStop.status
           // Status matches but the customer-visible tracker lags (a sibling
           // tracker write failed after the status commit — codex r3).
           || (s.trackState && nextStop.trackState && s.trackState !== nextStop.trackState))),
   );
+  // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
+  // that an admin/GPS signal already put on site pulls the whole stop to
+  // on_site; the server's on-site path accepts an en_route primary.
   const handleSyncStop = () => {
-    if (!nextStop) return;
-    if (nextStop.status === 'on_site') handleOnSite(nextStop.id);
-    else if (nextStop.status === 'en_route') handleEnRoute(nextStop.id);
+    if (!nextStop || !nextVisitStop) return;
+    const live = nextVisitStop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
+    const target = live.some((s) => s.status === 'on_site') ? 'on_site'
+      : live.some((s) => s.status === 'en_route') ? 'en_route' : null;
+    if (target === 'on_site') handleOnSite(nextStop.id);
+    else if (target === 'en_route') handleEnRoute(nextStop.id);
   };
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
