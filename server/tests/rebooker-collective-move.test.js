@@ -1013,7 +1013,9 @@ describe('caller wiring (source)', () => {
     // …and both customer surfaces run their series effects through the shared durable pass (reconciled surfaces), Quick Move with notify off.
     expect(rainOut).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(rainOut).toContain('notify: false,');
-    expect(rainOut).toContain('if (notifyCustomer && !seriesReplayed) {');
+    // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
+    expect(rainOut).toContain(".whereNull('notified_at')\n          .update({ notified_at: db.fn.now(), customer_notified: false });");
+    expect(rainOut).toContain('if (notifyCustomer && ownsSeriesText) {');
     const pub = read('../routes/reschedule-public.js');
     expect(pub).toContain("const { applySeriesMoveEffects } = require('./admin-dispatch');");
     expect(pub).toContain('seriesNoticeSent = effects.notificationSent === true;');

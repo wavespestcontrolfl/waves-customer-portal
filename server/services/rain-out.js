@@ -1922,8 +1922,34 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     const chosen = { date: target.date, window: newWindow };
-    let sms = { sent: false, reason: seriesReplayed ? 'replayed' : 'not_requested' };
-    if (notifyCustomer && !seriesReplayed) {
+    let sms = { sent: false, reason: 'not_requested' };
+    // Quick Move's own moved-SMS for a SERIES move is tracked on the
+    // series_moves row: the text is CLAIMED (notified_at) before it is
+    // sent, so a replay sends only when no earlier pass concluded it — a
+    // pass that died between the commit and this send is recovered by the
+    // retry, a winner that already sent is never duplicated (hook r26 P1).
+    // A send that definitively did not go out releases the claim. The
+    // effects pass above never texts for quick_move (notify_requested is
+    // false), so the row's text markers are this block's alone.
+    const seriesMoveId = seriesResultForEffects?.seriesMoveId || null;
+    let ownsSeriesText = !seriesMoveId;
+    if (notifyCustomer && seriesMoveId) {
+      try {
+        const claimed = await db('series_moves')
+          .where({ id: seriesMoveId })
+          .whereNull('notified_at')
+          .update({ notified_at: db.fn.now(), customer_notified: false });
+        ownsSeriesText = Number(claimed) === 1;
+        if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
+      } catch (err) {
+        // Marker store unavailable: a fresh commit still texts (a possible
+        // duplicate beats a silent skip); a replay stays quiet.
+        logger.warn(`[rain-out] series text claim failed for ${seriesMoveId}: ${err.message}`);
+        ownsSeriesText = !seriesReplayed;
+        if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
+      }
+    }
+    if (notifyCustomer && ownsSeriesText) {
       try {
         const customer = job.id === serviceId
           ? {
@@ -1948,6 +1974,20 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };
+      }
+      if (seriesMoveId && ownsSeriesText) {
+        try {
+          if (sms.sent) {
+            await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true });
+          } else if (sms.reason !== 'QUIET_HOURS_HOLD') {
+            // Definitive non-send (a quiet-hours HOLD is a deferral the
+            // sender delivers later — the claim stays): release the claim
+            // so a retry may send.
+            await db('series_moves').where({ id: seriesMoveId }).update({ notified_at: null, customer_notified: false });
+          }
+        } catch (err) {
+          logger.warn(`[rain-out] series text marker update failed for ${seriesMoveId}: ${err.message}`);
+        }
       }
     }
 

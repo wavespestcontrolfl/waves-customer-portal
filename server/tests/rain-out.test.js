@@ -102,6 +102,7 @@ function chain({ rows = [], ...terminal } = {}) {
     whereIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     orderByRaw: jest.fn().mockReturnThis(),
@@ -834,9 +835,14 @@ describe('rain-out service', () => {
       expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
     });
 
-    test('gate on: a REPLAYED series result still runs the (idempotent) shared effects pass but never re-sends Quick Move\'s own moved-SMS', async () => {
+    test('gate on: a REPLAYED series result runs the (idempotent) shared effects pass; Quick Move\'s own moved-SMS is CLAIMED on the row first — a winner that already concluded it means no second text', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-      wireRecurring();
+      db.fn = { now: jest.fn(() => 'now()') };
+      const claim = chain({ update: jest.fn().mockResolvedValue(0) }); // notified_at already set by the winner
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [claim],
+      });
       SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
         replayed: true, seriesMoveId: 'sm-1',
         rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
@@ -845,8 +851,32 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      expect(claim.whereNull).toHaveBeenCalledWith('notified_at');
+      expect(claim.update).toHaveBeenCalledWith({ notified_at: 'now()', customer_notified: false });
       const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(result.results[0]).toMatchObject({ smsSent: false, smsReason: 'replayed' });
+    });
+
+    test('gate on: a replay whose first pass died BEFORE the moved-SMS (claim still free) recovers the text — sent once, customer_notified stamped', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      const claim = chain({ update: jest.fn().mockResolvedValue(1) });
+      const stamp = chain({ update: jest.fn().mockResolvedValue(1) });
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [claim, stamp],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        replayed: true, seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
+      });
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true });
     });
 
     test('gate on: a rejected series shift falls back WITH the anchor CAS — a concurrent move is never overwritten', async () => {
