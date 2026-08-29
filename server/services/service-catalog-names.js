@@ -35,7 +35,20 @@ let byLower = renameSeed();
 
 function canonicalCatalogName(text) {
   if (!text) return null;
-  return byLower.get(String(text).trim().toLowerCase()) || null;
+  const raw = String(text).trim();
+  const exact = byLower.get(raw.toLowerCase());
+  if (exact) return exact;
+  // Cadence-qualified form of a known name ("Lawn Care Program Service
+  // (Quarterly)"): the rename migration relabels these with the qualifier
+  // preserved, and an UNLINKED terminal visit keeps the old qualified label
+  // by Invariant 1 — resolve the base and keep the qualifier verbatim
+  // (pre-push codex P1).
+  const m = /^(.*\S)(\s*\([^()]*\))$/.exec(raw);
+  if (m) {
+    const base = byLower.get(m[1].toLowerCase());
+    if (base) return `${base}${m[2]}`;
+  }
+  return null;
 }
 
 async function refreshCatalogNames(conn = require('../models/db')) {

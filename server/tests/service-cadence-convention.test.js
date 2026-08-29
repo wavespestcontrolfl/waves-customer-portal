@@ -448,6 +448,9 @@ describe('display cache keeps migration-owned old names (unlinked terminal visit
     __setCatalogNamesForTest([to]);
     expect(normalizeServiceType(from)).toBe(from);
     expect(normalizeServiceType(to)).toBe(to);
+    // Cadence-qualified old label on an unlinked terminal visit keeps its
+    // qualifier too (the migration preserves it; so must display).
+    expect(normalizeServiceType(`${from} (Quarterly)`)).toBe(`${from} (Quarterly)`);
   });
 });
 
