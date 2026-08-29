@@ -181,29 +181,32 @@ function mapWater(waterContext, waterSnapshot = null) {
   // no property rainfall but the area does (and its inputs are actually known —
   // status can read low/high from irrigation-only totals while rain is unsynced).
   const clientRainKnown = waterContext && num(waterContext.rainfallInches7d) != null;
-  if (!clientRainKnown && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Sprinkler settings follow the home: after a move the STORED snapshot's
+  // irrigation, total AND status all describe the former property — its
+  // status was computed from the very figures the card would withhold, so
+  // surplus/deficit insights and root-cause claims would still leak the old
+  // schedule (codex gh-r39). Fall through to the live context (rain-only /
+  // unknown) instead of using the snapshot at all.
+  const snapshotUnconfirmed = !!(waterContext && waterContext.scheduleUnconfirmed);
+  if (!clientRainKnown && !snapshotUnconfirmed && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
-    // Sprinkler settings follow the home: after a move the STORED snapshot's
-    // irrigation and total describe the former property too — withheld the
-    // same way the live path withholds them (rain-only total, no schedule).
-    const unconfirmed = !!(waterContext && waterContext.scheduleUnconfirmed);
     return {
       rainInches: num(rain),
-      irrigationInches: unconfirmed ? null : num(waterSnapshot.irrigation_inches_per_week),
-      totalInches: unconfirmed ? num(rain) : num(waterSnapshot.total_water_7day_inches),
+      irrigationInches: num(waterSnapshot.irrigation_inches_per_week),
+      totalInches: num(waterSnapshot.total_water_7day_inches),
       targetInches: num(waterSnapshot.target_water_inches_per_week),
       status: SNAP_STATUS[waterSnapshot.status] || 'unknown',
       confidence: waterSnapshot.confidence || 'medium',
-      explanation: unconfirmed ? null : snapshotWaterExplanation(waterSnapshot, grassLabel),
+      explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
       rainProvider: 'area',
       // A POSITIVE stored per-week irrigation figure means the customer has a real
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
-      scheduleOnFile: !unconfirmed && (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
-      scheduleUnconfirmed: unconfirmed,
+      scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleUnconfirmed: false,
       // The sent plan is independent of which rainfall source the card uses.
       weekPlan: (waterContext && waterContext.weekPlan) || null,
     };
@@ -218,7 +221,11 @@ function mapWater(waterContext, waterSnapshot = null) {
     targetInches: target,
     status: clientWaterStatus(advice),
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
-    explanation: waterExplanation(advice, target, grassLabel),
+    // A moved home's live context withholds the schedule — prose that says
+    // "your irrigation schedule on file" would contradict that (gh-r39).
+    explanation: waterContext.scheduleUnconfirmed
+      ? `Your sprinkler settings need a quick re-entry after your address change, so this week reads from rainfall alone. The seasonal target for your ${grassLabel} is ${target != null ? `about ${target}"/wk` : 'the seasonal target'}.`
+      : waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
     // True provider of rainfallInches7d (open_meteo | fawn) — the Source row
     // credits the real one (codex P2 r6).

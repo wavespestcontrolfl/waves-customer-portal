@@ -1240,7 +1240,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // single re-saved field, a non-sizing irrigation edit, or the row-wide
       // updated_at never re-confirms the rest (codex gh-r20/r21).
       const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
-      const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding }) : null;
+      const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
       const priorWeekEvents = priorWeek ? priorWeek.events : null;
       const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
       const decisionInputs = {
@@ -1446,12 +1446,22 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             // Re-read the clock at dispatch: a plan decided inside the
             // window must not leave after it (codex gh-r33).
             if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
-            // Re-read the move stamp at dispatch: an address change since
-            // this customer's re-read means the decision sized the former
-            // home — abort the plan (codex gh-r38). An unreadable check
-            // proceeds (the claim renewal below is the correctness gate).
+            // Re-read the move stamp at dispatch UNDER the property-
+            // preferences advisory lock: a plain MVCC read would not wait
+            // for an address-change transaction that already holds the lock
+            // and is about to commit the new stamp (codex gh-r38/r39) — the
+            // lock makes an in-flight move commit first, then the committed
+            // stamp is read. A changed stamp means the decision sized the
+            // former home — abort the plan. An unreadable check proceeds
+            // (the claim renewal below is the correctness gate).
             try {
-              const row = await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+              const row = await db.transaction(async (trx) => {
+                await trx.raw(
+                  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                  ['property-preferences', String(customer.id)],
+                );
+                return trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+              });
               const stampAt = (v) => (v ? new Date(v).getTime() : null);
               if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) { homeMovedAtQueue = true; return false; }
             } catch (err) {

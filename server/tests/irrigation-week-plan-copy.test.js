@@ -456,6 +456,11 @@ describe('snapshot lifecycle — exactness contract', () => {
       const wet = decideWeekPlan({ ...common, lastWeekRainInches: 0.6 });
       expect(wet.decisionInputs.priorWeekCreditedInches).toBe(0);
     }
+    // gh-r39: the prior plan binds to the HOME on its snapshot — a moved customer's new-home sweep must not credit it.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1', weather_inputs: JSON.stringify({ home: { addressLine1: '100 Main St', city: 'Bradenton', zip: '34205' } }) });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', home: { addressLine1: '9 Beach Rd', city: 'Venice', zip: '34285' } })).toBe(null);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1', weather_inputs: JSON.stringify({ home: { addressLine1: '100 Main St', city: 'Bradenton', zip: '34205' } }) });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', home: { addressLine1: '100 Main Street', city: 'Bradenton', zip: '34205' } })).toEqual({ events: 1, prescribedInches: 0.75 });
     // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
     expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);

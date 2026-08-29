@@ -581,14 +581,29 @@ async function renewWeekPlanClaimWithRetry(args, { delaysMs = RENEW_RETRY_DELAYS
 // (decideWeekPlan's priorWeekRainOverride); < ½" means the customer was
 // told to run (codex gh-r36). Null when there is no delivered prior plan
 // (or it cannot be read).
-async function loadPriorWeekPlan({ customerId, weekEnding } = {}) {
+async function loadPriorWeekPlan({ customerId, weekEnding, home = null } = {}) {
   const prior = etDateStringPlusDays(weekEnding, -7);
   if (!customerId || !prior) return null;
   try {
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: prior })
-      .first('week_plan', 'sent_at', 'decision_hash');
+      .first('week_plan', 'sent_at', 'decision_hash', 'weather_inputs');
     if (!row) return null;
+    // The prior plan was decided for the HOME on its snapshot. After a move
+    // it is evidence about the former property: its prescribed depth must
+    // not replace the new home's schedule and its event count must not
+    // drive the cool-season cadence there (codex gh-r39). Same premise rule
+    // as planBindsToService; a legacy snapshot without a home binds.
+    if (home) {
+      const inputs = typeof row.weather_inputs === 'string' ? (() => { try { return JSON.parse(row.weather_inputs); } catch { return null; } })() : row.weather_inputs;
+      const priorHome = inputs?.home || null;
+      if (priorHome) {
+        const fanout = require('./customer-address-fanout');
+        const shape = (h) => ({ address_line1: h.addressLine1, address_line2: h.addressLine2, city: h.city, zip: h.zip });
+        if (fanout.addressMatchKey(priorHome.addressLine1) && fanout.addressMatchKey(home.addressLine1)
+          && fanout.homesDiffer(shape(priorHome), shape(home))) return null;
+      }
+    }
     // Delivered = stamped, OR the durable customer-week delivery record says
     // the provider accepted it and names this decision — the same
     // reconciliation the sweep and the merge use (codex gh-r20/r23).

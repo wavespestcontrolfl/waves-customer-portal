@@ -171,7 +171,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
-    expect(sweep).toMatch(/const priorWeek = weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
+    expect(sweep).toMatch(/const priorWeek = weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding, home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip \} \}\) : null;/);
     expect(sweep).toMatch(/const priorWeekPrescribedInches = priorWeek \? priorWeek\.prescribedInches : null;/);
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
     expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, countyConfirmed: countyConfirmedAfterMove\(customer\) \}\)/);

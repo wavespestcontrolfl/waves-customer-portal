@@ -1374,6 +1374,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
         // (codex #3426 r6 P2) — same rule as the single-edit path: comms
         // lock BEFORE this row's lock. Per-row transactions each hold one
         // key, so no cross-row ordering concern on this branch.
+        // Prefs advisory lock FIRST (global order: prefs advisory → comms →
+        // customers row) — an address row in the bulk update reaches the
+        // fan-out's move stamp (codex #3565 gh-r39).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(customerId)],
+        );
         if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
           await lockCustomerComms(trx, customerId);
         }

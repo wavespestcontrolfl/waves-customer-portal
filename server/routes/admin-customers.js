@@ -3737,6 +3737,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // ordering: BEFORE the customers row lock below (customer-comms-
           // lock.js contract — revertMerge takes comms first, then
           // FOR-UPDATEs rows; row-lock-first-then-wait-here would deadlock).
+          // Property-preferences advisory lock FIRST — one global order
+          // (prefs advisory → comms → combined → customers row → prefs row)
+          // shared with executeMerge and the portal autosave: any path that
+          // takes it after another of these locks forms an AB-BA deadlock
+          // with a path taking them the other way (codex #3565 gh-r38/r39).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(req.params.id)],
+          );
           if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
             await lockCustomerComms(trx, req.params.id);
           }
@@ -3751,15 +3760,6 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           if (updates.payer_id) {
             await require('../services/pay-combined').lockCombinedCustomers(trx, [String(req.params.id)]);
           }
-          // Property-preferences advisory lock BEFORE the customer row lock — one
-                // global order (prefs advisory → customers row → prefs row) shared with
-                // the merge and the portal autosave; taking the row first and the
-                // advisory later (inside the address fan-out's move stamp) formed a
-                // deadlock cycle with executeMerge (codex #3565 gh-r38).
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-            ['property-preferences', String(req.params.id)],
-          );
           // Serialize overlapping address edits on the same customer: the row
           // lock makes a second editor WAIT, and before/after are re-derived
           // from the locked row — a pre-transaction 'before' from the losing
