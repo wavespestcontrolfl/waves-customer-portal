@@ -261,14 +261,24 @@ describe('buildStationNetwork — a RECONCILED station-map summary drives the co
     const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: partial });
     expect(out.metrics[0].value).toBe('12 of 12');
     expect(out.statusSummary).not.toMatch(/all 11/);
-    // the activity pin still escalates the status; serviced pins still count as work
+    // the activity pin still escalates the status; serviced pins still count as
+    // WORK — but a partial sync never prints an exact serviced number
     expect(out.status.key).toBe('action');
-    expect(out.metrics[2]).toEqual({ label: 'Stations serviced', value: '2' });
+    expect(out.metrics[2]).toEqual({ label: 'Stations serviced', value: 'Performed' });
+    expect(out.statusSummary).toMatch(/Bait service was performed today/);
     // the payload flags the partial sync so the client suppresses the map / rows
     expect(out.stationSyncPartial).toBe(true);
-    // a reconciled summary DOES drive the counts
+    // …and the frozen typed location stays with the frozen counts
+    const partialLoc = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Active termites present', stations_with_activity: 1, active_station_location: 'Station 7, rear wall' },
+      typedReportType: 'termite_bait_station',
+      stationSummary: partial,
+    });
+    expect(partialLoc.statusSummary).toMatch(/Station 7, rear wall/);
+    // a reconciled summary DOES drive the counts (and the exact serviced number)
     const agreed = buildStationNetwork({ values: CLEAN_VALUES, stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } });
     expect(agreed.counts.activity).toBe(1);
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } }).metrics[2]).toEqual({ label: 'Stations serviced', value: '2' });
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } }).stationSyncPartial).toBe(false);
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).stationSyncPartial).toBe(false);
   });
@@ -583,6 +593,24 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     expect(data.termiteReportV2.nextStep).toBe('Recheck the bait ring.');
     // the primary's narrative never rides a companion dashboard
     expect(data.termiteReportV2.aiSummary).toBeNull();
+  });
+
+  it('a companion dashboard carries the COMPANION\'s own accepted technician-report body', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const withBody = attachTermiteReportV2({
+      serviceLine: 'pest',
+      typedReport: null,
+      companionReports: [{ type: 'termite_bait_station', visitSequence: 2, internalOnly: false, todaysResult: { headline: 'x', body: 'Stations 6 and 10 fed heavily; both cartridges replaced.', bodySource: 'technician_report', nextStep: 'Recheck sooner.' } }],
+      summarySource: 'technician_report',
+      summary: 'Primary framing that must not ride the companion.',
+    }, combined);
+    expect(withBody.termiteReportV2.aiSummary).toEqual({ headline: null, body: 'Stations 6 and 10 fed heavily; both cartridges replaced.' });
+    // a companion body the story did NOT accept (no bodySource) is never promoted
+    const unaccepted = attachTermiteReportV2({
+      typedReport: null,
+      companionReports: [{ type: 'termite_bait_station', visitSequence: 2, internalOnly: false, todaysResult: { headline: 'x', body: 'Drafted, not accepted.' } }],
+    }, combined);
+    expect(unaccepted.termiteReportV2.aiSummary).toBeNull();
   });
 
   it('an installation-stage visit keeps the typed record (no dashboard) and consumes the stage field', () => {

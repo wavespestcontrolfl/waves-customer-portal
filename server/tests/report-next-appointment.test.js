@@ -574,6 +574,21 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
   expect(pest.termiteBaitStage).toBeNull();
 });
 
+test('a swallowed profile-table failure (strict mode) also fails closed — no label fallback', async () => {
+  const base = makeKnex({
+    ...BASE_FIXTURES,
+    services: [{ id: 'svc-liquid', service_key: 'termite_liquid', name: 'Termite Liquid Treatment', short_name: 'Liquid', category: 'termite' }],
+    scheduled_services: [
+      { id: 'scheduled-broken', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Bait Station Follow-up', window_start: '09:00:00', service_id: 'svc-liquid' },
+    ],
+  });
+  // the profile table probe throws — non-strict resolution would swallow it
+  // into a typeless default profile and fall to the bait-sounding label
+  base.schema = { hasTable: async () => { throw new Error('profiles unavailable'); } };
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-resolver-strict', base, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit).toBeNull();
+});
+
 test('a FAILED profile resolution fails closed — a bait-sounding label never advertises a next monitoring visit', async () => {
   const base = makeKnex({
     ...BASE_FIXTURES,

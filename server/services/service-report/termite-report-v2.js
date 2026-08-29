@@ -463,11 +463,16 @@ function buildTermiteReportV2({
   const inaccessible = network?.counts?.inaccessible || 0;
   // Serviced pins are status evidence (a count of documented work), read
   // from the raw visit-backed summary like the activity escalation.
-  const servicedCount = visitBackedSummary(stationSummary)?.serviced ?? 0;
+  // Serviced pins: a NUMERIC count only from a reconciled summary; a
+  // partial sync still proves service happened (count-neutral "Performed")
+  // but its number is not trustworthy (codex P2 #3600 r26).
+  const reconciled = reconciledSummary(stationSummary, values);
+  const rawServiced = visitBackedSummary(stationSummary)?.serviced ?? 0;
+  const servicedCount = reconciled ? (Number(reconciled.serviced) || 0) : 0;
   // "Serviced today" is a VISIT fact claimed only on documented evidence:
   // serviced pins on the station map, or bait/station work recorded on the
   // typed form. Never attributed to individual activity stations.
-  const servicedToday = servicedCount > 0
+  const servicedToday = rawServiced > 0
     || Boolean(String(values.bait_actions || '').trim())
     || Boolean(String(values.station_actions || '').trim());
   const formStatus = resolveTermiteStatus({
@@ -510,7 +515,10 @@ function buildTermiteReportV2({
     // whenever visit-backed pins are authoritative for the count/status the
     // body uses count wording instead of naming stations the pins may not
     // agree with (codex P2 #3600 r16).
-    activeLocation: !visitBackedSummary(stationSummary) && values.active_station_location
+    // …only when the visit-backed counts were ACCEPTED: a partial sync falls
+    // back to the frozen counts and must keep the frozen location with them
+    // (codex P2 #3600 r26).
+    activeLocation: !reconciled && values.active_station_location
       ? String(values.active_station_location).trim()
       : null,
     baitFeeding: FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')),
@@ -665,13 +673,22 @@ function attachTermiteReportV2(data, service = {}) {
       // Summary + typed Today's Result), so the approved narrative rides
       // the hero: the accepted technician-report body or the live typed
       // narrative (report-data sets summarySource for each).
-      // The narrative is the PRIMARY story's summary — a companion
-      // dashboard never borrows the primary service's narrative.
-      technicianReport: resolved.source === 'primary'
-        && (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
-        && typeof data.summary === 'string'
-        ? data.summary
-        : null,
+      // The narrative belongs to the story that ACCEPTED it: the primary's
+      // summary for a primary dashboard; for a companion dashboard, the
+      // companion's own accepted technician-report body (completion stores
+      // it on the auto_send companion when the primary has no typed
+      // snapshot — codex P1 #3600 r26). Never a separate primary's prose.
+      technicianReport: (() => {
+        if (resolved.source === 'primary') {
+          return (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
+            && typeof data.summary === 'string'
+            ? data.summary
+            : null;
+        }
+        return report.todaysResult?.bodySource === 'technician_report' && typeof report.todaysResult.body === 'string'
+          ? report.todaysResult.body
+          : null;
+      })(),
     });
     // `source` tells the client which typed section the dashboard replaces:
     // the primary cards, or the bait-station companion block.

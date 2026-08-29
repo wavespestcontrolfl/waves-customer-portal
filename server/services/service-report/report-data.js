@@ -4399,7 +4399,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         if (isBait === undefined) {
           let profile = null;
           let resolutionFailed = false;
-          try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { resolutionFailed = true; }
+          // strict: a swallowed profile-table / identity-reload failure would
+          // surface as a default (typeless) profile and fall to the label
+          // (codex P2 #3600 r26) — make it throw, then skip the row.
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
           // A typed bait profile decides — except the installation profile,
           // which freezes the same type but is not a monitoring check
           // (codex P2 #3600 r19). A FAILED resolution is not an unlinked
