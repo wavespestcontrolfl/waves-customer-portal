@@ -185,7 +185,8 @@ service_visits                                  ← rev 5 shape
 visit_effects                                   ← rev 5: ONE durable outbox for every external
   id · visit_id · effect_type                      action, replacing per-column comms state
      (reminder_72h | reminder_24h | tracker_en_route | tracker_arrived | completion_sms |
-      completion_email | review_ask | visit_payment | visit_receipt | payment_failure)
+      completion_email | billing_ready | review_ask | visit_payment | visit_receipt |
+      payment_failure)
   dedupe_key · status (pending | claimed | sent | failed | suppressed | unknown_delivery) ·
   provider_id
   (Twilio SID / SendGrid id / Stripe PI id) · attempts · scheduled_at · sent_at ·
@@ -198,9 +199,13 @@ visit_effects                                   ← rev 5: ONE durable outbox fo
     at-most-once ledger. SMS has no provider dedupe: the send writes the `sms_log` row with
     the dedupe key first, then calls Twilio, then stores `twilio_sid`. On retry, a row found
     `claimed` with no `provider_id` is **never re-sent** — it is marked `unknown_delivery`
-    and parks an admin bell ("visit message may not have reached the customer — resend?").
+    and parks an admin bell — an **ambiguous-delivery tradeoff**, not a guarantee: Twilio may
+    have delivered before the crash, so the bell first shows the office the Twilio message
+    log lookup (reconcile by `to` + timestamp) and requires explicit acknowledgement before a
+    resend; the office decides, the system never resends on its own.
     Customer-facing messages are therefore **at-most-once**; only money (Stripe) is
-    retried-to-success. A lost text costs one office click; a duplicate text is impossible.
+    retried-to-success. A lost text costs one office click; the system never sends a duplicate on its own (the only duplicate path is an explicit,
+    acknowledged office resend after ambiguous delivery).
 
 visit_completion_packets                       ← rev 2 (§3), normalised rev 5
   id · visit_id · idempotency_key unique · request_hash (sha256 over visit_id + canonical
@@ -362,7 +367,7 @@ Follow-up needed ⇒ `follow_up_required=true` on whatever execution status the 
 | execution_status | Record | Invoice / billing_disposition (R4 **ruled**) | Report | Follow-up | Visit message | Closes visit |
 |---|---|---|---|---|---|---|
 | `completed` | yes | yes · `full` | full | only if `follow_up_required` | "complete" | yes |
-| `partially_completed` (derived: e.g. 8 of 10 stations inspected) | yes | minted but **`hold_for_review`**: not shown on the visit page, not auto-charged, `service_visits.billing_hold=true`; office disposes full / adjusted / waived from the closeout-needs-attention bell, then the page + message update | full, exceptions listed | yes (inaccessible items → follow-up row via existing incomplete-visit seeding) | "completed, but we couldn't access all …; we'll confirm today's charges" | yes |
+| `partially_completed` (derived: e.g. 8 of 10 stations inspected) | yes | minted but **`hold_for_review`**: not shown on the visit page, not auto-charged, `service_visits.billing_hold=true`; office disposes full / adjusted / waived from the closeout-needs-attention bell, then the page + message update | full, exceptions listed | yes (inaccessible items → follow-up row via existing incomplete-visit seeding) | "completed, but we couldn't access all …; we'll confirm today's charges" — the ONE completion message still goes out at close (charges block omitted while held); when the office disposes, a separate deduped `billing_ready` effect (`visit_effects`, once per visit) sends the payment link: "Today's charges are ready: $X {short_link}" | yes |
 | `unable_to_complete` (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
 | `customer_declined` | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
 | `cancelled_by_office` | no | no (void if minted) | none | office decides | omitted | yes (row leaves group; visit preserved per §2) |
