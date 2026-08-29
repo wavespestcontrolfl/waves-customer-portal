@@ -82,6 +82,9 @@ describe('resolveTermiteStatus — honest status ladder', () => {
     expect(resolveTermiteStatus({ ...base, activityCount: 2 }).key).toBe('action');
     expect(resolveTermiteStatus({ ...base, activeLocation: 'Station 7, rear wall' }).key).toBe('action');
     expect(resolveTermiteStatus({ ...base, activityCount: 0, activeLocation: '  ' }).key).toBe('protected');
+    // "Previous feeding noted" + a frozen count stays EVIDENCE, never "active"
+    expect(resolveTermiteStatus({ ...base, termiteActivity: 'Previous feeding noted', activityCount: 2 }).key).toBe('evidence');
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted', stations_with_activity: 2 }, typedReportType: 'termite_bait_station' }).status.label).toBe('Evidence of termite activity observed at 2 stations');
     const out = buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station' });
     expect(out.status.label).toBe('Termite activity observed at 2 stations');
   });

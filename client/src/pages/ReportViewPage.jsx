@@ -9238,7 +9238,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
             no satellite basemap to pin against (provider ToS). Rodent refresh
             draws trapping pins as animated snap traps. */}
-        {mode === 'live' && !data.termiteReportV2 && (
+        {/* Suppressed only when the termite dashboard actually OWNS the map
+            (termite program) — a rodent primary with a termite companion
+            keeps its rodent map here (codex P2 #3600 r27). */}
+        {mode === 'live' && !(data.termiteReportV2 && data.stationMap?.program === 'termite') && (
           <StationMapCard
             stationMap={data.stationMap}
             trapPins={Boolean(data.rodentReportRefresh)}

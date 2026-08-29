@@ -329,12 +329,14 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(screen.queryByText(/All 4/)).toBeNull();
   });
 
-  it('a non-termite program map (rodent pins) is never drawn inside the termite dashboard', async () => {
+  it('a non-termite program map (rodent pins) is never drawn inside the termite dashboard — but the primary rodent map still mounts on its own', async () => {
     const rodentMap = JSON.parse(JSON.stringify(termiteReportV2));
     rodentMap.stationMap.program = 'rodent';
     const { container } = renderReport(rodentMap);
     await screen.findAllByText('Termite activity observed at 2 stations');
-    expect(container.querySelector('#station-map')).toBeNull();
+    const maps = container.querySelectorAll('#station-map');
+    expect(maps).toHaveLength(1);
+    expect(container.querySelector('#visit-summary #station-map')).toBeNull();
     expect(screen.queryByText('Needs attention')).toBeNull();
   });
 

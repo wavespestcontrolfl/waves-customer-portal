@@ -114,8 +114,12 @@ function resolveTermiteStatus({
   const liveSigns = /live termites|mud tubing/i.test(signs);
   const priorSigns = /previous feeding/i.test(signs);
   const feedingSigns = /\bbait feeding\b/i.test(signs);
-  if (termiteActivity === ACTIVITY_VALUES.ACTIVE || liveSigns || frozenPositive) return { key: 'action', tone: 'watch' };
+  if (termiteActivity === ACTIVITY_VALUES.ACTIVE || liveSigns) return { key: 'action', tone: 'watch' };
+  // "Previous feeding noted" stays historical evidence even beside a frozen
+  // count / location — only genuinely current evidence (the select, live
+  // signs, activity pins) escalates it (codex P2 #3600 r27).
   if (termiteActivity === ACTIVITY_VALUES.PREVIOUS || priorSigns) return { key: 'evidence', tone: 'watch' };
+  if (frozenPositive) return { key: 'action', tone: 'watch' };
   if (feeding || feedingSigns) return { key: 'monitoring', tone: 'watch' };
   if (termiteActivity === ACTIVITY_VALUES.NONE && (checked ?? 0) > 0) {
     return { key: 'protected', tone: 'good' };
