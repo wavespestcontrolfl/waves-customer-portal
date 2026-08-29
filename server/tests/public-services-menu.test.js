@@ -7,7 +7,7 @@
  *  - lead intake accepts an optional serviceKey, shape-checked, and the
  *    handler keeps it only when the catalog says it is publicly selectable.
  */
-const { loadPublicServicesMenu, isPublicSelectableServiceKey, menuItem, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
+const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, menuItem, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
 
 function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
   const conn = () => {
@@ -16,7 +16,7 @@ function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
       where(cond) { filters = { ...filters, ...cond }; return q; },
       orderBy() { return q; },
       async select() { if (throws) throw new Error('db down'); return rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).map((r) => ({ ...r })); },
-      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id } : null; },
+      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name } : null; },
     };
     return q;
   };
@@ -34,7 +34,7 @@ describe('public services menu', () => {
       row({ service_key: 'pest_general_bimonthly', name: 'Bi-Monthly Pest Control Service', billing_type: 'recurring', frequency: 'bimonthly', visits_per_year: 6 }),
     ]));
     expect(items.map((i) => i.service_key)).toEqual(['wdo_inspection', 'pest_general_bimonthly']);
-    for (const i of items) { expect(JSON.stringify(i)).not.toContain('engine'); expect(i.name).toMatch(/Service$/); }
+    for (const i of items) { expect(JSON.stringify(i)).not.toContain('engine'); expect(i.name).toMatch(/Service$/); expect(i).not.toHaveProperty('description'); }
   });
   test('modes, cadence and family labels', () => {
     expect(menuItem(row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', category: 'inspection' }))).toMatchObject({ mode: 'inspection', family: 'Inspections', public_instant_quote: false });
@@ -66,5 +66,10 @@ describe('keyed leads', () => {
     expect(await isPublicSelectableServiceKey('nope', fakeConn(rows))).toBe(false);
     expect(await isPublicSelectableServiceKey('wdo_inspection', fakeConn(rows, { throws: true }))).toBe(false);
     expect(await isPublicSelectableServiceKey('wdo_inspection', fakeConn(rows, { hasColumn: false }))).toBe(false);
+  });
+  test('a keyed lead derives its label from the catalog name (identity wins over the submitted label)', async () => {
+    const rows = [row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service' })];
+    expect(await publicSelectableService('wdo_inspection', fakeConn(rows))).toEqual({ service_key: 'wdo_inspection', name: 'WDO Inspection Service' });
+    expect(await publicSelectableService('pest_re_service', fakeConn(rows))).toBeNull();
   });
 });

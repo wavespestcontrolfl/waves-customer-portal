@@ -5,8 +5,11 @@
  *
  * Contract (stable, consumed by the astro site): service_key, name (the
  * catalog name verbatim), family, mode, cadence (recurring rows only),
- * public_instant_quote, description. Engine keys are NEVER exposed — the
- * portal translates service_key → engine path internally.
+ * public_instant_quote. Engine keys are NEVER exposed — the portal
+ * translates service_key → engine path internally. The admin-maintained
+ * services.description is NOT exposed either: it is internal copy that has
+ * never passed the customer-facing copy rules (AGENTS.md) — the site keeps
+ * its own reviewed product copy keyed by service_key (pre-push codex P1).
  */
 const db = require('../models/db');
 
@@ -63,7 +66,6 @@ function menuItem(row) {
     family_key: row.category,
     mode,
     public_instant_quote: PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key),
-    description: row.description || null,
   };
   if (mode === 'recurring') {
     item.cadence = {
@@ -80,24 +82,31 @@ async function loadPublicServicesMenu(conn = db) {
   const rows = await conn('services')
     .where({ is_active: true, is_archived: false, public_quote_selectable: true })
     .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
-    .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year', 'description');
+    .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year');
   return rows.map(menuItem);
 }
 
-// True when a lead-supplied key names a product a NEW customer may choose.
-async function isPublicSelectableServiceKey(serviceKey, conn = db) {
-  if (!serviceKey) return false;
+// The catalog row a lead-supplied key names — ONLY when it is a product a
+// NEW customer may choose; null otherwise. Callers derive the lead's display
+// label from `name` so key and label can never disagree (pre-push codex P1:
+// serviceKey and serviceInterest are independently attacker-controlled).
+async function publicSelectableService(serviceKey, conn = db) {
+  if (!serviceKey) return null;
   try {
-    if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return false;
+    if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return null;
     const row = await conn('services')
       .where({ service_key: serviceKey, is_active: true, is_archived: false, public_quote_selectable: true })
-      .first('id');
-    return !!row;
+      .first('id', 'service_key', 'name');
+    return row ? { service_key: row.service_key, name: row.name } : null;
   } catch {
     // Fail closed to a prose-only lead: a keyed lead must never be created
     // from an unverified key, and a catalog read failure must not fail intake.
-    return false;
+    return null;
   }
 }
 
-module.exports = { loadPublicServicesMenu, isPublicSelectableServiceKey, menuItem, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+async function isPublicSelectableServiceKey(serviceKey, conn = db) {
+  return !!(await publicSelectableService(serviceKey, conn));
+}
+
+module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, menuItem, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };

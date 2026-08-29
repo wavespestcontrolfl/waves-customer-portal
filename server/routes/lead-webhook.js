@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { isPublicSelectableServiceKey } = require('../services/public-services-menu');
+const { publicSelectableService } = require('../services/public-services-menu');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
@@ -204,13 +204,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       anonId,
       firstName,
       lastName,
-      serviceInterest,
+      serviceInterest: submittedServiceInterest,
       serviceKey,
       leadSource,
     } = intake;
     // A keyed lead only when the key names a product a NEW customer may
-    // choose; anything else stays a prose-only lead (service_key NULL).
-    const leadServiceKey = serviceKey && (await isPublicSelectableServiceKey(serviceKey)) ? serviceKey : null;
+    // choose; anything else stays a prose-only lead (service_key NULL). On a
+    // keyed lead the display label is the catalog name — identity wins over
+    // the independently submitted label, so key and label never disagree.
+    const keyedService = serviceKey ? await publicSelectableService(serviceKey) : null;
+    const leadServiceKey = keyedService ? keyedService.service_key : null;
+    const serviceInterest = keyedService ? keyedService.name : submittedServiceInterest;
     // Human-readable note for triage / lead-response / owner alerts so the
     // extra-property ask can never be silently swallowed again (the ask used
     // to arrive as free text in the unit box and vanish).
