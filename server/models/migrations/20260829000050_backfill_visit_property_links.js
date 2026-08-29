@@ -26,6 +26,7 @@
  *   deleted; admin edits are owner data) ONLY when: not primary, label NULL,
  *   occupancy_type 'unknown', same city-less address key as the primary, and
  *   zero references from scheduled_services / estimates / service_visits.
+ *   `label` must be strictly NULL — any non-NULL value is treated as intent.
  *
  * Ownership is recorded in a system_settings state row so down() reverses
  * exactly what up() wrote (value-guarded per row: a link an admin changed
@@ -140,7 +141,9 @@ exports.up = async function up(knex) {
     if (!primaryKey) continue;
     for (const p of list) {
       if (p.id === primary.id || p.is_primary) continue;
-      if (p.label != null && String(p.label).trim() !== '') continue;
+      // Strictly NULL (the admin PATCH route already stores a blank label as
+      // NULL; a non-NULL value — even whitespace — is treated as intent).
+      if (p.label != null) continue;
       if (p.occupancy_type !== 'unknown') continue;
       if (streetZipKey(p) !== primaryKey) continue;
       candidates.push(p);

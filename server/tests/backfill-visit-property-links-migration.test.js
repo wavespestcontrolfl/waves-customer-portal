@@ -150,11 +150,16 @@ describe('20260829000050 backfill visit property links', () => {
     expect(state(db).deactivated).toEqual(['p4']);
   });
 
-  test('up() does not retire a labeled or non-unknown duplicate', async () => {
+  test('up() does not retire a labeled, blank-labeled, or non-unknown duplicate', async () => {
     const db = seedDb();
     property(db, 'p4').label = 'Guest house';
     await migration.up(fakeKnex(db));
     expect(property(db, 'p4').active).toBe(true);
+    // Non-NULL but blank is still intent (strictly-NULL rule).
+    const db1 = seedDb();
+    property(db1, 'p4').label = '';
+    await migration.up(fakeKnex(db1));
+    expect(property(db1, 'p4').active).toBe(true);
     const db2 = seedDb();
     property(db2, 'p4').occupancy_type = 'rental_investment';
     await migration.up(fakeKnex(db2));
