@@ -1747,6 +1747,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // in-memory effects be — the winner already ran (or is running) the
     // reminder sync, cards, board emits and the moved-SMS (codex r13 P1).
     let seriesReplayed = false;
+    let seriesResultForEffects = null;
     // Staff surface (Quick Move / storm re-route): an occupancy clash COMMITS
     // with a warning instead of 409ing (owner ruling 2026-08-27, extending
     // the 2026-08-25 dispatch ruling — see rebooker.overlapAdvisory). The
@@ -1761,6 +1762,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             allowLive: true,
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
+            // Quick Move sends its own moved-SMS; the series pass never texts.
+            notifyRequested: false,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
@@ -1768,6 +1771,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
             : null;
+          seriesResultForEffects = seriesResult;
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
@@ -1880,78 +1884,31 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // the customer with no message at all (codex P1 — coverDueWindows is
     // reserved for callers that send their own notice). The anchor's
     // re-arm stays with the calling route.
-    if (shiftedOccurrences && !seriesReplayed) {
-      const AppointmentReminders = require('./appointment-reminders');
-      for (const occ of shiftedOccurrences) {
-        if (String(occ.id) === String(job.id)) continue;
-        try {
-          await AppointmentReminders.handleReschedule(
-            occ.id,
-            `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
-            {
-              sendNotification: false,
-              // Atomic stale-guard (codex P1): another actor can re-move a
-              // sibling between the series trx commit and this sequential
-              // loop — the re-arm must no-op unless the row still holds the
-              // slot we shifted it to, or the customer gets a reminder for
-              // the wrong appointment.
-              expectSchedule: {
-                date: String(occ.date).split('T')[0],
-                windowStart: toHHMM(occ.windowStart) || null,
-              },
-            }
-          );
-        } catch (err) {
-          logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
-        }
-      }
-      // Live boards track every shifted sibling, not just the loop's own
-      // jobs — the admin/tech callers broadcast only their route ids, so
-      // future-date siblings would sit stale on any open board (codex P2).
-      // Per-occurrence isolation like the public series path.
+    if (shiftedOccurrences) {
+      // Sibling effects — reminder sync (anchor included, idempotent), board
+      // broadcasts, the conflict card for windowless landings — run through
+      // the shared durable pass: marker-fenced on the series_moves row (a
+      // replay re-runs nothing that already landed) and finished by the
+      // 15-minute reconciler when this pass dies after the commit
+      // (quick_move is a reconciled surface). notify is OFF here on purpose:
+      // Quick Move's own moved-SMS below carries the customer text (hook r25
+      // P1 — the existing mechanism, not a parallel effects path).
       try {
-        const { emitDispatchJobUpdate } = require('./dispatch-assignment');
-        for (const occ of shiftedOccurrences) {
-          if (String(occ.id) === String(job.id)) continue;
-          try {
-            await emitDispatchJobUpdate({ jobId: occ.id, actorId: null });
-          } catch (err) {
-            logger.error(`[rain-out] board broadcast failed for ${occ.id}: ${err.message}`);
-          }
-        }
+        const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+        await applySeriesMoveEffects({
+          result: seriesResultForEffects,
+          serviceId: job.id,
+          newDate: target.date,
+          newWindow,
+          notify: false,
+          actorId: actorUserId || null,
+          reasonText: null,
+        });
       } catch (err) {
-        logger.error(`[rain-out] board broadcast unavailable: ${err.message}`);
-      }
-      // Far-out siblings whose projected window held a seeded placeholder
-      // were committed at their cadence date WITHOUT a window (tech kept) —
-      // park them for retiming, same as the public and dispatch series paths.
-      const conflicted = shiftedOccurrences
-        .filter((occ) => occ.conflicted)
-        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-      if (conflicted.length) {
-        try {
-          const NotificationService = require('./notification-service');
-          const card = await NotificationService.notifyAdmin(
-            'schedule_conflict',
-            'Rain-out series shift needs a look',
-            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${conflicted.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
-            { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
-          );
-          if (!card) {
-            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — windowless siblings with no admin card: ${JSON.stringify(conflicted)}`);
-          }
-        } catch (err) {
-          logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);
-        }
+        logger.error(`[rain-out] series effects pass failed for ${job.id}: ${err.message} — the reconciler finishes it`);
       }
     }
 
-    // Soft no-show: the rebooker just logged the occurrence (reason_code
-    // customer_noshow with the missed slot's original_date/window), but
-    // only the terminal path and nightly sweep ever ran the outreach
-    // threshold — two soft no-shows would accumulate without the promised
-    // 2-in-90-days task (codex r2). Evaluate WITHOUT inserting a second
-    // occurrence row. Best-effort: never fails the committed move.
     if (reasonCode === 'customer_noshow') {
       try {
         const MissedAppointment = require('./workflows/missed-appointment');

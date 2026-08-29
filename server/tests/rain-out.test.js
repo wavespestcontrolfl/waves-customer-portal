@@ -5,6 +5,9 @@ jest.mock('../services/rebooker', () => ({
   rescheduleSeries: jest.fn().mockResolvedValue({ rescheduledOccurrences: [] }),
   findRescheduleOptions: jest.fn().mockResolvedValue([]),
 }));
+jest.mock('../routes/admin-dispatch', () => ({
+  applySeriesMoveEffects: jest.fn().mockResolvedValue({ notificationSent: false, notificationError: null, conflicts: [], seriesMoveId: 'sm-1' }),
+}));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
 }));
@@ -809,28 +812,41 @@ describe('rain-out service', () => {
           allowLive: true,
           overlapAdvisory: true,
           sourceSurface: 'quick_move',
+          notifyRequested: false,
           expectAnchor: { scheduled_date: '2026-06-11', window_start: '09:00' },
         },
       );
       // Series path replaces the single move entirely.
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
-      // Siblings re-arm silently; the anchor is left to the calling route.
-      expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(2);
-      expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
-        'sib-1', '2026-09-12T09:00',
-        {
-          sendNotification: false,
-          expectSchedule: { date: '2026-09-12', windowStart: '09:00' },
-        },
-      );
-      // The kept-tech double-book parked for reassignment.
-      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('schedule_conflict');
-      expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('2026-12-12');
-      // Live boards get a job_update per shifted SIBLING (the calling
-      // routes broadcast only their own loop ids) — never the anchor twice.
+      // Sibling effects (reminder sync, board, conflict card) run through the
+      // shared durable pass — marker-fenced and reconciled — with the text
+      // OFF (Quick Move's own moved-SMS is the customer notice); nothing runs
+      // in-memory here any more.
+      const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+      expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      expect(applySeriesMoveEffects.mock.calls[0][0]).toMatchObject({
+        serviceId: 'svc-1', newDate: '2026-06-12', notify: false,
+        result: expect.objectContaining({ rescheduledOccurrences: expect.arrayContaining([expect.objectContaining({ id: 'sib-2', conflicted: true })]) }),
+      });
+      expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
       const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-      expect(emitDispatchJobUpdate.mock.calls.map((c) => c[0].jobId).sort()).toEqual(['sib-1', 'sib-2']);
+      expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a REPLAYED series result still runs the (idempotent) shared effects pass but never re-sends Quick Move\'s own moved-SMS', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        replayed: true, seriesMoveId: 'sm-1',
+        rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }],
+      });
+      const result = await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      expect(result.ok).toBe(true);
+      const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+      expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
     test('gate on: a rejected series shift falls back WITH the anchor CAS — a concurrent move is never overwritten', async () => {

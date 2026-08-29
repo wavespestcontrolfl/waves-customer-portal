@@ -14364,7 +14364,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             // reconciler retries once the window opens (hook r19 P1). The
             // row's recorded source decides — the same on a live pass and
             // on reconciliation.
-            operatorInitiated: markers.source_surface !== 'sms_reply',
+            operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
             sendOutcome,
             preDispatchCheck: async () => {
               const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
@@ -14438,7 +14438,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 // effects of every such row from the operation's own recorded result —
 // only for surfaces whose effects run through applySeriesMoveEffects (the
 // customer web page and Quick Move keep their own effect paths).
-const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply'];
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];
+// Surfaces whose series text is an authenticated staff action (quiet-hours
+// exempt); every customer-driven surface stays inside the send window.
+const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal']);
 async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
   // Committed rows with any unfinished effect, plus SUPERSEDED rows that
   // still owe their conflict card (applySeriesMoveEffects runs card-only

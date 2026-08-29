@@ -988,7 +988,9 @@ describe('caller wiring (source)', () => {
     const fx = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(fx).toContain("const cardOnly = markers.status === 'superseded';");
     // A customer SMS-reply series move keeps the quiet-hours window; staff surfaces are exempt — decided by the row's recorded source on every pass.
-    expect(fx).toContain("operatorInitiated: markers.source_surface !== 'sms_reply',");
+    expect(fx).toContain("operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),");
+    expect(disp).toContain("const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal']);");
+    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');
@@ -1008,8 +1010,14 @@ describe('caller wiring (source)', () => {
     // Quick Move: a replayed series result runs NONE of the in-memory effects again (reminders, cards, board, moved-SMS).
     const rainOut = read('../services/rain-out.js');
     expect(rainOut).toContain('seriesReplayed = seriesResult?.replayed === true;');
-    expect(rainOut).toContain('if (shiftedOccurrences && !seriesReplayed) {');
+    // …and both customer surfaces run their series effects through the shared durable pass (reconciled surfaces), Quick Move with notify off.
+    expect(rainOut).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
+    expect(rainOut).toContain('notify: false,');
     expect(rainOut).toContain('if (notifyCustomer && !seriesReplayed) {');
+    const pub = read('../routes/reschedule-public.js');
+    expect(pub).toContain("const { applySeriesMoveEffects } = require('./admin-dispatch');");
+    expect(pub).toContain('seriesNoticeSent = effects.notificationSent === true;');
+    expect(pub).not.toContain("metadata: { original_message_type: 'reschedule_series_confirmation', source: 'reschedule_public' }");
   });
 
   test('the dispatch explicit series path fences on the FULL pin the resolution read; a retryable provider failure keeps the series text pending; a partial guard map never closes an uncovered id', () => {
