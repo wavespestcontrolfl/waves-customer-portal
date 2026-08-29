@@ -28,6 +28,11 @@ router.post('/group', async (req, res, next) => {
     });
     return res.json({ visit });
   } catch (err) {
+    if (/row not found/.test(String(err.message))) {
+      // Stale admin selection (row deleted mid-flight) is a request race,
+      // not a server failure (codex P2).
+      return res.status(404).json({ error: 'One of the selected appointments no longer exists — refresh and retry.' });
+    }
     if (/not mutually groupable|membership conflict/.test(String(err.message))) {
       return res.status(409).json({ error: err.message, code: 'visit_group_refused' });
     }

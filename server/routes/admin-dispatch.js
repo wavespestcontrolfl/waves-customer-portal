@@ -6236,11 +6236,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
-      // r4): the open packet-less visit this completion was allowed
-      // through dissolves only now that the completion actually exists.
-      if (legacyVisitToDissolve) {
-        void require('../services/visit-groups').dissolveForLegacyCompletion(legacyVisitToDissolve);
+      // r4; r6 resume path): the open packet-less visit this completion
+      // was allowed through dissolves only now that the completion
+      // actually exists. On a RESUMED completion (first process died after
+      // its commit but before this cleanup) the recheck never ran, so
+      // reconstruct the visit id from the row itself — the dissolve
+      // helper no-ops on anything but an open packet-less visit.
+      {
+        let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
+        if (!dissolveVisitId) {
+          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          dissolveVisitId = nowRow && nowRow.visit_id;
+        }
+        if (dissolveVisitId) {
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId);
+        }
       }
     } else {
       try {
@@ -7895,11 +7906,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
         durableCompletionCommitted = true;
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
-      // r4): the open packet-less visit this completion was allowed
-      // through dissolves only now that the completion actually exists.
-      if (legacyVisitToDissolve) {
-        void require('../services/visit-groups').dissolveForLegacyCompletion(legacyVisitToDissolve);
+      // r4; r6 resume path): the open packet-less visit this completion
+      // was allowed through dissolves only now that the completion
+      // actually exists. On a RESUMED completion (first process died after
+      // its commit but before this cleanup) the recheck never ran, so
+      // reconstruct the visit id from the row itself — the dissolve
+      // helper no-ops on anything but an open packet-less visit.
+      {
+        let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
+        if (!dissolveVisitId) {
+          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          dissolveVisitId = nowRow && nowRow.visit_id;
+        }
+        if (dissolveVisitId) {
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId);
+        }
       }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {

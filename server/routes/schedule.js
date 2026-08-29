@@ -291,6 +291,18 @@ router.post('/:id/reschedule', async (req, res, next) => {
         };
       }
 
+      // Visit-group seam (codex #3590 r6): a legacy-mode reschedule flips
+      // the row to 'rescheduled' (awaiting re-placement, stale stop) — it
+      // must leave its grouped visit like every other stop change fires.
+      // Fire-and-forget, NOT awaited: the helper opens its own
+      // transaction and takes the row lock, so it simply queues behind
+      // this trx's commit; awaiting it here would deadlock. No-op for
+      // ungrouped rows and under keepOnBooks (status unchanged).
+      if (!keepOnBooks) {
+        void require('../services/visit-groups').handleChildStopChanged(req.params.id)
+          .catch((vgErr) => require('../services/logger').warn(`[schedule] visit-group seam failed for ${req.params.id}: ${vgErr.message}`));
+      }
+
       // Keep the customer intent in the staff request queue as the durable,
       // append-only receipt. Appointment editors have independent write paths,
       // so status/notes alone cannot be the sole record of this request.

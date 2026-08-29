@@ -527,6 +527,16 @@ async function handleChildStopChanged(scheduledServiceId) {
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
       if (!fresh || String(fresh.visit_id) !== String(visit.id)) return false;
+      // A FROZEN visit (packet/artifact/link/payment) never loses members
+      // to a stop edit (codex r6): the recorded artifacts must keep their
+      // child set. Membership stays; the stale stop is logged for the
+      // office and resolves through the visit's own closeout path.
+      const frozenCheck = canSplit(await visitActivity(visit.id, t));
+      if (!frozenCheck.ok && frozenCheck.reason !== 'visit_not_open') {
+        const logger = require('./logger');
+        logger.warn(`[visit-groups] stop change on frozen visit ${visit.id} (row ${fresh.id}, ${frozenCheck.reason}) — membership preserved`);
+        return false;
+      }
       // Window test runs against the OTHER members, not the stale parent
       // union (codex r5): a child that no longer overlaps any sibling is a
       // second physical stop even when it grazes the old union.
@@ -539,8 +549,15 @@ async function handleChildStopChanged(scheduledServiceId) {
       // Tech: a conflicting assignment detaches; an assignment landing on
       // an UNASSIGNED visit is ADOPTED — the visit owns assignment, so the
       // parent and every unassigned member align (codex r5).
-      const techConflict = Boolean(fresh.technician_id && visit.technician_id
-        && String(fresh.technician_id) !== String(visit.technician_id));
+      const techConflict = Boolean(
+        (fresh.technician_id && visit.technician_id
+          && String(fresh.technician_id) !== String(visit.technician_id))
+        // Explicitly UNASSIGNING one child of an assigned visit is a
+        // single-row divergence from visit-owned assignment — the child
+        // detaches rather than becoming invisible to tech-scoped views
+        // (codex r6; doc rev-5 item 6: one-row tech changes are splits).
+        || (!fresh.technician_id && visit.technician_id),
+      );
       if (!techConflict && fresh.technician_id && !visit.technician_id) {
         await t('service_visits').where({ id: visit.id }).update({ technician_id: fresh.technician_id });
         await t('scheduled_services').where({ visit_id: visit.id })
