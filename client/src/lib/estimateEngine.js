@@ -665,7 +665,12 @@ export function rodentBaitPolicyNote(E = {}) {
   const setupLine = (E?.oneTime?.items || []).find((i) => i?.service === 'rodent_bait_setup');
   const counts = row.countsTowardWaveGuardTier !== false && row.tierQualifier !== false;
   const discountable = row.discountable !== false && row.excludeFromPctDiscount !== true;
-  const fee = Number(RODENT_BAIT.setupFee) || 0;
+  // The EMITTED row's amount is the frozen figure the customer sees and
+  // acceptance invoices; the live config is only the fallback when no row
+  // fired (codex #3591 r22 P2).
+  const fee = setupLine && Number(setupLine.price) > 0
+    ? Number(setupLine.price)
+    : (Number(RODENT_BAIT.setupFee) || 0);
   const feeText = fee > 0
     ? (setupLine
       ? `$${fee} setup applies (no other qualifying service)`

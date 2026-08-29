@@ -892,6 +892,18 @@ function mapV1ToLegacyShape(v1Result) {
           // Billing-unit marker — new rows bill per application; legacy
           // monthly-billed rodent rows never carry it.
           perApplicationBilled: true,
+          // The LIVE eligibility posture the pricer stamped from
+          // pricing_config.rodent_waveguard (codex #3591 r22 P1): an
+          // operator who turned tier_qualifier off or the % exclusion on
+          // must see that on the mapped row, or every downstream reader
+          // (cross-sell copy, PriceCard tag, portal) defaults it back to a
+          // qualifying, discountable member.
+          ...(rbLI.tierQualifier === false || rbLI.countsTowardWaveGuardTier === false
+            ? { tierQualifier: false, countsTowardWaveGuardTier: false }
+            : {}),
+          ...(rbLI.excludeFromPctDiscount === true || rbLI.discountable === false
+            ? { excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false, discountEligible: false }
+            : {}),
         }),
     });
   }

@@ -298,6 +298,10 @@ function normalizeOneTimeLines(result) {
       priceBeforeDiscount: money(item.price),
       discount: 0,
       priceSource: 'saved_estimate.result.oneTime.specItems',
+      // Server-generated estimates place the bait-station setup in
+      // specItems (not in ONE_TIME_SERVICES) — same COGS exemption as the
+      // items path (codex #3591 r22 P2).
+      ...(serviceKey === 'rodent_bait_setup' ? { skipCogs: true } : {}),
     });
   }
   if (Number(result?.oneTime?.membershipFee || 0) > 0) {

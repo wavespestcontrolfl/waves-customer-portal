@@ -25,6 +25,9 @@ describe('estimate pricing audit — rodent bait (codex #3591 r11)', () => {
     // Legacy shape without a service key resolves by name the same way.
     expect(normalizeOneTimeLines({ oneTime: { items: [{ name: 'Bait Station Setup', price: 99 }] } })[0])
       .toMatchObject({ serviceKey: 'rodent_bait_setup', skipCogs: true });
+    // The MAPPED (server-generated) shape places the setup in specItems.
+    expect(normalizeOneTimeLines({ oneTime: { items: [], specItems: [{ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 }] } })[0])
+      .toMatchObject({ serviceKey: 'rodent_bait_setup', skipCogs: true, priceSource: 'saved_estimate.result.oneTime.specItems' });
   });
 
   test('a pinned legacy rodent row keeps its disclosed rate under a plan-wide tier discount; a new-model row takes it', () => {

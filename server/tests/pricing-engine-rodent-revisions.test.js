@@ -279,6 +279,28 @@ describe('revised rodent pricing rules', () => {
     expect(commLine.pricingBasis).toBe('LEGACY_PINNED_REPLAY');
   });
 
+  test('the mapped new-model rodent row carries the LIVE eligibility flags the pricer stamped (codex #3591 r22 P1)', () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const constants = require('../services/pricing-engine/constants');
+    const original = { tq: constants.RODENT.tierQualifier, ex: constants.RODENT.excludeFromPctDiscount };
+    try {
+      constants.RODENT.tierQualifier = false;
+      constants.RODENT.excludeFromPctDiscount = true;
+      const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({ services: { pest: { frequency: 'quarterly' }, rodentBait: {} } })));
+      const row = mapped.recurring.services.find(s => s.service === 'rodent_bait');
+      expect(row).toMatchObject({ perApplicationBilled: true, tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false });
+    } finally {
+      constants.RODENT.tierQualifier = original.tq;
+      constants.RODENT.excludeFromPctDiscount = original.ex;
+    }
+    // Defaults: a plain new-model row carries no opt-out flags.
+    const plain = mapV1ToLegacyShape(generateEstimate(baseInput({ services: { rodentBait: {} } })))
+      .recurring.services.find(s => s.service === 'rodent_bait');
+    expect(plain.perApplicationBilled).toBe(true);
+    expect(plain.tierQualifier).toBeUndefined();
+    expect(plain.excludeFromPctDiscount).toBeUndefined();
+  });
+
   test('commercial rodent detail states the MONTHLY figure (commercial bills monthly) — never a per-application price (codex #3591 r10 P2)', () => {
     const commercial = generateEstimate(baseInput({
       propertyType: 'commercial',
