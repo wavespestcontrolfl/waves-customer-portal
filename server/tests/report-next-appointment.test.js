@@ -570,6 +570,27 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
   expect(pest.termiteBaitStage).toBeNull();
 });
 
+test('a FAILED profile resolution fails closed — a bait-sounding label never advertises a next monitoring visit', async () => {
+  const base = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      // linked row (service_id) whose catalog lookup throws during this build
+      { id: 'scheduled-broken', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Bait Station Follow-up', window_start: '09:00:00', service_id: 'svc-liquid' },
+    ],
+  });
+  const throwing = (table) => {
+    const query = base(table);
+    if (table === 'services') {
+      query.first = () => Promise.reject(new Error('catalog unavailable'));
+      query.then = (_resolve, reject) => Promise.reject(new Error('catalog unavailable')).catch(reject);
+    }
+    return query;
+  };
+  throwing.schema = base.schema;
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-resolver-fails', throwing, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit).toBeNull();
+});
+
 test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,

@@ -4398,11 +4398,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         let isBait = verdictByIdentity.get(identity);
         if (isBait === undefined) {
           let profile = null;
-          try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { profile = null; }
+          let resolutionFailed = false;
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { resolutionFailed = true; }
           // A typed bait profile decides — except the installation profile,
           // which freezes the same type but is not a monitoring check
-          // (codex P2 #3600 r19).
-          if (profile?.findingsType) {
+          // (codex P2 #3600 r19). A FAILED resolution is not an unlinked
+          // legacy row: fail closed, never fall to the label (codex P2 r23).
+          if (resolutionFailed) isBait = false;
+          else if (profile?.findingsType) {
             // …and neither the installation profile nor the detection-only
             // termite_monitoring program (codex P2 #3600 r19 / r21).
             isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE

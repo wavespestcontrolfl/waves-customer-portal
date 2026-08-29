@@ -344,7 +344,7 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(container.querySelector('#station-map')).toBeNull();
     expect(screen.queryByText('Needs attention')).toBeNull();
     expect(screen.queryByText(/View all stations/)).toBeNull();
-    expect(screen.getByText(/still being reconciled with your technician/)).toBeInTheDocument();
+    expect(screen.getByText(/did not match your technician/)).toBeInTheDocument();
   });
 
   it('the work cell keeps a non-numeric "Performed" serviced metric as count-neutral wording', async () => {
@@ -368,6 +368,14 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     const { termiteReportV2: _omit, ...gatedOff } = termiteReportV2;
     renderReport(gatedOff);
     await screen.findByText('Visit Summary');
+  });
+
+  it('gated-off (legacy layout): a cartridge-only visit lists no Products Applied and counts none — same rule as the header', async () => {
+    const { termiteReportV2: _omit, ...gatedOff } = JSON.parse(JSON.stringify(termiteReportV2));
+    const { container } = renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
+    expect(container.querySelector('#products-applied')).toBeNull();
+    expect(screen.queryByText(/product applied/)).toBeNull();
   });
 });
 

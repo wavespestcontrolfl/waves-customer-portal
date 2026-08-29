@@ -252,10 +252,12 @@ export function TermiteStationSyncNote() {
   return (
     <section data-glass="card" style={card}>
       <div style={eyebrow}>Station details</div>
+      {/* Durable wording — a skipped station check has no retry path, so
+          this note may stand for the life of the report (codex P2 r23). */}
       <p style={{ margin: 0, fontSize: 14, lineHeight: 1.55, color: MUTED }}>
-        The station-by-station map for this visit is still being reconciled with
-        your technician&apos;s record. The counts above come from that record;
-        the map will show once every station check has synced.
+        A station-by-station map isn&apos;t available for this visit: one or
+        more station checks did not match your technician&apos;s record. The
+        counts above come from that record.
       </p>
     </section>
   );

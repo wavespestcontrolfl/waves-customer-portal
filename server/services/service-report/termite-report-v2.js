@@ -81,8 +81,16 @@ function plural(n) { return n === 1 ? '' : 's'; }
  * red (owner 2026-08-29); the copy carries the urgency. Absence claims stay
  * scoped to what was inspected today.
  */
-function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inaccessible, activitySigns = '' }) {
+function resolveTermiteStatus({
+  termiteActivity, baitConsumption, checked, inaccessible, activitySigns = '',
+  // Frozen positive evidence beside a "None observed" select (older
+  // snapshots — the pre-V2 composer guarded both fields): a positive
+  // activity-station count or a named active station is activity
+  // (codex P2 #3600 r23).
+  activityCount = null, activeLocation = null,
+}) {
   const feeding = FEEDING_VALUES.has(baitConsumption);
+  const frozenPositive = (activityCount != null && activityCount > 0) || Boolean(String(activeLocation || '').trim());
   // Positive activity-sign chips are evidence in their own right: legacy
   // snapshots can pair "None observed" with "Live termites in station" (the
   // entry-time validator rejects that today, but the frozen record stands),
@@ -92,7 +100,7 @@ function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inacc
   const liveSigns = /live termites|mud tubing/i.test(signs);
   const priorSigns = /previous feeding/i.test(signs);
   const feedingSigns = /\bbait feeding\b/i.test(signs);
-  if (termiteActivity === ACTIVITY_VALUES.ACTIVE || liveSigns) return { key: 'action', tone: 'watch' };
+  if (termiteActivity === ACTIVITY_VALUES.ACTIVE || liveSigns || frozenPositive) return { key: 'action', tone: 'watch' };
   if (termiteActivity === ACTIVITY_VALUES.PREVIOUS || priorSigns) return { key: 'evidence', tone: 'watch' };
   if (feeding || feedingSigns) return { key: 'monitoring', tone: 'watch' };
   if (termiteActivity === ACTIVITY_VALUES.NONE && (checked ?? 0) > 0) {
@@ -454,6 +462,8 @@ function buildTermiteReportV2({
     checked,
     inaccessible,
     activitySigns: values.activity_signs || '',
+    activityCount: toCount(values.stations_with_activity),
+    activeLocation: values.active_station_location || null,
   });
   // Visit-backed activity pins can ESCALATE the status, never downgrade it:
   // the form select and the per-station checks are entered separately and
@@ -499,7 +509,14 @@ function buildTermiteReportV2({
     }
     : null;
 
-  const nextStepText = typeof nextStep === 'string' && nextStep.trim() ? nextStep.trim() : null;
+  let nextStepText = typeof nextStep === 'string' && nextStep.trim() ? nextStep.trim() : null;
+  // A frozen clean selection can legitimately carry "No action needed";
+  // when station pins escalated the status, that commitment contradicts
+  // the headline — replace it with a monitoring commitment (codex P2 #3600
+  // r23). Genuine follow-up wording passes through untouched.
+  if (statusEscalatedByPins && nextStepText && /\bno (further )?action\b|\bnothing (further |else )?(is )?needed\b|\bno follow[- ]?up\b/i.test(nextStepText)) {
+    nextStepText = 'We will re-check the active stations at your next monitoring visit.';
+  }
 
   return {
     status,

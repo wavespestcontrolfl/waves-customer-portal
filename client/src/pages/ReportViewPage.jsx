@@ -3303,7 +3303,11 @@ export function customerActionItems({ data = {}, coverage, primaryMove, aiSummar
 }
 
 function AppliedProductsSection({ data, mode = 'live' }) {
-  const applications = Array.isArray(data.applications) ? data.applications : [];
+  // Shared product-identity rule (lib/product-application.js) on EVERY
+  // line, matching the PDF document and the header count: termite / rodent
+  // monitoring devices (stations, cartridges) are checks, not products
+  // applied (codex P2 #3600 r23).
+  const applications = (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication);
   if (!applications.length) return null;
   const isLawn = data.serviceLine === 'lawn';
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
@@ -5576,11 +5580,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const termiteReconciledTimeline = termiteV2Primary && Array.isArray(data.typedVisitTimeline?.visits)
     ? reconcileTermiteTimeline(data.typedVisitTimeline)
     : null;
-  // Termite V2: only genuine product applications survive into Products
-  // Applied (bait cartridge / station-check rows are monitoring).
-  const termiteProductApplications = data.termiteReportV2
-    ? (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication)
-    : [];
   const hasReentry = Boolean(dynamicContext.reentry);
   // Bed bug: the typed narrative owns the report's ONE summary surface even
   // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
@@ -9269,22 +9268,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {/* Termite bait visits: bait cartridge / station checks are
-            monitoring, not application (owner 2026-08-29) — they never list
-            here; bait work is documented in the station record instead. A
-            REAL termiticide recorded on the same visit (foam, liquid — the
-            panel still defaults it to station_check) keeps the section with
-            its EPA facts and precautions (codex P1 #3600 r2). Same identity
-            rule as the PDF document (lib/product-application.js). */}
-        {!isV2LeadLayout && !data.termiteReportV2 && (
+        {/* Bait cartridge / station checks are monitoring, not application
+            (owner 2026-08-29) — the section filters them out on every line
+            via the shared identity rule; a REAL termiticide recorded on a
+            bait visit (foam, liquid — the panel still defaults it to
+            station_check) keeps the section with its EPA facts and
+            precautions (codex P1 #3600 r2). */}
+        {!isV2LeadLayout && (
           <AppliedProductsSection
             data={data}
-            mode={mode}
-          />
-        )}
-        {!isV2LeadLayout && data.termiteReportV2 && termiteProductApplications.length > 0 && (
-          <AppliedProductsSection
-            data={{ ...data, applications: termiteProductApplications }}
             mode={mode}
           />
         )}

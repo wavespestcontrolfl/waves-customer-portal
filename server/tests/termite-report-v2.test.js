@@ -77,6 +77,15 @@ describe('resolveTermiteStatus — honest status ladder', () => {
     expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Favorable moisture / soil conditions' }).key).toBe('protected');
   });
 
+  it('frozen positive evidence (activity count / active location) beside "None observed" is activity', () => {
+    const base = { termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0 };
+    expect(resolveTermiteStatus({ ...base, activityCount: 2 }).key).toBe('action');
+    expect(resolveTermiteStatus({ ...base, activeLocation: 'Station 7, rear wall' }).key).toBe('action');
+    expect(resolveTermiteStatus({ ...base, activityCount: 0, activeLocation: '  ' }).key).toBe('protected');
+    const out = buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station' });
+    expect(out.status.label).toBe('Termite activity observed at 2 stations');
+  });
+
   it('never claims protection without an inspected count', () => {
     expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: null, checked: 0, inaccessible: 0 }))
       .toEqual({ key: 'monitoring', tone: 'watch' });
@@ -432,6 +441,21 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(out.metrics[1].value).toBe('2 stations');
     // the payload says the frozen select was overridden (the gauge trend is stale)
     expect(out.statusEscalatedByPins).toBe(true);
+    // …and a frozen "No action needed" commitment is replaced by a monitoring commitment
+    const noAction = buildTermiteReportV2({
+      typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 },
+      nextStep: 'No action needed.',
+    });
+    expect(noAction.nextStep).toBe('We will re-check the active stations at your next monitoring visit.');
+    const followUp = buildTermiteReportV2({
+      typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 },
+      nextStep: 'Recheck active stations sooner.',
+    });
+    expect(followUp.nextStep).toBe('Recheck active stations sooner.');
+    // no escalation → the frozen commitment stands verbatim
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' }).nextStep).toBe('No action needed.');
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).statusEscalatedByPins).toBe(false);
     // pins never DOWNGRADE an explicit activity selection
     const kept = buildTermiteReportV2({
