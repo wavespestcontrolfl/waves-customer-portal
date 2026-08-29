@@ -1,7 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
+let mockFrozenRodentSetup = 0;
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
+  // Frozen rodent bait-station setup the prepay invoice bills as its own
+  // line (codex #3591 r24) — tests set mockFrozenRodentSetup to exercise it.
+  frozenRodentBaitSetupAmount: jest.fn(() => mockFrozenRodentSetup),
   // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
   // so estimate-public's breakdown/fee gates work under this module mock.
   recurringMixHasMembershipFeeService: (services = []) => {
@@ -1531,6 +1535,25 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
       },
     });
     expect(r.eligible).toBe(true);
+  });
+
+  test('a rodent bait-station setup row does NOT block and the preview total includes it — the prepay invoice bills it (codex #3591 r24 P1)', async () => {
+    const base = recurring([{ service: 'rodent_bait', name: 'Rodent Bait Stations', frequency: 'quarterly', perApplicationBilled: true }]);
+    mockFrozenRodentSetup = 99;
+    try {
+      const r = await prepayBookingEligibility({
+        ...base,
+        onetime_total: '99.00',
+        estimate_data: {
+          ...base.estimate_data,
+          oneTime: { items: [{ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 }] },
+        },
+      });
+      expect(r.eligible).toBe(true);
+      expect(r.invoiceTotal).toBe(627 + 99);
+    } finally {
+      mockFrozenRodentSetup = 0;
+    }
   });
 
   test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {

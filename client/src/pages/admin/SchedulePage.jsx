@@ -2445,13 +2445,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
     (!presetCategoryFilter ||
       presetCategoryFilter === (line.serviceCategory || null));
+  // excludedFromPercentDiscount === null means UNKNOWN (static fallback
+  // row while the live catalog is unavailable): a percentage preview must
+  // not assume eligibility the server may refuse on save (codex #3591 r24
+  // P2) — the row is withheld from the percentage base.
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(discountType === "percentage" && line.excludedFromPercentDiscount === true);
+    !(discountType === "percentage"
+      && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
   const primaryLineForDiscount = {
     serviceKey: form.serviceKey,
     serviceCategory: form.serviceCategory,
-    excludedFromPercentDiscount: form.excludedFromPercentDiscount === true,
+    excludedFromPercentDiscount: form.excludedFromPercentDiscount === null
+      ? null
+      : form.excludedFromPercentDiscount === true,
   };
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
@@ -2730,7 +2737,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                 onField("serviceId", svc.id || null);
                                 onField(
                                   "excludedFromPercentDiscount",
-                                  svc.excludedFromPercentDiscount === true,
+                                  svc.excludedFromPercentDiscount === null
+                                    ? null
+                                    : svc.excludedFromPercentDiscount === true,
                                 );
                                 onField("serviceKey", svc.serviceKey || null);
                                 // Static-fallback items carry no category of
@@ -3649,9 +3658,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         color: D.muted,
                       }}
                     >
-                      Live service catalog unavailable — percentage exclusions
-                      (e.g. rodent bait) aren&apos;t previewed here; the server
-                      applies the live rules on save.
+                      Live service catalog unavailable — lines whose percentage
+                      exclusion is unknown (e.g. rodent bait) are withheld from
+                      this preview; the server applies the live rules on save.
                     </div>
                   )}
                 {discountType &&
