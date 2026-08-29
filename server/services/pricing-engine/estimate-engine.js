@@ -2335,6 +2335,16 @@ function generateEstimate(input) {
   const specialtyTotalGross = specialtyItems.reduce((sum, i) => sum + (i.totalAfterDiscount ?? i.total ?? 0), 0);
   const oneTimeTotal = Math.max(0, roundMoney(oneTimeTotalGross - manualDiscountOneTimeAmount));
   const specialtyTotal = Math.max(0, roundMoney(specialtyTotalGross - manualDiscountSpecialtyAmount));
+  // The $99 bait-station setup is INTRINSIC to a rodent bait plan, not
+  // one-time work: it stays inside oneTimeTotal (converter/invoice/display
+  // all read it there), but the self-serve mixed-billing gate
+  // (booking-pay-at-visit.engineSummaryHasMixedBilling) subtracts this
+  // share so a standalone rodent quote keeps its self-book funnel — the
+  // plan and its setup fee ride staff conversion, exactly like the
+  // WaveGuard setup fee on a solo mosquito self-book (codex #3591 r8).
+  const rodentBaitSetupTotal = roundMoney(oneTimeItems
+    .filter((i) => i.service === 'rodent_bait_setup')
+    .reduce((sum, i) => sum + (i.priceAfterDiscount ?? i.price ?? 0), 0));
 
   // Installation costs (termite)
   const installationTotal = recurringItems
@@ -2416,6 +2426,7 @@ function generateEstimate(input) {
       manualDiscount: manualDiscountInfo,
       serviceSpecificDiscounts,
       oneTimeTotal,
+      rodentBaitSetupTotal,
       specialtyTotal,
       installationTotal,
       year1Total: Math.round(year1Total),

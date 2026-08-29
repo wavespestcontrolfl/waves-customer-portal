@@ -501,7 +501,7 @@ function publicQuoteBedBugInput(bedBug = {}) {
 // Specialty and installation totals count alongside oneTimeTotal.
 function estimateBlocksBookingHandoff(estimate) {
   const { engineSummaryHasMixedBilling } = require('../services/booking-pay-at-visit');
-  return engineSummaryHasMixedBilling(estimate?.summary || {});
+  return engineSummaryHasMixedBilling(estimate?.summary || {}, { lineItems: estimate?.lineItems || [] });
 }
 
 // Services with no self-bookable slot shape: bed bug treatment is multi-visit

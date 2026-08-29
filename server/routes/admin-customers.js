@@ -583,6 +583,11 @@ function isSchedulableOneTimeEstimateLine(line) {
   const text = `${service} ${label} ${detail}`;
 
   if (service === 'waveguard_setup') return false;
+  // Billing-only rows: the rodent bait-station setup fee is invoiced, never
+  // visited — the recurring rodent_bait row is the schedulable program. Left
+  // in, serviceCatalogMatch keys "bait station" to the quarterly bait
+  // program and Customer 360 could schedule it twice (codex #3591 r8).
+  if (service === 'rodent_bait_setup') return false;
   if (text.includes('membership_setup_fee')) return false;
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }

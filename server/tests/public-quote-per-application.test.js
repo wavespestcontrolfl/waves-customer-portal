@@ -394,6 +394,35 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(Number(lawnPestMix.summary.oneTimeTotal)).toBeGreaterThan(0);
   });
 
+  test('standalone rodent bait keeps its self-book funnel: the $99 setup share is carved out of the mixed-billing gate (codex #3591 r8)', () => {
+    // Non-member rodent-only quote: the engine attaches the intrinsic $99
+    // bait-station setup as a one-time line (oneTimeTotal 99) but reports
+    // its share, so the gate sees NO real one-time add-on.
+    const rodentOnly = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {} },
+    });
+    expect(rodentOnly.lineItems.some((l) => l.service === 'rodent_bait_setup' && l.price === 99)).toBe(true);
+    expect(Number(rodentOnly.summary.oneTimeTotal)).toBe(99);
+    expect(Number(rodentOnly.summary.rodentBaitSetupTotal)).toBe(99);
+    expect(estimateBlocksBookingHandoff(rodentOnly)).toBe(false);
+    expect(estimateBlocksSelfBookLink(rodentOnly)).toBe(false);
+    // A REAL one-time add-on beside the rodent plan still blocks — only the
+    // setup share is exempt, not the whole one-time bucket.
+    const rodentPlusRoach = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {}, pest: { frequency: 'quarterly', roachType: 'regular' } },
+    });
+    expect(Number(rodentPlusRoach.summary.rodentBaitSetupTotal)).toBe(0); // member → waived
+    expect(estimateBlocksBookingHandoff(rodentPlusRoach)).toBe(true);
+    const rodentPlusWeed = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { rodentBait: {}, oneTimeLawn: { treatmentType: 'weed' } },
+    });
+    expect(Number(rodentPlusWeed.summary.oneTimeTotal)).toBeGreaterThan(99);
+    expect(estimateBlocksBookingHandoff(rodentPlusWeed)).toBe(true);
+  });
+
   test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
     const bedBug = generateEstimate({
       ...BASE_PROPERTY,

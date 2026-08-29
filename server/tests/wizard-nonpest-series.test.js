@@ -962,7 +962,14 @@ describe('booking route wiring (source contracts)', () => {
     expect(engineSummaryHasMixedBilling({ recurringAnnual: 900 })).toBe(false);
     expect(engineSummaryHasMixedBilling({ oneTimeTotal: 150, specialtyTotal: 250 })).toBe(false);
     const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
-    expect(publicQuote).toMatch(/function estimateBlocksBookingHandoff\(estimate\) \{\s*\n\s*const \{ engineSummaryHasMixedBilling \} = require\('\.\.\/services\/booking-pay-at-visit'\);\s*\n\s*return engineSummaryHasMixedBilling\(estimate\?\.summary \|\| \{\}\);/);
+    // The mint passes the engine's line items too, so the rodent bait
+    // setup carve-out (codex #3591 r8) resolves identically from a fresh
+    // engine result and from a mirrored draft's engineResult.lineItems.
+    expect(publicQuote).toMatch(/function estimateBlocksBookingHandoff\(estimate\) \{\s*\n\s*const \{ engineSummaryHasMixedBilling \} = require\('\.\.\/services\/booking-pay-at-visit'\);\s*\n\s*return engineSummaryHasMixedBilling\(estimate\?\.summary \|\| \{\}, \{ lineItems: estimate\?\.lineItems \|\| \[\] \}\);/);
+    // The carve-out is the setup share ONLY — never the whole one-time bucket.
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, oneTimeTotal: 99, rodentBaitSetupTotal: 99 })).toBe(false);
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, oneTimeTotal: 249, rodentBaitSetupTotal: 99 })).toBe(true);
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, oneTimeTotal: 99 }, { lineItems: [{ service: 'rodent_bait_setup', price: 99 }] })).toBe(false);
     const { _internals } = require('../routes/public-quote');
     expect(_internals.estimateBlocksBookingHandoff({ summary: { recurringAnnual: 900, specialtyTotal: 250 } })).toBe(true);
     expect(_internals.estimateBlocksSelfBookLink({ summary: { recurringAnnual: 900, installationTotal: 400 }, lineItems: [] })).toBe(true);
