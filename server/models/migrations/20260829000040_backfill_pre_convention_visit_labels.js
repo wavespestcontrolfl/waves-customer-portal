@@ -307,20 +307,26 @@ async function fanOutSnapshots(knex, { from, to, visits }, state) {
     const linked = await knex('appointment_reminders')
       .whereIn('scheduled_service_id', visitIds)
       .select(...REMINDER_COLS);
-    const targets = new Map(linked.map((r) => [r.id, { rem: r, sourceVisitId: r.scheduled_service_id || null }]));
+    // Every visit a target represents rides in its record: a sibling row
+    // reached from two same-slot visits sharing this mapping (the merger
+    // dedupes identical labels) reverts only when ALL of them do (r7 P2).
+    const targets = new Map();
+    const addTarget = (rem, visitId) => {
+      if (!targets.has(rem.id)) targets.set(rem.id, { rem, visitIds: new Set() });
+      if (visitId) targets.get(rem.id).visitIds.add(visitId);
+    };
+    for (const rem of linked) addTarget(rem, rem.scheduled_service_id);
     for (const rem of linked) {
       if (rem.customer_id == null || rem.appointment_time == null) continue;
-      for (const sib of await liveSiblingReminders(knex, rem, hasPreclosedCol)) {
-        if (!targets.has(sib.id)) targets.set(sib.id, { rem: sib, sourceVisitId: rem.scheduled_service_id || null });
-      }
+      for (const sib of await liveSiblingReminders(knex, rem, hasPreclosedCol)) addTarget(sib, rem.scheduled_service_id);
     }
-    for (const { rem, sourceVisitId } of targets.values()) {
+    for (const { rem, visitIds: sources } of targets.values()) {
       const next = relabelReminderComponent(rem.service_type, from, to);
       if (next === null) continue;
       const count = await knex('appointment_reminders')
         .where({ id: rem.id, service_type: rem.service_type })
         .update({ service_type: next, updated_at: knex.fn.now() });
-      if (count) state.reminders.push({ id: rem.id, prior: rem.service_type, written: next, from, to, visit_id: sourceVisitId });
+      if (count) state.reminders.push({ id: rem.id, prior: rem.service_type, written: next, from, to, visit_ids: [...sources] });
     }
   }
 
@@ -429,11 +435,16 @@ exports.up = async function up(knex) {
     ).select('ss.id', 'ss.service_type', 'ss.service_id', 'ss.self_booking_id', 'sv.name as catalog_name')
     : [];
 
+  // The write predicate re-checks the catalog name it is about to stamp:
+  // an admin rename landing between the join read and this write must
+  // make the CAS miss, never stamp the obsolete name (r7 P2).
+  const catalogNameStill = (q, serviceId, name) => q.whereRaw('(SELECT name FROM services WHERE id = ?) = ?', [serviceId, name]);
+
   for (const r of linkedRows) {
-    const count = await openVisitStatus(
+    const count = await catalogNameStill(openVisitStatus(
       knex('scheduled_services')
         .where({ id: r.id, service_type: r.service_type, service_id: r.service_id })
-    ).update({ service_type: r.catalog_name });
+    ), r.service_id, r.catalog_name).update({ service_type: r.catalog_name });
     if (count) {
       state.linked.push({ id: r.id, from: r.service_type, to: r.catalog_name, service_id: r.service_id });
       noteRelabel(r.service_type, r.catalog_name, r);
@@ -453,10 +464,15 @@ exports.up = async function up(knex) {
         .whereRaw('a.service_name <> sv.name')
         .select('a.id', 'a.scheduled_service_id', 'a.service_name', 'a.service_id', 'sv.name as catalog_name')
       : [];
+    // Add-ons persist their OWN recurrence (20260526000019) and series
+    // generation honors it, so a name-only add-on maps through its own
+    // cadence when it has one; the parent's is only the legacy fallback
+    // (r7 P1).
+    const addonHasPattern = await knex.schema.hasColumn('scheduled_service_addons', 'recurring_pattern');
     const legacyAddons = await knex('scheduled_service_addons')
       .whereNull('service_id')
       .whereIn('service_name', [...new Set(UNLINKED_MAPPING.map(([l]) => l))])
-      .select('id', 'scheduled_service_id', 'service_name');
+      .select('id', 'scheduled_service_id', 'service_name', ...(addonHasPattern ? ['recurring_pattern'] : []));
     const parentIds = [...new Set([...linkedAddons, ...legacyAddons].map((a) => a.scheduled_service_id).filter(Boolean))];
     const openParents = new Map(
       parentIds.length
@@ -465,28 +481,38 @@ exports.up = async function up(knex) {
           .select('id', 'recurring_pattern')).map((v) => [v.id, v])
         : []
     );
-    const relabelAddon = async (a, to, identityScope, pattern) => {
+    const relabelAddon = async (a, to, identityScope, cadence) => {
       if (!openParents.has(a.scheduled_service_id)) return;
       const count = await identityScope(
         knex('scheduled_service_addons').where({ id: a.id, service_name: a.service_name })
       ).update({ service_name: to });
       if (count) {
         const rec = { id: a.id, from: a.service_name, to, parent_id: a.scheduled_service_id, service_id: a.service_id || null };
-        // A name-only add-on's mapping rests on the PARENT cadence — recorded
-        // so down() can re-check it (r4 P2).
-        if (pattern != null) rec.pattern = pattern;
+        // A name-only add-on's mapping rests on a cadence — its own, or the
+        // parent's as the legacy fallback — recorded with its source so
+        // down() re-checks exactly that (r4 P2, r7 P1).
+        if (cadence) { rec.pattern = cadence.pattern; rec.pattern_source = cadence.source; }
         state.addons.push(rec);
         noteRelabel(a.service_name, to, { id: a.scheduled_service_id, self_booking_id: null });
       }
     };
     for (const a of linkedAddons) {
-      await relabelAddon(a, a.catalog_name, (q) => q.where({ service_id: a.service_id }));
+      // Same catalog-name re-check as the linked visit write (r7 P2).
+      await relabelAddon(a, a.catalog_name, (q) => catalogNameStill(q.where({ service_id: a.service_id }), a.service_id, a.catalog_name));
     }
     for (const a of legacyAddons) {
       const parent = openParents.get(a.scheduled_service_id);
-      const to = parent ? mappingTarget(a.service_name, parent.recurring_pattern) : null;
+      if (!parent) continue;
+      const cadence = a.recurring_pattern
+        ? { pattern: a.recurring_pattern, source: 'addon' }
+        : { pattern: parent.recurring_pattern, source: 'parent' };
+      const to = mappingTarget(a.service_name, cadence.pattern);
       if (!to || !catalog.has(to)) continue;
-      await relabelAddon(a, to, (q) => q.whereNull('service_id'), parent.recurring_pattern);
+      // The add-on's own cadence is part of its identity for the CAS.
+      const scope = (q) => (cadence.source === 'addon'
+        ? q.whereNull('service_id').where({ recurring_pattern: cadence.pattern })
+        : q.whereNull('service_id'));
+      await relabelAddon(a, to, scope, cadence);
     }
   }
 
@@ -568,7 +594,7 @@ exports.down = async function down(knex) {
   const invoiceRecs = list(state.invoices);
   const componentVisitIds = [...new Set([
     ...addonRecs.map((r) => r && r.parent_id),
-    ...reminderRecs.map((r) => r && r.visit_id),
+    ...reminderRecs.flatMap((r) => (r && Array.isArray(r.visit_ids) ? r.visit_ids : [])),
     ...sbRecs.flatMap((r) => (r && Array.isArray(r.visit_ids) ? r.visit_ids : [])),
     ...invoiceRecs.map((r) => r && r.visit_id),
   ].filter((id) => id && !recordedVisits.has(id)))];
@@ -590,9 +616,13 @@ exports.down = async function down(knex) {
       // add-on-only parent the owner re-cadenced since no longer justifies
       // the old name (a relabeled parent already re-checked its cadence in
       // its own reversal above).
-      if (rec.pattern != null && !recordedVisits.has(rec.parent_id) && parentPattern.get(rec.parent_id) !== rec.pattern) continue;
+      const parentCadenceBased = rec.pattern != null && rec.pattern_source !== 'addon';
+      if (parentCadenceBased && !recordedVisits.has(rec.parent_id) && parentPattern.get(rec.parent_id) !== rec.pattern) continue;
       let q = knex('scheduled_service_addons').where({ id: rec.id, service_name: rec.to });
       q = rec.service_id ? q.where({ service_id: rec.service_id }) : q.whereNull('service_id');
+      // An add-on mapped through its OWN cadence re-checks that cadence on
+      // the row itself (r7 P1) — the identity the forward CAS used.
+      if (rec.pattern_source === 'addon') q = q.where({ recurring_pattern: rec.pattern });
       await q.update({ service_name: rec.from });
     }
   }
@@ -606,7 +636,8 @@ exports.down = async function down(knex) {
     // at the first step whose component visit is not revertible.
     const recsById = new Map();
     for (const rec of reminderRecs) {
-      if (!pair(rec) || !rec.visit_id || typeof rec.written !== 'string' || typeof rec.prior !== 'string') continue;
+      if (!pair(rec) || typeof rec.written !== 'string' || typeof rec.prior !== 'string') continue;
+      if (!Array.isArray(rec.visit_ids) || !rec.visit_ids.length) continue;
       if (!recsById.has(rec.id)) recsById.set(rec.id, []);
       recsById.get(rec.id).push(rec);
     }
@@ -615,7 +646,7 @@ exports.down = async function down(knex) {
       if (!current) continue;
       let working = current.service_type;
       for (const rec of [...recs].reverse()) {
-        if (!visitRevertible(rec.visit_id)) break;
+        if (!rec.visit_ids.every(visitRevertible)) break;
         if (working !== rec.written) break;
         working = rec.prior;
       }

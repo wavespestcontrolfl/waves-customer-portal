@@ -31,6 +31,7 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
     let rawNeq = null; // { col } — `<col> <> sv.name`
     let likeAny = null; // unattached-invoice label prefilter
     const inClauses = [];
+    const catalogChecks = []; // `(SELECT name FROM services WHERE id = ?) = ?` write predicates
     const rows = () => db[table] || [];
     const isOpen = (r) => r.status == null || !TERMINAL.includes(r.status);
     const svcById = (id) => (db.services || []).find((s) => s.id === id);
@@ -47,7 +48,8 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
         const has = (v) => typeof v === 'string' && v.includes(from);
         if (!(has(r.title) || has(r.service_type) || has(typeof r.line_items === 'string' ? r.line_items : JSON.stringify(r.line_items)))) return false;
       }
-      return filters.every((f) => Object.entries(f).every(([k, v]) => r[stripAlias(k)] === v));
+      if (!catalogChecks.every((check) => check())) return false;
+      return filters.every((f) => Object.entries(f).every(([k, v]) => k.startsWith('__') || r[stripAlias(k)] === v));
     };
     const q = {
       join() { joined = true; return q; },
@@ -62,6 +64,12 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
         let m = /^(?:ss|a)\.(service_type|service_name) <> sv\.name$/.exec(sql);
         if (m) { rawNeq = { col: m[1] }; return q; }
         if (/^updated_at::text = \?$/.test(sql)) { filters.push({ updated_at: bindings[0] }); return q; }
+        if (/^\(SELECT name FROM services WHERE id = \?\) = \?$/.test(sql)) {
+          const [sid, name] = bindings;
+          filters.push({ __catalog_name_still: name });
+          catalogChecks.push(() => svcById(sid)?.name === name);
+          return q;
+        }
         if (/^\(title = \? OR title LIKE \?/.test(sql)) { likeAny = { from: bindings[0] }; return q; }
         throw new Error(`fake whereRaw: unsupported ${sql}`);
       },
@@ -143,6 +151,9 @@ function seedDb() {
       // second Quarterly Pest Control visit sharing l1's slot (c2/T2) — so that
       // slot is swept by TWO passes converging on one target
       { id: 'u6', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
+      // and a THIRD at that slot with the same mapping as u6 — a shared sibling
+      // reminder then represents both
+      { id: 'u7', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // add-on-only parents: label fine, add-ons stale (open / terminal)
       { id: 'p-open', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       { id: 'p-done', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'completed', self_booking_id: null },
@@ -152,15 +163,18 @@ function seedDb() {
     ],
     scheduled_service_addons: [
       // linked stale add-on under an open parent → catalog name
-      { id: 'a-linked', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'Pest Control' },
-      // name-only add-on, parent quarterly → mapped
-      { id: 'a-legacy', scheduled_service_id: 'p-open', service_id: null, service_name: 'Quarterly Pest Control' },
-      // name-only ambiguous label, parent monthly → the PARENT cadence disambiguates
-      { id: 'a-monthly', scheduled_service_id: 'u2', service_id: null, service_name: 'Pest Control' },
+      { id: 'a-linked', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'Pest Control', recurring_pattern: null },
+      // name-only add-on with NO cadence of its own, parent quarterly → parent cadence (legacy fallback)
+      { id: 'a-legacy', scheduled_service_id: 'p-open', service_id: null, service_name: 'Quarterly Pest Control', recurring_pattern: null },
+      // name-only ambiguous label, no own cadence, parent monthly → the PARENT cadence disambiguates
+      { id: 'a-monthly', scheduled_service_id: 'u2', service_id: null, service_name: 'Pest Control', recurring_pattern: null },
+      // name-only add-on with its OWN cadence (quarterly) under a MONTHLY parent — its own
+      // cadence maps it; the parent's would find no (label, monthly) pair at all
+      { id: 'a-own', scheduled_service_id: 'u2', service_id: null, service_name: 'Quarterly Pest Control', recurring_pattern: 'quarterly' },
       // under a TERMINAL parent — untouched
-      { id: 'a-done', scheduled_service_id: 'p-done', service_id: null, service_name: 'Quarterly Pest Control' },
+      { id: 'a-done', scheduled_service_id: 'p-done', service_id: null, service_name: 'Quarterly Pest Control', recurring_pattern: null },
       // linked add-on whose name is a LIVE catalog name — linkage conflict, untouched
-      { id: 'a-conflict', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'General Pest Control' },
+      { id: 'a-conflict', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'General Pest Control', recurring_pattern: null },
     ],
     appointment_reminders: [
       // u1's own registration — plain stale label
@@ -169,8 +183,9 @@ function seedDb() {
       { id: 'r-l1', scheduled_service_id: 'l1', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // live same-slot sibling of l1 (legacy, unlinked) — swept via customer_id + appointment_time
       { id: 'r-sib', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Mosquito Control, Pest Control, and Lawn Care', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
-      // u6's own registration, same slot as l1
+      // u6's and u7's own registrations, same slot as l1
       { id: 'r-u6', scheduled_service_id: 'u6', customer_id: 'c2', appointment_time: 'T2', service_type: 'Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      { id: 'r-u7', scheduled_service_id: 'u7', customer_id: 'c2', appointment_time: 'T2', service_type: 'Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // legacy sibling holding BOTH stale components that converge on one target
       { id: 'r-conv', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Quarterly Pest Control & Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // a longer name that merely STARTS with the stale label — never matches
@@ -260,7 +275,7 @@ describe('20260829000040 backfill up()', () => {
     expect(byId(db, 'p-open').service_type).toBe('Mosquito Control'); // parent label untouched
 
     const state = readState(db);
-    expect(state.unlinked.map((r) => r.id).sort()).toEqual(['u1', 'u2', 'u6']);
+    expect(state.unlinked.map((r) => r.id).sort()).toEqual(['u1', 'u2', 'u6', 'u7']);
     expect(state.linked.map((r) => r.id).sort()).toEqual(['l1', 'l5']);
     // Population identity rides in the record for down().
     expect(state.unlinked.find((r) => r.id === 'u1')).toEqual(
@@ -278,14 +293,18 @@ describe('20260829000040 backfill up()', () => {
     expect(addon(db, 'a-linked').service_name).toBe('Quarterly Pest Control Service');
     expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service');
     expect(addon(db, 'a-monthly').service_name).toBe('Monthly Pest Control Service'); // parent u2 is monthly
+    expect(addon(db, 'a-own').service_name).toBe('Quarterly Pest Control Service'); // its OWN quarterly cadence, not the monthly parent
     expect(addon(db, 'a-done').service_name).toBe('Quarterly Pest Control'); // terminal parent
     expect(addon(db, 'a-conflict').service_name).toBe('General Pest Control'); // live catalog name
 
     const state = readState(db);
-    expect(state.addons.map((r) => r.id).sort()).toEqual(['a-legacy', 'a-linked', 'a-monthly']);
+    expect(state.addons.map((r) => r.id).sort()).toEqual(['a-legacy', 'a-linked', 'a-monthly', 'a-own']);
     expect(state.addons.find((r) => r.id === 'a-linked')).toEqual(
       { id: 'a-linked', from: 'Pest Control', to: 'Quarterly Pest Control Service', parent_id: 'p-open', service_id: 'svc-q' }
     );
+    // The cadence each name-only mapping rested on, and where it came from.
+    expect(state.addons.find((r) => r.id === 'a-legacy')).toMatchObject({ pattern: 'quarterly', pattern_source: 'parent' });
+    expect(state.addons.find((r) => r.id === 'a-own')).toMatchObject({ pattern: 'quarterly', pattern_source: 'addon' });
     // The add-on-only parent's copies carry the add-on name → swept too.
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
     // Both add-on passes touched the parent's draft — neither skipped the other.
@@ -317,11 +336,12 @@ describe('20260829000040 backfill up()', () => {
     expect(rem(db, 'r-l4').service_type).toBe('General Pest Control'); // conflict visit's reminder
 
     const state = readState(db);
-    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-conv', 'r-conv', 'r-l1', 'r-p-open', 'r-sib', 'r-u1', 'r-u6']);
-    // The converging label has one exact prior/written step per pass.
-    expect(state.reminders.filter((r) => r.id === 'r-conv').map((r) => [r.prior, r.written]).sort()).toEqual([
-      ['Quarterly Pest Control & Pest Control', 'Quarterly Pest Control Service & Pest Control'],
-      ['Quarterly Pest Control Service & Pest Control', 'Quarterly Pest Control Service & Quarterly Pest Control Service'],
+    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-conv', 'r-conv', 'r-l1', 'r-p-open', 'r-sib', 'r-u1', 'r-u6', 'r-u7']);
+    // The converging label has one exact prior/written step per pass, and
+    // the shared-slot step names EVERY visit it represents (u6 AND u7).
+    expect(state.reminders.filter((r) => r.id === 'r-conv').map((r) => [r.prior, r.written, [...r.visit_ids].sort()]).sort()).toEqual([
+      ['Quarterly Pest Control & Pest Control', 'Quarterly Pest Control Service & Pest Control', ['u6', 'u7']],
+      ['Quarterly Pest Control Service & Pest Control', 'Quarterly Pest Control Service & Quarterly Pest Control Service', ['l1']],
     ]);
     // A sibling records the COMPONENT visit that swept it, not its own owner.
     expect(state.reminders.find((r) => r.id === 'r-sib')).toEqual({
@@ -330,7 +350,7 @@ describe('20260829000040 backfill up()', () => {
       written: 'Mosquito Control, Quarterly Pest Control Service, and Lawn Care',
       from: 'Pest Control',
       to: 'Quarterly Pest Control Service',
-      visit_id: 'l1',
+      visit_ids: ['l1'],
     });
   });
 
@@ -541,10 +561,57 @@ describe('20260829000040 down()', () => {
     const knex = fakeKnex(db);
     await migration.up(knex);
     byId(db, 'p-open').recurring_pattern = 'monthly'; // cadence that justified the mapping is gone
+    addon(db, 'a-own').recurring_pattern = 'monthly'; // an add-on's OWN cadence changed since → its identity is gone too
     await migration.down(knex);
     expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service'); // kept
     expect(addon(db, 'a-linked').service_name).toBe('Pest Control'); // catalog-linked, cadence-independent → reverted
+    expect(addon(db, 'a-own').service_name).toBe('Quarterly Pest Control Service'); // own cadence changed → kept
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control'); // parent still open → reverts
+  });
+
+  test('a sibling reminder shared by two same-mapping visits reverts only when BOTH revert', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    byId(db, 'u7').status = 'completed'; // u6 reverts, u7 does not
+    await migration.down(knex);
+    // Last step (l1's pass) unwinds; the shared u6+u7 step is retained whole.
+    expect(rem(db, 'r-conv').service_type).toBe('Quarterly Pest Control Service & Pest Control');
+    // Every row at that slot carrying the shared label represents both visits
+    // (the merger dedupes identical labels) — u6's own row included.
+    expect(rem(db, 'r-u6').service_type).toBe('Quarterly Pest Control Service');
+    expect(rem(db, 'r-u7').service_type).toBe('Quarterly Pest Control Service');
+    // u1's row (a different slot) reverts with u1 as usual.
+    expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control');
+  });
+
+  test('a linked write re-checks the catalog name it stamps (an admin rename in between makes the CAS miss)', async () => {
+    const db = seedDb();
+    // Simulate the rename landing between the join read and the write: the
+    // fake evaluates the predicate at write time against the live row.
+    const knex = fakeKnex(db);
+    const orig = knex;
+    let renamed = false;
+    const wrapped = (t) => {
+      const q = orig(t);
+      const update = q.update;
+      q.update = async (payload) => {
+        // Leg B's l5 write is the one stamping svc-m's name AFTER Leg A
+        // already relabeled u2 to the same string — rename svc-m right then.
+        const legADone = db.scheduled_services.find((r) => r.id === 'u2').service_type === 'Monthly Pest Control Service';
+        if (!renamed && legADone && t === 'scheduled_services' && payload.service_type === 'Monthly Pest Control Service') {
+          renamed = true;
+          db.services.find((s) => s.id === 'svc-m').name = 'Monthly Pest Control Plan';
+        }
+        return update(payload);
+      };
+      return q;
+    };
+    wrapped.schema = orig.schema; wrapped.fn = orig.fn; wrapped.raw = orig.raw;
+    await migration.up(wrapped);
+    // l5 (svc-m) was the write in flight — the stale name was NOT stamped.
+    expect(byId(db, 'l5').service_type).toBe('Pest Control Service');
+    expect(readState(db).linked.map((r) => r.id)).toEqual(['l1']);
   });
 
   test('a converging merged reminder stops unwinding at the first non-revertible step and never guesses', async () => {
