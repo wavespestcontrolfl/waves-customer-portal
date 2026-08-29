@@ -40,4 +40,24 @@ describe('composeLeadAddress', () => {
   test('a different embedded unit is not treated as a duplicate', () => {
     expect(composeLeadAddress('100 Main St Apt 4', 'Apt 5')).toBe('100 Main St Apt 4, Apt 5');
   });
+
+  test('multipart and structural designators dedupe through the shared unit parser', () => {
+    expect(composeLeadAddress('100 Main St Bldg 2 Apt 4', 'Bldg 2 Apt 4')).toBe('100 Main St Bldg 2 Apt 4');
+    expect(composeLeadAddress('100 Main St Floor 2', 'Fl 2')).toBe('100 Main St Floor 2');
+    expect(composeLeadAddress('100 Main St Lot 7', 'Lot 7')).toBe('100 Main St Lot 7');
+    expect(composeLeadAddress('100 Main St Space 12', 'Spc 12')).toBe('100 Main St Space 12');
+    // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed.
+    expect(composeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toBe('100 Main St Bldg 2 Apt 4, Apt 4');
+    // Designator words inside a street name are not a unit.
+    expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
+  });
+
+  test('bounded to the leads.address varchar(255) — street trims, unit tail survives', () => {
+    const longStreet = `100 ${'Verylongstreetname '.repeat(20)}Blvd`;
+    expect(longStreet.length).toBeGreaterThan(255);
+    const out = composeLeadAddress(longStreet, 'Apt 4');
+    expect(out.length).toBeLessThanOrEqual(255);
+    expect(out.endsWith(', Apt 4')).toBe(true);
+    expect(composeLeadAddress(longStreet, null).length).toBeLessThanOrEqual(255);
+  });
 });

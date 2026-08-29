@@ -9192,6 +9192,22 @@ const CallRecordingProcessor = {
         if (leadId) {
           let current = existingLead || (await db('leads').where({ id: leadId }).first());
           const isEmpty = (v) => v === null || v === undefined || v === '';
+          // leads.address is ONE free-text varchar(255) (migration
+          // 20260401000095): compose the unit in, or the lead card / pipeline
+          // card / estimate prefill all lose it even though the extractor
+          // captured it in address_line2 (2026-08-29: a prod lead rendered
+          // without the caller's unit while the customer row had it).
+          // Composed ONCE and reused by every ledger path below (fill,
+          // chronological-restamp resupply, stamp-ownership identity) so the
+          // stored value and the supplied identity always compare equal —
+          // a restated street+unit must record successor ownership, or a
+          // later rollback of the earlier call erases the accepted address.
+          // extracted.address_line2 ONLY, no V2 fallback — same reasoning as
+          // the customer insert: adoptV2PrimaryFields already copies a SAFE
+          // paired unit under primary mode, and reading V2 directly here
+          // would glue a V2 unit onto an unrelated V1 street in shadow /
+          // kill-switch mode.
+          const composedLeadAddress = composeLeadAddress(extracted.address_line1, extracted.address_line2);
 
           // The enrichment below runs as a PASS over `current` so the
           // claim-race recovery can re-run the SAME pass against a freshly
@@ -9213,17 +9229,7 @@ const CallRecordingProcessor = {
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-            // leads.address is a single free-text column (migration
-            // 20260401000095): compose the unit in, or the lead card / pipeline
-            // card / estimate prefill all lose it even though the extractor
-            // captured it in address_line2 (2026-08-29: a prod lead rendered
-            // without the caller's unit while the customer row had it).
-            if (extracted.address_line1 && isEmpty(current?.address)) {
-              leadUpdates.address = composeLeadAddress(
-                extracted.address_line1,
-                extracted.address_line2 || v2CanonicalExtraction?.property?.service_address?.street_line_2 || null,
-              );
-            }
+            if (composedLeadAddress && isEmpty(current?.address)) leadUpdates.address = composedLeadAddress;
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
             // Multi-service calls: matched_service is single-slot, so append the
@@ -9668,7 +9674,7 @@ const CallRecordingProcessor = {
                     resupply('first_name', extracted.first_name ? capitalizeName(extracted.first_name) : null);
                     resupply('last_name', extracted.last_name ? capitalizeName(extracted.last_name) : null);
                     resupply('email', extracted.email);
-                    resupply('address', extracted.address_line1);
+                    resupply('address', composedLeadAddress);
                     resupply('city', extracted.city);
                     resupply('zip', extracted.zip);
                     if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
@@ -9727,7 +9733,7 @@ const CallRecordingProcessor = {
                   first_name: extracted.first_name,
                   last_name: extracted.last_name,
                   email: extracted.email,
-                  address: extracted.address_line1,
+                  address: composedLeadAddress,
                   city: extracted.city,
                   zip: extracted.zip,
                 };
@@ -14479,20 +14485,35 @@ CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
 /**
- * leads.address is ONE free-text column, so the unit/suite from address_line2
- * has to be composed into it ("100 Main St" + "Apt 4" → "100 Main St, Apt 4").
- * A street that already embeds the same unit ("100 Main St Apt 4") is left
- * alone so a V1 street + V2 unit never renders the unit twice. Pure.
+ * leads.address is ONE free-text varchar(255), so the unit/suite from
+ * address_line2 has to be composed into it ("100 Main St" + "Apt 4" →
+ * "100 Main St, Apt 4"). A street that already embeds the same unit
+ * ("100 Main St Apt 4", "100 Main St Bldg 2 Apt 4") is left alone so a
+ * legacy inline-unit street + a separately captured unit never renders the
+ * unit twice — duplicate detection goes through the shared address-normalizer
+ * parser (splitStreetLineUnit / normalizeUnitLine / unitLineValueKey) so
+ * multipart and structural designators (Bldg, Floor, Lot, Space) compare the
+ * same way everywhere. Bounded to the column via formatAddressBounded, which
+ * trims the STREET and keeps the unit tail (the same mechanism the customer
+ * address fan-out uses for leads.address). Pure.
  */
 function composeLeadAddress(line1, line2) {
   const street = String(line1 || '').trim();
   const unit = String(line2 || '').trim();
   if (!street) return null;
-  if (!unit) return street;
-  const { unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
-  if (unitKey(unit) && streetEmbeddedUnitKey(street) === unitKey(unit)) return street;
-  return `${street}, ${unit}`;
+  const { formatAddressBounded } = require('./customer-address-fanout');
+  if (!unit) return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
+  const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const embedded = String(splitStreetLineUnit(street)?.unit || '').trim();
+  if (embedded && unitLineValueKey(normalizeUnitLine(embedded)) === unitLineValueKey(normalizeUnitLine(unit))) {
+    return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
+  }
+  return formatAddressBounded({ line1: street, line2: unit }, LEAD_ADDRESS_MAX_LENGTH);
 }
+// leads.address column width (migration 20260401000095: default string →
+// varchar(255)); a longer composed value makes Postgres reject the whole
+// enrichment update and fails the call-processing attempt.
+const LEAD_ADDRESS_MAX_LENGTH = 255;
 
 CallRecordingProcessor._test = {
   composeLeadAddress,
