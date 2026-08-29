@@ -528,7 +528,6 @@ export default function ServiceReportDocument({ data, token }) {
     if (cockroachV2.statusSummary) summaryParagraphs.push(cockroachV2.statusSummary);
     const narrative = cleanVisitSummary(cockroachV2.aiSummary?.body || '');
     if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
-    if (cockroachV2.whatsNext?.title) summaryParagraphs.push(`${cockroachV2.whatsNext.title}.`);
   } else if (termiteV2Summary) {
     summaryParagraphs.push(String(termiteV2Summary.status.label).replace(/\.$/, '') + '.');
     if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
@@ -1086,6 +1085,21 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {/* Products applied */}
+        {/* Cockroach V2 treatment program (codex P2 #3613 r1): the plan lines
+            are composed for pdf/static too — only the live appointment date
+            is stripped — so the document prints them. */}
+        {cockroachV2?.whatsNext && (
+          <div className="doc-keep">
+            <SectionHeader>Your cockroach treatment program</SectionHeader>
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}><strong>{cockroachV2.whatsNext.title}</strong>{cockroachV2.whatsNext.badge ? ` — ${cockroachV2.whatsNext.badge === 'COMPLETE' ? 'program complete' : 'program in progress'}` : ''}</p>
+            {(cockroachV2.whatsNext.lines || []).filter((line) => line && line.text).map((line) => (
+              <Bullet key={line.label}>
+                <strong>{line.label}:</strong> {line.text}
+              </Bullet>
+            ))}
+          </div>
+        )}
+
         {appliedProducts.length > 0 && (
           <div>
             <SectionHeader>Products applied</SectionHeader>

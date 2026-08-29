@@ -186,36 +186,35 @@ export function CockroachHowToHelp({ help = null }) {
 }
 
 // ── 5. Your cockroach treatment program (what happens next) ──────────────────
+// One eyebrow per card, then bold-title + muted-detail rows — the same
+// rhythm as "What we did today" (owner eyeball 2026-08-29: stacked
+// eyebrow labels inside the card read off from the rest of the page).
 export function CockroachProgram({ whatsNext = null, nextVisitLabel = null }) {
   if (!whatsNext) return null;
   const complete = whatsNext.badge === 'COMPLETE';
-  const cellLabel = { ...eyebrow, marginBottom: 4 };
   return (
     <section data-glass="card" style={{ ...card, borderColor: 'rgba(4, 57, 94, 0.35)', background: `linear-gradient(180deg, rgba(4, 57, 94, 0.06), ${CARD} 55%)` }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
         <div>
           <div style={eyebrow}>Your cockroach treatment program</div>
-          <div style={{ fontSize: 17, fontWeight: 700, color: TEXT }}>{whatsNext.title}</div>
+          <h3 style={{ margin: 0, fontSize: 17, lineHeight: 1.3, color: TEXT }}>{whatsNext.title}</h3>
         </div>
-        <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 14, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto' }}>
+        <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 13, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto', marginTop: 2 }}>
           {whatsNext.badge}
         </span>
       </div>
-      <div style={{ display: 'grid', gap: 14 }}>
+      <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
         {(whatsNext.lines || []).map((line, i) => {
-          if (line.kind === 'next_visit') {
-            if (!nextVisitLabel) return null;
-            return (
-              <div key={`${i}-${line.label}`}>
-                <div style={cellLabel}>{line.label}</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: TEXT, lineHeight: 1.4 }}>{nextVisitLabel}</div>
-              </div>
-            );
-          }
+          const isDate = line.kind === 'next_visit';
+          if (isDate && !nextVisitLabel) return null;
           return (
-            <div key={`${i}-${line.label}`}>
-              <div style={cellLabel}>{line.label}</div>
-              <div style={{ fontSize: 15, lineHeight: 1.5, color: TEXT }}>{line.text}</div>
+            <div key={`${i}-${line.label}`} style={{ borderTop: i === 0 ? 'none' : `1px solid ${BORDER}`, paddingTop: i === 0 ? 0 : 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: TEXT }}>
+                {line.label}{isDate ? ` — ${nextVisitLabel}` : ''}
+              </div>
+              {!isDate && line.text ? (
+                <div style={{ fontSize: 14, lineHeight: 1.5, color: MUTED, marginTop: 2 }}>{line.text}</div>
+              ) : null}
             </div>
           );
         })}

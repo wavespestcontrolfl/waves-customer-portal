@@ -14,6 +14,7 @@ const {
   cockroachSnapshotOf,
   frozenCockroachServiceKey,
   resolveCockroachStatus,
+  hasLiveEvidence,
   resolveProgram,
   buildWhatsNext,
   buildHelp,
@@ -93,6 +94,30 @@ describe('resolveCockroachStatus — progress visits read the gauge trend', () =
     expect(resolveCockroachStatus({ activityLevel: 'Low', species: 'German', visitSequence: 1, activity: { score: 1, trend: 'improving', isBaseline: true } }).label).toBe('German cockroach activity was low today');
     // no level recorded → no activity claim either way
     expect(resolveCockroachStatus({ activityLevel: null, species: 'German' }).key).toBe('unknown');
+  });
+});
+
+describe('"None observed" beside live-activity evidence is reconciled, never published as a contradiction (codex P2 #3613 r1)', () => {
+  it('escalates the status, reports the evidence in the metric, withholds the stale select body and flags statusReconciled', () => {
+    const out = buildCockroachReportV2({
+      typedSnapshotValues: { species: 'German', activity_level: 'None observed', activity_locations: ['Kitchen', 'Under sink'], evidence_observed: ['Live roaches', 'Droppings'], work_completed: ['Bait placement'] },
+      typedReportType: 'cockroach',
+      todaysResultBody: 'No activity was observed today.',
+    });
+    expect(out.status).toEqual({ key: 'active', tone: 'watch', label: 'German cockroach activity signs were found today' });
+    expect(out.statusReconciled).toBe(true);
+    expect(out.metrics[0]).toEqual({ label: 'Activity today', value: 'Signs found' });
+    expect(out.metrics[1]).toEqual({ label: 'Areas with activity', value: '2' });
+    expect(out.statusSummary).not.toMatch(/No activity was observed/);
+    expect(out.statusSummary).toMatch(/Live roaches, Droppings were found in 2 areas/);
+    expect(out.evidence).toEqual(['Live roaches', 'Droppings']);
+  });
+
+  it('non-activity evidence (dead roaches, odor, moisture) does not escalate a clear select', () => {
+    expect(hasLiveEvidence(['Dead roaches', 'Odor', 'Grease / food debris', 'Moisture present'])).toBe(false);
+    const out = buildCockroachReportV2({ typedSnapshotValues: { species: 'German', activity_level: 'None observed', evidence_observed: ['Dead roaches'] }, typedReportType: 'cockroach' });
+    expect(out.status.key).toBe('clear');
+    expect(out.statusReconciled).toBe(false);
   });
 });
 
@@ -242,6 +267,14 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     expect(pdf.cockroachReportV2.whatsNext.lines.map((l) => l.label)).not.toContain('Next treatment');
     // the packaged total still prints on the PDF (catalog fact, not calendar)
     expect(pdf.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    // a severity-priced cleanout's COMPLETION STATE reaches the PDF too: the
+    // same-program upcoming count is passed in every mode, only the date is
+    // not (codex P1 #3613 r1)
+    const cleanout = { service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: GERMAN_MODERATE } }) };
+    const finalPdf = attachCockroachReportV2({ ...pdfPayload, cockroachProgramPosition: { treatmentNumber: 2 }, cockroachUpcomingRoachVisits: 0 }, cleanout);
+    expect(finalPdf.cockroachReportV2.program).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
+    expect(finalPdf.cockroachReportV2.whatsNext.badge).toBe('COMPLETE');
+    expect(finalPdf.cockroachReportV2.whatsNext.lines.map((l) => l.label)).not.toContain('What we will do');
   });
 
   it('is a no-op (still consuming the live-only fields) when the gate is off, on a non-cockroach primary, or without a snapshot', () => {

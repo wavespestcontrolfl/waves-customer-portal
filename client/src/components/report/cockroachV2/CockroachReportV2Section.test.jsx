@@ -56,7 +56,7 @@ describe('CockroachReportV2Section', () => {
     expect(screen.getByText(/sprays are used between visits/)).toBeTruthy();
     expect(screen.getByText('Treatment 1 of 2 complete')).toBeTruthy();
     expect(screen.getByText('IN PROGRESS')).toBeTruthy();
-    expect(screen.getByText('Thu, Sep 10 · 9–11am')).toBeTruthy();
+    expect(screen.getByText(/Next treatment — Thu, Sep 10 · 9–11am/)).toBeTruthy();
     const text = document.body.textContent;
     expect(text.indexOf('Where we found activity')).toBeLessThan(text.indexOf('What we did today'));
     expect(text.indexOf('What we did today')).toBeLessThan(text.indexOf('How you can help'));

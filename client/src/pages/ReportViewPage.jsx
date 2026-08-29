@@ -8997,7 +8997,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  next ROACH-FAMILY appointment (live view only). */
               nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
               narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
-              activityTrend={data.activity || null}
+              /* the gauge trend describes the frozen select; when the status
+                 was reconciled away from it the trend is stale (codex P2 #3613 r1) */
+              activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
             />
           </div>
         )}

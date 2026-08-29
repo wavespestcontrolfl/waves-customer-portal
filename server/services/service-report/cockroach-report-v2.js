@@ -115,11 +115,28 @@ function isGerman(species) { return String(species || '').trim() === 'German'; }
  * urgency — same rule as termite: no alarm red for a job that is working as
  * designed); 'good' only for a scoped absence claim on an inspected visit.
  */
-function resolveCockroachStatus({ activityLevel, species, activity = null, visitSequence = 1 }) {
+// Evidence chips that assert CURRENT activity (project-types.js `cockroach`
+// evidence_observed). "Dead roaches", "Odor", "Grease / food debris" and
+// "Moisture present" are conditions or history, not live activity.
+const LIVE_EVIDENCE_RE = /live roaches|droppings|egg cases|cast skins/i;
+
+function hasLiveEvidence(evidence = []) {
+  return evidence.some((e) => LIVE_EVIDENCE_RE.test(String(e || '')));
+}
+
+function resolveCockroachStatus({ activityLevel, species, activity = null, visitSequence = 1, evidence = [] }) {
   const level = String(activityLevel || '').trim();
   const noun = speciesLabel(species);
   const trend = activity && activity.score != null && !activity.isBaseline ? activity.trend : null;
   if (!level) return { key: 'unknown', tone: 'watch', label: `${noun} treatment completed today` };
+  // A "None observed" select beside live-activity evidence chips is a stale
+  // combination the typed validator permits (codex P2 #3613 r1). The chips
+  // are evidence in their own right and still print — the status must never
+  // contradict them, so it escalates (same rule as termite r13) and the
+  // caller marks the reading reconciled (gauge trend withheld).
+  if (level === 'None observed' && hasLiveEvidence(evidence)) {
+    return { key: 'active', tone: 'watch', label: `${noun} activity signs were found today`, reconciled: true };
+  }
   if (level === 'None observed') {
     return {
       key: 'clear',
@@ -337,12 +354,15 @@ function buildCockroachReportV2({
   const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait });
   if (!species && !activityLevel && !locations.length && !work.length) return null;
 
-  const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence });
+  const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence, evidence });
+  const statusReconciled = Boolean(status.reconciled);
+  delete status.reconciled;
   const program = resolveProgram({ serviceKey, treatmentNumber: treatmentNumber != null ? treatmentNumber : 1, upcomingRoachVisits });
   const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, work, nextStep });
 
   const metrics = [
-    { label: 'Activity today', value: activityLevel ? (activityLevel === 'None observed' ? 'None observed' : activityLevel) : 'Not recorded' },
+    // A reconciled reading reports what the evidence says, not the stale select.
+    { label: 'Activity today', value: statusReconciled ? 'Signs found' : (activityLevel ? activityLevel : 'Not recorded') },
     { label: 'Areas with activity', value: status.key === 'clear' ? '0' : (locations.length ? String(locations.length) : 'Not counted') },
   ];
   const treatments = shortTreatments(work);
@@ -350,7 +370,11 @@ function buildCockroachReportV2({
 
   return {
     status,
-    statusSummary: buildStatusSummary({ status, species, locations, evidence, work, todaysResultBody }),
+    // The activity gauge (score / trend) is computed from the frozen select;
+    // when the status was reconciled away from it, that trend describes a
+    // reading the report no longer shows — the client withholds it.
+    statusReconciled,
+    statusSummary: buildStatusSummary({ status, species, locations, evidence, work, todaysResultBody: statusReconciled ? null : todaysResultBody }),
     aiSummary: technicianReport ? { headline: null, body: technicianReport } : null,
     metrics,
     species,
@@ -402,6 +426,11 @@ function frozenCockroachServiceKey(service = {}) {
  */
 function attachCockroachReportV2(data, service = {}) {
   if (!data || typeof data !== 'object') return data;
+  // The DATE is live-only (report-data sets the field only in live mode;
+  // pdf/static strip it) — its presence means "the calendar was resolved
+  // for a date". The same-program upcoming COUNT arrives in every mode
+  // (codex P1 #3613 r1): the completion state of the program is a fact the
+  // permanent record must carry, only the appointment date is not.
   const scheduleResolved = Object.prototype.hasOwnProperty.call(data, 'cockroachNextTreatmentVisit');
   const nextVisit = data.cockroachNextTreatmentVisit || null;
   const upcomingRoachVisits = Object.prototype.hasOwnProperty.call(data, 'cockroachUpcomingRoachVisits')
@@ -484,6 +513,7 @@ module.exports = {
   frozenCockroachServiceKey,
   // exported for tests
   resolveCockroachStatus,
+  hasLiveEvidence,
   resolveProgram,
   buildWhatsNext,
   buildHelp,

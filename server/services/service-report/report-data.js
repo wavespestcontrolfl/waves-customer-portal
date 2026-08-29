@@ -1550,12 +1550,43 @@ function structuredCustomerConcern(structured = {}) {
 // snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
 // (pdf-queue.js) builds its payload outside the route helper, so the strip
 // must be shared, not route-inlined (codex P2 2026-07-18).
+/**
+ * Cockroach program lineage for a completed record: the sale its scheduled
+ * service came from (scheduled_services.estimate_id) and the included
+ * follow-up chain (followup_source_service_id). `known` is false when the
+ * record's scheduled row carries neither — legacy or hand-booked visits —
+ * and the caller falls back to service key + window. Best-effort reads.
+ */
+async function cockroachProgramLineage(service = {}, knex) {
+  const selfId = service.scheduled_service_id ? String(service.scheduled_service_id) : null;
+  let estimateId = null;
+  let sourceId = null;
+  if (selfId && knex) {
+    try {
+      const row = await knex('scheduled_services').where('id', selfId).first('estimate_id', 'followup_source_service_id');
+      estimateId = row?.estimate_id ? String(row.estimate_id) : null;
+      sourceId = row?.followup_source_service_id ? String(row.followup_source_service_id) : null;
+    } catch { /* best-effort */ }
+  }
+  const known = Boolean(estimateId || sourceId);
+  const matches = (cand = {}) => {
+    const candId = cand?.id ? String(cand.id) : null;
+    const candEstimate = cand?.estimate_id ? String(cand.estimate_id) : null;
+    const candSource = cand?.followup_source_service_id ? String(cand.followup_source_service_id) : null;
+    if (estimateId && candEstimate && candEstimate === estimateId) return true;
+    // an included follow-up of THIS visit, or this visit's own source / siblings
+    if (selfId && candSource && candSource === selfId) return true;
+    if (sourceId && (candId === sourceId || candSource === sourceId)) return true;
+    return false;
+  };
+  return { known, estimateId, sourceId, selfId, matches };
+}
+
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
   delete data.termiteNextMonitoringVisit;
   delete data.cockroachNextTreatmentVisit;
-  delete data.cockroachUpcomingRoachVisits;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4575,42 +4606,45 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // name tokens judge only rows with no resolvable profile; a failed
     // resolution skips the row. Runs only where the value can render
     // (live view, gate on, cockroach typed primary).
-    // Scoped to the SAME PROGRAM (local codex P1): the completed record's
-    // frozen service key is the program identity — a future visit of a
-    // different roach package or a knockdown type is not this program's
-    // next treatment and must not inflate its total. Legacy records with no
-    // frozen key match on the exact service label. Only rows whose profile
-    // resolves to that key (or, key-less, whose label matches) qualify.
-    if (
-      opts.mode === 'live'
-      && process.env.COCKROACH_REPORT_V2 === 'true'
-      && cockroachSnapshotOf(service)
-    ) {
+    // Scoped to the SAME PROGRAM. Program identity (codex P2 #3613 r1 — a
+    // service key names the catalog product, not a particular sale): the
+    // sale's lineage first — visits booked from one estimate share
+    // scheduled_services.estimate_id, and an included follow-up child links
+    // to its source via followup_source_service_id — and the frozen service
+    // key only for records with no lineage at all (legacy / hand-booked),
+    // where the 120-day window bounds the fallback. Rows must also resolve
+    // to the same service key (a different package sold on the same
+    // estimate is not this program). The upcoming COUNT runs in every mode
+    // (the permanent record carries the program's completion state — codex
+    // P1 #3613 r1); the DATE is live-only and stripped for pdf/static.
+    if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service)) {
       const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       const programKey = frozenCockroachServiceKey(service);
       const programLabel = String(service.service_type || '').trim().toLowerCase();
+      const lineage = await cockroachProgramLineage(service, knex);
       const verdictByIdentity = new Map();
       let firstProgramRow = null;
       let programCount = 0;
       for (const row of rows) {
         const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
-        let sameProgram = verdictByIdentity.get(identity);
-        if (sameProgram === undefined) {
+        let sameKey = verdictByIdentity.get(identity);
+        if (sameKey === undefined) {
           let profile = null;
           let resolutionFailed = false;
           try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
-          if (resolutionFailed) sameProgram = false;
-          else if (programKey) sameProgram = String(profile?.serviceKey || '') === programKey;
-          else sameProgram = Boolean(programLabel) && String(row?.service_type || '').trim().toLowerCase() === programLabel;
-          verdictByIdentity.set(identity, sameProgram);
+          if (resolutionFailed) sameKey = false;
+          else if (programKey) sameKey = String(profile?.serviceKey || '') === programKey;
+          else sameKey = Boolean(programLabel) && String(row?.service_type || '').trim().toLowerCase() === programLabel;
+          verdictByIdentity.set(identity, sameKey);
         }
+        const sameProgram = sameKey && (lineage.known ? lineage.matches(row) : true);
         if (sameProgram) {
           programCount += 1;
           if (!firstProgramRow) firstProgramRow = row;
         }
       }
-      cockroachNextTreatmentVisit = toNextAppointment(firstProgramRow);
+      if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(firstProgramRow);
       cockroachUpcomingRoachVisits = programCount;
     }
   } catch { /* best-effort */ }
@@ -4633,16 +4667,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       if (serviceDay) {
         const windowStart = new Date(`${serviceDay}T00:00:00Z`);
         windowStart.setUTCDate(windowStart.getUTCDate() - 120);
-        const priorRows = await knex('service_records')
-          .where('customer_id', service.customer_id)
-          .whereIn('status', ['completed', 'complete'])
-          .andWhere('service_date', '<', serviceDay)
-          .andWhere('service_date', '>=', windowStart.toISOString().slice(0, 10))
-          .modify((qb) => { if (service.id) qb.whereNot('id', service.id); })
-          .select('service_type', 'service_data');
+        // Same-program identity as the calendar pick: sale lineage first
+        // (estimate_id / follow-up link via the record's scheduled service),
+        // service key + window only for records with no lineage (codex P2
+        // #3613 r1). Earlier records joined to their scheduled row so the
+        // lineage columns are in hand.
+        const lineage = await cockroachProgramLineage(service, knex);
+        const priorRows = await knex('service_records as r')
+          .leftJoin('scheduled_services as s', 's.id', 'r.scheduled_service_id')
+          .where('r.customer_id', service.customer_id)
+          .whereIn('r.status', ['completed', 'complete'])
+          .andWhere('r.service_date', '<', serviceDay)
+          .modify((qb) => {
+            if (!lineage.known) qb.andWhere('r.service_date', '>=', windowStart.toISOString().slice(0, 10));
+            if (service.id) qb.whereNot('r.id', service.id);
+          })
+          .select('r.service_type', 'r.service_data', 's.id as scheduled_id', 's.estimate_id', 's.followup_source_service_id');
         const prior = (Array.isArray(priorRows) ? priorRows : []).filter((row) => {
-          if (programKey) return frozenCockroachServiceKey(row) === programKey;
-          return String(row?.service_type || '').trim().toLowerCase() === String(service.service_type || '').trim().toLowerCase();
+          const sameKey = programKey
+            ? frozenCockroachServiceKey(row) === programKey
+            : String(row?.service_type || '').trim().toLowerCase() === String(service.service_type || '').trim().toLowerCase();
+          if (!sameKey) return false;
+          return lineage.known ? lineage.matches({ id: row.scheduled_id, estimate_id: row.estimate_id, followup_source_service_id: row.followup_source_service_id }) : true;
         }).length;
         cockroachProgramPosition = { treatmentNumber: prior + 1 };
       }
