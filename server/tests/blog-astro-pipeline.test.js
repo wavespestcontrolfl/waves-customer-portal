@@ -1994,6 +1994,32 @@ describe('Astro publisher idempotency guard', () => {
     } finally { spy.mockRestore(); }
   });
 
+  test('a deterministic topic block on a retry row records the debt for its existing PR and retires it; a transient gate error does not (hook r33 P1)', async () => {
+    const post = { id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton', astro_status: 'publish_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1', tag: 'pest-control' };
+    const topicGate = require('../services/content/topic-targeting-gate');
+    const spy = jest.spyOn(topicGate, 'evaluateBlogPostRow').mockResolvedValue({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_GEO_OUT_OF_AREA', message: 'Tampa' }] });
+    try {
+      const read = chain({ first: jest.fn().mockResolvedValue(post), update: jest.fn().mockResolvedValue(1) });
+      db.mockImplementation(() => read);
+      const closed = new Set();
+      gh.getPr.mockImplementation(async (n) => ({ number: n, state: closed.has(n) ? 'closed' : 'open', merged: false, head: { ref: 'content/blog-ant-trails-bradenton-old1' } }));
+      gh.closePr.mockImplementation(async (n) => { closed.add(n); });
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+      expect(read.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed', astro_retire_pr_number: 99 }));
+      expect(gh.closePr).toHaveBeenCalledWith(99);
+      expect(gh.retireBranch).toHaveBeenCalledWith('content/blog-ant-trails-bradenton-old1');
+
+      // Transient (corpus unavailable): no debt, nothing closed — the scheduler retries.
+      jest.clearAllMocks();
+      spy.mockRejectedValue(new Error('corpus unavailable'));
+      const read2 = chain({ first: jest.fn().mockResolvedValue(post), update: jest.fn().mockResolvedValue(1) });
+      db.mockImplementation(() => read2);
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/corpus unavailable/);
+      expect(read2.update).toHaveBeenCalledWith(expect.not.objectContaining({ astro_retire_pr_number: expect.anything() }));
+      expect(gh.closePr).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
   test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
     const post = {
       id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',

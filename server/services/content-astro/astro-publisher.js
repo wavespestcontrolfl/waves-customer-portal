@@ -1119,9 +1119,14 @@ async function publishAstro(postId) {
     // the gate is in flight and move the row to 'merged' — an ID-only stamp
     // would revert a live post to publish_failed and strand it (pollPending
     // selects merged, not publish_failed).
-    const stampTopicFailure = (message) => db('blog_posts').where({ id: postId, astro_status: post.astro_status ?? null }).update({
+    // `retire`: a DETERMINISTIC block on a retry row that still carries a PR
+    // (build_failed / publish_failed with markers) records the close it now
+    // owes for that PR in the same write — cleanupStaleAstroPr below is
+    // never reached, and an open rejected PR must not stay human-mergeable.
+    const stampTopicFailure = (message, { retire = false } = {}) => db('blog_posts').where({ id: postId, astro_status: post.astro_status ?? null }).update({
       astro_status: 'publish_failed',
       astro_publish_error: String(message).slice(0, 1000),
+      ...(retire && post.astro_pr_number ? { astro_retire_pr_number: post.astro_pr_number } : {}),
     });
     let topic;
     try {
@@ -1134,7 +1139,10 @@ async function publishAstro(postId) {
       const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
       tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
       tErr.details = topic.findings;
-      await stampTopicFailure(tErr.message);
+      const stamped = await stampTopicFailure(tErr.message, { retire: true });
+      // Debt durable → retire the rejected PR now (verified close + branch
+      // delete); a lost close is retried by every pages-poll tick.
+      if (stamped && post.astro_pr_number) await retireTopicBlockedPostPr({ ...post, astro_retire_pr_number: post.astro_pr_number });
       throw tErr;
     }
   }
