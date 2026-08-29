@@ -1,14 +1,14 @@
 /**
  * Migration 20260829000040 — backfill pre-convention visit labels.
- * Asserts the two population contracts (cadence-mapped unlinked rows,
- * whitelist-gated linked sync with the run-time live-catalog exclusion),
- * Invariant 1 (terminal rows untouched), the fail-closed skip when a
- * mapping target is missing from the active catalog, the snapshot fanout
- * (reminder own-row + same-slot sibling component-wise, self-booking
- * exact-or-qualified, draft/scheduled invoice title/service_type/line
- * items under the updated_at CAS with frozen statements skipped), and the
- * identity-checked CAS down() reversal under the completed-history
- * invariant for every copy.
+ * Asserts the population contracts (cadence-mapped unlinked rows,
+ * whitelist-gated linked sync with the run-time live-catalog exclusion,
+ * add-ons under open parents), Invariant 1 (terminal rows untouched), the
+ * fail-closed skip when a mapping target is missing from the active
+ * catalog, the snapshot fanout (reminder own-row + LIVE same-slot siblings
+ * component-wise, self-booking exact-or-qualified, attached AND
+ * unambiguous unattached draft/scheduled invoices under the updated_at CAS
+ * with frozen statements skipped), and the down() reversal gated on each
+ * component visit's own identity-checked reversal.
  *
  * Purpose-built fake knex: this migration's only grouped-where callback is
  * the open-visit-status predicate, so the fake evaluates where(fn) as
@@ -20,29 +20,37 @@ const migration = require('../models/migrations/20260829000040_backfill_pre_conv
 const STATE_KEY = 'migration.20260829000040.state';
 const TERMINAL = ['completed', 'cancelled', 'skipped', 'no_show'];
 
-function fakeKnex(db, { missingTables = [] } = {}) {
+const stripAlias = (k) => k.replace(/^(ss|sv|a)\./, '');
+
+function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
   const knex = (tableExpr) => {
     const table = String(tableExpr).split(' ')[0];
     const filters = [];
-    let joined = null; // { table } — only services-on-service_id is used
+    let joined = false; // only services-on-service_id joins are used
     let openOnly = false;
-    let rawNeq = false; // ss.service_type <> sv.name
+    let rawNeq = null; // { col } — `<col> <> sv.name`
+    let likeAny = null; // unattached-invoice label prefilter
     const inClauses = [];
     const rows = () => db[table] || [];
     const isOpen = (r) => r.status == null || !TERMINAL.includes(r.status);
     const svcById = (id) => (db.services || []).find((s) => s.id === id);
     const match = (r) => {
       if (openOnly && !isOpen(r)) return false;
-      for (const c of inClauses) if (!c.vals.includes(r[c.col.replace(/^ss\./, '')])) return false;
+      for (const c of inClauses) if (!c.vals.includes(r[stripAlias(c.col)])) return false;
       if (rawNeq) {
         const sv = svcById(r.service_id);
-        if (!sv || r.service_type === sv.name) return false;
+        if (!sv || r[rawNeq.col] === sv.name) return false;
       }
       if (joined && !svcById(r.service_id)) return false;
-      return filters.every((f) => Object.entries(f).every(([k, v]) => r[k.replace(/^ss\./, '')] === v));
+      if (likeAny) {
+        const { from } = likeAny;
+        const has = (v) => typeof v === 'string' && v.includes(from);
+        if (!(has(r.title) || has(r.service_type) || has(typeof r.line_items === 'string' ? r.line_items : JSON.stringify(r.line_items)))) return false;
+      }
+      return filters.every((f) => Object.entries(f).every(([k, v]) => r[stripAlias(k)] === v));
     };
     const q = {
-      join(t) { joined = { table: t }; return q; },
+      join() { joined = true; return q; },
       where(cond) {
         if (typeof cond === 'function') { openOnly = true; return q; }
         filters.push(cond);
@@ -51,8 +59,10 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       whereNull(col) { filters.push({ [col]: null }); return q; },
       whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
       whereRaw(sql, bindings) {
-        if (/service_type <> sv\.name/.test(sql)) { rawNeq = true; return q; }
+        let m = /^(?:ss|a)\.(service_type|service_name) <> sv\.name$/.exec(sql);
+        if (m) { rawNeq = { col: m[1] }; return q; }
         if (/^updated_at::text = \?$/.test(sql)) { filters.push({ updated_at: bindings[0] }); return q; }
+        if (/^\(title = \? OR title LIKE \?/.test(sql)) { likeAny = { from: bindings[0] }; return q; }
         throw new Error(`fake whereRaw: unsupported ${sql}`);
       },
       forUpdate() { return q; },
@@ -62,7 +72,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
           const out = {};
           cols.forEach((c) => {
             const [expr, , alias] = String(c).split(' ');
-            const key = expr.replace(/^(ss|sv)\./, '').replace(/::text$/, '');
+            const key = stripAlias(expr).replace(/::text$/, '');
             const fromJoin = expr.startsWith('sv.');
             out[alias || key] = fromJoin ? svcById(r.service_id)?.[key] : r[key];
           });
@@ -85,7 +95,10 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     };
     return q;
   };
-  knex.schema = { hasTable: async (t) => !missingTables.includes(t) && !!db[t] };
+  knex.schema = {
+    hasTable: async (t) => !missingTables.includes(t) && !!db[t],
+    hasColumn: async (t, c) => !missingColumns.includes(`${t}.${c}`) && (db[t] || []).some((r) => c in r),
+  };
   knex.fn = { now: () => 'NOW' };
   knex.raw = (sql) => sql; // only used as `updated_at::text AS updated_at_cas`
   return knex;
@@ -98,6 +111,7 @@ function seedDb() {
       { id: 'svc-m', name: 'Monthly Pest Control Service', is_active: true },
       { id: 'svc-l6', name: 'Every 6 Weeks Lawn Care Service', is_active: true },
       { id: 'svc-sa', name: 'Semiannual Pest Control Service', is_active: true },
+      { id: 'svc-mosq', name: 'Mosquito Control', is_active: true },
       // A LIVE catalog row whose name is on the linked whitelist — the
       // run-time exclusion must drop it from the sweep.
       { id: 'svc-gp', name: 'General Pest Control', is_active: true },
@@ -126,21 +140,45 @@ function seedDb() {
       { id: 'l4', service_id: 'svc-q', service_type: 'General Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // whitelisted label that exists only as an INACTIVE catalog row — still stale, syncs
       { id: 'l5', service_id: 'svc-m', service_type: 'Pest Control Service', recurring_pattern: 'monthly', status: 'pending', self_booking_id: 'sb-5' },
+      // add-on-only parents: label fine, add-ons stale (open / terminal)
+      { id: 'p-open', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
+      { id: 'p-done', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'completed', self_booking_id: null },
+      // parked same-slot siblings of l1 (c2/T2): a rescheduled placeholder and a cancelled visit
+      { id: 'x-resched', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'rescheduled', self_booking_id: null },
+      { id: 'x-cancel', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'cancelled', self_booking_id: null },
+    ],
+    scheduled_service_addons: [
+      // linked stale add-on under an open parent → catalog name
+      { id: 'a-linked', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'Pest Control' },
+      // name-only add-on, parent quarterly → mapped
+      { id: 'a-legacy', scheduled_service_id: 'p-open', service_id: null, service_name: 'Quarterly Pest Control' },
+      // name-only ambiguous label, parent monthly → the PARENT cadence disambiguates
+      { id: 'a-monthly', scheduled_service_id: 'u2', service_id: null, service_name: 'Pest Control' },
+      // under a TERMINAL parent — untouched
+      { id: 'a-done', scheduled_service_id: 'p-done', service_id: null, service_name: 'Quarterly Pest Control' },
+      // linked add-on whose name is a LIVE catalog name — linkage conflict, untouched
+      { id: 'a-conflict', scheduled_service_id: 'p-open', service_id: 'svc-q', service_name: 'General Pest Control' },
     ],
     appointment_reminders: [
       // u1's own registration — plain stale label
-      { id: 'r-u1', scheduled_service_id: 'u1', customer_id: 'c1', appointment_time: 'T1', service_type: 'Quarterly Pest Control', updated_at: 'orig' },
+      { id: 'r-u1', scheduled_service_id: 'u1', customer_id: 'c1', appointment_time: 'T1', service_type: 'Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // l1's own registration holds a MERGED label — only the component swaps
-      { id: 'r-l1', scheduled_service_id: 'l1', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', updated_at: 'orig' },
-      // same-slot sibling of l1 (merger stored the combined label on the
-      // earlier visit's row) — swept via customer_id + appointment_time
-      { id: 'r-sib', scheduled_service_id: 'x-other', customer_id: 'c2', appointment_time: 'T2', service_type: 'Mosquito Control, Pest Control, and Lawn Care', updated_at: 'orig' },
+      { id: 'r-l1', scheduled_service_id: 'l1', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      // live same-slot sibling of l1 (legacy, unlinked) — swept via customer_id + appointment_time
+      { id: 'r-sib', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Mosquito Control, Pest Control, and Lawn Care', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // a longer name that merely STARTS with the stale label — never matches
-      { id: 'r-long', scheduled_service_id: 'l1', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control Premium', updated_at: 'orig' },
+      { id: 'r-long', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control Premium', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      // PARKED same-slot siblings — the merger excludes them, so must we
+      { id: 'r-sib-cancelled', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: true, windows_preclosed: false, updated_at: 'orig' },
+      { id: 'r-sib-preclosed', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: true, updated_at: 'orig' },
+      { id: 'r-sib-resched', scheduled_service_id: 'x-resched', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      { id: 'r-sib-terminal', scheduled_service_id: 'x-cancel', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // registration for an untouched (terminal) visit — untouched
-      { id: 'r-u4', scheduled_service_id: 'u4', customer_id: 'c3', appointment_time: 'T3', service_type: 'Quarterly Pest Control', updated_at: 'orig' },
+      { id: 'r-u4', scheduled_service_id: 'u4', customer_id: 'c3', appointment_time: 'T3', service_type: 'Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // linkage-conflict visit's registration — untouched
-      { id: 'r-l4', scheduled_service_id: 'l4', customer_id: 'c4', appointment_time: 'T4', service_type: 'General Pest Control', updated_at: 'orig' },
+      { id: 'r-l4', scheduled_service_id: 'l4', customer_id: 'c4', appointment_time: 'T4', service_type: 'General Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      // add-on-only parent: merged label carries the add-on component
+      { id: 'r-p-open', scheduled_service_id: 'p-open', customer_id: 'c5', appointment_time: 'T5', service_type: 'Mosquito Control & Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
     ],
     self_booked_appointments: [
       // linked from BOTH u1 (Quarterly Pest Control → …) and l1 (Pest
@@ -163,6 +201,13 @@ function seedDb() {
       { id: 'i-l5', scheduled_service_id: 'l5', status: 'scheduled', title: 'Lawn + Pest Control Service', service_type: 'Pest Control Service', payer_statement_id: 'ps-open', updated_at: 'orig', line_items: null },
       // draft for an untouched visit — untouched
       { id: 'i-l4', scheduled_service_id: 'l4', status: 'draft', title: 'General Pest Control', service_type: 'General Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      // add-on-only parent's draft: line item carries the add-on name
+      { id: 'i-p-open', scheduled_service_id: 'p-open', status: 'draft', title: 'Mosquito Control + Quarterly Pest Control', service_type: 'Mosquito Control', payer_statement_id: null, updated_at: 'orig',
+        line_items: JSON.stringify([{ description: 'Mosquito Control', category: 'Mosquito Control' }, { description: 'Quarterly Pest Control', category: 'Quarterly Pest Control' }]) },
+      // UNATTACHED drafts: unambiguous label swaps; bare "Pest Control" is a guess → untouched
+      { id: 'i-free-q', scheduled_service_id: null, status: 'draft', title: 'Quarterly Pest Control — first visit', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      { id: 'i-free-amb', scheduled_service_id: null, status: 'draft', title: 'Pest Control', service_type: 'Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      { id: 'i-free-sent', scheduled_service_id: null, status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
     ],
     payer_statements: [
       { id: 'ps-closed', status: 'issued' },
@@ -176,6 +221,7 @@ const byId = (db, id) => db.scheduled_services.find((r) => r.id === id);
 const rem = (db, id) => db.appointment_reminders.find((r) => r.id === id);
 const sb = (db, id) => db.self_booked_appointments.find((r) => r.id === id);
 const inv = (db, id) => db.invoices.find((r) => r.id === id);
+const addon = (db, id) => db.scheduled_service_addons.find((r) => r.id === id);
 const readState = (db) => JSON.parse(db.system_settings.find((r) => r.key === STATE_KEY).value);
 
 describe('20260829000040 backfill up()', () => {
@@ -193,6 +239,7 @@ describe('20260829000040 backfill up()', () => {
     expect(byId(db, 'l3').service_type).toBe('Monthly Pest Control Service'); // already synced
     expect(byId(db, 'l4').service_type).toBe('General Pest Control'); // live catalog name → owner-managed
     expect(byId(db, 'l5').service_type).toBe('Monthly Pest Control Service'); // inactive row ≠ live
+    expect(byId(db, 'p-open').service_type).toBe('Mosquito Control'); // parent label untouched
 
     const state = readState(db);
     expect(state.unlinked.map((r) => r.id).sort()).toEqual(['u1', 'u2']);
@@ -206,7 +253,29 @@ describe('20260829000040 backfill up()', () => {
     );
   });
 
-  test('fans the relabel out to reminder registrations: own row, same-slot sibling, component-wise on merged labels', async () => {
+  test('relabels add-ons under OPEN parents: linked via the whitelist, name-only via the parent cadence; leaves terminal parents and live-catalog names', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+
+    expect(addon(db, 'a-linked').service_name).toBe('Quarterly Pest Control Service');
+    expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service');
+    expect(addon(db, 'a-monthly').service_name).toBe('Monthly Pest Control Service'); // parent u2 is monthly
+    expect(addon(db, 'a-done').service_name).toBe('Quarterly Pest Control'); // terminal parent
+    expect(addon(db, 'a-conflict').service_name).toBe('General Pest Control'); // live catalog name
+
+    const state = readState(db);
+    expect(state.addons.map((r) => r.id).sort()).toEqual(['a-legacy', 'a-linked', 'a-monthly']);
+    expect(state.addons.find((r) => r.id === 'a-linked')).toEqual(
+      { id: 'a-linked', from: 'Pest Control', to: 'Quarterly Pest Control Service', parent_id: 'p-open', service_id: 'svc-q' }
+    );
+    // The add-on-only parent's copies carry the add-on name → swept too.
+    expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
+    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service');
+    expect(JSON.parse(inv(db, 'i-p-open').line_items)[1]).toEqual({ description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service' });
+    expect(inv(db, 'i-p-open').service_type).toBe('Mosquito Control');
+  });
+
+  test('fans the relabel out to reminder registrations: own row + LIVE same-slot siblings only, component-wise on merged labels', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
 
@@ -215,11 +284,15 @@ describe('20260829000040 backfill up()', () => {
     expect(rem(db, 'r-l1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
     expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Quarterly Pest Control Service, and Lawn Care');
     expect(rem(db, 'r-long').service_type).toBe('Pest Control Premium'); // prefix-only, not a component
+    // Parked siblings the merger excludes stay historical.
+    for (const id of ['r-sib-cancelled', 'r-sib-preclosed', 'r-sib-resched', 'r-sib-terminal']) {
+      expect(rem(db, id).service_type).toBe('Pest Control & Mosquito Control');
+    }
     expect(rem(db, 'r-u4').service_type).toBe('Quarterly Pest Control'); // terminal visit's reminder
     expect(rem(db, 'r-l4').service_type).toBe('General Pest Control'); // conflict visit's reminder
 
     const state = readState(db);
-    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-l1', 'r-sib', 'r-u1']);
+    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-l1', 'r-p-open', 'r-sib', 'r-u1']);
     // A sibling records the COMPONENT visit that swept it, not its own owner.
     expect(state.reminders.find((r) => r.id === 'r-sib')).toEqual({
       id: 'r-sib',
@@ -229,6 +302,14 @@ describe('20260829000040 backfill up()', () => {
       to: 'Quarterly Pest Control Service',
       visit_id: 'l1',
     });
+  });
+
+  test('sibling sweep tolerates a schema without windows_preclosed', async () => {
+    const db = seedDb();
+    db.appointment_reminders.forEach((r) => { delete r.windows_preclosed; });
+    await migration.up(fakeKnex(db));
+    expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Quarterly Pest Control Service, and Lawn Care');
+    expect(rem(db, 'r-sib-cancelled').service_type).toBe('Pest Control & Mosquito Control');
   });
 
   test('fans the relabel out to self-booking snapshots (exact-or-qualified) and records every linked visit', async () => {
@@ -247,7 +328,7 @@ describe('20260829000040 backfill up()', () => {
     ]);
   });
 
-  test('fans the relabel out to draft/scheduled invoices: title, service_type, line items; skips sent + frozen-statement invoices', async () => {
+  test('fans the relabel out to draft/scheduled invoices — attached, plus unattached on unambiguous labels only; skips sent + frozen', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
 
@@ -264,9 +345,15 @@ describe('20260829000040 backfill up()', () => {
     expect(inv(db, 'i-l5').title).toBe('Lawn + Monthly Pest Control Service');
     expect(inv(db, 'i-l5').service_type).toBe('Monthly Pest Control Service');
     expect(inv(db, 'i-l4').service_type).toBe('General Pest Control'); // untouched visit
+    // Unattached: "Quarterly Pest Control" has one target everywhere → swaps;
+    // bare "Pest Control" resolved to two targets (quarterly + monthly) → guess, untouched.
+    expect(inv(db, 'i-free-q').service_type).toBe('Quarterly Pest Control Service');
+    expect(inv(db, 'i-free-q').title).toBe('Quarterly Pest Control Service — first visit');
+    expect(inv(db, 'i-free-amb').service_type).toBe('Pest Control');
+    expect(inv(db, 'i-free-sent').service_type).toBe('Quarterly Pest Control');
 
     const state = readState(db);
-    expect(state.invoices.map((r) => r.id).sort()).toEqual(['i-l5', 'i-u1']);
+    expect(state.invoices.map((r) => r.id).sort()).toEqual(['i-free-q', 'i-l5', 'i-p-open', 'i-u1']);
     expect(state.invoices.find((r) => r.id === 'i-u1')).toEqual({
       id: 'i-u1',
       changed: { title: true, service_type: true, items: [{ i: 0, description: true, category: true }] },
@@ -274,16 +361,19 @@ describe('20260829000040 backfill up()', () => {
       to: 'Quarterly Pest Control Service',
       visit_id: 'u1',
     });
+    expect(state.invoices.find((r) => r.id === 'i-free-q').visit_id).toBeNull();
   });
 
   test('skips a snapshot fanout whose table is missing, still relabels visits', async () => {
     const db = seedDb();
-    await migration.up(fakeKnex(db, { missingTables: ['appointment_reminders', 'self_booked_appointments', 'invoices'] }));
+    await migration.up(fakeKnex(db, { missingTables: ['appointment_reminders', 'self_booked_appointments', 'invoices', 'scheduled_service_addons'] }));
     expect(byId(db, 'u1').service_type).toBe('Quarterly Pest Control Service');
     expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control');
     expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control (Quarterly)');
     expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control');
+    expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control');
     const state = readState(db);
+    expect(state.addons).toEqual([]);
     expect(state.reminders).toEqual([]);
     expect(state.selfBookings).toEqual([]);
     expect(state.invoices).toEqual([]);
@@ -297,7 +387,23 @@ describe('20260829000040 backfill up()', () => {
 });
 
 describe('20260829000040 down()', () => {
-  test('CAS-restores recorded rows still open, unchanged, and in-population under the written label; clears state', async () => {
+  test('clean reversal restores every visit and every snapshot copy; clears state', async () => {
+    const db = seedDb();
+    const before = JSON.parse(JSON.stringify(seedDb()));
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    await migration.down(knex);
+
+    for (const t of ['scheduled_services', 'scheduled_service_addons', 'self_booked_appointments']) {
+      expect(db[t]).toEqual(before[t]);
+    }
+    const strip = (rows) => rows.map(({ updated_at, ...r }) => r);
+    expect(strip(db.appointment_reminders)).toEqual(strip(before.appointment_reminders));
+    expect(strip(db.invoices)).toEqual(strip(before.invoices));
+    expect(db.system_settings).toHaveLength(0);
+  });
+
+  test('CAS-restores recorded rows still open, unchanged, and in-population under the written label', async () => {
     const db = seedDb();
     const knex = fakeKnex(db);
     await migration.up(knex);
@@ -318,7 +424,6 @@ describe('20260829000040 down()', () => {
     expect(byId(db, 'u2').service_type).toBe('Monthly Pest Control Service'); // linked since → kept
     expect(byId(db, 'l1').service_type).toBe('Owner Custom Label');
     expect(byId(db, 'l5').service_type).toBe('Monthly Pest Control Service'); // relinked since → kept
-    expect(db.system_settings).toHaveLength(0);
   });
 
   test('restores an unlinked row whose cadence is unchanged, leaves one the owner re-cadenced', async () => {
@@ -331,55 +436,62 @@ describe('20260829000040 down()', () => {
     expect(byId(db, 'u2').service_type).toBe('Pest Control'); // restored
   });
 
-  test('reverses reminder components on the CURRENT value, honoring the completed-history invariant', async () => {
+  test('snapshot copies revert ONLY in step with their component visit: a visit kept for any reason keeps its copies', async () => {
     const db = seedDb();
     const knex = fakeKnex(db);
     await migration.up(knex);
 
-    // l1 completed after up(): its reminder AND the sibling it swept keep the new component.
-    byId(db, 'l1').status = 'completed';
-    // r-u1 gained an add-on component since up() — component-wise reversal keeps it.
+    byId(db, 'u1').status = 'completed'; // history
+    byId(db, 'u2').service_id = 'svc-m'; // owner linked since → visit kept
+    byId(db, 'l1').recurring_pattern = 'monthly'; // (linked leg ignores cadence) → l1 reverts
+    byId(db, 'l5').service_type = 'Owner Custom Label'; // hand-edited → kept
+    // r-u1 gained an add-on component since up() — would be component-reversed IF u1 reverted.
     rem(db, 'r-u1').service_type = 'Quarterly Pest Control Service & Mosquito Control';
 
     await migration.down(knex);
 
-    expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control & Mosquito Control');
-    expect(rem(db, 'r-l1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
-    expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Quarterly Pest Control Service, and Lawn Care');
-  });
-
-  test('reverses self-booking and invoice snapshots only while their component visits are open, unedited, and not frozen', async () => {
-    const db = seedDb();
-    const knex = fakeKnex(db);
-    await migration.up(knex);
-
-    // Clean reversal path first: everything still open + untouched.
-    await migration.down(knex);
-    expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control (Quarterly)');
-    const iu1 = inv(db, 'i-u1');
-    expect(iu1.title).toBe('Quarterly Pest Control — first visit');
-    expect(iu1.service_type).toBe('Quarterly Pest Control');
-    expect(JSON.parse(iu1.line_items)[0]).toEqual({ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 });
-    expect(inv(db, 'i-l5').title).toBe('Lawn + Pest Control Service');
-    expect(inv(db, 'i-l5').service_type).toBe('Pest Control Service');
-  });
-
-  test('keeps self-booking and invoice snapshots whose component visit completed, whose invoice was edited, or whose statement froze since up()', async () => {
-    const db = seedDb();
-    const knex = fakeKnex(db);
-    await migration.up(knex);
-
-    byId(db, 'u1').status = 'completed'; // sb-1 + i-u1 keep the new label
-    inv(db, 'i-l5').updated_at = 'edited-since'; // CAS mismatch → kept
-    db.payer_statements.find((p) => p.id === 'ps-open').status = 'issued'; // froze since → kept anyway
-
-    await migration.down(knex);
-
+    // u1 (completed): reminder, self-booking, invoice all keep the new label.
+    expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
     expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control Service (Quarterly)');
     expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control Service');
     expect(inv(db, 'i-u1').title).toBe('Quarterly Pest Control Service — first visit');
+    // u2 (linked since): its add-on keeps the new name too.
+    expect(byId(db, 'u2').service_type).toBe('Monthly Pest Control Service');
+    expect(addon(db, 'a-monthly').service_name).toBe('Monthly Pest Control Service');
+    // l1 reverted → its reminder and the live sibling it swept revert with it.
+    expect(byId(db, 'l1').service_type).toBe('Pest Control');
+    expect(rem(db, 'r-l1').service_type).toBe('Pest Control & Mosquito Control');
+    expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Pest Control, and Lawn Care');
+    // l5 (hand-edited): its scheduled invoice keeps the new labels.
     expect(inv(db, 'i-l5').service_type).toBe('Monthly Pest Control Service');
     expect(inv(db, 'i-l5').title).toBe('Lawn + Monthly Pest Control Service');
+    // Unattached draft has no visit → reverts under the still-draft guard alone.
+    expect(inv(db, 'i-free-q').service_type).toBe('Quarterly Pest Control');
+  });
+
+  test('add-on-only parents: copies revert while the parent is still open, stay once it completed', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    byId(db, 'p-open').status = 'completed';
+    await migration.down(knex);
+    expect(addon(db, 'a-linked').service_name).toBe('Quarterly Pest Control Service');
+    expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service');
+    expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
+    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service');
+  });
+
+  test('invoice reversal honors the updated_at CAS and a statement frozen since up()', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    inv(db, 'i-l5').updated_at = 'edited-since'; // CAS mismatch → kept
+    inv(db, 'i-free-q').payer_statement_id = 'ps-open';
+    db.payer_statements.find((p) => p.id === 'ps-open').status = 'issued'; // froze since → kept
+    await migration.down(knex);
+    expect(inv(db, 'i-l5').service_type).toBe('Monthly Pest Control Service');
+    expect(inv(db, 'i-free-q').service_type).toBe('Quarterly Pest Control Service');
+    expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control'); // clean → restored
   });
 
   test('down is a no-op without a state row', async () => {
