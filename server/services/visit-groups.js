@@ -212,6 +212,32 @@ async function recomputeVisitWindow(t, visitId) {
     .whereNotIn('status', TERMINAL_ROW_STATUSES)
     .select('window_start', 'window_end');
   if (!members.length) return;
+  // Connectivity (codex r8): removing a BRIDGE member can leave the rest
+  // transitively disconnected (09-10 and 11-12 held together by a 10-11
+  // middle). Windowed members must form ONE overlapping chain; if not,
+  // and the visit is still dissolvable, it dissolves — otherwise
+  // membership is preserved and logged (frozen visits never got here;
+  // effects-sent visits log for the office).
+  const windowed = members.filter((m) => m.window_start)
+    .sort((a, b) => String(a.window_start).localeCompare(String(b.window_start)));
+  let disconnected = false;
+  for (let i = 1; i < windowed.length; i += 1) {
+    const prevHi = windowed.slice(0, i)
+      .map((m) => toMinutes(m.window_end) ?? toMinutes(m.window_start))
+      .reduce((a, b) => Math.max(a, b), -1);
+    if (toMinutes(windowed[i].window_start) > prevHi) { disconnected = true; break; }
+  }
+  if (disconnected) {
+    const activity = await visitActivity(visitId, t);
+    if (canDissolve(activity).ok) {
+      await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
+      await t('service_visits').where({ id: visitId })
+        .update({ status: 'dissolved', close_reason: 'row_moved', closed_at: t.fn.now() });
+      return;
+    }
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] visit ${visitId} members no longer form one stop after a removal — membership preserved (not dissolvable)`);
+  }
   const starts = members.map((m) => m.window_start).filter(Boolean);
   const ends = members.map((m) => m.window_end).filter(Boolean);
   await t('service_visits').where({ id: visitId }).update({
@@ -594,12 +620,6 @@ async function handleChildStopChanged(scheduledServiceId) {
         // (codex r6; doc rev-5 item 6: one-row tech changes are splits).
         || (!fresh.technician_id && visit.technician_id),
       );
-      if (!techConflict && fresh.technician_id && !visit.technician_id) {
-        await t('service_visits').where({ id: visit.id }).update({ technician_id: fresh.technician_id });
-        await t('scheduled_services').where({ visit_id: visit.id })
-          .whereNull('technician_id').update({ technician_id: fresh.technician_id });
-        visit.technician_id = fresh.technician_id;
-      }
       const stillMatches = dateOnly(fresh.scheduled_date) === dateOnly(visit.scheduled_date)
         && overlapsMembers
         && !techConflict
@@ -609,6 +629,15 @@ async function handleChildStopChanged(scheduledServiceId) {
         && familiesCompatible(fresh.group_family, visit.group_family)
         && !JOIN_INELIGIBLE_STATUSES.includes(String(fresh.status || ''));
       if (stillMatches) {
+        // Adoption ONLY once every retention predicate passed (codex r8):
+        // adopting before the date/window/family checks let a departing
+        // child leave its technician stamped on an unrelated visit.
+        if (fresh.technician_id && !visit.technician_id) {
+          await t('service_visits').where({ id: visit.id }).update({ technician_id: fresh.technician_id });
+          await t('scheduled_services').where({ visit_id: visit.id })
+            .whereNull('technician_id').update({ technician_id: fresh.technician_id });
+          visit.technician_id = fresh.technician_id;
+        }
         // The move stayed inside the stop but may have shifted the union —
         // recompute the visit window from current members (codex P2).
         const members = await t('scheduled_services').where({ visit_id: visit.id })

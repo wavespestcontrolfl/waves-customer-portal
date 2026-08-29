@@ -9247,13 +9247,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
-    // Visit-group seam (visit-group-scope.md §2; codex #3590 r4): a direct
-    // Edit-Appointment date/window/technician change must repair grouped
-    // membership like every other writer — a child whose stop no longer
-    // matches its visit detaches. Post-commit, best-effort, no-op for
+    // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
+    // direct Edit-Appointment change must repair grouped membership like
+    // every other writer — for the edited anchor AND every recurring
+    // child this edit rewrote (cadence moves collect their ids in
+    // recurringUpdatedJobIds). Post-commit, best-effort, no-op for
     // ungrouped rows.
     try {
-      await require('../services/visit-groups').handleChildStopChanged(req.params.id);
+      const { handleChildStopChanged } = require('../services/visit-groups');
+      const seamIds = [...new Set([req.params.id, ...recurringUpdatedJobIds])].filter(Boolean);
+      for (const seamId of seamIds) {
+        await handleChildStopChanged(seamId);
+      }
     } catch (vgErr) {
       logger.warn(`[schedule/update-details] visit-group seam failed for ${req.params.id}: ${vgErr.message}`);
     }
