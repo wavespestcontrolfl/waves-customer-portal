@@ -325,14 +325,14 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('under 4★ and unrated are left alone: released skipped, no draft, no bell (owner ruling 2026-08-29)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row({ star_rating: 2 }), row({ id: 'rev-0', star_rating: 0 })];
+    state.rows = [row({ star_rating: 2, auto_reply_attempts: 2 }), row({ id: 'rev-0', star_rating: 0 })];
     const stats = await Runner.processDueAutoReplies();
     expect(stats).toMatchObject({ claimed: 2, skipped: 2, parked: 0, posted: 0 });
     expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
     // NULL state with the reason stamped (not skipped): re-eligible if the reviewer later raises it.
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, auto_reply_claimed_until: null });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0 });
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0].auto_reply_draft).toBeFalsy();
     expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });

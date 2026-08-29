@@ -128,9 +128,11 @@ function ratingEligible(star_rating) {
 }
 
 // How an under-4★ row leaves the lane: back to NULL state with the reason
-// stamped, nothing pending, no draft. Same shape as queue_expired.
+// stamped, nothing pending, no draft, retry counter reset (a later upgrade
+// re-enters with the normal retry allowance — codex #3587 r2). Same shape
+// as queue_expired.
 function lowRatingExitFields(reason) {
-  return { auto_reply_status: null, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: null };
+  return { auto_reply_status: null, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: null, auto_reply_attempts: 0 };
 }
 
 // Rows the OLD rule parked as low_rating / unrated with a pipeline draft
