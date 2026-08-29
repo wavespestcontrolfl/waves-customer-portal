@@ -1782,7 +1782,11 @@ function generateEstimate(input) {
     const result = calculateFoamPrice(services.termiteFoam);
     lineItems.push(result);
   }
-  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control', { scopedOneTime: true })) {
+  // calculateStingingPrice defaults nestCount to 1 and scales material +
+  // labor by it — a commercial multi-nest job with no count would be
+  // underquoted as one nest (codex #3594 r5 P1). Positive explicit count only.
+  const stingingV2Scoped = Number(services.stingingV2?.nestCount) > 0;
+  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control', { scopedOneTime: stingingV2Scoped })) {
     const result = calculateStingingPrice(services.stingingV2);
     lineItems.push(result);
   }

@@ -1109,7 +1109,7 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
     { services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 4 } }, service: 'rodent_exclusion' },
     { services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }, service: 'bed_bug' },
     { services: { stinging: { species: 'PAPER_WASP' } }, service: 'stinging_insect' },
-    { services: { stingingV2: { species: 'PAPER_WASP' } }, service: 'stinging_insect_v2' },
+    { services: { stingingV2: { nestType: 'wasp', nestCount: 2 } }, service: 'stinging_insect_v2' },
     { services: { rodentWireMesh: { meshLinearFeet: 20 } }, service: 'rodent_wire_mesh' },
     { services: { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 2 } }, service: 'rodent_bird_box' },
     { services: { sanitation: { tier: 'standard', affectedSqFt: 400 } }, service: 'rodent_sanitation' },
@@ -1261,6 +1261,9 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
       { termiteFoam: { applicationPoints: 0 } },
       { exclusion: { pricingVersion: 'v2' } },
       { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 0, meshSoftLF: 0 } },
+      // stingingV2 defaults nestCount to 1 and scales by it (codex #3594 r5 P1).
+      { stingingV2: { nestType: 'wasp' } },
+      { stingingV2: { nestType: 'hornet', nestCount: 0 } },
       { rodentTrapping: true },
       { rodentGuarantee: true },
       { oneTimeMosquito: true },
