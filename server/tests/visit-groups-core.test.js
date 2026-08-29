@@ -26,6 +26,11 @@ const baseRow = {
 const baseVisit = { ...baseRow, status: 'open' };
 
 describe('stopBaseKey', () => {
+  test('normalizes pg Date instances (UTC calendar day), not toString', () => {
+    // pg parses `date` at UTC midnight; toString would give 'Sat Aug 29…'.
+    expect(stopBaseKey({ propertyId: PROP, customerId: CUST, scheduledDate: new Date('2026-08-30T00:00:00Z') }))
+      .toBe('p1:2026-08-30');
+  });
   test('prefers property, falls back to customer, strips time from date', () => {
     expect(stopBaseKey({ propertyId: PROP, customerId: CUST, scheduledDate: '2026-08-30T00:00:00Z' }))
       .toBe('p1:2026-08-30');
@@ -62,6 +67,9 @@ describe('canJoin', () => {
     expect(canJoin(baseRow, baseVisit).ok).toBe(true);
   });
   test.each([
+    ['row_terminal', { status: 'completed' }],
+    ['row_terminal', { status: 'cancelled' }],
+    ['row_terminal', { status: 'skipped' }],
     ['customer', { customer_id: 'other' }],
     ['property', { property_id: 'other' }],
     ['date', { scheduled_date: '2026-08-31' }],

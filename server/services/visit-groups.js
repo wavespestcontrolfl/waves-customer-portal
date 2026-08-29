@@ -25,12 +25,34 @@
 const db = require('../models/db');
 
 const OPEN_STATUSES = ['open'];
+// Terminal scheduled_services statuses (CHECK constraint,
+// 20260426000004): rows in these states never join a visit.
+const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped'];
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
+
+/**
+ * pg returns `date` columns as JS Date instances (UTC midnight); strings
+ * arrive as 'YYYY-MM-DD[...]'. Normalize both to the calendar date. A Date
+ * is read via its UTC fields — pg parses `date` at UTC midnight, so UTC
+ * getters return the stored calendar day regardless of host timezone
+ * (datetime-et discipline: never toString a Date for a calendar day).
+ */
+function dateOnly(value) {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    const y = value.getUTCFullYear();
+    const m = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(value.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const m = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
 
 function stopBaseKey({ propertyId, customerId, scheduledDate }) {
   const anchor = propertyId || customerId;
-  if (!anchor || !scheduledDate) throw new Error('stopBaseKey needs propertyId|customerId and scheduledDate');
-  const date = String(scheduledDate).slice(0, 10);
+  const date = dateOnly(scheduledDate);
+  if (!anchor || !date) throw new Error('stopBaseKey needs propertyId|customerId and scheduledDate');
   return `${anchor}:${date}`;
 }
 
@@ -72,8 +94,11 @@ function canJoin(row, visit) {
   if (String(visit.status) !== 'open') return { ok: false, reason: 'visit_not_open' };
   if (String(row.customer_id) !== String(visit.customer_id)) return { ok: false, reason: 'customer' };
   if (String(row.property_id || '') !== String(visit.property_id || '')) return { ok: false, reason: 'property' };
-  if (String(row.scheduled_date).slice(0, 10) !== String(visit.scheduled_date).slice(0, 10)) {
+  if (dateOnly(row.scheduled_date) !== dateOnly(visit.scheduled_date)) {
     return { ok: false, reason: 'date' };
+  }
+  if (TERMINAL_ROW_STATUSES.includes(String(row.status || ''))) {
+    return { ok: false, reason: 'row_terminal' };
   }
   if (!row.groupable) return { ok: false, reason: 'not_groupable' };
   if (!familiesCompatible(row.group_family, visit.group_family)) return { ok: false, reason: 'family' };
@@ -188,47 +213,92 @@ async function nextStopSeq(trx, baseKey) {
  */
 async function createOrJoinVisit({ rows, createdBy, trx = null }) {
   if (!Array.isArray(rows) || rows.length < 2) throw new Error('createOrJoinVisit needs >= 2 rows');
+  const ids = rows.map((r) => (r && r.id) || r).filter(Boolean);
+  if (ids.length !== rows.length) throw new Error('createOrJoinVisit rows need ids');
+
+  // Authoritative reload with catalog flags — caller snapshots are never
+  // trusted for eligibility (codex r3 P1: a reschedule/reassignment can
+  // commit between the caller's read and our lock).
+  const loadRows = (t, { lock }) => {
+    let q = t('scheduled_services as ss')
+      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+      .whereIn('ss.id', ids)
+      .select(
+        'ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.status',
+        'ss.visit_id',
+        'svc.groupable as groupable', 'svc.group_family as group_family',
+      );
+    if (lock) q = q.forUpdate('ss');
+    return q;
+  };
+
   const run = async (t) => {
-    const [first] = rows;
+    // Derive the stop key from an unlocked peek, take the stop advisory
+    // lock (always BEFORE row locks — same order as splitChild/dissolve),
+    // then lock + reload and confirm the key still matches. A concurrent
+    // reschedule between peek and lock surfaces as a mismatch.
+    const peek = await loadRows(t, { lock: false });
+    if (peek.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
     const baseKey = stopBaseKey({
+      propertyId: peek[0].property_id,
+      customerId: peek[0].customer_id,
+      scheduledDate: peek[0].scheduled_date,
+    });
+    await lockStop(t, baseKey);
+
+    const fresh = await loadRows(t, { lock: true });
+    if (fresh.length !== ids.length) throw new Error('createOrJoinVisit: row not found');
+    const [first] = fresh;
+    const lockedKey = stopBaseKey({
       propertyId: first.property_id,
       customerId: first.customer_id,
       scheduledDate: first.scheduled_date,
     });
-    await lockStop(t, baseKey);
+    if (lockedKey !== baseKey) {
+      const err = new Error('visit stop moved concurrently — retry');
+      err.code = 'VISIT_STOP_MOVED';
+      throw err;
+    }
+
+    for (const r of fresh) {
+      if (TERMINAL_ROW_STATUSES.includes(String(r.status || ''))) {
+        throw new Error('visit membership conflict: a row is already terminal');
+      }
+      if (r.visit_id) {
+        throw new Error('visit membership conflict: a row is attached to another visit');
+      }
+      if (!r.groupable || !r.group_family) {
+        throw new Error('rows not mutually groupable: not_groupable');
+      }
+    }
+    // One technician owns the visit (doc §2 rev 5): all non-null
+    // assignments across the input rows must agree.
+    const rowTechs = [...new Set(fresh.map((r) => r.technician_id).filter(Boolean).map(String))];
+    if (rowTechs.length > 1) throw new Error('rows not mutually groupable: technician');
+    for (const r of fresh.slice(1)) {
+      const probe = canJoin(r, { ...first, status: 'open' });
+      if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
+    }
 
     const openVisits = await t('service_visits')
       .where({ stop_base_key: baseKey })
       .whereIn('status', OPEN_STATUSES)
       .orderBy('stop_seq', 'asc');
 
-    // One technician owns the visit (doc §2 rev 5): all non-null
-    // assignments across the input rows must agree.
-    const rowTechs = [...new Set(rows.map((r) => r.technician_id).filter(Boolean).map(String))];
-    if (rowTechs.length > 1) throw new Error('rows not mutually groupable: technician');
-    // Every row — including the first — must be a groupable catalog type
-    // with a family (canJoin only checks the joining side).
-    for (const r of rows) {
-      if (!r.groupable || !r.group_family) throw new Error('rows not mutually groupable: not_groupable');
-    }
-
     let visit = null;
     for (const v of openVisits) {
       if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
-      if (rows.every((r) => canJoin(r, v).ok)) { visit = v; break; }
+      if (fresh.every((r) => canJoin(r, v).ok)) { visit = v; break; }
     }
 
     if (!visit) {
-      for (const r of rows.slice(1)) {
-        const probe = canJoin(r, { ...first, status: 'open' });
-        if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
-      }
       const seq = await nextStopSeq(t, baseKey);
       [visit] = await t('service_visits')
         .insert({
           customer_id: first.customer_id,
           property_id: first.property_id || null,
-          scheduled_date: String(first.scheduled_date).slice(0, 10),
+          scheduled_date: dateOnly(first.scheduled_date),
           window_start: first.window_start || null,
           window_end: first.window_end || null,
           stop_base_key: baseKey,
@@ -242,8 +312,8 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     }
 
     // Widen the visit window to the union of member windows (doc rev 5f).
-    const starts = [visit.window_start, ...rows.map((r) => r.window_start)].filter(Boolean);
-    const ends = [visit.window_end, ...rows.map((r) => r.window_end)].filter(Boolean);
+    const starts = [visit.window_start, ...fresh.map((r) => r.window_start)].filter(Boolean);
+    const ends = [visit.window_end, ...fresh.map((r) => r.window_end)].filter(Boolean);
     const patch = {};
     if (starts.length) patch.window_start = starts.sort()[0];
     if (ends.length) patch.window_end = ends.sort().slice(-1)[0];
@@ -255,23 +325,14 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       Object.assign(visit, patch);
     }
 
-    // Serialize with legacy completion (codex r2 P0): lock the rows, then
-    // refuse any row that is already completed/cancelled or that has a
-    // live or succeeded completion attempt. The legacy handler claims its
-    // attempt (committed) BEFORE re-reading membership under the same row
-    // lock, so every interleaving resolves: either we see the claim here
-    // and refuse, or the handler sees our committed stamp and 409s.
-    const locked = await t('scheduled_services')
-      .whereIn('id', rows.map((r) => r.id))
-      .forUpdate()
-      .select('id', 'status', 'visit_id');
-    for (const l of locked) {
-      if (['completed', 'cancelled'].includes(String(l.status))) {
-        throw new Error('visit membership conflict: a row is already terminal');
-      }
-    }
+    // Serialize with legacy completion (codex r2 P0): rows are locked
+    // above; refuse any row with a live or succeeded completion attempt.
+    // The legacy handler claims its attempt (committed) BEFORE re-reading
+    // membership under the same row lock, so every interleaving resolves:
+    // either we see the claim here and refuse, or the handler sees our
+    // committed stamp and 409s.
     const liveAttempt = await t('service_completion_attempts')
-      .whereIn('service_id', rows.map((r) => r.id))
+      .whereIn('service_id', ids)
       .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'])
       .first('id')
       .catch(() => null);
@@ -279,19 +340,29 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       throw new Error('visit membership conflict: a completion attempt is in flight');
     }
 
-    // Never silently transfer a row already attached elsewhere — membership
-    // must be null or already this visit (a stale caller would otherwise
-    // bypass the other visit's freeze checks). Count-verified.
     const stamped = await t('scheduled_services')
-      .whereIn('id', rows.map((r) => r.id))
-      .where((q) => q.whereNull('visit_id').orWhere('visit_id', visit.id))
+      .whereIn('id', ids)
+      .whereNull('visit_id')
       .update({ visit_id: visit.id, ...(visit.technician_id ? { technician_id: visit.technician_id } : {}) });
-    if (Number(stamped) !== rows.length) {
+    if (Number(stamped) !== ids.length) {
       throw new Error('visit membership conflict: a row is attached to another visit');
     }
     return visit;
   };
-  return trx ? run(trx) : db.transaction(run);
+
+  if (trx) return run(trx);
+  // Advisory locks are transaction-scoped; a stop that moved concurrently
+  // needs a fresh transaction, so retry the whole unit a couple of times.
+  let lastErr = null;
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      return await db.transaction(run);  
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED') { lastErr = err; continue; }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
