@@ -18,7 +18,7 @@ const vm = require('vm');
 
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const {
-  LEGACY_LABEL_CADENCE_NAMES, legacyCatalogName, renamedCatalogName, counterpartServiceName,
+  LEGACY_LABEL_CADENCE_NAMES, legacyCatalogName, counterpartServiceName,
 } = require('../config/service-name-aliases');
 
 function fakeConn(services, { fail = false, onQuery = null, onLock = null } = {}) {
@@ -87,6 +87,33 @@ describe('resolveSeriesChildIdentity', () => {
 
   test('unlinked pre-rename catalog name → rename alias → current row', async () => {
     const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };
+    await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), parent)).resolves.toEqual(
+      { service_type: 'Bi-Monthly Pest Control Service', service_id: 'svc-bm', service_key: 'pest_general_bimonthly' }
+    );
+  });
+
+  test('cadence-QUALIFIED pre-rename label ("… Service (Quarterly)") resolves by its base — the catalog never carries the qualifier', async () => {
+    const catalog = [...CATALOG, { id: 'svc-lawn-bm', name: 'Bi-Monthly Lawn Care Service', service_key: 'lawn_care_recurring', is_active: true }];
+    const parent = { id: 'p', service_id: null, service_type: 'Lawn Care Program Service (Quarterly)', recurring_pattern: 'quarterly' };
+    await expect(resolveSeriesChildIdentity(fakeConn(catalog), parent)).resolves.toEqual(
+      { service_type: 'Bi-Monthly Lawn Care Service', service_id: 'svc-lawn-bm', service_key: 'lawn_care_recurring' }
+    );
+    // A qualified CURRENT name resolves to its own row the same way.
+    await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), { ...parent, service_type: 'Monthly Pest Control Service (Monthly)' })).resolves.toEqual(
+      { service_type: 'Monthly Pest Control Service', service_id: 'svc-m', service_key: 'pest_monthly' }
+    );
+  });
+
+  test('rename bridge is bidirectional: with 000010 rolled back (old spelling restored, new absent) a new-spelling parent links to the old row', async () => {
+    const rolledBack = [
+      ...CATALOG.filter((s) => s.id !== 'svc-bm'),
+      { id: 'svc-bm-old', name: 'General Pest Control Service (Bi-Monthly)', service_key: 'pest_general_bimonthly', is_active: true },
+    ];
+    const parent = { id: 'p', service_id: null, service_type: 'Bi-Monthly Pest Control Service', recurring_pattern: 'bimonthly' };
+    await expect(resolveSeriesChildIdentity(fakeConn(rolledBack), parent)).resolves.toEqual(
+      { service_type: 'General Pest Control Service (Bi-Monthly)', service_id: 'svc-bm-old', service_key: 'pest_general_bimonthly' }
+    );
+    // Normal direction: the counterpart (retired spelling) has no active row → the exact name wins.
     await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), parent)).resolves.toEqual(
       { service_type: 'Bi-Monthly Pest Control Service', service_id: 'svc-bm', service_key: 'pest_general_bimonthly' }
     );
@@ -186,13 +213,12 @@ describe('service-name-aliases legacy map', () => {
     expect(LEGACY_LABEL_CADENCE_NAMES).toEqual(fromMigration);
   });
 
-  test('legacyCatalogName is pair-keyed and case-insensitive on the label; renamedCatalogName is one-directional', () => {
+  test('legacyCatalogName is pair-keyed and case-insensitive on the label; the rename bridge stays bidirectional', () => {
     expect(legacyCatalogName('pest control', 'monthly')).toBe('Monthly Pest Control Service');
     expect(legacyCatalogName('Pest Control', 'custom')).toBeNull();
     expect(legacyCatalogName('Pest Control', null)).toBeNull();
-    expect(renamedCatalogName('Lawn Care Program — Monthly')).toBe('Monthly Lawn Care Service');
-    expect(renamedCatalogName('Monthly Lawn Care Service')).toBeNull(); // current form is not "renamed to" anything
-    expect(counterpartServiceName('Monthly Lawn Care Service')).toBe('Lawn Care Program — Monthly'); // bidirectional bridge unchanged
+    expect(counterpartServiceName('Lawn Care Program — Monthly')).toBe('Monthly Lawn Care Service');
+    expect(counterpartServiceName('Monthly Lawn Care Service')).toBe('Lawn Care Program — Monthly');
   });
 });
 

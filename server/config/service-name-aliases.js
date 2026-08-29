@@ -29,21 +29,14 @@ const CADENCE_CONVENTION_RENAMES = [
 ];
 
 const BY_LOWER = new Map();
-const RENAMED_TO = new Map();
 for (const [from, to] of CADENCE_CONVENTION_RENAMES) {
   BY_LOWER.set(from.toLowerCase(), to);
   BY_LOWER.set(to.toLowerCase(), from);
-  RENAMED_TO.set(from.toLowerCase(), to);
 }
 
 /** The other spelling of a renamed catalog service, or null. */
 function counterpartServiceName(name) {
   return BY_LOWER.get(String(name || '').trim().toLowerCase()) || null;
-}
-
-/** The CURRENT spelling for a pre-rename catalog name, or null (one direction only). */
-function renamedCatalogName(name) {
-  return RENAMED_TO.get(String(name || '').trim().toLowerCase()) || null;
 }
 
 /**
@@ -88,6 +81,5 @@ module.exports = {
   CADENCE_CONVENTION_RENAMES,
   LEGACY_LABEL_CADENCE_NAMES,
   counterpartServiceName,
-  renamedCatalogName,
   legacyCatalogName,
 };

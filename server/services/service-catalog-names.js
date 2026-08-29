@@ -15,7 +15,7 @@
  * tests import, and an unprimed cache simply falls back to the regex map.
  */
 
-const { CADENCE_CONVENTION_RENAMES, renamedCatalogName, legacyCatalogName } = require('../config/service-name-aliases');
+const { CADENCE_CONVENTION_RENAMES, counterpartServiceName, legacyCatalogName } = require('../config/service-name-aliases');
 
 // Migration-owned rename history is always resolvable, primed or not: an
 // unlinked terminal visit (service_id null, completed/cancelled) keeps its
@@ -182,7 +182,32 @@ async function resolveFromCatalog(conn, parent, verbatim) {
     }
     const label = String(parent.service_type || '').trim();
     if (!label) return verbatim;
-    const candidate = renamedCatalogName(label) || legacyCatalogName(label, parent.recurring_pattern) || label;
+    // Bridge the label to a catalog name:
+    //  - cadence-qualified pre-rename labels ("Lawn Care Program Service
+    //    (Quarterly)") are the population 000010 relabels with the qualifier
+    //    preserved and canonicalCatalogName resolves by BASE — the catalog
+    //    never carries the qualifier, so the base is what is looked up
+    //    (codex #3604 r6 P1);
+    //  - the rename bridge is BIDIRECTIONAL (counterpartServiceName), the
+    //    same contract service-completion-profiles uses: with 000010 rolled
+    //    back while this code is deployed, a parent stamped with the new
+    //    spelling must resolve to the restored old row (r6 P1). In the
+    //    normal direction the counterpart is the retired spelling, which
+    //    no active row carries, so the exact-name branch below decides.
+    // The FULL label is bridged first — several renamed names carry their
+    // own parenthetical ("General Pest Control Service (Bi-Monthly)"); only
+    // a label no alias knows falls back to its base.
+    const bridge = (l) => counterpartServiceName(l) || legacyCatalogName(l, parent.recurring_pattern) || null;
+    let base = label;
+    let candidate = bridge(label);
+    if (!candidate) {
+      const qualified = /^(.*\S)(\s*\([^()]*\))$/.exec(label);
+      if (qualified) {
+        base = qualified[1];
+        candidate = bridge(base);
+      }
+    }
+    if (!candidate) candidate = base;
     // services.name is not unique and the Service Library can reactivate an
     // old spelling as its own row: the parent's exact label is evidence too.
     // Both spellings are read in ONE statement so the decision comes from
@@ -190,13 +215,13 @@ async function resolveFromCatalog(conn, parent, verbatim) {
     // otherwise link from a stale row — r2 P2). Both live → conflicting
     // evidence → verbatim, unlinked. Only the old spelling lives → it is the
     // exact-name match.
-    const names = candidate.toLowerCase() === label.toLowerCase() ? [candidate] : [candidate, label];
+    const names = candidate.toLowerCase() === base.toLowerCase() ? [candidate] : [candidate, base];
     const rows = await stable(conn('services')
       .whereRaw(`lower(name) IN (${names.map(() => 'lower(?)').join(', ')})`, names)
       .where({ is_active: true }))
       .select('id', 'name', 'service_key');
     const mapped = rows.filter((r) => String(r.name).toLowerCase() === candidate.toLowerCase());
-    const exact = names.length === 2 ? rows.filter((r) => String(r.name).toLowerCase() === label.toLowerCase()) : [];
+    const exact = names.length === 2 ? rows.filter((r) => String(r.name).toLowerCase() === base.toLowerCase()) : [];
     if (mapped.length && exact.length) return verbatim;
     const hit = mapped.length ? mapped : exact;
     if (hit.length !== 1) return verbatim;
