@@ -1506,7 +1506,7 @@ unset its gate; budget kill = the issuer program's limit.
   outcome = 'slot_reserved' AND lease_token = ?` after the new day's count shows room (no room
   ⇒ the row becomes `skipped`, never submitted); no second row is ever inserted for the same
   action instance, so the §3.4 partial-unique `idempotency_key` (one row per
-  `${prospect_id}:${action}:${generation}`) is never violated and the instance-bound approval
+  `${prospect_id}:${action}:${instance_key}`) is never violated and the instance-bound approval
   stays valid — and only then flips the attempt `slot_reserved → submitting` (durable,
   conditional on the lease). The only edges out of `slot_reserved` are `submitting` (worker,
   under the lock), `skipped` (no room after rollover) and `slot_released` (the sweep on lease
