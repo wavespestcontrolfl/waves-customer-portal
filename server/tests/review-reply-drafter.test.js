@@ -405,6 +405,21 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    // 2026-08-29 dry run: sentence-initial ORDINARY words (plural / gerund /
+    // participle …) are not names — exempt when nothing name-shaped follows.
+    expect(verify(good('Hi Dana,\n\nAnts are relentless in this heat, so we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nFinding a company you can count on should not be hard, and we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nSkipping the paperwork is how we like to do it. We will pass your note along to Marcus.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nHonestly, Marcus enjoys this part of the job. We will pass your note along to him.'))).not.toBe('unlisted_name');
+    // …but the same morphology followed by a name-shaped token is still a
+    // staff attribution: past-tense verb, copula, appositive, full name,
+    // a first name + "s", or a known first name regardless of context.
+    expect(verify(good('Hi Dana,\n\nJennings handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nJennings is glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nSanders, our technician, was glad to help alongside Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nJennings Smith helped with the ants alongside Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRogers and Marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nHopes are high, and Kevin was glad to help alongside Marcus.'))).toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
     const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hi Dana, we will make sure kevin hears your feedback about the ants.'), gants)).toBe('unlisted_name');

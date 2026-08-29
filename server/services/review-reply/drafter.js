@@ -267,6 +267,27 @@ some sounds still stop such sure take thank thanks that that's the their them th
 these they this those though to too up us very was we we'll we're we've welcome well were
 what when where whether which while who why wish with would yes you your you're yours
 `.split(/\s+/).filter(Boolean));
+// Sentence-initial ORDINARY words that happen to be capitalised ("Ants are
+// relentless", "Finding a company you can count on", "Skipping the
+// contract") were failing provenance whenever they fell outside
+// SENTENCE_STARTERS — half of the verifier rejections in the 2026-08-29 dry
+// run. A word is exempt at a sentence start only when its MORPHOLOGY says
+// ordinary English (plural / gerund / participle / adverb / abstract-noun
+// suffix), it is not a known first name (nor a first name + "s": Adams,
+// Rogers, Peters), and the token after it is not name-shaped — a singular
+// copula / auxiliary / possessive, a past-tense verb ("Jennings handled"),
+// an appositive ("Sanders, our technician"), or another capitalised word
+// ("Jennings Smith"). Anything else at a sentence start still needs
+// provenance exactly as before.
+const COMMON_WORD_FORM_RE = /^[a-z]{2,}(?:ings?|ed|ly|ness|tions?|sions?|ments?|ful|less|able|ible|ous|ive|s)$/;
+const NAME_SHAPED_NEXT_RE = /^\s*(?:,\s*(?:our|the|a|an|your|who|from)\b|(?:is|was|has|had|does|did|will|would|could|should|can|took|came|went|got|made|said|told|knew|kept|left|ran|gave|showed|spoke|met|saw|sent|\p{Ll}+ed|'s|'ll|'d)\b|\p{Lu})/u;
+function exemptSentenceStart(w, rest) {
+  if (SENTENCE_STARTERS.has(w)) return true;
+  if (COMMON_FIRST_NAMES.has(w)) return false;
+  if (!COMMON_WORD_FORM_RE.test(w)) return false;
+  if (w.endsWith('s') && COMMON_FIRST_NAMES.has(w.slice(0, -1))) return false;
+  return !NAME_SHAPED_NEXT_RE.test(rest);
+}
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
@@ -544,10 +565,11 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
     const w = pn[2].toLowerCase();
     if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w)) continue;
-    // Sentence starts get the common-word exemption only; a capitalized
-    // word that is neither a starter nor sourced from the review has no
-    // provenance wherever it sits.
-    if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
+    // Sentence starts get the common-word exemption only (starter list, or
+    // an ordinary-English word form that is not followed by a name-shaped
+    // token); a capitalized word that is neither nor sourced from the
+    // review has no provenance wherever it sits.
+    if (sentenceInitial && exemptSentenceStart(w, body.slice(pn.index + pn[0].length))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
