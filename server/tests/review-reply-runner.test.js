@@ -345,8 +345,14 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'old-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'unrated', auto_reply_draft: 'Thanks.', review_reply: null, auto_reply_version: 'reply-v1' }),
       row({ id: 'human', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Human words.', review_reply: '[DRAFT] Human words.', auto_reply_version: 'human' }),
       row({ id: 'recon', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'x', auto_reply_version: 'reply-v1' }),
+      // A draft a person asked for via Post now (hook): its own reason, never swept.
+      row({ id: 'asked', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Asked for.', review_reply: '[DRAFT] Asked for.', auto_reply_version: 'reply-v1' }),
+      // Under a live publish claim: a publisher is mid-flight, untouched.
+      row({ id: 'claimed', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'y', review_reply: '[DRAFT] y', auto_reply_version: 'reply-v1', publish_claimed_until: '2099-01-01T00:00:00Z' }),
     ];
     expect(await Runner.sweepLowRatingParks()).toBe(2);
+    expect(state.rows[4]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', review_reply: '[DRAFT] Asked for.' });
+    expect(state.rows[5]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] y' });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: null, auto_reply_draft: null, auto_reply_due_at: null });
     expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: null });
     expect(state.rows[2]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Human words.' });
@@ -1404,7 +1410,8 @@ describe('admin actions', () => {
     for (const star_rating of [2, 0]) {
       state.rows = [row({ id: 'lo', star_rating, auto_reply_status: 'queued' })];
       const r = await Runner.postNow('lo', { type: 'admin', adminUserId: 'u1' });
-      expect(r).toMatchObject({ outcome: 'parked', reason: star_rating === 0 ? 'unrated' : 'low_rating', drafted: true });
+      // A person asked for this draft: its own reason, never swept (hook on #3587).
+      expect(r).toMatchObject({ outcome: 'parked', reason: star_rating === 0 ? 'unrated_requested' : 'low_rating_requested', drafted: true });
       expect(mockPublish).not.toHaveBeenCalled();
       expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text, auto_reply_claimed_until: null });
       // Second Post now: the surfaced draft is published as the admin.

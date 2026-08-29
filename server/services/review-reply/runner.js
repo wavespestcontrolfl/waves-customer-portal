@@ -136,7 +136,9 @@ function lowRatingExitFields(reason) {
 // Rows the OLD rule parked as low_rating / unrated with a pipeline draft
 // (before the 2026-08-29 ruling) leave the lane the same way; bounded and
 // idempotent, so it simply runs every tick. Human / Agent Ops drafts are
-// theirs (untouched); a live publish claim means a publisher is mid-flight.
+// theirs (untouched); a live publish claim means a publisher is mid-flight;
+// low_rating_requested / unrated_requested (a draft a person asked for via
+// Post now) is not a legacy park and is never touched.
 async function sweepLowRatingParks({ limit = 50 } = {}) {
   const rows = await db('google_reviews')
     .where('auto_reply_status', STATUS.PARKED)
@@ -147,10 +149,14 @@ async function sweepLowRatingParks({ limit = 50 } = {}) {
     .select('id', 'review_reply', 'auto_reply_draft', 'auto_reply_reason');
   let n = 0;
   for (const r of (rows || [])) {
-    // Compare-and-set on the reply slot: only OUR draft is removed.
+    // Compare-and-set on EVERYTHING the eligibility read saw — status, reason,
+    // version, publish claim, reply slot — so a concurrent Skip / sync /
+    // publisher transition wins (hook on #3587); only OUR draft is removed.
     const ours = r.auto_reply_draft && r.review_reply === asDraft(r.auto_reply_draft);
     const updated = await db('google_reviews')
-      .where({ id: r.id, review_reply: r.review_reply })
+      .where({ id: r.id, review_reply: r.review_reply, auto_reply_status: STATUS.PARKED, auto_reply_reason: r.auto_reply_reason })
+      .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
       .update({ ...lowRatingExitFields(r.auto_reply_reason), auto_reply_claimed_until: null, ...(ours ? { review_reply: null, reply_updated_at: null } : {}) });
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
@@ -653,7 +659,11 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   if (humanOnly) {
     // low_rating / unrated = the hard 1-3★ safety lane; below_threshold = a
     // 4★ under a configured REVIEW_AUTO_REPLY_MIN_STARS=5 (codex r40).
-    const reason = rating === 0 ? 'unrated' : rating <= 3 ? 'low_rating' : 'below_threshold';
+    // A low-star draft a PERSON asked for (Post now) carries its own reason so
+    // the legacy low-rating park sweep never removes it (hook on #3587).
+    const reason = rating === 0 ? (intent === 'post_now' ? 'unrated_requested' : 'unrated')
+      : rating <= 3 ? (intent === 'post_now' ? 'low_rating_requested' : 'low_rating')
+        : 'below_threshold';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, reason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     if (intent !== 'post_now') {
       const title = reason === 'below_threshold' ? `${rating}-star review — draft ready (below the auto-post threshold)` : `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`;
