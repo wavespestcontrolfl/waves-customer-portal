@@ -181,6 +181,17 @@ function snapshotMatchesLine1(snapshot, line1) {
   return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
+// Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
+// city) — the premise test the sprinkler-settings move guard uses, shared
+// with the customer merge (a duplicate pair can be the old and new home).
+function homesDiffer(a, b) {
+  const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
+  return addressMatchKey(a?.address_line1) !== addressMatchKey(b?.address_line1)
+    || unitKey(a?.address_line2) !== unitKey(b?.address_line2)
+    || zip5(a?.zip) !== zip5(b?.zip)
+    || addressMatchKey(a?.city) !== addressMatchKey(b?.city);
+}
+
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
   const counts = { leads: 0, estimates: 0 };
   const customerId = (after && after.id) || (before && before.id);
@@ -202,12 +213,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // A unit is a distinct premise (the report's plan binding treats it so):
   // moving between units in one building is a move too — hook P1 on
   // 75b90bf11. Normalized keys, so a formatting correction never counts.
-  const homeMoved = !!before && (
-    addressMatchKey(before.address_line1) !== addressMatchKey(after.address_line1)
-    || unitKey(before.address_line2) !== unitKey(after.address_line2)
-    || addressMatchKey(before.zip) !== addressMatchKey(after.zip)
-    || addressMatchKey(before.city) !== addressMatchKey(after.city)
-  );
+  const homeMoved = !!before && homesDiffer(before, after);
   if (homeMoved) {
     counts.property_preferences = await conn('property_preferences')
       .where({ customer_id: customerId })
@@ -440,6 +446,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 
 module.exports = {
   addressMatchKey,
+  homesDiffer,
   formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,

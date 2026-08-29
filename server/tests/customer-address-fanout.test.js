@@ -570,6 +570,14 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);
     expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeTruthy();
   });
+  test('homesDiffer is the shared premise test (street, unit, zip, city; normalized)', () => {
+    const { homesDiffer } = require('../services/customer-address-fanout');
+    expect(homesDiffer(BEFORE, AFTER)).toBe(true);
+    expect(homesDiffer(BEFORE, { ...BEFORE, address_line1: BEFORE.address_line1.toUpperCase() })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: '#4' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: 'Apt 7' })).toBe(true);
+    expect(homesDiffer(BEFORE, { ...BEFORE, zip: '34211-1234' })).toBe(false);
+  });
   test('a formatting-only correction of the same home (case, unit spelling) does not stamp', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Apt 4' }, after: { ...BEFORE, address_line1: BEFORE.address_line1.toUpperCase(), address_line2: '#4' } }, conn);

@@ -1338,6 +1338,25 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     } catch (e) {
       throw new Error(`executeMerge: irrigation delivery identity rewrite failed: ${e.message}`);
     }
+    // Duplicate profiles can be the customer's OLD and NEW homes: the
+    // surviving property_preferences row (merged, filled, or repointed by
+    // mergeSingletonPrefRow) may carry sprinkler settings saved for the
+    // other address. When the two homes differ, mark the survivor moved —
+    // the weekly plan withholds the sizing fields until each is re-saved for
+    // the kept address (codex #3565 gh-r22). Same premise test as the
+    // address fan-out's move guard. Left in place by an undo (conservative:
+    // it only ever withholds).
+    if (require('./customer-address-fanout').homesDiffer(winner, loser)) {
+      try {
+        await trx.transaction(async (sp) => {
+          const n = await sp('property_preferences').where({ customer_id: winnerId })
+            .update({ irrigation_home_changed_at: sp.fn.now(), irrigation_confirmed_fields: JSON.stringify([]) });
+          if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
+        });
+      } catch (e) {
+        throw new Error(`executeMerge: sprinkler-settings move stamp failed: ${e.message}`);
+      }
+    }
     // Referral surfaces load ONE promoter per customer (`.first()` in
     // referral-engine/referrals-v2) — if both sides were enrolled, the sweep
     // left two rows on the winner and the second row's rewards would vanish

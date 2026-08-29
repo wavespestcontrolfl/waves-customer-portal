@@ -656,16 +656,19 @@ function buildWeeklyEmailDecision({
   };
 
   if (weekPlanEnabled) {
+    // Unconfirmed after a move: the former home's sizing inputs (minutes,
+    // days, head type, typed inches) AND its programmed total (carryover)
+    // are withheld from the plan — events-only, rain-only carryover.
     const { plan, restriction, decisionInputs } = decideWeekPlan({
-      advice,
+      advice: scheduleUnconfirmed ? { ...advice, appliedInchesPerWeek: null } : advice,
       grassType,
       forecastEt0Inches,
       lastWeekRainInches: rainfallInches7d,
       forecastRainInches,
-      runMinutes: irrigationRunMinutes,
-      wateringDays,
-      systemType: irrigationSystemType,
-      explicitInchesPerWeek: prefsInches,
+      runMinutes: scheduleUnconfirmed ? null : irrigationRunMinutes,
+      wateringDays: scheduleUnconfirmed ? null : wateringDays,
+      systemType: scheduleUnconfirmed ? null : irrigationSystemType,
+      explicitInchesPerWeek: scheduleUnconfirmed ? null : prefsInches,
       rainSensor: rainSensor === true || rainSensor === 't',
       county,
       home,
@@ -679,7 +682,7 @@ function buildWeeklyEmailDecision({
     // renderer's generic copies so the note doesn't say them twice.
     const sensorOn = rainSensor === true || rainSensor === 't';
     const planCopy = renderWeekPlanEmail(plan, {
-      firstName, grassLabel, runMinutes: runtimeInputs.runMinutes, restriction,
+      firstName, grassLabel, runMinutes: scheduleUnconfirmed ? null : runtimeInputs.runMinutes, restriction,
       omitRateNote: scheduleSource === 'portal_derived',
       omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
       scheduleUnconfirmed,
@@ -692,7 +695,11 @@ function buildWeeklyEmailDecision({
       const scheduleClause = scheduleSource === 'portal_derived'
         ? `your sprinkler schedule as entered in your portal (about ${irrigationFmt}" per week)`
         : `your irrigation schedule (${irrigationFmt}" per week)`;
-      const lastWeekLine = advice.status === 'surplus'
+      // A moved home's schedule is not quoted as last week's watering — the
+      // narrative is rain-only until the settings are re-saved.
+      const lastWeekLine = scheduleUnconfirmed
+        ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        : advice.status === 'surplus'
         ? `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" more than the ${target}" your ${grassLabel} needs this time of year.`
         : advice.status === 'deficit'
           ? `Rain was light near your home last week (${rain}"), so with ${scheduleClause} your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`
@@ -701,7 +708,7 @@ function buildWeeklyEmailDecision({
       // rides the note, INCLUDING the sensor upper-bound disclosure — the
       // summary quotes the full programmed amount as "received", and a
       // sensor may have skipped some of it (codex #3478 r13 / #3565 r5).
-      const provenance = scheduleSource === 'portal_derived'
+      const provenance = scheduleSource === 'portal_derived' && !scheduleUnconfirmed
         ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn })
         : '';
       const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');
@@ -713,7 +720,7 @@ function buildWeeklyEmailDecision({
         advice,
         weekPlan: plan,
         restriction,
-        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource },
+        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed },
         payload: {
           ...payload,
           // "What your grass needs right now" = THIS week's target (the plan's),
@@ -1125,17 +1132,18 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         firstName: customer.first_name,
         grassType: resolveGrassType(customer),
         weekEnding,
-        // Settings saved BEFORE the home moved describe the former property's
-        // sprinkler system — withheld (events-only plan, reconfirm ask), never
-        // turned into exact controller minutes for the new home.
-        irrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.irrigation_inches_per_week,
-        turfIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.turf_irrigation_inches_per_week,
-        assessmentIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.assessment_irrigation_inches_per_week,
+        irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
+        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
         turfIrrigationType: customer.turf_irrigation_type,
         irrigationSystem: customer.irrigation_system,
-        irrigationRunMinutes: scheduleUnconfirmed ? null : customer.irrigation_run_minutes,
-        wateringDays: scheduleUnconfirmed ? null : customer.watering_days,
-        irrigationSystemType: scheduleUnconfirmed ? null : customer.irrigation_system_type,
+        irrigationRunMinutes: customer.irrigation_run_minutes,
+        wateringDays: customer.watering_days,
+        irrigationSystemType: customer.irrigation_system_type,
+        // Settings saved BEFORE the home moved describe the former property's
+        // sprinkler system. The inputs still ride (so the decision routes to
+        // the plan renderer, not the "missing schedule" setup copy — codex
+        // gh-r22); the PLAN drops the sizing fields and says why.
         scheduleUnconfirmed,
         priorWeekEvents,
         rainSensor: customer.rain_sensor === true || customer.rain_sensor === 't',

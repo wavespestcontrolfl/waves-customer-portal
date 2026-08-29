@@ -165,9 +165,15 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(_private.sizingFieldsUnconfirmed(row({ irrigation_run_minutes: null, watering_days: '[]', irrigation_system_type: [], irrigation_inches_per_week: null }))).toBe(false);
     expect(_private.sizingFieldsUnconfirmed(row({ irrigation_inches_per_week: 1, irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] }))).toBe(true);
     expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: 'not json' }))).toBe(true);
-    for (const k of ['irrigationInchesPerWeek: scheduleUnconfirmed \\? null : customer\\.irrigation_inches_per_week', 'turfIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'assessmentIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'irrigationRunMinutes: scheduleUnconfirmed \\? null : customer\\.irrigation_run_minutes', 'wateringDays: scheduleUnconfirmed \\? null : customer\\.watering_days', 'irrigationSystemType: scheduleUnconfirmed \\? null : customer\\.irrigation_system_type']) {
+    // gh-r22: the raw inputs still ride (the decision must route to the PLAN
+    // renderer, never the "missing schedule" setup copy); the plan itself
+    // drops the sizing fields + the former home's programmed total.
+    expect(sweep).toMatch(/irrigationRunMinutes: customer\.irrigation_run_minutes,\s*wateringDays: customer\.watering_days,\s*irrigationSystemType: customer\.irrigation_system_type,/);
+    expect(sweep).toMatch(/advice: scheduleUnconfirmed \? \{ \.\.\.advice, appliedInchesPerWeek: null \} : advice,/);
+    for (const k of ['runMinutes: scheduleUnconfirmed \\? null : irrigationRunMinutes', 'wateringDays: scheduleUnconfirmed \\? null : wateringDays', 'systemType: scheduleUnconfirmed \\? null : irrigationSystemType', 'explicitInchesPerWeek: scheduleUnconfirmed \\? null : prefsInches', 'runMinutes: scheduleUnconfirmed \\? null : runtimeInputs\\.runMinutes']) {
       expect(sweep).toMatch(new RegExp(k));
     }
+    expect(sweep).toMatch(/const lastWeekLine = scheduleUnconfirmed\s*\? `Rain near your home last week came to/);
     expect(sweep).toMatch(/'pp\.irrigation_confirmed_fields',\s*'pp\.irrigation_home_changed_at',/);
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
@@ -190,5 +196,34 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(queued).toBeGreaterThan(0);
     expect(hook).toBeGreaterThan(queued);
     expect(send === -1 || send > hook).toBe(true);
+  });
+});
+
+describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-only) with the reconfirm note (codex gh-r22)', () => {
+  const { buildWeeklyEmailDecision, TEMPLATE_WEEK_PLAN } = require('../services/irrigation-weekly-email');
+  const base = {
+    // Monday 2026-08-31 (inside the checked-in policy, effective 08-27).
+    firstName: 'Dana', grassType: 'st_augustine', weekEnding: '2026-08-30',
+    irrigationInchesPerWeek: null, irrigationSystem: true,
+    irrigationRunMinutes: 20, wateringDays: ['Mon'], irrigationSystemType: ['spray'],
+    rainfallInches7d: 0.2, et0Inches: 1.5, forecastRainInches: 0.1, forecastEt0Inches: 1.4,
+    weekPlanEnabled: true, county: 'Manatee', planWeekEnd: '2026-09-06', now: new Date('2026-08-31T11:00:00Z'),
+    home: { addressLine1: '1 Main St', city: 'Bradenton', zip: '34205' },
+  };
+  test('confirmed: minutes-based plan; unconfirmed: same template, events-only, note explains, no schedule quoted', () => {
+    const ok = buildWeeklyEmailDecision(base);
+    expect(ok.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(ok.weekPlan.minutesPerEvent).not.toBe(null);
+    const moved = buildWeeklyEmailDecision({ ...base, scheduleUnconfirmed: true });
+    expect(moved.templateKey).toBe(TEMPLATE_WEEK_PLAN); // never the setup copy
+    expect(moved.weekPlan.minutesPerEvent).toBe(null);
+    // Generic UF fallback cycle, never the former home's own minutes phrasing.
+    expect(moved.payload.week_plan).toMatch(/one full cycle on each turf zone/);
+    expect(moved.payload.week_plan).not.toMatch(/run each turf zone/);
+    expect(ok.payload.week_plan).toMatch(/run each turf zone/);
+    expect(moved.payload.plan_note).toContain('Your address changed after your sprinkler settings were saved');
+    expect(moved.payload.summary_line).toMatch(/^Rain near your home last week came to/);
+    expect(moved.decisionInputs.scheduleUnconfirmed).toBe(true);
+    expect(moved.decisionInputs.runMinutes ?? null).toBe(null);
   });
 });
