@@ -219,7 +219,13 @@ export function TermiteStationRecord({ stationMap }) {
     // "All" only when every station on the visit was checked clean — never
     // beside exceptions, serviced, OR on-file (unchecked) stations
     // (codex P2 #3600 r17).
-    const every = !exceptions.length && !onFile.length && !serviced.length;
+    // …and the map's rows must BE the whole network: with check rows the
+    // map lists only the checked stations, so 12 clean rows on a
+    // 14-station property is "12 of 14", not "All 12" (codex P2 #3600 r30).
+    const networkTotal = Number(stationMap?.summary?.total);
+    const networkChecked = Number(stationMap?.summary?.checked);
+    const wholeNetwork = !Number.isFinite(networkTotal) || !Number.isFinite(networkChecked) || networkTotal === networkChecked;
+    const every = !exceptions.length && !onFile.length && !serviced.length && wholeNetwork;
     summaryParts.push(`${every ? 'All ' : ''}${clean.length} ${exceptions.length || serviced.length ? 'other ' : ''}station${clean.length === 1 ? '' : 's'} checked — no activity observed`);
   }
   if (serviced.length) {

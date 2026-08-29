@@ -321,6 +321,16 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(screen.queryByText(/checked — no activity observed/)).toBeNull();
   });
 
+  it('a checked SUBSET of the network (12 clean rows, total 14) never says "All 12 checked"', async () => {
+    const subset = JSON.parse(JSON.stringify(termiteReportV2));
+    subset.stationMap.stations = subset.stationMap.stations.slice(0, 12).map((st) => ({ ...st, status: 'ok' }));
+    subset.stationMap.summary = { total: 14, checked: 12, activity: 0, serviced: 0, inaccessible: 0 };
+    renderReport(subset);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('12 stations checked — no activity observed')).toBeInTheDocument();
+    expect(screen.queryByText(/All 12/)).toBeNull();
+  });
+
   it('a partial sync (checked + on-file, no exceptions) never says "All N checked"', async () => {
     const mixed = JSON.parse(JSON.stringify(termiteReportV2));
     mixed.stationMap.stations = mixed.stationMap.stations.map((st, i) => ({ ...st, status: i < 4 ? 'ok' : null }));
