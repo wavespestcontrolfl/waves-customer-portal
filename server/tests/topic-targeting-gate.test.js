@@ -917,6 +917,15 @@ describe('PR codex r22 (b4db7a542)', () => {
     // Pre-spend (no corpus): the geo verdict stands alone, no corpus needed.
     expect(gate.evaluate(blog({ query: 'house came with taexx', title: 'Taexx in Tampa', slug: 'taexx-tampa' }), { requireCorpus: true }).findings.map((f) => f.code)).toEqual([gate.CODES.GEO_OUT_OF_AREA]);
   });
+  test('metro / regional aliases are out-of-footprint geography (r25)', () => {
+    for (const t of ['NYC pest control', 'DFW pest control', 'pest control in the Bay Area', 'SF Bay Area termite treatment', 'SoCal exterminator', 'Philly rodent control', 'pest control Twin Cities', 'PNW carpenter ants', 'Vegas scorpion control', 'ATL mosquito service']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('NYC pest control').out_of_area).toContain('New York City');
+    for (const t of ['bay area lawn care in sarasota', 'the twin ant colonies in a lakewood ranch yard', 'atlas of florida ants']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

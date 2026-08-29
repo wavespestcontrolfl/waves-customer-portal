@@ -260,6 +260,28 @@ const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bi
 // Bare "US" / "America" only in unambiguous nationwide forms ("in the US",
 // "across America", "US pest control") — "let us help" / "American
 // cockroach" are not geography.
+// Everyday metro / regional aliases no city matcher can see: reported under
+// the metro they stand for. Unambiguous forms only — "Bay Area" counts as
+// the SF form ("the / SF / San Francisco Bay Area"); "Tampa Bay area" is
+// caught by Tampa itself.
+const METRO_ALIASES = Object.freeze([
+  ['New York City', /\bnyc\b/gi],
+  ['Dallas–Fort Worth', /\bdfw\b/gi],
+  ['San Francisco Bay Area', /\b(?:the|sf|san\s+francisco)\s+bay\s+area\b/gi],
+  ['Southern California', /\bsocal\b/gi],
+  ['Northern California', /\bnorcal\b/gi],
+  ['Philadelphia', /\bphilly\b/gi],
+  ['Minneapolis–St. Paul', /\b(?:the\s+)?twin\s+cities\b/gi],
+  ['Pacific Northwest', /\bpnw\b|\bpacific\s+northwest\b/gi],
+  ['Oklahoma City', /\bokc\b/gi],
+  ['Salt Lake City', /\bslc\b/gi],
+  ['Las Vegas', /\bvegas\b/gi],
+  ['Atlanta', /\batl\b/gi],
+  ['Houston', /\bhtx\b/gi],
+]);
+function metroAliasHits(text) {
+  return METRO_ALIASES.filter(([, re]) => { re.lastIndex = 0; return re.test(text); }).map(([name]) => name);
+}
 const NATIONWIDE_RE = new RegExp(
   `\\b(?:united states|u\\.s\\.a?\\.?|usa|nationwide|america|all 50 states|every state)(?![a-z])`
   + `|\\b(?:in|across|throughout|around|serving|anywhere in)\\s+(?:the\\s+)?(?:us|u\\.s\\.|states)(?![a-z])`
@@ -470,6 +492,7 @@ function classifyGeoScope(text) {
     ...findAll(OUT_OF_STATE_RE, tg),
     ...findAll(OUT_OF_COUNTRY_RE, tg),
     ...findAll(NATIONWIDE_RE, tg),
+    ...metroAliasHits(tg),
     ...findAll(NAME_STATE_RE, tg),
     ...findAll(CONTEXT_PLACE_RE, tg.replace(CONTEXT_PLACE_FOOTPRINT_RE, ' ')),
     ...findAll(STATE_ABBR_RE, tg).map((s) => s.toUpperCase()),
