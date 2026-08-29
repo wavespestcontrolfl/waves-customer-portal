@@ -627,6 +627,15 @@ function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) 
   if (statusByStationId.size > 0) {
     return stationRows.filter((row) => statusByStationId.has(String(row.id)));
   }
+  return stationRowsOnVisitDay(stationRows, serviceDate);
+}
+
+// The registry as it stood on the visit's ET service day — the NETWORK the
+// visit's checks are a subset of. Used as the fallback map rows when a visit
+// wrote no checks, and as the summary's denominator when it did: 12
+// submitted checks on a 14-station property are "12 of 14", never "12 of 12"
+// (codex P2 #3600 r29).
+function stationRowsOnVisitDay(stationRows, serviceDate) {
   const dateStr = typeof serviceDate === 'string'
     ? serviceDate.slice(0, 10)
     : serviceDate instanceof Date && !Number.isNaN(serviceDate.getTime())
@@ -724,8 +733,11 @@ function buildStationMapReportContext({
   // status (codex P2 #3600 r15); the unavailable branch below carries it as
   // `checkSummary` so status builders can still reconcile against it.
   const visitStatuses = visitRows.map((row) => statusByStationId.get(String(row.id)) || null);
+  // Denominator = the network on the visit day (never smaller than the
+  // rows the visit actually covered).
+  const networkTotal = Math.max(visitStatuses.length, stationRowsOnVisitDay(programRows, serviceDate).length);
   const summary = {
-    total: visitStatuses.length,
+    total: networkTotal,
     checked: visitStatuses.filter((status) => status && status !== 'inaccessible').length,
     activity: visitStatuses.filter((status) => status === 'activity').length,
     serviced: visitStatuses.filter((status) => status === 'serviced').length,

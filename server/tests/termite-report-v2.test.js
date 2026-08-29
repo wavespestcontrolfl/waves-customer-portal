@@ -488,6 +488,14 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Active termites present' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(false);
     // frozen evidence also replaces a contradictory no-action step
     expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' }).nextStep).toBe('We will re-check the active stations at your next monitoring visit.');
+    // current activity pins escalate the historical evidence state too — and mark it reconciled
+    const fromEvidence = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted' },
+      typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 1, serviced: 0, inaccessible: 0 },
+    });
+    expect(fromEvidence.status.key).toBe('action');
+    expect(fromEvidence.statusReconciled).toBe(true);
     // pins never DOWNGRADE an explicit activity selection
     const kept = buildTermiteReportV2({
       typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted' },

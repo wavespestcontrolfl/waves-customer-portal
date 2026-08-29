@@ -496,14 +496,18 @@ function buildTermiteReportV2({
   // 'action'. A tech's explicit activity selection is never understated
   // because pins were left unmarked.
   const pinActivity = visitBackedSummary(stationSummary)?.activity || 0;
-  const statusEscalatedByPins = pinActivity > 0 && (formStatus.key === 'protected' || formStatus.key === 'monitoring');
+  // Current activity pins escalate every lesser state — including the
+  // historical "Previous feeding noted" evidence state (codex P2 #3600 r29):
+  // red pins labelled "Termite activity observed" are current evidence.
+  const statusEscalatedByPins = pinActivity > 0 && formStatus.key !== 'action';
   const statusBase = statusEscalatedByPins ? { key: 'action', tone: 'watch' } : formStatus;
   // ANY reconciliation away from the select-derived status — pins, frozen
   // count / location / sign chips, or feeding data promoting an explicit
   // "None observed" — means the activity gauge (score / trend computed from
   // that select) and a frozen "No action needed" step describe a reading the
   // report no longer shows (codex P2 #3600 r22 / r25).
-  const statusReconciled = values.termite_activity === ACTIVITY_VALUES.NONE && statusBase.key !== 'protected';
+  const statusReconciled = statusEscalatedByPins
+    || (values.termite_activity === ACTIVITY_VALUES.NONE && statusBase.key !== 'protected');
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const feedingNoted = statusBase.key === 'monitoring'
     && (FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')));

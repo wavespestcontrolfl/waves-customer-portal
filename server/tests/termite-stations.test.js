@@ -751,6 +751,21 @@ test('report context gates: wrong visit type, no stations, satellite down, env k
   }
 });
 
+test('the summary denominator is the visit-day network, not the submitted subset (12 checks on 14 stations = 12 of 14)', () => {
+  const rows = Array.from({ length: 14 }, (_, i) => stationRow(`st-${i + 1}`, i + 1, pin(0.1 + (i % 7) * 0.12, i < 7 ? 0.3 : 0.7), { created_at: '2026-01-01T00:00:00Z' }));
+  const context = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: rows.slice(0, 12).map((row) => ({ station_id: row.id, status: 'ok' })),
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-08-27',
+  });
+  expect(context.available).toBe(true);
+  expect(context.stations).toHaveLength(12);
+  expect(context.summary).toEqual({ total: 14, checked: 12, activity: 0, serviced: 0, inaccessible: 0 });
+});
+
 test('a basemap outage keeps the visit-check evidence as checkSummary (status builders reconcile without a map)', () => {
   const context = buildStationMapReportContext({
     stationRows: [
