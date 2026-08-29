@@ -42,6 +42,10 @@ const STATE_KEY = 'migration.20260829000050.state';
 // Same terminal set as 20260825000010 — `rescheduled` can revive.
 const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 
+// OPEN = not terminal, INCLUDING legacy NULL-status rows (a bare NOT IN
+// drops NULLs — same predicate as 20260829000010; codex #3601 r1 P1).
+const openVisitStatus = (q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_VISIT_STATUSES);
+
 async function loadState(knex) {
   if (!(await knex.schema.hasTable('system_settings'))) return null;
   const row = await knex('system_settings').where({ key: STATE_KEY }).first();
@@ -61,11 +65,17 @@ function streetZipKey(row) {
   return addressKey({ address_line1: row.address_line1, address_line2: row.address_line2, zip: row.zip });
 }
 
+// Field-level fallbacks, mirroring the dispatch readers' per-column
+// COALESCE(service_address_*, customers.*) (codex #3601 r1 P1): a partial
+// stamp (street only) still keys against the mirror's city/ZIP. The UNIT
+// follows the stamped street when one exists — a stamped street with no
+// unit means "no unit", never the mirror's unit (unit-divergence behavior).
 function visitAddressKey(visit, customer) {
+  const stamped = !!visit.service_address_line1;
   const line1 = visit.service_address_line1 || customer.address_line1;
-  const line2 = visit.service_address_line1 ? visit.service_address_line2 : customer.address_line2;
-  const city = visit.service_address_line1 ? visit.service_address_city : customer.city;
-  const zip = visit.service_address_line1 ? visit.service_address_zip : customer.zip;
+  const line2 = stamped ? visit.service_address_line2 : customer.address_line2;
+  const city = visit.service_address_city || customer.city;
+  const zip = visit.service_address_zip || customer.zip;
   if (!line1) return null;
   return addressKey({ address_line1: line1, address_line2: line2, city, zip });
 }
@@ -80,7 +90,7 @@ async function liveReferencedPropertyIds(knex, ids) {
   if (await knex.schema.hasColumn('scheduled_services', 'property_id')) {
     const rows = await knex('scheduled_services')
       .whereIn('property_id', ids)
-      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .where(openVisitStatus)
       .select('property_id');
     for (const r of rows) if (r.property_id) out.add(r.property_id);
   }
@@ -122,7 +132,7 @@ exports.up = async function up(knex) {
   const visits = await knex('scheduled_services')
     .whereIn('customer_id', multiIds)
     .whereNull('property_id')
-    .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+    .where(openVisitStatus)
     .select('id', 'customer_id', 'status', 'service_address_line1', 'service_address_line2',
       'service_address_city', 'service_address_zip');
   for (const v of visits) {
@@ -137,7 +147,7 @@ exports.up = async function up(knex) {
     const n = await knex('scheduled_services')
       .where({ id: v.id })
       .whereNull('property_id')
-      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .where(openVisitStatus)
       .update({ property_id: propertyId });
     if (n) state.linked[v.id] = propertyId;
   }
@@ -162,11 +172,34 @@ exports.up = async function up(knex) {
   }
   if (candidates.length) {
     const referenced = await liveReferencedPropertyIds(knex, candidates.map((p) => p.id));
+    const hasEstimates = (await knex.schema.hasTable('estimates'))
+      && (await knex.schema.hasColumn('estimates', 'property_id'));
+    const hasServiceVisits = (await knex.schema.hasTable('service_visits'))
+      && (await knex.schema.hasColumn('service_visits', 'property_id'));
     for (const p of candidates) {
       if (referenced.has(p.id)) continue;
-      const n = await knex('customer_properties')
-        .where({ id: p.id, active: true, is_primary: false })
-        .update({ active: false, updated_at: knex.fn.now() });
+      // Atomic re-validation (codex #3601 r1 P2): the UPDATE itself re-checks
+      // every observed condition and the live references, so an admin edit
+      // or a new booking between the scan and this statement wins.
+      const q = knex('customer_properties')
+        .where({ id: p.id, active: true, is_primary: false, occupancy_type: 'unknown', address_key: p.address_key })
+        .whereNull('label')
+        .whereNotExists(function openVisitRef() {
+          this.select(1).from('scheduled_services')
+            .whereRaw('scheduled_services.property_id = customer_properties.id')
+            .where(openVisitStatus);
+        });
+      if (hasEstimates) {
+        q.whereNotExists(function estimateRef() {
+          this.select(1).from('estimates').whereRaw('estimates.property_id = customer_properties.id');
+        });
+      }
+      if (hasServiceVisits) {
+        q.whereNotExists(function serviceVisitRef() {
+          this.select(1).from('service_visits').whereRaw('service_visits.property_id = customer_properties.id');
+        });
+      }
+      const n = await q.update({ active: false, updated_at: knex.fn.now() });
       if (n) state.deactivated.push(p.id);
     }
   }
@@ -187,17 +220,22 @@ exports.down = async function down(knex) {
   }
 
   // Duplicates: re-activate ONLY rows still inactive. The per-customer
-  // active-address unique index can refuse a revival if an equal-key active
-  // row appeared since — that row is the admin's, so leave ours retired.
+  // active-address unique index would refuse a revival if an equal-key
+  // active row appeared since — that row is the admin's, so leave ours
+  // retired. Checked BEFORE the update: a failed statement would abort the
+  // migration transaction and catching the JS error cannot recover it
+  // (codex #3601 r1 P1).
   if (await knex.schema.hasTable('customer_properties')) {
     for (const id of state.deactivated || []) {
-      try {
-        await knex('customer_properties')
-          .where({ id, active: false })
-          .update({ active: true, updated_at: knex.fn.now() });
-      } catch (err) {
-        if (!/unique|duplicate key/i.test(String(err && err.message))) throw err;
-      }
+      const row = await knex('customer_properties').where({ id, active: false }).first();
+      if (!row) continue;
+      const clash = await knex('customer_properties')
+        .where({ customer_id: row.customer_id, address_key: row.address_key, active: true })
+        .first();
+      if (clash) continue;
+      await knex('customer_properties')
+        .where({ id, active: false })
+        .update({ active: true, updated_at: knex.fn.now() });
     }
   }
 

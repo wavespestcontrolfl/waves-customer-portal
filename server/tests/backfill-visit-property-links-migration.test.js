@@ -54,6 +54,10 @@ function seedDb() {
       { id: 'v-done', customer_id: 'c1', status: 'completed', property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
       // already linked → untouched
       { id: 'v-linked', customer_id: 'c1', status: 'pending', property_id: 'p2', service_address_line1: B.address_line1, service_address_city: B.city, service_address_zip: B.zip },
+      // legacy NULL status counts as OPEN → linked (codex r1 P1)
+      { id: 'v-nullstatus', customer_id: 'c1', status: null, property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
+      // partial stamp (street only, no city/ZIP) keys against the mirror's city/ZIP (codex r1 P1)
+      { id: 'v-partial', customer_id: 'c1', status: 'pending', property_id: null, service_address_line1: B.address_line1, service_address_line2: null, service_address_city: null, service_address_zip: null },
       // single-property customer → out of scope
       { id: 'v-single', customer_id: 'c2', status: 'pending', property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
       // references p5 so p5 must survive leg B
@@ -71,11 +75,43 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const ins = [];
     const notIns = [];
     const rowsNow = () => db[table] || [];
+    const groups = []; // grouped OR predicates from where(fn)
+    const notExists = []; // { table, openOnly } from whereNotExists(fn)
+    const TERMINAL = ['completed', 'cancelled', 'skipped', 'no_show'];
+    const isOpen = (r) => r.status == null || !TERMINAL.includes(r.status);
     const match = (r) => filters.every((f) => Object.entries(f).every(([k, v]) => r[k] === v))
       && ins.every((c) => c.vals.includes(r[c.col]))
-      && notIns.every((c) => !c.vals.includes(r[c.col]));
+      && notIns.every((c) => !c.vals.includes(r[c.col]))
+      && groups.every((g) => g(r))
+      && notExists.every((ne) => !(db[ne.table] || []).some((o) => o.property_id === r.id && (!ne.openOnly || isOpen(o))));
+    // The only grouped predicate the migration uses is the open-visit one:
+    // whereNull('status').orWhereNotIn('status', TERMINAL).
+    const groupBuilder = () => {
+      const g = { nulls: [], orNotIns: [] };
+      const b = {
+        whereNull(col) { g.nulls.push(col); return b; },
+        orWhereNotIn(col, vals) { g.orNotIns.push({ col, vals }); return b; },
+      };
+      return { b, pred: (r) => g.nulls.some((c) => r[c] == null) || g.orNotIns.some((c) => !c.vals.includes(r[c.col])) };
+    };
     const q = {
-      where(cond) { filters.push(cond); return q; },
+      where(cond) {
+        if (typeof cond === 'function') { const { b, pred } = groupBuilder(); cond(b); groups.push(pred); return q; }
+        filters.push(cond); return q;
+      },
+      whereNotExists(fn) {
+        const sub = { table: null, openOnly: false };
+        const b = {
+          select() { return b; },
+          from(tbl) { sub.table = tbl; return b; },
+          whereRaw(sql) { if (!/\.property_id = customer_properties\.id$/.test(sql)) throw new Error(`fake whereRaw: ${sql}`); return b; },
+          where(fn2) { if (typeof fn2 !== 'function') throw new Error('fake sub where: expected fn'); sub.openOnly = true; return b; },
+        };
+        fn.call(b);
+        if (!sub.table) throw new Error('fake whereNotExists: no from()');
+        notExists.push(sub);
+        return q;
+      },
       whereIn(col, vals) { ins.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notIns.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
@@ -121,7 +157,9 @@ describe('20260829000050 backfill visit property links', () => {
     await migration.up(fakeKnex(db));
     expect(visit(db, 'v-stamped').property_id).toBe('p1');
     expect(visit(db, 'v-mirror').property_id).toBe('p1');
-    expect(state(db).linked).toEqual({ 'v-stamped': 'p1', 'v-mirror': 'p1' });
+    expect(visit(db, 'v-nullstatus').property_id).toBe('p1');
+    expect(visit(db, 'v-partial').property_id).toBe('p2');
+    expect(state(db).linked).toEqual({ 'v-stamped': 'p1', 'v-mirror': 'p1', 'v-nullstatus': 'p1', 'v-partial': 'p2' });
   });
 
   test('up() leaves no-match, terminal, already-linked and single-property visits alone', async () => {
@@ -140,7 +178,9 @@ describe('20260829000050 backfill visit property links', () => {
     db.customer_properties.push(prop('p1-dup', 'c1', A, { label: 'Twin' }));
     await migration.up(fakeKnex(db));
     expect(visit(db, 'v-stamped').property_id).toBeNull();
-    expect(state(db).linked).toEqual({});
+    expect(visit(db, 'v-mirror').property_id).toBeNull();
+    // Only the visit whose key is NOT duplicated still links.
+    expect(state(db).linked).toEqual({ 'v-partial': 'p2' });
   });
 
   test('up() retires the unreferenced / terminal-only-referenced duplicates and keeps the live-referenced one', async () => {
@@ -154,6 +194,28 @@ describe('20260829000050 backfill visit property links', () => {
     expect(property(db, 'p6').active).toBe(false);
     expect(visit(db, 'v-ref-p6-cancelled').property_id).toBe('p6');
     expect(state(db).deactivated.sort()).toEqual(['p4', 'p6']);
+  });
+
+  test('up() retirement UPDATE re-validates atomically (open ref appearing after the scan wins)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    // Simulate the race: the scan sees no references, but by UPDATE time an
+    // open visit points at p4. The fake evaluates NOT EXISTS at update time.
+    const origSelect = knex;
+    let scanned = false;
+    const wrapped = (table) => {
+      const q = origSelect(table);
+      if (table === 'scheduled_services' && !scanned) {
+        const sel = q.select;
+        q.select = async (...cols) => { const out = await sel(...cols); scanned = true;
+          db.scheduled_services.push({ id: 'v-race', customer_id: 'c3', status: 'pending', property_id: 'p4' }); return out; };
+      }
+      return q;
+    };
+    wrapped.schema = knex.schema; wrapped.fn = knex.fn;
+    await migration.up(wrapped);
+    expect(property(db, 'p4').active).toBe(true);
+    expect(state(db).deactivated).toEqual(['p6']);
   });
 
   test('up() does not retire a labeled, blank-labeled, or non-unknown duplicate', async () => {
