@@ -185,6 +185,8 @@ function blankContentWhere(str, opens, { keepSummary = false } = {}) {
   const text = String(str || '');
   const out = text.split('');
   const tags = [...eachTag(text)];
+  // Pass 1 — every hidden container's range.
+  const ranges = [];
   for (let t = 0; t < tags.length; t += 1) {
     const tag = tags[t];
     if (tag.isClose || tag.selfClosing || !opens(tag)) continue;
@@ -199,11 +201,18 @@ function blankContentWhere(str, opens, { keepSummary = false } = {}) {
     }
     // Never closed → blank to end: unterminated hidden content cannot be
     // proven visible either.
-    const stop = endIdx === -1 ? text.length - 1 : endIdx;
-    for (let k = tag.start; k <= stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
-    if (keepSummary && tag.name === 'details') {
-      const last = endTagIdx === -1 ? tags.length : endTagIdx;
-      const open = tags.slice(t + 1, last).find((x) => x.name === 'summary' && !x.isClose && !x.selfClosing);
+    ranges.push({ t, tag, start: tag.start, stop: endIdx === -1 ? text.length - 1 : endIdx, endTagIdx });
+  }
+  for (const r of ranges) for (let k = r.start; k <= r.stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  // Pass 2 — a closed <details>'s <summary> is visible ONLY when the
+  // <details> itself is not inside another hidden container.
+  if (keepSummary) {
+    for (const r of ranges) {
+      if (r.tag.name !== 'details') continue;
+      const insideOther = ranges.some((o) => o !== r && o.start <= r.start && r.stop <= o.stop);
+      if (insideOther) continue;
+      const last = r.endTagIdx === -1 ? tags.length : r.endTagIdx;
+      const open = tags.slice(r.t + 1, last).find((x) => x.name === 'summary' && !x.isClose && !x.selfClosing);
       const close = open ? tags.slice(tags.indexOf(open) + 1, last).find((x) => x.name === 'summary' && x.isClose) : null;
       if (open && close) for (let k = open.end + 1; k < close.start; k += 1) out[k] = text[k];
     }

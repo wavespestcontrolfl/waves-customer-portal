@@ -4767,6 +4767,10 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(kept).toContain('Peek ![p](/x.webp)');
     expect(kept).not.toContain('Hidden body');
     expect(guardrails.blankHiddenContent(t)).not.toContain('Peek');
+    // A <details> inside another hidden container stays hidden — no summary restore (hook P1).
+    expect(guardrails.blankDefinitelyHiddenContent('<div hidden><details><summary>Peek ![p](/x.webp)</summary>body</details></div>')).not.toContain('Peek');
+    expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).toContain('Outer');
+    expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {
