@@ -4214,14 +4214,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
+  // EVERY 30 MIN (:04/:34 — own minutes, off the :00/:30 pool pile-up) — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
   // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('4,34 * * * *', async () => {
     try {
       await runExclusive('booking-abandon-recovery', async () => {
         const BookingAbandonRecovery = require('./booking-abandon-recovery');
@@ -4234,7 +4234,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Click-followup action queue (clicked-but-didn't-book)
+  // EVERY 30 MIN (:09/:39 — own minutes) — Click-followup action queue (clicked-but-didn't-book)
   //
   // Turns human short-link clicks on estimate/booking links (4h–72h old, not
   // converted, fully suppression-guarded) into PENDING message_drafts for
@@ -4242,7 +4242,7 @@ function initScheduledJobs() {
   // the owner's approval in /admin/drafts is the only send path. Gated by
   // GATE_CLICK_FOLLOWUP (off → shadow-logs candidate counts, writes nothing).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('9,39 * * * *', async () => {
     try {
       await runExclusive('click-followup', async () => {
         const ClickFollowup = require('./click-followup');
@@ -4670,9 +4670,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Verify CSR follow-up tasks
+  // HOURLY (:33 — own minute, also clear of the daily 10:26 pre-visit card
+  // sweep; was :30, which shared the pool with ~25 other ticks and starved
+  // the Twilio voice webhooks on 2026-08-29) — Verify CSR follow-up tasks
   // =========================================================================
-  cron.schedule('30 * * * *', async () => {
+  cron.schedule('33 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
       // runExclusive: verifyFollowUps expires past-deadline tasks — a
@@ -5358,7 +5360,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Sync Google review content from Places API
+  // HOURLY (:56 — own minute, off the :00 pile-up) — Sync Google review content from Places API
   // GBP performance sync (above) handles impressions / views, NOT review
   // text. Without this hourly sync, the google_reviews table only ever
   // contained the aggregate `_stats` rows seeded by syncAllReviews on
@@ -5368,7 +5370,7 @@ function initScheduledJobs() {
   // re-pulls — this just makes "Sync Reviews" no longer the only way
   // for reviews to appear in the portal.
   // =========================================================================
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('56 * * * *', async () => {
     logger.info('Running: Google review content sync');
     try {
       const GoogleBusiness = require('./google-business');
@@ -5533,13 +5535,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('14,44 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
     try {
       await runExclusive('review-sequences', async () => {

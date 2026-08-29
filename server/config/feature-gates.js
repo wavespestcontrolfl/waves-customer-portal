@@ -1023,6 +1023,17 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Unrecorded-call alert: the "Twilio has no recording either" step of the
+  // existing 5-min missing-recording sweep (call-recording-processor
+  // .recoverMissingRecentRecordings). Rings an admin bell for any answered
+  // inbound call (>=60s, not voicemail/AI-relay) still without a recording
+  // 30 min after it ENDED — the blind spot the ingest watchdog can't see
+  // (the SID IS known; the audio never arrived). Born 2026-08-29: pool
+  // exhaustion → webhook 502 → Twilio's static voice-fallback bridged a
+  // 4:17 call with no <Dial record>, so no transcript/extraction/lead ever
+  // followed. Reads notifications; writes only admin bells.
+  // Off → the sweep recovers recordings exactly as before, no bells.
+  unrecordedCallWatchdog: process.env.GATE_UNRECORDED_CALL_WATCHDOG === 'true',
   // Booking-miss watchdog: a 30-min cron that rings an admin bell when a
   // call's V2 extraction says a concrete appointment slot was CONFIRMED but
   // no non-cancelled scheduled_services row exists for that customer on that
