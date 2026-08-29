@@ -1,10 +1,28 @@
 # Visit groups — one stop, two services, one message, one payment
 
-**Date:** 2026-08-29 (rev 3 + live-UI pass, same day) · **Status:** scope for owner sign-off. **Not approved
-to build.** No code changes in this doc.
+**Date:** 2026-08-29 (rev 5) · **Status:** **APPROVED TO BUILD** (owner, 08-29 evening: rev-5 review
+findings adopted as recommendations, R3/R4/R6 ruled by adopting them, no shadow phase). No code
+changes in this doc.
 **Branch:** `docs/visit-group-scope` (worktree `~/wt-visit-group`, off main `571ed7be8`).
 **Scope page:** https://claude.ai/code/artifact/5c963058-a2ff-469f-be99-96150178b8c2 ·
 **Screen renders:** https://claude.ai/code/artifact/351e2b0b-b25b-41da-b28e-e500b85fe905 (9 screens — tech route card, Complete Visit sheet, rodent exceptions, accepted; customer texts, visit page self-pay / partial + older balance / paid; dispatch card).
+
+**Rev 5 changes (owner's second review, all adopted):** (1) gates stop *new* groups and never
+change an existing visit's behaviour (`behavior_version`, `communication_mode`); (2) "exactly once"
+replaced by dedup-by-key + at-least-once children + a durable `visit_effects` outbox for every
+external action; (3) one outcome string split into `execution_status` · `service_mode` ·
+`follow_up_required` · `customer_concern` · `billing_disposition`, R4 ruled (partial ⇒
+`hold_for_review`, never exposed or auto-charged until disposed); (4) dissolution only while the
+visit is untouched — after any reminder/route event/packet/report/invoice/link/payment the visit is
+preserved even with one child; (5) schema carries window end, route-stop key, lifecycle timestamps,
+a family-based compatibility policy, and an open-visit uniqueness rule under a lock; (6) the visit
+owns the technician — reassigning one row is an explicit *Split* action; (7) arrival/times/backdate/
+time-on-site/access/overall note/shared photos are visit-level; (8) review ask needs a real
+customer cap + visit dedupe + eligibility rule; (9) the account, not the visit, owns dunning and
+collections; (10) all comms go through the effects ledger; (11) the public page shows this visit
+only — other balances route to the authenticated portal; token stored hashed + revocable; (12)
+payment mode re-read at close, `billing_strategy` chosen then, never two charges; (13) packet items
+normalised into `visit_completion_packet_items`, `202` returns `packet_id`.
 
 **Product promise (owner, rev 2):** *One stop. One route card. One closeout. Two service
 reports. One summary link. One payment.* Not necessarily one literal invoice record.
@@ -111,25 +129,62 @@ row may still carry them.
 ## 2. Data model
 
 ```
-service_visits
+service_visits                                  ← rev 5 shape
   id                 uuid pk
   customer_id        uuid → customers
   property_id        uuid → customer_properties (nullable, mirrors rows)
   scheduled_date     date
-  window_start       time      ← intended stop (rev 2): same tech twice in a day ≠ one visit
-  technician_id      uuid → technicians (nullable until dispatch)
+  window_start       time
+  window_end         time
+  route_stop_key     text  NOT NULL   — `<property_id>:<date>:<window_start>` (or the dispatch
+                                        stop id once routed); the identity of "one physical stop"
+  technician_id      uuid → technicians (nullable until dispatch; the VISIT owns assignment,
+                                        children inherit — §2 rule 6)
+  group_family       text   — recurring_property_service | lawn_tree_shrub | pest_rodent …
   status             text CHECK: open | closing | closed | dissolved
-  closed_at · close_reason   (all_resolved | operator | row_cancelled …)
-  summary_token      text unique   — customer visit-summary page (§5)
-  completion_sms_status / completion_message_id / completion_email_id
-  review_request_id / autopay_status / payment_intent_id
+  behavior_version   int    NOT NULL DEFAULT 1   — frozen at creation; gates never rewrite it
+  communication_mode text   NOT NULL DEFAULT 'grouped'
+  billing_strategy   text   — chosen at CLOSE, not at creation: self_pay_visit_page |
+                              grouped_autopay (Phase 3) | office_review
+  billing_hold       bool   — true while any child is hold_for_review (§3)
+  en_route_at · arrived_at · completion_submitted_at · closed_at · close_reason
+                     (all_resolved | operator | row_cancelled | legacy_completion …)
+  summary_token_hash text unique   — sha256 of the 64-hex bearer (§5); raw token never stored
+  summary_token_revoked_at
+  review_request_id · payment_intent_id
   created_by         converter | seeder | admin:<id> | dispatch
   created_at / updated_at
 
-visit_completion_packets                       ← rev 2 (§3)
+  UNIQUE INDEX (route_stop_key) WHERE status = 'open'
+  — plus creation under advisory lock `['visit.create', route_stop_key]`, so converter, seeder
+    and admin cannot race two open visits for one stop (nullable technician_id is NOT part of
+    the identity — NULLs don't collide in a unique index).
+
+visit_effects                                   ← rev 5: ONE durable outbox for every external
+  id · visit_id · effect_type                      action, replacing per-column comms state
+     (reminder_72h | reminder_24h | tracker_en_route | tracker_arrived | completion_sms |
+      completion_email | review_ask | visit_payment | visit_receipt | payment_failure)
+  dedupe_key · status (pending | claimed | sent | failed | suppressed) · provider_id
+  (Twilio SID / SendGrid id / Stripe PI id) · attempts · scheduled_at · sent_at ·
+  payload_version · last_error
+  UNIQUE (visit_id, effect_type, dedupe_key)
+  — the worker claims a row, performs the action with the row's dedupe key as the provider
+    idempotency key (Stripe `Idempotency-Key`, SMS/email job keys), then marks it. A crash
+    between provider call and mark ⇒ retry with the SAME key ⇒ the provider dedupes.
+
+visit_completion_packets                       ← rev 2 (§3), normalised rev 5
   id · visit_id · idempotency_key unique · request_hash (sha256 over visit_id + canonical
-  payload) · payload jsonb · status (accepted | processing | done | failed) · child_results
-  jsonb · error · timestamps
+  payload) · payload jsonb (immutable, as submitted) · status (accepted | processing | done |
+  failed) · error · timestamps
+
+visit_completion_packet_items                   ← rev 5
+  packet_id · scheduled_service_id · derived_idempotency_key · status (pending | processing |
+  done | failed) · attempt_count · started_at · completed_at · service_record_id · invoice_id ·
+  last_error
+  UNIQUE (packet_id, scheduled_service_id)
+  — per-child claims, retry counts, admin repair and "one child stuck while the other is done"
+    all read from here; `202` returns `packet_id` and the phone clears its local draft only
+    after receiving it.
   — same key + same request_hash ⇒ return the existing packet (202/200 replay); same key +
   different hash (other visit or changed payload) ⇒ **409 idempotency_conflict**, nothing
   stored — the request-hash rule the per-row `/complete` claim already enforces
@@ -140,6 +195,12 @@ scheduled_services
 
 service_records.structured_notes
   completionSmsStatus += 'covered_by_visit' · visitMessageId   ← never 'sent' on a child
+
+services
+  + groupable   bool  (default true recurring residential programs)
+  + group_family text — two rows join only when families are compatible (policy table in
+                        code, not a boolean product): pest_rodent × pest_rodent,
+                        recurring_property_service × recurring_property_service …
 ```
 
 Rules:
@@ -148,15 +209,25 @@ Rules:
   at the same property, or an admin action. Same-customer-same-date is never inferred.
 - `visit_id` is the identity. A new row may **join** an open visit only when all hold:
   same customer · same property · same scheduled date · same or overlapping window / intended
-  route stop · compatible technician (null joins; a conflicting assignment splits) · both
-  service types flagged **groupable** in the catalog (`services.groupable`, default true for
-  recurring residential programs, false for one-time projects, inspections, and anything the
-  owner marks). Admins can group compatible rows or split one out regardless.
-- One open row is not a group — it auto-dissolves and behaves exactly as today. Cancel/skip
-  leaves the group; the last remaining row dissolves it.
-- Reschedule (R3): moving one grouped row moves the group through the #3562 collective-move
-  choke point (`series_moves` with a `visit_group` scope); "just this service" splits it.
-  Auto-dispatch / route-tier moves treat the group as one unit.
+  route stop (`route_stop_key`) · technician null or equal to the visit's · both service
+  types **groupable** with **compatible `group_family`** (§2 schema). Admins can group
+  compatible rows or split one out regardless.
+- **Dissolution (rev 5).** A visit may dissolve to a plain row ONLY while all hold: `status =
+  open` · no `visit_effects` row sent or claimed (no reminder, no tracker) · `en_route_at`
+  and `arrived_at` null · no packet accepted · no service record / invoice / report on any
+  child · no summary link issued · no payment attempt. After any of those, the visit is
+  preserved even when one child remains — it becomes a historical one-service visit with the
+  same token, message and payment path. Cancel/split of a child is **rejected (409)** while a
+  packet for the visit is `accepted`/`processing`.
+- **Technician (rev 5, item 6).** The visit owns `technician_id`; child rows inherit it on
+  dispatch and on every row-level edit. Changing the tech on ONE row is not allowed silently —
+  the admin gets *Split this service into a separate visit and assign another technician*,
+  an explicit action that creates a second visit (and, if the first had already sent
+  effects, leaves both preserved). Auto-dispatch assigns at the visit level.
+- Reschedule (R3, **ruled rev 5**): moving one grouped row moves the group through the #3562
+  collective-move choke point (`series_moves` with a `visit_group` scope); "just this
+  service" is the explicit split action above. Auto-dispatch / route-tier moves treat the
+  group as one unit.
 - Migrations in `server/models/migrations/`, idempotent, reversible, no backfill. No new
   `scheduled_services` status strings.
 
@@ -178,22 +249,29 @@ one `Idempotency-Key`. The server:
 1. Validates the packet shape and every child section **synchronously** (typed findings,
    chips, required-when rules — the same validators `/complete` runs, so the tech sees a
    422 naming the section while still on the screen).
-2. Persists a `visit_completion_packets` row and returns **202 accepted**. The tech is back
-   on the route. Retries with the same key return the same packet.
+2. Persists a `visit_completion_packets` row + one `visit_completion_packet_items` row per
+   child and returns **202 accepted `{ packet_id }`**. The tech is back on the route; the app
+   clears its local draft only once `packet_id` arrives. Retries with the same key + same
+   request hash return the same packet.
 3. A worker processes children in server-controlled order by calling the per-row completion
    logic — which requires **extracting the `/complete` handler body into a callable
    service** (`server/services/dispatch-complete.js`), with the route becoming a thin
    wrapper. Each child call carries a derived key (`<packet>:<rowId>`) so the existing
    idempotency claim (`admin-dispatch.js:5236`) makes per-child replay safe. Report, PDF,
    invoice mint, record: unchanged.
-4. When every child is terminal the visit closes (§4). A child failure marks the packet
-   `failed` with `child_results`, retries with backoff, and after exhaustion parks an admin
+4. When every child item is terminal the visit closes (§4). A child failure marks its item
+   `failed` (attempt_count, last_error), retries with backoff, and after exhaustion parks an admin
    bell ("Visit closeout needs attention") — the visit stays `closing`, no customer message
    goes out, and the tech is never asked to re-enter data.
 
 Why 202 + worker rather than one transaction: the per-row completion already spans ~12
-nested transactions plus Stripe, PDF, and SMS side effects; it cannot be made atomic, so the
-honest guarantee is *packet accepted exactly once, children processed exactly once each*.
+nested transactions plus Stripe, PDF, and SMS side effects; it cannot be made atomic. **The
+guarantee (rev 5):** *the packet is deduplicated by its idempotency key; child processing is
+at-least-once with idempotent effects that produce an effectively-once customer and accounting
+result.* Every external action (SMS, email, review ask, Stripe charge, receipt) is a
+`visit_effects` row with its own durable dedupe key used as the provider idempotency key, so a
+crash between "SMS sent" and "row marked sent" retries into the provider's dedupe, not into a
+second text. The advisory lock orders workers; the ledger makes retries safe.
 
 **Exception-driven closeout (rev 2, #2).** Not two stacked forms:
 - Shared block once: access, overall visit note, shared photos. Each photo carries a tag set
@@ -214,19 +292,51 @@ honest guarantee is *packet accepted exactly once, children processed exactly on
 **No tech-side messaging controls.** The office keeps one exception action: *Separate these
 services into different visits*.
 
-**Outcomes per service section (rev 2, #5)** — `not_required` removed:
+**Field levels (rev 5, item 7).** Visit-level, entered once: arrival · start/finish time ·
+backdated closeout timestamp · total time on site · access · overall note · shared photos.
+Service-level: findings · materials · areas treated · station results · service-specific
+recommendations · next scheduled service · re-entry restriction. Labour per service record
+is a **default split from planned durations** (manual adjust optional) — never two
+time-on-site entries for one stop. Re-entry: the summary page shows the **most restrictive**
+instruction; each report keeps its own.
 
-| Outcome | Record | Invoice | Report | Follow-up | Visit message | Closes visit |
+**Outcome model per service section (rev 5, item 3)** — one sheet pick used to carry three
+questions; they are now separate fields on the section (and on the service record):
+
+```
+execution_status   completed | partially_completed (DERIVED from section data, never picked)
+                   | unable_to_complete | customer_declined | cancelled_by_office
+service_mode       treatment | inspection_only            (sheet "Inspection only")
+follow_up_required bool + reason + recommended_due_date   (sheet "Follow-up needed")
+customer_concern   bool + note                            (sheet "Customer concern")
+billing_disposition full | adjusted | waived | hold_for_review
+```
+
+Sheet vocabulary stays: *Completed · Inspection only · Customer declined · Follow-up needed ·
+Customer concern · Incomplete* map onto the fields above (Incomplete ⇒ `unable_to_complete`;
+Follow-up needed ⇒ `follow_up_required=true` on whatever execution status the data derives).
+
+| execution_status | Record | Invoice / billing_disposition (R4 **ruled**) | Report | Follow-up | Visit message | Closes visit |
 |---|---|---|---|---|---|---|
-| `completed` → sheet **Completed** | yes | yes (full) | full | no | "complete" | yes |
-| `partially_completed` → sheet **Follow-up needed** — **derived** from section data (8 of 10 stations inspected, 2 marked inaccessible ⇒ partial; the tech never picks the status separately) | yes | yes (full unless office adjusts — R4 open) | full, exceptions listed | yes — inaccessible items → follow-up row via existing incomplete-visit seeding | "completed, but we couldn't access all …" + next steps | yes |
-| `unable_to_complete` → sheet **Incomplete** (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
-| `customer_declined` → sheet **Customer declined** | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
-| `cancelled_by_office` | no | no (void if minted) | none | office decides | omitted | yes (row leaves group) |
+| `completed` | yes | yes · `full` | full | only if `follow_up_required` | "complete" | yes |
+| `partially_completed` (derived: e.g. 8 of 10 stations inspected) | yes | minted but **`hold_for_review`**: not shown on the visit page, not auto-charged, `service_visits.billing_hold=true`; office disposes full / adjusted / waived from the closeout-needs-attention bell, then the page + message update | full, exceptions listed | yes (inaccessible items → follow-up row via existing incomplete-visit seeding) | "completed, but we couldn't access all …; we'll confirm today's charges" | yes |
+| `unable_to_complete` (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
+| `customer_declined` | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
+| `cancelled_by_office` | no | no (void if minted) | none | office decides | omitted | yes (row leaves group; visit preserved per §2) |
+
+R4 ruling (rev 5): "full unless the office adjusts" created a race (page shows $173, customer
+pays, office reduces later) — so a partial service **never bills before disposition**. Grouped
+autopay (Phase 3) must not charge while `billing_hold` is true.
 
 ---
 
-## 4. Customer comms — the visit is the source of truth
+## 4. Customer comms — the visit owns the appointment; the account owns the money owed
+
+**Ownership (rev 5, item 9).** The visit is the source of truth for: appointment reminders,
+tracker, completion SMS/email, reports, review ask, and the **visit** payment/receipt. The
+**account** (#3575) stays the source of truth for dunning and collections — a customer with
+an August 29 visit ($173), an August 3 one-time service ($199) and a July invoice ($128) gets
+ONE account reminder that groups charges by visit, and Sandy gets one account task.
 
 When a child completes under a packet, `/complete` **never sends**: SMS, email, and review
 enrollment are suppressed and the record is stamped `completionSmsStatus = 'covered_by_visit'`
@@ -241,9 +351,14 @@ Closes only when every child is terminal; then:
    portal short link, 08-01 rule). **One link only.** Quiet-hours deferral reuses
    `dispatch-completion-deferred.js` at the visit level.
 2. One email (`visit_summary`) with a button per report and the charges block.
-3. One review request, subject to the existing customer caps (fixes today's auto-path
-   double-ask as a side effect).
-4. Stamps `service_visits.completion_*` and each child's `covered_by_visit`.
+3. One review request — **eligibility (rev 5, item 8):** every customer-visible child
+   `execution_status = completed` AND no `customer_concern` AND no `follow_up_required` AND no
+   `billing_hold` AND a **new customer-level automatic cap** permits (today the caps are
+   manual-only, `review-request.js:515-526`; the grouped path adds a real per-customer
+   window) AND no prior `visit_effects(review_ask)` for this visit. Anchored by
+   `review_requests.visit_id` (new nullable column; `service_record_id` stays for per-row asks).
+4. All four are `visit_effects` rows; marks child records `covered_by_visit` +
+   `visitMessageId` once the completion effect is `sent`.
 
 Copy (owner, rev 2):
 - Two services: *Hi James, today's 2 services are complete. View both reports, today's
@@ -259,15 +374,15 @@ completed child → admin bell with *Close & send* / *Separate*. Never composes 
 
 | Rail | Today | Grouped rule | Where |
 |---|---|---|---|
-| Appointment reminders (72h/24h, confirm link) | per row | once per visit; `dedupeKey` gains `visit_id`; appointment page lists both services | `appointment-reminders.js:192` |
-| En-route / tracker SMS | per row | once per visit | `track-transitions.js` |
+| Appointment reminders (72h/24h, confirm link) | per row | once per visit via `visit_effects(reminder_72h/24h)`; appointment page lists both services | `appointment-reminders.js:192` |
+| En-route / tracker SMS | per row | once per visit via `visit_effects(tracker_*)` | `track-transitions.js` |
 | Completion SMS / email | per row | once per visit (above) | `admin-dispatch.js:11911-12395` |
 | Payment request | in completion SMS | in the summary page only | §5 |
 | Payment receipt | **one per invoice** on combined pay | one visit receipt (new `visit_receipt` email; per-invoice receipts suppressed under a visit PI) | `pay-combined.js:8, :883` |
 | Payment failure | per PI | once per visit payment attempt | `stripe-webhook.js:788` |
-| Late-payment reminder | account-level clock (#3575), names every open invoice | one reminder referencing the **visit balance** ("August 29 visit · $173"), never two invoice lines read as two bills | `invoice-followups.js:1616` |
-| Collections call / Sandy task | one per customer account | one account task; Sandy's script names the visit, not the child invoices | `collections-*` (#3575) |
-| Review request | per record (auto path uncapped) | at most once per visit, customer caps apply | `review-request.js:515-526` |
+| Late-payment reminder | account-level clock (#3575), names every open invoice | **stays account-level**: one reminder with the account balance, lines grouped by visit ("August 29 visit · $173 / August 3 service · $199 / Previous balance · $128") — never two invoice lines read as two bills | `invoice-followups.js:1616` |
+| Collections call / Sandy task | one per customer account | unchanged: one account task; Sandy's script groups by visit | `collections-*` (#3575) |
+| Review request | per record (auto path uncapped) | at most once per visit, real customer cap + eligibility rule above | `review-request.js:515-526` |
 
 ---
 
@@ -288,28 +403,35 @@ token *is* the credential:
   `statementPayLimiter`), plus a tighter limiter on the payment POSTs.
 - Privacy headers on every GET/POST outcome including errors: `X-Robots-Tag: noindex`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (same posture as `/report/:token`).
-- The page shows no customer name, email, phone, or full address (R6 → ruled no name; street
-  only, as on the report page) — the link is forwardable by design.
+- The page shows no customer name, email, phone, or full address (R6 **ruled rev 5**: no
+  name; street only, as on the report page) — the link is forwardable by design.
+- **Scope of what the token unlocks (rev 5, item 11):** services, reports, charges and
+  payment status **of this visit only**. Other account balances are never itemised here: the
+  page shows *"An additional balance is on your account"* with a link into the authenticated
+  customer portal (Billing tab), which already has combined pay. No *Pay full balance* on the
+  public page.
+- Token stored as `summary_token_hash` (sha256), revocable (`summary_token_revoked_at` ⇒ 404,
+  office action *Reissue link*), excluded from analytics URLs, permanent otherwise.
 - Build blocker: the family `/api/public/visit/:token` (+ `/pay`, `/pay/quote`, `/pay/finalize`,
   `/receipt`) is **added to the public-by-token allowlist in `AGENTS.md`** in the same PR that
   introduces the route (new public routes outside that list are P0).
 
-**Activation is a conjunction (rev 3, tightened rev 4):** grouped completion comms run only
-when `GATE_VISIT_GROUPS` **and** `GATE_VISIT_SUMMARY_PAGE` are both on (a conjunction accessor
-in `feature-gates.js`, like `isPrepayCardAndChargeEnabled`). **Fail closed:** if the page gate
-is off, no `service_visits` row is ever *closed* through the grouped path — the packet endpoint
-returns 404 and the tech app shows the per-row closeout, so each row runs the legacy
-`/complete` (its own text, its own review ask) exactly as today. A group is never closed and
-then followed by multiple child messages; the "one visit message owns delivery" rule in §4 holds
-whenever a visit closes at all. To keep a visit from being closed twice: the moment any child of an
-open visit is completed through the legacy per-row `/complete` (page gate off, or an admin
-completing one row directly), that transaction stamps the visit `dissolved`
-(`dissolved_reason = 'legacy_completion'`) before the row's own sends fire, so the stuck-visit
-sweep and the packet worker never see it again. Conversely, grouped close (`visit-close.js`)
-**rejects** a visit whose children include a row completed outside its packet (status already
-`completed` with no packet id) — it dissolves the visit and returns the per-row result instead of
-sending a visit message. Re-enabling the page gate therefore never produces a second completion
-text or review ask for a visit whose rows already spoke for themselves.
+**Gates (rev 5, item 1 — replaces the rev-3/4 conjunction + fallback).** One master gate,
+`GATE_VISIT_GROUPS`, is **one coordinated activation**: it is flipped on only when the grouping,
+packet, close, page, SMS, email and payment PRs are all deployed (the page route itself is
+served whenever a visit exists — it is not separately gated, so an issued link can never die).
+Rules:
+- Gate **off** ⇒ **no new groups are created** (converter, seeder, admin all stamp nothing).
+- **Existing visits keep the behaviour they were created under** (`behavior_version`,
+  `communication_mode = grouped`): the grouped route card, packet endpoint, close, message and
+  page keep working for them. An active group **never** falls back to per-row texts.
+- Issued `/visit/:token` links keep working after any gate change.
+- Emergency: if the grouped closer cannot complete (worker failure, provider outage), the
+  visit parks in `closing` with an admin bell — it never emits per-row messages as a fallback.
+- The legacy per-row `/complete` **refuses** a row whose visit is open (409 *"complete this
+  visit from the visit sheet"*), and the admin's *Separate these services* action is the only
+  way to return rows to per-row completion — and only while §2's dissolution conditions hold.
+  A visit is therefore never closed twice and never speaks twice.
 
 **Portal billing history (rev 3, new surface).** The customer portal Billing tab
 (`client/src/pages/PortalPage.jsx` `BillingTab` :5105, Payment History card) groups invoices
@@ -326,8 +448,7 @@ TODAY'S CHARGES
   Rodent Bait Stations      $45.00
   Today's total            $173.00
 [Pay $173]                                       after payment: Paid · $173 · [View receipt]
-OTHER ACCOUNT BALANCE (only when present)
-  Previous balance         $128.00   [Pay full balance of $301]
+(only when present) An additional balance is on your account · [Open your portal]
 ```
 
 Permanent link: later visits to it show both reports, payment status, receipt, and follow-up
@@ -343,9 +464,8 @@ URLs — nothing about the reports changes. Glass-UI tokens. No customer name on
 visit** and reuses the combined-PI machinery (`buildAllocation`/`encodeAllocation`
 `pay-combined.js:270-300`, `verifyAllocationLocked` `:339`, `settleCombinedPaymentIntent`
 `:788`). The generic balance-inclusion behaviour (`payIncludeBalance`) is **not** used for the
-primary button: *Pay $173* can never silently become $301. An older balance renders as a
-separate block with its own *Pay full balance* action (that path may use the existing combined
-sibling selection). Mint, ledger, void-on-cancel, dunning, and Sandy's account-level language
+primary button: *Pay $173* can never silently become $301. An older balance is only
+*announced* on the public page and paid from the authenticated portal (rev 5, item 11). Mint, ledger, void-on-cancel, dunning, and Sandy's account-level language
 are untouched. Copy says "today's charges / today's total", never "invoice".
 
 **Surcharge seam (rev 4 — money-critical).** The visit token cannot reach the invoice-token
@@ -364,9 +484,15 @@ in `pay-combined.js:703` applies to visit PIs unchanged.
 combined settle enqueues today (`:883`) are suppressed when the PI carries a `visit_id`.
 Ledger rows and invoice `receipt_url`s stay per invoice.
 
-**Autopay (rev 2).** Grouped autopay customers are **not parked for office review as the
-normal path**. Release rule (R7): visit groups are created only for self-pay customers until
-grouped autopay ships; the group closer then finalises both invoices, charges one PaymentIntent
+**Autopay (rev 2, hardened rev 5 item 12).** Grouping is **independent of payment mode**;
+`billing_strategy` is chosen at CLOSE by re-reading the customer's current payment mode. Rules:
+child invoices under a `visit_id` are **never autocharged individually** (the per-row autopay
+closer skips them). Before Phase 3, a visit whose customer is on autopay at close takes the
+safe path: **suppress autocharge, send the visit payment page** (`billing_strategy =
+self_pay_visit_page`, `autopay_log` code `visit_autopay_deferred`), plus an office bell — never
+a split after the tech used the grouped sheet, never two charges. Seeder still prefers self-pay
+customers for auto-join until Phase 3 (R7), but enrolment changes after scheduling are handled
+by the close-time rule, not by dissolving the visit. Once Phase 3 ships; the group closer then finalises both invoices, charges one PaymentIntent
 with the saved card, allocates across both invoices, sends one receipt, one failure notice.
 `autopay_log` codes `visit_charge_success` / `visit_charge_failed`. Office review remains the
 fallback only for exceptions (cap unresolved, card unusable) — never the steady state.
@@ -381,14 +507,15 @@ or accounting genuinely require it.
 | Phase | Ships | Gate | Depends on |
 |---|---|---|---|
 | **0 — sizing + rulings** | prod count (§8), R1–R9 | — | owner |
-| **1 — model + grouping** | `service_visits` + `visit_completion_packets` migrations, converter stamp, seeder join rule (self-pay only), admin group/split, collective-move scope, grouped route card, en-route/on-site fan-out, reminder dedupe | `GATE_VISIT_GROUPS` split in two (rev 4): `GATE_VISIT_GROUPS_STAMP` — may go on after Phase 1 merges; stamps `visit_id` at scheduling and shows the grouped route card, but every row still completes per row exactly as today (no comms change, no packet). `GATE_VISIT_GROUPS` (customer-facing grouped completion) **stays off** until Phase 2 is merged | — |
-| **2 — one packet, one message, one page** | `/complete` body extracted to `dispatch-complete.js`; visit-complete endpoint + packet worker; exception-driven CompletionPanel; `visit-close.js`; `visit_complete*` templates; single review ask; `/visit/:token` page + visit-scoped payment + visit receipt; **portal billing history grouped by visit**; late-payment/collections copy names the visit; stuck-visit sweep | `GATE_VISIT_GROUPS` + `GATE_VISIT_SUMMARY_PAGE` (conjunction = launch) | 1 |
+| **1 — model + grouping** | `service_visits` + `visit_effects` + packets/items migrations, `services.groupable/group_family`, converter stamp, seeder join rule, admin group/split (explicit tech split), collective-move scope, grouped route card, en-route/on-site fan-out, reminder/tracker effects | `GATE_VISIT_GROUPS` **off** — no groups exist, so nothing observable; no shadow phase (owner, rev 5) | — |
+| **2 — one packet, one message, one page** | `/complete` body extracted to `dispatch-complete.js`; visit-complete endpoint + packet worker; exception-driven CompletionPanel with outcome fields; `visit-close.js` over the effects ledger; `visit_complete*` templates; review eligibility + cap; `/visit/:token` page (visit-only) + visit-scoped pay/quote/finalize + visit receipt; billing_hold disposition bell; **portal billing history grouped by visit**; account reminders grouped by visit; stuck-visit sweep | `GATE_VISIT_GROUPS` = one coordinated activation after the last Phase-2 PR deploys | 1 |
 | **3 — grouped autopay** | closer charge via visit allocation, receipts, failure notice, `autopay_log` codes; seeder join rule extends to autopay customers | `GATE_VISIT_GROUP_AUTOPAY` | 2 |
 | later | retire `COMBINED_SERVICE_ROUTES` + combo catalog rows **only after Phase 3** (summary, self-pay, and grouped autopay at parity — retiring earlier would push autopay combo customers from one automatic charge into office review); combined visit PDF only if customers ask | — | 3 |
 
 Phase 2 is several PRs (extraction · endpoint+worker · panel · close+templates · page+payment)
 but one gate: the launch is the moment closeout, close, page, SMS, email, and payment all work
-together. Contract tests per PR: packet idempotency, child-order + failure parking, outcome
+together. Phase 1 and 2 are built back-to-back now (owner, rev 5) — no shadow/measurement
+phase; the sizing (§8) is recorded for the record, not as a gate. Contract tests per PR: packet idempotency, child-order + failure parking, outcome
 table effects, close rule, template presence, visit-scoped allocation, receipt suppression,
 comms-audit rails.
 
@@ -421,9 +548,9 @@ payment" problem is currently small in count but real when it occurs. Phase-2's 
 (extracting the 8,580-line `/complete` body into a service) is a fixed cost that does not shrink
 with volume; the value case rests on the sales direction (rodent bait as an add-on row, combo-row
 retirement per 08-28 ruling) rather than on current calendar counts. Recommendation: build
-Phase 1 (model + grouping) with only `GATE_VISIT_GROUPS_STAMP` on, so groups start being stamped
-as bundles are sold and the adoption count is measurable from `service_visits` itself;
-hold Phase 2 until future multi-row days reach ~10 per 120d or the owner GOes on sales direction.
+Phase 1 first. **Owner decision (rev 5): build Phases 1 and 2 now, no shadow phase** — the
+sales direction (rodent bait / termite bait-station rows alongside quarterly pest, combo-row
+retirement) is the volume driver, and the first real paired stop is already on the calendar.
 
 ---
 
@@ -433,13 +560,14 @@ hold Phase 2 until future multi-row days reach ~10 per 120d or the owner GOes on
 |---|---|---|
 | R1 | Group identity | explicit `visit_id`; auto-join needs same property + date + overlapping window/stop + compatible tech + groupable types — **ruled (rev 3)** |
 | R2 | Billing | two internal invoices for v1; portal groups them visually by visit; payment visit-scoped; never say "invoice" — **ruled** |
-| R3 | Rescheduling one grouped row | group moves as a unit; "just this service" splits — **open** |
-| R4 | Section outcomes | table in §3 — **ruled**; the per-outcome billing column (does `partially_completed` bill in full?) is **open** |
+| R3 | Rescheduling one grouped row | group moves as a unit; "just this service" = explicit split action — **ruled (rev 5)** |
+| R4 | Section outcomes + billing | fields split (execution / mode / follow-up / concern / billing_disposition); `partially_completed` ⇒ `hold_for_review`, never exposed or auto-charged before office disposition — **ruled (rev 5)** |
 | R5 | SMS shape | one link, short copy per §4 — **ruled** |
-| R6 | Summary page greets by name? | no name on page; first name in SMS only — **recommended (rev 4), owner to confirm** |
+| R6 | Summary page greets by name? | no name on page; first name in SMS only — **ruled (rev 5)** |
 | R7 | Autopay rollout | self-pay only until grouped autopay ships — **ruled** |
 | R8 | Retire combined routes + combo rows | only after summary + self-pay + grouped autopay reach parity (after Phase 3) — **ruled (rev 3)** |
-| R9 | Build blockers | one packet endpoint · page + message same gate · visit-scoped payment — **ruled** |
+| R9 | Build blockers | one packet endpoint · page + message one activation · visit-scoped payment — **ruled** |
+| R10 | Rev-5 review (13 items) | all adopted as written in this doc — **ruled (owner, 08-29)** |
 
 ## 10. Explicitly out of scope
 
