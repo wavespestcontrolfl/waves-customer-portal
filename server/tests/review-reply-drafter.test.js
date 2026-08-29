@@ -467,6 +467,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoaches, Marcus and the crew are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHonestly, Marcus made this easy. We will pass your note along to him.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nAnts and even roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
+    // codex #3580 r5: multiword coordinators are coordination; mass nouns take singular predicates.
+    expect(verify(good('Hi Dana,\n\nFinding as well as Marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches along with marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches as Marcus will tell you are relentless.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nCommunication matters, and we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nReliability is what we aim for, so we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nAnts as well as roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.

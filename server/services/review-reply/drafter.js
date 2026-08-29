@@ -293,22 +293,29 @@ treatment treatments visits results protection prevention nothing something ever
 // it (codex #3580 r2 + hook: "Going and Marcus", "Truly says thanks", "Truly,
 // alongside Marcus"): a plural-only verb ("Ants are / love / need"), a
 // determiner or preposition ("Finding a", "Skipping the"), a pronoun, a
-// conjunction followed by a lowercase word that is not a possessive / role
-// phrase ("Truly and his team" fails; "Ants and roaches" passes), or a comma
+// conjunction — and / or / with / as well as / along with / plus / as / than —
+// followed by a lowercase word that is not a possessive / role phrase ("Truly
+// and his team" fails; "Ants and roaches" passes), or a comma
 // followed by a lowercase word that opens neither an appositive (", our
 // technician") nor a coordination (", alongside Marcus"). Nothing a single person's name takes —
 // singular copula / auxiliary / possessive, modal, adverb, present- or
 // past-tense verb, capitalised word — is on the list, so adverb openers need
 // adverb syntax ("Honestly, we…") and surnames the list audit missed still
 // fail on shape.
-const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them)\b|(?:and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
 // …and when the evidence went through a conjunction or comma, the word after
 // it must itself be ordinary and may not be a name in ANY case (codex #3580
 // r3 "Roaches and marcus"; hook "Roaches and tasha").
 // Words that may sit between a conjunction / comma and the coordinated word
 // without changing what it is ("and even Marcus", "and not just the ants").
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
+// Abstract mass nouns on the opener list — none a surname — take their normal
+// singular predicate ("Communication matters", "Reliability is what we aim
+// for"; codex #3580 r5 P2). Bounded on purpose: no pest / lawn noun here.
+const MASS_NOUN_OPENERS = new Set(['dependability', 'reliability', 'consistency', 'communication', 'service', 'treatment', 'protection', 'prevention', 'nothing', 'something', 'everything', 'anything']);
+const SINGULAR_PREDICATE_RE = /^\s*(?:is|isn't|was|wasn't|has|hasn't|does|doesn't|will|won't|can|can't|should|matters|means|goes|makes|helps|keeps|counts|starts|comes|takes|shows|speaks|says|'s)\b/u;
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
+  if (MASS_NOUN_OPENERS.has(w) && SINGULAR_PREDICATE_RE.test(rest)) return true;
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {
     // An -ly adverb opener, a comma, then a name the reviewer wrote
     // ("Honestly, Marcus made this easy") is ordinary adverb syntax (codex
@@ -316,7 +323,7 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
     const adv = /^\s*,\s+(\p{Lu}[\p{Ll}'-]+)\b/u.exec(rest);
     return !!(adv && /ly$/.test(w) && allowed.has(adv[1].toLowerCase()));
   }
-  const coord = /^\s*(?:and|or|but|nor|with|[,;:])\s+([\s\S]*)$/u.exec(rest);
+  const coord = /^\s*(?:and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than|[,;:])\s+([\s\S]*)$/u.exec(rest);
   if (!coord) return true;
   // Judge the coordinated word AFTER any modifiers (codex #3580 r4 P1: "and
   // even Marcus"): a capitalised word there is name shape; a lowercase word
