@@ -427,8 +427,11 @@ completed child → admin bell with *Close & send* / *Separate*. Never composes 
 family exposes reports, today's charges, a receipt and a payment write with no auth, so the
 token *is* the credential:
 - The token = 32 bytes from `crypto.randomBytes` encoded as **64 hex chars**, generated when
-  the link is issued (close / reissue), stored only as its sha256 (`UNIQUE`), never derived
-  from ids or dates, never logged. Reissue rotates the hash; the old link becomes a 404.
+  the link is issued (close / reissue), never derived from ids or dates, never logged.
+  **Lookup uses only the sha256** (`summary_token_hash`, `UNIQUE`). The raw bearer is
+  additionally retained **encrypted** (`summary_token_enc`, §2) only until every link-bearing
+  effect for that issue is terminal, then NULLed; it is never read on the request path.
+  Reissue rotates the hash; the old link becomes a 404.
 - Format gate `^[0-9a-f]{64}$` runs **before any DB access**; malformed and unknown tokens both
   return a generic **404** (no distinguishing body/status), exactly like
   `loadStatementByToken`. A dissolved or cancelled visit is also a 404.
@@ -515,13 +518,19 @@ payment method), `POST …/pay/finalize` (re-verify the allocation with `verifyA
 then apply the surcharge and confirm). The displayed total, the PI amount, the PI metadata and
 the payment-row surcharge are all derived from **one** `computeChargeAmount(..., { funding })`
 result per finalize; nothing recomputes independently. **Billing-hold enforcement (rev 5c):**
-`/pay`, `/pay/quote`, `/pay/finalize` and the webhook settle all run under the visit advisory
-lock and **refuse (409 `visit_billing_hold`)** unless `service_visits.billing_hold = false`
+`/pay`, `/pay/quote` and `/pay/finalize` run under the visit advisory lock and **refuse (409
+`visit_billing_hold`)** unless `service_visits.billing_hold = false`
 AND every selected child has a terminal billable `billing_disposition` (`full` | `adjusted`;
 `waived` invoices are excluded from the allocation, `hold_for_review` blocks the whole
 visit) — the check is inside `verifyAllocationLocked` for visit PIs, not only in the UI, so a
-direct POST can never charge an undisposed amount. Disposition changes after a PI exists
-invalidate the locked allocation (the existing update-amount degrade path). Card funding is never charged base-only,
+direct POST can never charge an undisposed amount. Once `/pay/finalize` begins confirmation
+the allocation and the dispositions it covers are **frozen** (`service_visits.billing_frozen_at`;
+disposition edits are refused with a bell "visit payment in progress"). The **webhook never
+rejects a captured PI**: it settles the confirmed allocation snapshot exactly as recorded, and
+any drift found under the lock is written to the existing reconciliation queue for the office
+— money is always recorded (AGENTS.md PI↔invoice↔webhook agreement). Before confirmation,
+disposition changes invalidate the locked allocation via the existing update-amount degrade
+path. Card funding is never charged base-only,
 and the PI amount always equals what the ledger records (AGENTS.md surcharge / PI-agreement
 rules). ACH/bank funding takes the no-surcharge branch of the same call. The kill-switch sweep
 in `pay-combined.js:703` applies to visit PIs unchanged.
