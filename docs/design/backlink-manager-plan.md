@@ -214,8 +214,10 @@ proposes the same canonical host for another target page while one is parked (ot
 could be approved and contact the same inbox); `watching` is added to `IN_FLIGHT_STATUSES`
 only (the recovery lane sees it; it is not an open conversation), and resuming a `watching`
 row (restoring `parked_from_status`) is a board admission that runs through the same guard
-exactly like the PATCH reopen — refused while another row for the domain is in active
-outreach. `prospect-domain-lock.test.js` pins both sets.
+exactly like the PATCH reopen — refused while ANOTHER row for the domain is in active
+outreach; `claimProspectDomain()` gains an `excludeId` predicate (the row being resumed is
+excluded from the in-flight probe, the advisory lock is kept) since with `watching` in
+`IN_FLIGHT_STATUSES` the probe would otherwise always match the resumed row itself. `prospect-domain-lock.test.js` pins both sets.
 
 ### 3.3b `seo_link_placement_authorities` — one row per required dimension
 
@@ -501,7 +503,7 @@ value in the same migration so placement and path agree — the migration never 
 that would fail the §3.2 CHECK, so it cannot abort deployment on a legacy null; `submission_url =
 target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
 low; `last_investigated_at = null` so the investigator refreshes it) and is linked via
-`domain_id`/`path_id`. The backfill is the same shape as the `seo_signup_attempts` one (§3.4): ONE pure re-runnable function keyed by prospect id (`WHERE domain_id IS NULL`), run in the migration AND as the gate-independent 6-hourly `link-registry-catchup`, so a prospect inserted by an old pod or a not-yet-migrated writer during the phased rollout is registered within 6h and never silently excluded by the step-4 predicate; `domain_id`/`path_id` become NOT NULL only in the step-2 contract migration after every writer is registry-aware. No claim-predicate change ships before this backfill has run; the
+`domain_id`/`path_id`. The backfill is the same shape as the `seo_signup_attempts` one (§3.4): ONE pure re-runnable function keyed by prospect id (`WHERE domain_id IS NULL`), run in the migration AND as the gate-independent 6-hourly `link-registry-catchup`, so a prospect inserted by an old pod or a not-yet-migrated writer during the phased rollout is registered within 6h and never silently excluded by the step-4 predicate; `domain_id`/`path_id` become NOT NULL only in a LATER contract migration — a deploy AFTER the one that ships the registry-aware writers, once every old pod has drained and the catch-up reports zero backfilled rows for a full 24h (migrations run pre-deploy, so a constraint shipped in the same PR as the writers would be active while old pods still write legacy-shaped rows); until then the columns stay nullable and the 6-hourly catch-up owns the gap. No claim-predicate change ships before this backfill has run; the
 step-4 predicate treats a legacy row exactly like a new one (it still needs investigation →
 bridge → authority before any send).
 
@@ -1395,7 +1397,11 @@ Implementations, in order:
    canonical NAP packet the contract already sends.
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
-Provider selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
+**Provider selection is a STEP-5 concern, deferred until a second approved provider has a
+concrete need the runner cannot meet** (AGENTS.md: extend the existing mechanism first) —
+steps 1–4 hard-code `deterministic_runner` for every step, and none of the override /
+preference / cohort / fallback schema below ships before then. When it does: provider
+selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
 for non-credentialed, non-payment steps only — with ONE precedence above both during a live §10 benchmark: `seo_link_benchmark_cohorts (domain_id, provider, benchmark_id; UNIQUE (domain_id, benchmark_id))`, an explicit audited cohort assignment the claim predicate honours (disjoint cohorts by DOMAIN — every placement of a domain, all its locations and shared-account profiles included, belongs to one provider, so D30/cost/recovery outcomes are never cross-contaminated; the owner override and global preference are untouched, exactly as §10 promises) — restricted to live `BrowserAgentProvider` implementations that support the current action (CHECK on both columns: never `hermes` or `human`, which hold no execution-capable worker token; an unsupported choice falls through to the next preference, then the runner); **credentialed steps (account creation, email
 verification, login, authenticated resume) and payment steps always resolve to
 `deterministic_runner`** regardless of preference — a `ready_for_credentials` / `ready_for_payment`
