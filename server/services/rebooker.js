@@ -1718,15 +1718,21 @@ class SmartRebooker {
           siblings = locked;
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
-          // The acknowledged set: a surface confirmed "moves N visits" from
-          // a preview — the locked sweep must be exactly that many rows, or
-          // the operator confirmed a different plan (codex r18 P2).
-          if (Number.isInteger(options.expectMovableCount) && sweptIds.length !== options.expectMovableCount) {
-            throw Object.assign(new Error(`Cannot reschedule — the recurring plan changed since it was previewed (${sweptIds.length} visit(s) would move, not ${options.expectMovableCount}); reload and confirm again`), {
-              statusCode: 409,
-              isOperational: true,
-              code: 'SERIES_CHANGED',
-            });
+          // The acknowledged set: a surface confirmed exactly the previewed
+          // occurrences — the locked sweep must be that same set (ids, not a
+          // count: a cancel plus an auto-extend keeps the count while moving
+          // a visit nobody confirmed — codex r18/r19 P2).
+          if (Array.isArray(options.expectOccurrenceIds)) {
+            const want = new Set(options.expectOccurrenceIds.map(String));
+            const have = new Set(sweptIds.map(String));
+            const same = want.size === have.size && [...want].every((id) => have.has(id));
+            if (!same) {
+              throw Object.assign(new Error(`Cannot reschedule — the recurring plan changed since it was previewed (${have.size} visit(s) would move, ${want.size} were confirmed, or different ones); reload and confirm again`), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SERIES_CHANGED',
+              });
+            }
           }
           // The projector was built from the parent's recurrence config
           // read BEFORE the lock; a cadence edit (update-details holds this
@@ -2258,6 +2264,10 @@ class SmartRebooker {
       if (followUpsShifted > 0) {
         logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
       }
+      // Shifted call follow-ups ride the operation so the durable effects
+      // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
+      // the cadence set (counts, ack, close, text).
+      const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
         `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
       ));
@@ -2302,6 +2312,7 @@ class SmartRebooker {
         // operator card is a marker-fenced, reconciled effect (codex r15
         // P1), never an in-memory alert a dying pass can lose.
         overlapDates: [...overlapWarnDates].sort(),
+        followUpOccurrences,
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
         rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],
@@ -2505,6 +2516,9 @@ class SmartRebooker {
       collective: true,
       deltaDays,
       movableCount: movable.length,
+      // The exact set a surface acknowledges (seriesAckIds) — bound again at
+      // commit against the locked sweep (expectOccurrenceIds).
+      occurrenceIds: [...sweptIds].sort(),
       skippedCount: swept.length - movable.length,
       exceptionCount: movable.filter((row, idx) => idx > 0 && row.date_exception === true).length,
       conflictCount,

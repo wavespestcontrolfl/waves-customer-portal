@@ -14086,6 +14086,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // marker: the operator learns about every double-booking the sweep
   // committed, and a dying pass leaves it for the reconciler.
   const overlapDates = Array.isArray(result.overlapDates) ? result.overlapDates.map((d) => String(d).split('T')[0]) : [];
+  // Call-created follow-ups the move shifted with the primary: their
+  // reminder rows sync (and their boards refresh) with the cadence rows,
+  // but they are never texted, closed or re-armed here — nothing covers
+  // them but the reminder cron (codex r19 P1).
+  const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];
   const leaseOwner = crypto.randomUUID();
   // Every marker write is fenced on the owner token: only the pass holding
   // the CURRENT lease can stamp or release.
@@ -14253,8 +14258,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           seriesGuardSnapshotFailed = true;
         }
       }
+      for (const followUp of followUps) {
+        const synced = await syncRescheduleReminder(
+          followUp.id,
+          followUp.date,
+          { start: followUp.windowStart, end: followUp.windowEnd },
+          { willNotify: false, expectSchedule: { date: String(followUp.date).split('T')[0], windowStart: followUp.windowStart ? String(followUp.windowStart).slice(0, 5) : null } },
+        );
+        if (!synced) allRemindersSynced = false;
+      }
       let allBroadcast = true;
-      for (const occurrence of occurrences) {
+      for (const occurrence of [...occurrences, ...followUps]) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
         } catch (err) {
@@ -14733,25 +14747,27 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
       if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
-        const seriesAckCount = Number.isInteger(req.body.seriesAckCount) ? req.body.seriesAckCount : null;
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
         } catch {
           preview = null;
         }
-        const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;
+        // Bound to the previewed OCCURRENCE SET (seriesAckIds), never a count.
+        const ids = Array.isArray(req.body.seriesAckIds) ? req.body.seriesAckIds.map(String) : null;
+        const have = preview && Array.isArray(preview.occurrenceIds) ? new Set(preview.occurrenceIds.map(String)) : null;
+        const acked = req.body.seriesAck === true && ids && have && ids.length === have.size && ids.every((id) => have.has(id));
         if (!acked) {
-          const changed = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount !== seriesAckCount;
+          const changed = req.body.seriesAck === true && ids && have;
           return res.status(409).json({
             error: changed
-              ? `The recurring plan changed since the preview — it now moves ${preview.movableCount - 1} later visit(s), not ${Math.max(seriesAckCount - 1, 0)}. Review the refreshed count and confirm again.`
+              ? `The recurring plan changed since the preview — it now moves ${Math.max((preview?.movableCount || 1) - 1, 0)} later visit(s) (a different set). Review the refreshed preview and confirm again.`
               : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
             code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
             preview: preview || null,
           });
         }
-        rescheduleOptions.expectMovableCount = seriesAckCount;
+        rescheduleOptions.expectOccurrenceIds = preview.occurrenceIds.map(String);
       }
     }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);

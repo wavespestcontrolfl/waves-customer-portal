@@ -679,6 +679,17 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     const lockedById = new Map((await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate })).map((k) => [String(k.id), k]));
     let shifted = 0;
     const skipped = [];
+    const shiftedRows = [];
+    // A child that appeared AFTER the plan (a call-recording reprocess
+    // created a missing follow-up) is not in the locked set the caller
+    // fenced for: not written — and reported, so the package's lost
+    // spacing is never silent (codex r19 P2).
+    if (occupancyHeld) {
+      const plannedIds = new Set(kids.map((k) => String(k.id)));
+      for (const [id, k] of lockedById) {
+        if (!plannedIds.has(id)) skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'added' });
+      }
+    }
     for (const planned of kids) {
       const k = lockedById.get(String(planned.id));
       if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) {
@@ -726,9 +737,16 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           route_order: null,
           updated_at: trx.fn.now(),
         });
-      if (Number(wrote) === 1) shifted += 1;
-      else skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
+      if (Number(wrote) === 1) {
+        shifted += 1;
+        shiftedRows.push({ id: k.id, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+      } else {
+        skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
+      }
     }
+    // Shifted children (with their kept windows) — the caller's durable
+    // reminder sync must cover them (codex r19 P1).
+    if (report && typeof report === 'object' && shiftedRows.length) report.shifted = (report.shifted || []).concat(shiftedRows);
     if (skipped.length) {
       if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);
       // The durable operator card rings for EVERY caller — a report only
@@ -742,7 +760,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Call-booked follow-up visit kept its date',
-            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : ' — slot booked'}`).join(', ')}). Re-space them from dispatch.`,
+            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
             { metadata: { parentServiceId, skipped } },
           );
         } catch (err) {

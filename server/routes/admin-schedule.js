@@ -6568,6 +6568,17 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
 // collective date move (gate off, one-time/booster row, same date, terminal
 // row = record correction, or a date the handler's own validation must
 // answer) — the handler then runs exactly as before.
+// The surface's acknowledgement of a collective move is bound to the
+// previewed OCCURRENCE SET: `seriesAck: true` + `seriesAckIds` (the
+// preview's occurrenceIds). Returns { ok, changed } against a fresh preview.
+function seriesAckMatches(body, preview) {
+  const ids = Array.isArray(body?.seriesAckIds) ? body.seriesAckIds.map(String) : null;
+  if (body?.seriesAck !== true || !ids || !preview || !Array.isArray(preview.occurrenceIds)) return { ok: false, changed: false };
+  const want = new Set(ids);
+  const have = new Set(preview.occurrenceIds.map(String));
+  const ok = want.size === have.size && [...want].every((id) => have.has(id));
+  return { ok, changed: !ok };
+}
 async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
@@ -6600,7 +6611,7 @@ async function planCollectiveEditDateMove(req) {
   // transaction (expectMovableCount) against the locked sibling set
   // (codex r18 P2). Without the ack the save is refused up front — nothing
   // saved, nothing moved.
-  const seriesAckCount = Number.isInteger(req.body.seriesAckCount) ? req.body.seriesAckCount : null;
+  let ackedIds = null;
   {
     let preview = null;
     try {
@@ -6608,16 +6619,16 @@ async function planCollectiveEditDateMove(req) {
     } catch {
       preview = null;
     }
-    const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;
-    if (!acked) {
-      const changed = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount !== seriesAckCount;
+    const { ok, changed } = seriesAckMatches(req.body, preview);
+    if (!ok) {
       throw Object.assign(
         httpError(409, changed
-          ? `The recurring plan changed since the preview — it now moves ${preview.movableCount - 1} later visit(s), not ${Math.max(seriesAckCount - 1, 0)}. Review the refreshed count and confirm again. Nothing was changed.`
+          ? `The recurring plan changed since the preview — it now moves ${Math.max((preview?.movableCount || 1) - 1, 0)} later visit(s) (a different set). Review the refreshed preview and confirm again. Nothing was changed.`
           : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Confirm the series move to continue. Nothing was changed.`),
         { code: 'COLLECTIVE_MOVE_ACK_REQUIRED', preview: preview || null },
       );
     }
+    ackedIds = preview.occurrenceIds.map(String);
   }
   let win = { start: null, end: null };
   const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
@@ -6656,8 +6667,8 @@ async function planCollectiveEditDateMove(req) {
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
         notifyRequested: notifyCustomer === true,
-        // The acknowledged count, enforced against the locked sibling set.
-        expectMovableCount: seriesAckCount,
+        // The acknowledged occurrence set, enforced against the locked sweep.
+        expectOccurrenceIds: ackedIds,
         ...(operationKey ? { operationKey } : {}),
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.

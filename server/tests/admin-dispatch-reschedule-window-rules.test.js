@@ -45,7 +45,7 @@ jest.mock('../services/rebooker', () => ({
   rescheduleSeries: jest.fn().mockResolvedValue({ success: true, rescheduledOccurrences: [] }),
   applyLiveMovePostCommitEffects: jest.fn(),
   collectiveMoveGateOn: () => process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
-  previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
+  previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, occurrenceIds: ['o1', 'o2', 'o3', 'o4'], skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
@@ -100,15 +100,16 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   test('gate on: the same move WITH seriesAck reaches the rebooker (the choke point widens it server-side)', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = recurringRow();
-    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckCount: 4 });
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckIds: ['o4', 'o3', 'o2', 'o1'] });
     expect(status).toBe(200);
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectOccurrenceIds: ['o1', 'o2', 'o3', 'o4'] });
   });
 
-  test('gate on: an ack whose count no longer matches the plan (auto-extend since the preview) is refused with the REFRESHED preview — nothing moves', async () => {
+  test('gate on: an ack whose occurrence set no longer matches the plan (a cancel + an auto-extend since the preview — same count, different visits) is refused with the REFRESHED preview — nothing moves', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = recurringRow();
-    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckCount: 3 });
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckIds: ['o1', 'o2', 'o3', 'o9'] });
     expect(status).toBe(409);
     expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
     expect(body.error).toMatch(/changed since the preview/);

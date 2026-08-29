@@ -801,13 +801,13 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(6) }); // Tue — Monday is the skipped row's slot
   });
 
-  test('an acknowledged count that no longer matches the LOCKED sibling set (a child landed since the preview) aborts 409 SERIES_CHANGED — nothing written', async () => {
+  test('an acknowledged occurrence SET that no longer matches the LOCKED sweep (same count, a different visit) aborts 409 SERIES_CHANGED — nothing written; the same set proceeds', async () => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
-    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectMovableCount: 2 }))
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectOccurrenceIds: ['svc-1', 'svc-2', 'svc-9'] }))
       .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED', message: expect.stringContaining('since it was previewed') });
     expect(updates[0].update).not.toHaveBeenCalled();
     const { updates: ok } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1), sib('svc-3', SIB2)]);
-    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectMovableCount: 3 });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expectOccurrenceIds: ['svc-3', 'svc-1', 'svc-2'] });
     expect(ok[0].update).toHaveBeenCalled();
   });
 
@@ -870,6 +870,7 @@ describe('previewSeriesMove', () => {
       collective: true,
       deltaDays: 2,
       movableCount: 3,
+      occurrenceIds: ['svc-1', 'svc-3', 'svc-4'],
       skippedCount: 1,
       exceptionCount: 1,
       conflictCount: 1,
@@ -1137,10 +1138,15 @@ describe('caller wiring (source)', () => {
     // Disclosure: without seriesAck the planner refuses up front (nothing saved) with the preview.
     expect(sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), handler)).toContain("code: 'COLLECTIVE_MOVE_ACK_REQUIRED'");
     const disp = read('../routes/admin-dispatch.js');
-    expect(disp).toContain("const acked = req.body.seriesAck === true && seriesAckCount !== null && preview && preview.movableCount === seriesAckCount;");
-    expect(disp).toContain('rescheduleOptions.expectMovableCount = seriesAckCount;');
-    expect(read('../routes/admin-schedule.js')).toContain('expectMovableCount: seriesAckCount,');
-    expect(read('../services/rebooker.js')).toContain('if (Number.isInteger(options.expectMovableCount) && sweptIds.length !== options.expectMovableCount) {');
+    expect(disp).toContain('rescheduleOptions.expectOccurrenceIds = preview.occurrenceIds.map(String);');
+    expect(read('../routes/admin-schedule.js')).toContain('expectOccurrenceIds: ackedIds,');
+    expect(read('../services/rebooker.js')).toContain('if (Array.isArray(options.expectOccurrenceIds)) {');
+    expect(read('../services/rebooker.js')).toContain('occurrenceIds: [...sweptIds].sort(),');
+    // r19: shifted call follow-ups ride the operation for the durable reminder sync (never texted/closed); transactional blackout reads use a savepoint; children added after the plan are reported.
+    expect(read('../services/rebooker.js')).toContain('followUpOccurrences,');
+    expect(disp).toContain("const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];");
+    expect(read('../services/scheduling/blackout-dates.js')).toContain('const readOptional = (conn, fn) =>');
+    expect(read('../services/call-booking-catalog.js')).toContain("reason: 'added'");
     // r18: blackout reads ride the series trx; a Quick Move close-only recovery closes the anchor only; explicit-window dispatch requests still pin the observed anchor.
     expect(read('../services/rebooker.js')).toContain('const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1], trx);');
     expect(disp).toContain("const closeScope = () => (markers.source_surface === 'quick_move'");

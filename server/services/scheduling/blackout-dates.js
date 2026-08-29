@@ -62,9 +62,17 @@ function parseWeeklyDaysOff(value) {
 // the lookup never checks out a SECOND pool connection while holding
 // scheduling locks — under load every such caller would otherwise wait on an
 // exhausted pool with its locks held (codex #3562 r18 P1).
+// A failed optional read inside a caller's transaction would leave it
+// ABORTED (25P02 on every later statement) despite the catch — so when
+// `conn` is a transaction the read runs in a SAVEPOINT (nested trx), the
+// same shape getBlackoutLayers uses, and rolls back to it on error.
+const readOptional = (conn, fn) => (conn && conn.isTransaction && typeof conn.transaction === 'function'
+  ? conn.transaction((sp) => fn(sp))
+  : fn(conn));
+
 async function getWeeklyDaysOff(conn = db) {
   try {
-    const row = await conn('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value');
+    const row = await readOptional(conn, (dbh) => dbh('system_settings').where('key', WEEKLY_DAYS_OFF_KEY).first('value'));
     return parseWeeklyDaysOff(row && row.value);
   } catch (err) {
     logger.warn(`[blackout-dates] weekly days-off lookup failed (failing open): ${err.message}`);
@@ -90,9 +98,9 @@ function expandWeeklyDaysOff(fromStr, toStr, dowSet) {
 async function getBlackoutDates(fromStr, toStr, conn = db) {
   let dates = new Set();
   try {
-    const rows = await conn('schedule_blackout_dates')
+    const rows = await readOptional(conn, (dbh) => dbh('schedule_blackout_dates')
       .whereBetween('date', [fromStr, toStr])
-      .select('date');
+      .select('date'));
     dates = new Set(rows.map((r) => toDateStr(r.date)));
   } catch (err) {
     logger.warn(`[blackout-dates] range lookup failed (failing open): ${err.message}`);
