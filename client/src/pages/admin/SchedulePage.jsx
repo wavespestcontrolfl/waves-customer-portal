@@ -3669,7 +3669,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                  // Phones (owner 2026-08-29): Date alone on the first row, both
+                  // times side by side beneath it, all three the same width —
+                  // auto-fit used to wrap End time alone onto a second row.
+                  gridTemplateColumns: isMobile
+                    ? "minmax(0, 1fr) minmax(0, 1fr)"
+                    : "repeat(auto-fit, minmax(150px, 1fr))",
                   gap: 12,
                   marginBottom: 14,
                 }}
@@ -3686,7 +3691,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     style={inputStyle}
                   />{" "}
                 </div>{" "}
-                <div>
+                <div style={isMobile ? { gridColumn: 1 } : undefined}>
                   {" "}
                   <label style={labelStyle}>Time</label>{" "}
                   <input
@@ -6182,12 +6187,15 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     } catch (e) {
       const ack = parseSeriesAckError(e);
       if (ack?.code === SERIES_ACK_REQUIRED && isCollectivePreview(ack.preview)) {
-        const { seriesAck, seriesAckIds: _seriesAckIds, ...bare } = body;
+        // Keep only the SLOT — reason, notes and the notification choice are
+        // re-read from the current controls when the operator confirms (they
+        // stay editable while the confirm step is up).
+        const { newDate, newWindow, deriveWindowFromCurrentVisit } = body;
         setSeriesConfirm({
-          body: bare,
+          body: { newDate, newWindow, deriveWindowFromCurrentVisit },
           preview: ack.preview,
           // A second refusal means the set changed under an ack we sent.
-          stale: seriesAck === true ? (ack.message || "changed") : "",
+          stale: body.seriesAck === true ? (ack.message || "changed") : "",
         });
       } else {
         console.error(e);
@@ -6202,6 +6210,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     if (!seriesConfirm) return;
     submitReschedule({
       ...seriesConfirm.body,
+      reasonCode: reason,
+      reasonText: notes,
+      notifyCustomer,
       ...seriesAckPayload(seriesConfirm.preview),
     });
   };

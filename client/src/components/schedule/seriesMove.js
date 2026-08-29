@@ -91,7 +91,13 @@ export function parseSeriesAckError(err) {
   if (!body || typeof body !== 'object') return null;
   const code = body.code || err.code || null;
   if (code !== SERIES_ACK_REQUIRED && code !== SERIES_CHANGED) return null;
-  return { code, message: body.error || err.message || '', preview: body.preview || null };
+  // The refusal carries the rebooker's raw preview — no `enabled` (only the
+  // GET endpoint stamps it). The refusal itself only exists while the gate
+  // is on, so the surface may treat it as enabled.
+  const preview = body.preview && typeof body.preview === 'object'
+    ? { enabled: true, ...body.preview }
+    : null;
+  return { code, message: body.error || err.message || '', preview };
 }
 
 // Operator-facing text from an adminFetch error whose message may be the raw

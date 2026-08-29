@@ -82,6 +82,14 @@ describe('parseSeriesAckError', () => {
     expect(parsed).toEqual({ code: SERIES_ACK_REQUIRED, message: body.error, preview: PREVIEW });
   });
 
+  it('treats the refusal preview as enabled — the server 409 carries the raw rebooker preview', () => {
+    const { enabled: _enabled, ...raw } = PREVIEW;
+    const parsed = parseSeriesAckError(new Error(JSON.stringify({ ...body, preview: raw })));
+    expect(parsed?.preview).toEqual({ enabled: true, ...raw });
+    expect(isCollectivePreview(parsed?.preview)).toBe(true);
+    expect(seriesAckPayload(parsed?.preview).seriesAckIds).toEqual(PREVIEW.occurrenceIds.map(String));
+  });
+
   it('reads the structured shape (err.code + err.preview) SchedulePage attaches', () => {
     const err = Object.assign(new Error(body.error), { status: 409, code: SERIES_ACK_REQUIRED, preview: PREVIEW });
     expect(parseSeriesAckError(err)).toEqual({ code: SERIES_ACK_REQUIRED, message: body.error, preview: PREVIEW });

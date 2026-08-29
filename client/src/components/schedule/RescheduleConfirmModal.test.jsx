@@ -110,7 +110,9 @@ describe('RescheduleConfirmModal — collective series moves', () => {
 
   it('a refused ack (plan changed) swaps in the refreshed preview and stays open', async () => {
     mockPreview(PREVIEW);
-    const refreshed = { ...PREVIEW, movableCount: 4, occurrenceIds: ['occ-1', 'occ-2', 'occ-3', 'occ-4'], lastAffectedDate: '2026-12-03' };
+    // The 409 carries the rebooker's raw preview — no `enabled` stamp.
+    const { enabled: _enabled, ...raw } = PREVIEW;
+    const refreshed = { ...raw, movableCount: 4, occurrenceIds: ['occ-1', 'occ-2', 'occ-3', 'occ-4'], lastAffectedDate: '2026-12-03' };
     const onConfirm = vi.fn()
       .mockRejectedValueOnce(new Error(JSON.stringify({
         error: 'The recurring plan changed since the preview.',
