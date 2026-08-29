@@ -155,7 +155,7 @@ const STATE_ABBR_RE = new RegExp(
   // "al termite treatment" / "pa pest control laws" — a non-word ambiguous
   // abbreviation LEADING the text before a service ("in wall pest control"
   // and "or pest control" never: in/or are English words, not in SEMI).
-  + `|^\\s*(${STATE_ABBR_SEMI})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`
+  + `|^\\s*(${STATE_ABBR_SEMI})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT}|${PEST_NOUNS})\\b`
   // "pest control omaha ne" / "termite treatment boulder co" — service, an
   // optional service noun, a locality word, then a non-word ambiguous
   // abbreviation ending the phrase ("pest control near me": me ∉ SEMI).
@@ -287,7 +287,9 @@ function metroAliasHits(text) {
 const NATIONWIDE_RE = new RegExp(
   `\\b(?:united states|u\\.s\\.a?\\.?|usa|nationwide|america|all 50 states|every state)(?![a-z])`
   + `|\\b(?:in|across|throughout|around|serving|anywhere in)\\s+(?:the\\s+)?(?:us|u\\.s\\.|states)(?![a-z])`
-  + `|\\bus\\s+(?:${SERVICE_INTENT})\\b`,
+  // "US ant control" — a service OR a governed pest noun; "us" as an object
+  // pronoun ("keeps us bug-free", "bite us") is not the country.
+  + `|(?<!\\b(?:keep|keeps|keeping|kept|protect|protects|protecting|help|helps|helping|let|lets|bite|bites|biting|make|makes|making|give|gives|tell|tells|drive|drives|call|contact|for|with|to|of|on|at|from|around|about)\\s)\\bus\\s+(?:${SERVICE_INTENT}|${PEST_NOUNS})\\b`,
   'i'
 );
 // Chemical symbols and agronomic / measurement abbreviations that collide
@@ -700,7 +702,8 @@ function parseTargetingFields(body) {
 }
 
 // Every H2/H3 form the blog renderer accepts: ATX (## / ###), Setext (a line
-// underlined with === or ---), and inline HTML/MDX (<h2>…</h2>, <h3>…</h3>).
+// underlined with --- = H2; a === underline is an H1 — the title again, not
+// ownership evidence), and inline HTML/MDX (<h2>…</h2>, <h3>…</h3>).
 function headingsOf(markdown) {
   const src = String(markdown || '');
   const out = [];
@@ -708,7 +711,7 @@ function headingsOf(markdown) {
   let h;
   const atx = /^ {0,3}#{2,3}\s+(.+?)\s*#*\s*$/gm; // CommonMark allows ≤3 leading spaces
   while ((h = atx.exec(src)) !== null) out.push(clean(h[1]));
-  const setext = /^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*(?:=+|-{3,})[ \t]*$/gm;
+  const setext = /^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*-{3,}[ \t]*$/gm;
   while ((h = setext.exec(src)) !== null) out.push(clean(h[1]));
   const html = /<h([23])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
   while ((h = html.exec(src)) !== null) out.push(clean(h[2]));
@@ -970,7 +973,11 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // src/content/blog/<leaf>.md and can overwrite a legacy file serving a
   // category-qualified URL; category-qualified candidates collide on the
   // exact route only (the publisher allows one leaf under many categories).
-  const leafOnly = selfUrl.split('/').filter(Boolean).length === 1;
+  // …and only for a candidate WITHOUT a category: with one, the publisher
+  // canonicalizes to /<category>/<leaf>/ and adopts by exact route (a flat
+  // file rendering another category is skipped), so only that route can
+  // collide — it is already in `routes`.
+  const leafOnly = selfUrl.split('/').filter(Boolean).length === 1 && !category;
   // A NEW blog may not reuse a live post's URL — or its LEAF: the publisher
   // writes a leaf-only row slug to src/content/blog/<leaf>.md, which can
   // overwrite the legacy file serving the category-qualified URL. Either way

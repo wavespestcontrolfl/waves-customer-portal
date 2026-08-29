@@ -729,7 +729,7 @@ describe('PR codex r11 (1c55e2875)', () => {
     expect(gate.classifyGeoScope('maine coon breeders in maine').scope).toBe('out_of_area');
   });
   test('Setext and HTML headings are ownership evidence like ATX headings', () => {
-    expect(gate._internals.headingsOf('Intro\n\nWhat Taexx Does\n----------------\n\ntext\n\nAnother Heading\n===\n\n<h2 class="x">Inside <em>Taexx</em> Tubes</h2>\n<h3>Costs</h3>\n## ATX Heading\n')).toEqual(['ATX Heading', 'What Taexx Does', 'Another Heading', 'Inside Taexx Tubes', 'Costs']);
+    expect(gate._internals.headingsOf('Intro\n\nWhat Taexx Does\n----------------\n\ntext\n\nAnother Heading\n===\n\n<h2 class="x">Inside <em>Taexx</em> Tubes</h2>\n<h3>Costs</h3>\n## ATX Heading\n')).toEqual(['ATX Heading', 'What Taexx Does', 'Inside Taexx Tubes', 'Costs']); // a === underline is an H1 (the title again) — not ownership evidence (r27)
     const index = gate.indexCorpus(CORPUS);
     const generic = { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch' };
     expect(gate.evaluateDraftTargeting({ frontmatter: generic, body: 'Your first quarter\n---\n\ntext\n\nWhat Taexx Does\n----------------\n\ntext\n' }, { index, service: 'pest' }).ok).toBe(false);
@@ -942,6 +942,27 @@ describe('PR codex r22 (b4db7a542)', () => {
     // The same emitted slug under the termite category is a different route — no collision.
     expect(gate.evaluate(blog({ query: 'in wall termite tubes', title: 'In-Wall Termite Tubes Explained', slug: '/termite/in-wall-pest-control/', category: 'termite' }), { corpus: CORPUS }).findings.map((f) => f.code)).not.toContain(gate.CODES.SLUG_COLLIDES_LIVE);
   });
+  test('pest nouns after a leading state abbreviation and after bare US count like the full-name forms (r27)', () => {
+    for (const t of ['PA ant control', 'VA cockroach control', 'CO spider guide', 'US ant control', 'US cockroach control', 'US spider guide']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['what keeps us bug-free in sarasota', 'mosquitoes that bite us', 'in wall ant control', 'or ant control']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+  test('a leaf-only slug WITH a category collides only on its canonical category route (r27)', () => {
+    // /springtails/ in mosquito → the publisher writes /mosquito/springtails/; a live /pest-control/springtails/ is a different route.
+    const corpus = [{ url: '/pest-control/springtails/', body: '---\ntitle: Springtails Explained\nslug: /pest-control/springtails/\nprimary_keyword: springtails\ncategory: pest-control\n---\n\ntext\n' }];
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'springtails near pools', title: 'Springtails Near Sarasota Pools', slug: 'springtails', category: 'mosquito' }, { corpus }).findings.map((f) => f.code)).not.toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    // Same category → the canonical route IS the live one.
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'springtails near pools', title: 'Springtails Near Sarasota Pools', slug: 'springtails', category: 'pest-control' }, { corpus }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    // No category at all → the flat file can overwrite the legacy leaf: still a collision.
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'springtails near pools', title: 'Springtails Near Sarasota Pools', slug: 'springtails' }, { corpus }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+  });
+  test('a Setext === H1 is not an ownership heading; the --- H2 form still is (r27)', () => {
+    const h = gate._internals.headingsOf('Taexx Guide\n===========\n\nWhy Taexx\n---------\n\n## Costs\n');
+    expect(h).toEqual(['Costs', 'Why Taexx']); // ATX first, then Setext
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
@@ -963,7 +984,10 @@ describe('slug collision scope (hook, PR codex r17 push)', () => {
     const idx = gate.indexCorpus(corpus);
     expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo mosquito', title: 'Foo for mosquitoes', slug: '/mosquito/foo/', category: 'mosquito' }, { index: idx }).ok).toBe(true);
     expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo termite', title: 'Foo again', slug: '/termite/foo/', category: 'termite' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
-    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo', title: 'Foo', slug: '/foo/', category: 'mosquito' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    // Leaf-only WITH a category: the publisher canonicalizes to /mosquito/foo/ (a different route) — no collision (r27);
+    // leaf-only WITHOUT a category is written flat and can overwrite the legacy leaf — still a collision.
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo', title: 'Foo', slug: '/foo/', category: 'mosquito' }, { index: idx }).findings.map((f) => f.code)).not.toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo', title: 'Foo', slug: '/foo/' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
   });
 });
 
