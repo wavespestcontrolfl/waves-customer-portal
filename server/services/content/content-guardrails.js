@@ -1690,7 +1690,7 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Estero', 'Lehigh Acres', 'St. Petersburg', 'Tampa', 'Winter Haven',
   'Plant City', 'Clearwater', 'Orlando', 'Miami', 'Jacksonville',
   'Fort Lauderdale', 'Tallahassee', 'Gainesville', 'Lakeland', 'Kissimmee',
-  'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
+  'Ocala', 'Port St. Lucie', 'Palm Beach', 'West Palm Beach', 'Hialeah', 'Boca Raton',
   // Broader FL metros (curated — full-state coverage stays a curated list
   // by design).
   'Daytona Beach', 'Melbourne', 'Palm Bay', 'Vero Beach', 'Fort Pierce',

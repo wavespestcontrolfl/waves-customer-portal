@@ -986,6 +986,12 @@ describe('PR codex r22 (b4db7a542)', () => {
       expect(gate.geoBlockReason(t)).toBeNull();
     }
   });
+  test('bare Palm Beach is out of area like its West / Gardens / County forms (r31)', () => {
+    for (const t of ['Palm Beach pest control', 'pest control in Palm Beach', 'termite treatment West Palm Beach']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('palm trees on a bradenton beach lot').out_of_area).toEqual([]);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
