@@ -45,7 +45,7 @@ Everything already shipped is a **dependency**, not work to redo (§1).
 | Gap feeder | `competitor-gap-miner.js`, `competitor-discovery.js` → `seo_competitor_backlinks` | 7,553 unreviewed rows = the largest raw inventory; v2 ingests it (§4) |
 | Local opportunity feed | `local-opportunity-prospector/promoter.js` | Stays; writes through the guard |
 | Scorer + lane classifier | `prospect-scorer.js` (relevance, lead value, contactability gate, `CLAIMABLE_LINK_TYPES`), `signup-classifier.js` | Quality score. v2 adds path + persistence terms (§8) |
-| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Kept verbatim; v2 puts providers behind it (§7) |
+| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Route shape and report semantics kept; AUTHENTICATION IS REPLACED in step 1 — `hermes-auth.js` bearer + `HERMES_SERVICE_TOKEN` retired, per-provider HMAC request signing (§12) — and v2 puts providers behind it (§7) |
 | Deterministic signup runner | `signup-runner.js`, `signup-evidence.js`, `GATE_SIGNUP_RUNNER`, `SIGNUP_RUNNER_ALLOWLIST`, `HERMES_SIGNUP_EMAIL` (chromium in the prod image) | First `BrowserAgentProvider` implementation (§7) |
 | Outreach drafter + sender | `backlink-outreach-drafter.js` (`GATE_OUTREACH_DRAFTER`), `link-prospect-outreach.js` (`GATE_LINK_OUTREACH`, `LINK_OUTREACH_DAILY_CAP`, Gmail `contact@`, idempotent send, `send_error` reconcile), `comms-lint.js` | The `OutreachProvider` (§7) under the bounded mandate (§6.4) |
 | Strategist | `backlink-strategy-agent*.js`, `create_link_prospects` / `list_prospects` | Stays on demand; becomes one more *source* into the registry |
@@ -239,9 +239,10 @@ business-claim, membership, vendor registration, human steps), **payment** in ad
 whenever `payment_required`, and — for a `legal_attestation=true` path of ANY type, outreach
 included — a separate **execution-dimension `accept_terms` authority row** (level per `policy.legal_attestation_requires_owner`: `OWNER_LEGAL` by default, else the normal `AUTO_*`/`OWNER_*` execution rules) whose approval, when owner-gated, is
 bound to `legal_terms_hash`; the send approval never satisfies it (§3.6b). An outreach
-placement therefore carries no execution row unless it must accept terms, so the 56 drafts
-and their follow-ups need exactly the communication authority (plus payment only if paid,
-plus `accept_terms` only if an agreement must be signed). The locked claim and every
+placement therefore carries execution rows exactly per its REQUIRED ACTIONS — an `acquire`
+instance when it must create an account or submit a form, an `accept_terms` instance when
+it must sign — and none otherwise, so the 56 drafts and their follow-ups (plain email
+pitches) need exactly the communication authority (plus payment only if paid). The locked claim and every
 irreversible step (submit, send, mint) load ALL rows for the placement. The dimension
 **owning the current action** (payment for mint, communication for send/follow-up, execution
 for submit/create-account) must be `AUTO_*` (gate on, re-run decision agreeing) or `OWNER_*`
@@ -287,7 +288,7 @@ t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // CHECK (provider IN ('deterministic_runner','openai_cua','claude_cu','stagehand','grok','hermes','human')) — `hermes` = the legacy shared HERMES_SERVICE_TOKEN identity (§12): investigation/draft reports only, no payment/credential capability
 t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`, `accept_terms`): `${prospect_id}:${action}:${instance_key}` where `instance_key` is the §3.3b action-instance identity (`-:1`, `annual:1`, `2027:1`, `followup:1`, `terms:1`) — so an initial acquisition submit and a renewal submit never share a key; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and — because a DB row cannot prove whether the external call took effect — treats it as **`mutation_ambiguous`** (outcome, added to the enum): the runner first RECONCILES per action before anything is re-sent (`create_account`: probe the login/‘email already registered’ path or the inbox for the welcome mail; verification activation: reload the account and read its verified state; `submit`: the existing profile/listing probe the Judge uses) and only retries the external call when reconciliation PROVES the first one did not take effect; an unprovable state stays `mutation_ambiguous` for the owner card — a crashed mutation is therefore never repeated blindly
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
-t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered) | accept_terms (the guarded legal-acceptance mutation: its own idempotency_key `${prospect_id}:accept_terms:terms:${generation}` — never aliased to resume; outcomes `terms_accepted` on success, `mutation_ambiguous` on an unproven crash (reconciled by re-reading the account's agreement state), `terms_changed` when the live hash ≠ legal_terms_hash)
+t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | outreach_followup | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered) | accept_terms (the guarded legal-acceptance mutation: its own idempotency_key `${prospect_id}:accept_terms:terms:${generation}` — never aliased to resume; outcomes `terms_accepted` on success, `mutation_ambiguous` on an unproven crash (reconciled by re-reading the account's agreement state), `terms_changed` when the live hash ≠ legal_terms_hash)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13);
                                       //   'sending',                                                   -- outreach send in flight: the send claim writes an `outreach_send`/`outreach_followup` attempt with outcome='sending' under the sender lock BEFORE calling Gmail (mirrors the retained outreach_status='sending'); the same lock flips it to 'sent' / 'send_error' on the result — so the supersession pin and restart sweep (§3.2) see an active attempt during the external call; slot_released = a reserved slot given back on lease expiry (ET-day rollover re-slots the same row in place, §13) — audit-only, NEVER counted by the cap query; the same row returns to slot_reserved on the instance's next lease
@@ -1378,7 +1379,7 @@ that cannot complete it. Outreach: `OutreachProvider` = drafter + `link-prospect
   unsampled, drains that set in batches, and records the sample; the retained verifier's
   200-row `last_live_check` rotation is not relied on for it, so growth of the board never
   starves the only success metric. The same rule replaces the imported-baseline test in §4 (imports predating scan
-  coverage stay `null`). Stored on the placement (`d30_live`, `d90_live`, tri-state) — this is
+  coverage stay `null`). Stored PER ACQUISITION CYCLE, not once per placement: `seo_link_d30_samples (prospect_id, acquisition_attempt_id UNIQUE, cycle_first_live_at, d30_live, d90_live, sampled_at)` — the cutoff is the cycle's own first-live (the Judge's verification after THAT successful attempt; the retained verifier only initializes `first_live_at` when null and `lost-link-recovery` preserves it, so a reacquisition needs its own row), and the §8 learning join reads the sample through `acquisition_attempt_id`, so a recovery provider/path is credited only with its own cycle's outcome; the placement's `d30_live`/`d90_live` columns mirror the LATEST cycle for display — this is
   the only success metric that counts.
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
   and per `domain` into `seo_link_learning` (small table, replaced each night). The
@@ -1563,7 +1564,12 @@ unset its gate; budget kill = the issuer program's limit.
   `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
   one conversation per inbox — enforced by a durable RECIPIENT-level guard, not the domain lock: `claimProspectDomain` locks only the canonical domain, so the send claim additionally takes `pg_advisory_xact_lock(hashtext('link_outreach_inbox:' || lower(recipient)))` and refuses when any other placement with that recipient is `contacted`/`negotiating`/in a send in-flight (a partial unique index on `lower(outreach_to_email)` — the shipped recipient column on `seo_link_prospects` — over those statuses makes it durable across pods); signup lanes coexist per location by design; no templated blasts.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
-  `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
+  `awaiting_owner` (never solved by an agent) AND, in the same report transaction, the
+  current execution instance is ENDED (`end_outcome='captcha'`) and a NEW
+  `OWNER_HUMAN_STEP` execution instance (`-:n+1`) opened for that placement alone — the
+  instance the §7 resume protocol consumes (`human_step_done` → satisfied → `-:n+2` decided
+  for the remainder), so the original automatic authority is never reused across the
+  checkpoint; paid-link-only "sponsored" slots are stored
   with `expected_rel='sponsored'` and scored accordingly.
 - **Money** — single-use per-purchase virtual cards with an issuer-enforced ceiling; PAN/CVV
   handled only by the local payment broker, never by a model-observed provider; every charge
