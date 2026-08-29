@@ -4369,7 +4369,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // both directions, name tokens judge only rows with no typed profile
     // (codex P1 #3600 r7). Scanned in date order, stopping at the first
     // hit; best-effort — a resolver failure skips the row, never throws.
-    if (serviceLine === 'termite') {
+    // Runs ONLY where the value can render: live view (pdf/static strip
+    // it), gate on, bait-station typed visit — each resolution is a few
+    // catalog reads, so gated-off and PDF builds must not pay for it
+    // (codex P2 #3600 r8).
+    if (
+      serviceLine === 'termite'
+      && opts.mode === 'live'
+      && process.env.TERMITE_REPORT_V2 === 'true'
+      && typedSnapshot?.type === TERMITE_BAIT_TYPED_TYPE
+    ) {
       const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       let baitRow = null;

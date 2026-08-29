@@ -354,7 +354,18 @@ const TERMITE_SERVICE = {
   id: 'service-termite',
   service_line: 'termite',
   service_type: 'Termite Bait Station Service',
+  service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: { stations_checked: 12, termite_activity: 'None observed', bait_consumption: 'None — bait intact' } } }),
 };
+// The lookup runs only where its value can render: live view + gate on +
+// bait-station typed visit (pdf/static strip the field; other termite
+// forms never render it) — no catalog reads elsewhere.
+const LIVE_V2 = { mode: 'live' };
+const originalGate = process.env.TERMITE_REPORT_V2;
+beforeEach(() => { process.env.TERMITE_REPORT_V2 = 'true'; });
+afterAll(() => {
+  if (originalGate === undefined) delete process.env.TERMITE_REPORT_V2;
+  else process.env.TERMITE_REPORT_V2 = originalGate;
+});
 
 test('termite report: next monitoring visit skips an earlier liquid visit for the later bait-station row', async () => {
   const knex = makeKnex({
@@ -364,7 +375,7 @@ test('termite report: next monitoring visit skips an earlier liquid visit for th
       { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
     ],
   });
-  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-next', knex);
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-next', knex, LIVE_V2);
   // same-line pick is unchanged (the liquid visit IS the next termite visit)
   expect(data.nextAppointment.serviceType).toBe('Termite Liquid Treatment');
   expect(data.termiteNextMonitoringVisit).toEqual({
@@ -398,7 +409,7 @@ test('termite report: the canonical completion-profile resolver is authoritative
       { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-03-03', status: 'confirmed', service_type: 'Custom Termite Plan', window_start: '11:00:00', service_key_snapshot: 'termite_bait_quarterly' },
     ],
   });
-  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-profile', knex);
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-profile', knex, LIVE_V2);
   expect(data.termiteNextMonitoringVisit).toEqual({
     serviceType: 'Bait Annual',
     scheduledDate: '2999-02-03',
@@ -413,9 +424,34 @@ test('termite report: no bait-station appointment → null (never the cross-line
       { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00' },
     ],
   });
-  const termite = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-none', knex);
+  const termite = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-none', knex, LIVE_V2);
   expect(termite.nextAppointment.serviceType).toBe('Quarterly Pest Control Service');
   expect(termite.termiteNextMonitoringVisit).toBeNull();
-  const pest = await buildReportV1Data(BASE_SERVICE, 'token-pest-none', knex);
+  const pest = await buildReportV1Data(BASE_SERVICE, 'token-pest-none', knex, LIVE_V2);
   expect(pest.termiteNextMonitoringVisit).toBeNull();
+});
+
+test('termite report: the lookup never runs (no catalog reads) when the gate is off, in pdf mode, or for a non-bait termite form', async () => {
+  const bait = { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' };
+  const build = (service, opts) => {
+    const reads = [];
+    const base = makeKnex({ ...BASE_FIXTURES, scheduled_services: [bait] });
+    const spy = (table) => { reads.push(table); return base(table); };
+    spy.schema = base.schema;
+    return buildReportV1Data(service, 'token-termite-gated', spy, opts).then((data) => ({ data, reads }));
+  };
+  process.env.TERMITE_REPORT_V2 = 'false';
+  const gatedOff = await build(TERMITE_SERVICE, LIVE_V2);
+  expect(gatedOff.data.termiteNextMonitoringVisit).toBeNull();
+  expect(gatedOff.reads).not.toContain('service_completion_profiles');
+  process.env.TERMITE_REPORT_V2 = 'true';
+  const pdf = await build(TERMITE_SERVICE, { mode: 'pdf' });
+  expect(pdf.data.termiteNextMonitoringVisit).toBeNull();
+  expect(pdf.reads).not.toContain('service_completion_profiles');
+  const liquid = await build({ ...TERMITE_SERVICE, service_type: 'Termite Liquid Treatment', service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_liquid', values: {} } }) }, LIVE_V2);
+  expect(liquid.data.termiteNextMonitoringVisit).toBeNull();
+  expect(liquid.reads).not.toContain('service_completion_profiles');
+  // and the live bait report DOES resolve through the profile table
+  const live = await build(TERMITE_SERVICE, LIVE_V2);
+  expect(live.data.termiteNextMonitoringVisit?.serviceType).toBe('Termite Bait Station Service');
 });

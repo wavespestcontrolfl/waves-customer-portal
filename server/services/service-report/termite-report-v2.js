@@ -151,11 +151,15 @@ function buildTodaysResultCopy({
       body: `No termite activity was observed in the ${checked} station${plural(checked)} we were able to inspect.${accessNote}`,
     };
   }
+  // "all N" only when a denominator was documented (recorded total, or an
+  // explicit inaccessible count) — a checked count alone never claims the
+  // whole network (codex P2 #3600 r8). Property-neutral: the same profile
+  // serves commercial bait programs (warehouse, office, multifamily), so
+  // never "your home".
+  const scope = total ? `all ${checked}` : `${checked}`;
   return {
     headline: 'No termite activity observed',
-    // Property-neutral: the same profile serves commercial bait programs
-    // (warehouse, office, multifamily), so never "your home".
-    body: `We inspected all ${checked} bait station${plural(checked)} around the property today. No termite activity was observed at the stations inspected.`,
+    body: `We inspected ${scope} bait station${plural(checked)} around the property today. No termite activity was observed at the stations inspected.`,
   };
 }
 
@@ -185,8 +189,11 @@ function buildTodaysMetrics({ checked, total, activityCount = null, activityObse
   // print "0" under a body that says service was performed.
   let servicedValue = String(servicedCount || 0);
   if (!servicedCount && servicedToday) servicedValue = 'Performed';
+  // No documented denominator → count only, never an invented "N of N".
+  let inspectedValue = String(checked);
+  if (total) inspectedValue = `${checked} of ${total}`;
   const metrics = [
-    { label: 'Stations inspected', value: total && total !== checked ? `${checked} of ${total}` : `${checked} of ${checked}` },
+    { label: 'Stations inspected', value: inspectedValue },
     { label: 'Termite activity', value: activityValue },
     { label: 'Stations serviced', value: servicedValue },
   ];

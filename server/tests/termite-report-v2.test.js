@@ -73,6 +73,15 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
     expect(copy.body).not.toMatch(/termite[- ]free|no termites|your home/i);
   });
 
+  it('a checked count with no documented total never claims "all"', () => {
+    const copy = buildTodaysResultCopy({ statusKey: 'protected', checked: 12, total: null, activityCount: 0, inaccessible: 0 });
+    expect(copy.headline).toBe('No termite activity observed');
+    expect(copy.body).toMatch(/We inspected 12 bait stations around the property/);
+    expect(copy.body).not.toMatch(/all 12/);
+    expect(buildTodaysMetrics({ checked: 12, total: null, activityCount: 0, servicedCount: 0 })[0].value).toBe('12');
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0 })[0].value).toBe('12 of 12');
+  });
+
   it('partial access leads with "N of M inspected" and promises the re-check', () => {
     const copy = buildTodaysResultCopy({ statusKey: 'protected', checked: 10, total: 12, activityCount: 0, servicedToday: false, inaccessible: 2 });
     expect(copy.headline).toBe('10 of 12 stations inspected');

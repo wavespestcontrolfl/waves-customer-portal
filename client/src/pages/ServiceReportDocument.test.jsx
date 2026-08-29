@@ -743,6 +743,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('Termidor Foam');
   });
 
+  it('keeps an applied pest bait (Advion gel under bait_placement) as a real application', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      applications: [{ id: 'a1', method: 'bait_placement', totalAmount: '4', amountUnit: 'g', product: { name: 'Advion Ant Bait Gel', category: 'insecticide bait', epa_reg: '100-1498', active_ingredient: 'Indoxacarb' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Advion Ant Bait Gel');
+    expect(container.textContent).toContain('100-1498');
+  });
+
   it('never lists a bait cartridge recorded under bait_placement (device identity beats the method)', () => {
     const data = {
       ...BASE_DATA,
