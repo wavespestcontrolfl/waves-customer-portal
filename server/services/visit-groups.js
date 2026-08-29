@@ -104,6 +104,13 @@ function canJoin(row, visit) {
   if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) {
     return { ok: false, reason: 'row_terminal' };
   }
+  // An unconfirmed office-review booking is not yet a real stop (it needs
+  // the tech's field-confirm tap or the office's activation first); it
+  // groups once confirmed — the shared status writer regroups it on
+  // pending → confirmed (codex #3603 r2).
+  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) {
+    return { ok: false, reason: 'office_review' };
+  }
   if (!row.groupable) return { ok: false, reason: 'not_groupable' };
   if (!familiesCompatible(row.group_family, visit.group_family)) return { ok: false, reason: 'family' };
   if (row.technician_id && visit.technician_id
@@ -341,6 +348,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       .whereIn('ss.id', ids)
       .select(
         'ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.source_action', 'ss.customer_confirmed',
         'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.status',
         'ss.visit_id',
         'svc.groupable as groupable', 'svc.group_family as group_family',
@@ -387,6 +395,9 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       }
       if (!r.groupable || !r.group_family) {
         throw new Error('rows not mutually groupable: not_groupable');
+      }
+      if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(r)) {
+        throw new Error('rows not mutually groupable: office_review');
       }
     }
     // A row that already carries a completion artifact (service record or
@@ -890,6 +901,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
       .where('ss.id', rowId)
       .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.source_action', 'ss.customer_confirmed',
         'ss.window_start', 'ss.window_end', 'ss.technician_id',
         'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
     if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
@@ -906,6 +918,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     // window + tech for the office). Office placement/explicit grouping
     // is the path for those rows — as subject AND as partner.
     if (!row.window_start) return null;
+    if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
     if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -923,6 +936,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     else partnersQ.whereNull('ss.property_id');
     partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
       'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
+      'ss.source_action', 'ss.customer_confirmed',
       'svc.groupable', 'svc.group_family');
     // Every same-stop candidate, deterministically ordered — a cap made
     // grouping depend on heap order once a customer had more rows than
@@ -1027,6 +1041,20 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       const visit = await t('service_visits').where({ id: primary.visit_id }).first();
       if (!visit || String(visit.status) !== 'open') return null;
       await lockStop(t, visit.stop_base_key);
+      // Revalidate the PRIMARY under the stop lock (codex #3603 r2): a split
+      // or stop change can detach it between the tracker's row load and
+      // this lock — the tracker CAS does not predicate on visit_id. Only a
+      // primary that is still this visit's member, on the same technician,
+      // and actually at the target status leads its siblings.
+      const lockedPrimary = await t('scheduled_services').where({ id: primary.id }).forUpdate()
+        .first('id', 'visit_id', 'technician_id', 'status');
+      if (!lockedPrimary
+          || String(lockedPrimary.visit_id || '') !== String(visit.id)
+          || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')
+          || String(lockedPrimary.status) !== toStatus) {
+        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}, status=${lockedPrimary && lockedPrimary.status}) — skipped`);
+        return null;
+      }
       const siblings = await t('scheduled_services')
         .where({ visit_id: visit.id })
         .whereNot('id', primary.id)
@@ -1071,8 +1099,11 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       return { visitId: visit.id, moved, trackers, covered, skipped };
     });
   } catch (err) {
+    // Surfaced, not swallowed (codex #3603 r2): the caller reports the
+    // stop as NOT fully synced; the next signal (re-tap / Sync Stop /
+    // automatic arrival) re-runs this idempotently.
     logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id} (visit ${primary.visit_id}) failed: ${err.message}`);
-    return null;
+    return { ok: false, visitId: primary.visit_id, reason: err.message, siblingIds: [], trackerIds: [], skipped: [] };
   }
   if (!fan) return null;
 
@@ -1106,6 +1137,9 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
   const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   try {
+    // Upsert (codex r2): a later attempt that DELIVERS advances a
+    // suppressed/failed row to sent; a row already sent is never
+    // downgraded; attempts count every reconciliation.
     await db('visit_effects')
       .insert({
         visit_id: fan.visitId,
@@ -1116,14 +1150,20 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         sent_at: status === 'sent' ? lifecycleAt : null,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
-      .ignore();
+      .merge({
+        status,
+        attempts: db.raw('?? + 1', ['visit_effects.attempts']),
+        sent_at: status === 'sent' ? lifecycleAt : null,
+        updated_at: lifecycleAt,
+      })
+      .where('visit_effects.status', '<>', 'sent');
   } catch (err) {
     logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: visit_effects record failed: ${err.message}`);
   }
   if (fan.skipped.length) {
     logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);
   }
-  return { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: { effectType, status } };
+  return { ok: true, visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: { effectType, status } };
 }
 
 /**

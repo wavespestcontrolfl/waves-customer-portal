@@ -78,6 +78,7 @@ describe('canJoin', () => {
     ['family', { group_family: 'lawn_tree_shrub' }],
     ['technician', { technician_id: 't2' }],
     ['window', { window_start: '14:00', window_end: '16:00' }],
+    ['office_review', { status: 'pending', source_action: 'ai_call_outbound_review', customer_confirmed: false }],
   ])('%s mismatch refuses', (reason, patch) => {
     const visit = { ...baseVisit, technician_id: 't1' };
     const row = { ...baseRow, technician_id: 't1', ...patch };

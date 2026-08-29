@@ -19,13 +19,15 @@ jest.mock('../models/db', () => {
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       insert(values) { log.push({ table, op: 'insert', values }); return chain; },
-      onConflict() { return chain; },
+      onConflict() { chain._ops.push(['onConflict', ...arguments]); return chain; },
+      merge(values) { chain._merge = values; log.push({ table, op: 'merge', values }); return chain; },
       ignore() { return Promise.resolve([]); },
       then(res, rej) { return Promise.resolve([]).then(res, rej); },
     };
     return chain;
   }
   const db = jest.fn((table) => makeChain(table, db.__script, calls));
+  db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.__calls = calls;
   db.__script = {};
   db.__rawCalls = [];
@@ -51,6 +53,7 @@ const trackTransitions = require('../services/track-transitions');
 const { fanOutLiveTransition } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
+const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', ...over });
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30' };
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
@@ -67,6 +70,7 @@ describe('fanOutLiveTransition', () => {
     db.__script = {
       service_visits: { first: () => VISIT },
       scheduled_services: {
+        first: lockedPrimary(),
         select: () => [
           { id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
           { id: 's2', status: 'on_site', technician_id: 't1', track_state: 'on_property' },   // not eligible for en_route
@@ -78,6 +82,7 @@ describe('fanOutLiveTransition', () => {
       },
     };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', actorType: 'tech', actorId: 't1', smsOutcome: 'sent' });
+    expect(out.ok).toBe(true);
     expect(out.visitId).toBe('v1');
     expect(out.siblingIds).toEqual(['s1']);
     expect(out.trackerIds).toEqual(['s1', 's5']);
@@ -96,13 +101,16 @@ describe('fanOutLiveTransition', () => {
     expect(covered.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['s1', 's5']], ['whereNull', 'track_sms_sent_at']]));
     const effect = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
     expect(effect.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'sent' });
+    // upsert: a later delivered attempt advances a non-sent row; never downgrades a sent one
+    const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
+    expect(merge.values).toMatchObject({ status: 'sent', attempts: { sql: '?? + 1' } });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('s6=office_review'));
   });
 
   test('on_site: arrival lifecycle written per moved sibling; effect status follows the primary send outcome', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
+      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
     };
     const out = await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorId: 't1', smsOutcome: 'gate_off' });
     expect(out.siblingIds).toEqual(['s1']);
@@ -115,7 +123,7 @@ describe('fanOutLiveTransition', () => {
   });
 
   test.each([['retry', 'failed'], ['suppressed', 'suppressed'], ['sent', 'sent']])('smsOutcome %s → effect %s', async (outcome, status) => {
-    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { select: () => [] } };
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => [] } };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome });
     expect(out.effect.status).toBe(status);
   });
@@ -127,10 +135,27 @@ describe('fanOutLiveTransition', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
   });
 
-  test('a failure inside the fan-out transaction is logged and returns null (the primary transition stands)', async () => {
+  test('a failure inside the fan-out transaction is SURFACED as ok:false (the primary transition stands; next signal repairs)', async () => {
     db.__script = { service_visits: { first: () => { throw new Error('boom'); } } };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
-    expect(out).toBe(null);
+    expect(out).toMatchObject({ ok: false, visitId: 'v1', reason: 'boom', siblingIds: [] });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
+  });
+
+  test.each([
+    ['detached (split committed under the lock)', { visit_id: 'v2' }],
+    ['reassigned technician', { technician_id: 't9' }],
+    ['not at the target status', { status: 'confirmed' }],
+  ])('primary revalidated under the stop lock — %s ⇒ no fan-out', async (_label, over) => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(over), select: () => [{ id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' }] },
+    };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out).toBe(null);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(trackTransitions.markEnRoute).not.toHaveBeenCalled();
+    const lockRead = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'first');
+    expect(lockRead.ops).toEqual(expect.arrayContaining([['forUpdate']]));
   });
 });

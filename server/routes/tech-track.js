@@ -421,6 +421,16 @@ router.post('/:id/en-route', async (req, res, next) => {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
     }
+    if (result.visitFanOut && result.visitFanOut.ok === false) {
+      // The primary moved; its linked services did not sync (codex #3603
+      // r2). Honest, retryable: the re-tap / Sync Stop runs the tracker
+      // writer again, whose fan-out is idempotent.
+      return res.status(409).json({
+        error: 'Your stop moved, but its linked services did not sync — tap again.',
+        code: 'visit_fanout_incomplete',
+        visitId: result.visitFanOut.visitId,
+      });
+    }
 
     // Delegated stale heal: markEnRoute's operational sync is best-effort
     // (it logs and continues), so verify the status actually landed before
@@ -448,7 +458,7 @@ router.post('/:id/en-route', async (req, res, next) => {
       enRouteAt: result.enRouteAt,
       smsSent: result.smsSent,
       alreadyEnRoute: !!result.alreadyEnRoute,
-      ...(result.visitFanOut
+      ...(result.visitFanOut && result.visitFanOut.ok
         ? { visitId: result.visitFanOut.visitId, visitSiblingsMoved: result.visitFanOut.siblingIds.length }
         : {}),
     });
@@ -526,6 +536,16 @@ router.post('/:id/on-site', async (req, res, next) => {
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
+    }
+    if (result.visitFanOut && result.visitFanOut.ok === false) {
+      // The primary moved; its linked services did not sync (codex #3603
+      // r2). Honest, retryable: the re-tap / Sync Stop runs the tracker
+      // writer again, whose fan-out is idempotent.
+      return res.status(409).json({
+        error: 'Your stop moved, but its linked services did not sync — tap again.',
+        code: 'visit_fanout_incomplete',
+        visitId: result.visitFanOut.visitId,
+      });
     }
 
     logger.info(

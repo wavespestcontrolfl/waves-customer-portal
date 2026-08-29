@@ -388,6 +388,21 @@ export default function TechHomePage() {
     ? serviceWindowLabel(stopWindow(nextVisitStop))
     : serviceWindowLabel(nextStop);
   const nextStopAlerts = nextVisitStop ? stopPropertyAlerts(nextVisitStop) : [];
+  // A grouped stop whose live members are not all at the primary's status
+  // (a fan-out that did not finish — codex #3603 r2): offer Sync Stop,
+  // which re-runs the primary's own transition; the server's fan-out is
+  // idempotent, so the lagging siblings catch up. Divergence-driven, so it
+  // survives reloads and does not depend on having seen the 409.
+  const stopOutOfSync = Boolean(
+    nextVisitStop && nextVisitStop.isVisit && nextStop
+      && ['en_route', 'on_site'].includes(nextStop.status)
+      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status) && s.status !== nextStop.status),
+  );
+  const handleSyncStop = () => {
+    if (!nextStop) return;
+    if (nextStop.status === 'on_site') handleOnSite(nextStop.id);
+    else if (nextStop.status === 'en_route') handleEnRoute(nextStop.id);
+  };
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -666,6 +681,15 @@ export default function TechHomePage() {
                 primary
                 disabled={onSiteState.pendingId === nextStop.id}
                 onClick={() => handleOnSite(nextStop.id)}
+              />
+            )}
+            {stopOutOfSync && (
+              <ActionBtn
+                label={(onSiteState.pendingId || enRouteState.pendingId) === nextStop.id ? 'Syncing…' : 'Sync Stop'}
+                icon="🔁"
+                primary
+                disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
+                onClick={handleSyncStop}
               />
             )}
           </div>

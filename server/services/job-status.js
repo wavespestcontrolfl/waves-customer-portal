@@ -916,7 +916,12 @@ async function transitionJobStatus({
       // rebuild the stop from scratch under the same join rules. Ordinary
       // forward transitions (pending→confirmed, →en_route, →on_site)
       // never regroup here; stamping happens at scheduling only.
-      if (['cancelled', 'skipped', 'no_show'].includes(String(fromStatus || ''))) {
+      // Regroup on a terminal reversal AND on pending → confirmed: an
+      // office-review booking is join-ineligible until confirmed
+      // (visit-groups.canJoin office_review), so its confirmation is its
+      // grouping moment (codex #3603 r2).
+      const pendingConfirmed = String(fromStatus || '') === 'pending' && String(toStatus || '') === 'confirmed';
+      if (['cancelled', 'skipped', 'no_show'].includes(String(fromStatus || '')) || pendingConfirmed) {
         void require('./visit-groups').maybeGroupRow(jobId, { createdBy: 'dispatch' }).catch((e) => {
           logger.warn(`[job-status] visit-group revival seam failed for ${jobId}: ${e.message}`);
         });

@@ -339,7 +339,7 @@ async function markEnRoute(serviceId, opts = {}) {
   if (result && result.ok && !opts._visitSibling && result._row) {
     const fan = await require('./visit-groups').fanOutLiveTransition({
       primary: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
-      smsOutcome: result.smsSent ? 'sent' : 'suppressed',
+      smsOutcome: result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled'),
     });
     if (fan) result.visitFanOut = fan;
   }
@@ -588,6 +588,10 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // write above, so it must not suppress today's send. A same-day guard
   // (SMS already sent for THIS attempt) still suppresses.
   let smsSent = false;
+  // Classification for the visit effect ledger (codex #3603 r2): a
+  // deterministic suppression (opt-out / covered sibling / already handled)
+  // must read differently from a provider failure ('retry').
+  let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
   // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
   // way" text came from the visit's primary row; the visit stamps this row
   // as covered afterwards (visit-groups.fanOutLiveTransition).
@@ -622,6 +626,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
         },
       );
 
+      smsOutcome = result && result.success ? 'sent' : (result && result.suppressed ? 'suppressed' : 'retry');
       // sendTechEnRoute can return undefined (opt-out path), falsy results,
       // or { success, sid }. Only mark sent on a positive signal.
       if (result && result.success) {
@@ -644,6 +649,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
       }
     } catch (err) {
       logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
+      smsOutcome = 'retry';
       // Leave track_sms_sent_at NULL so a retap can retry.
     }
   }
@@ -670,6 +676,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
     state: 'en_route',
     enRouteAt: now,
     smsSent,
+    smsOutcome,
     alreadyEnRoute: false,
     _row: svc,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
