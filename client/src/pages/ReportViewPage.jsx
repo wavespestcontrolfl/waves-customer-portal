@@ -694,8 +694,12 @@ export function visitWorkSummary(data = {}, fallback = '') {
     ].filter(Boolean);
     if (parts.length) return parts.join(' · ');
   }
+  // Same identity rule as Products Applied: a termite/rodent station or
+  // cartridge check is monitoring, not a product applied — the header must
+  // not count what the section below filters out (codex P2 #3600 r19).
   const appCount = (Array.isArray(data.applications) ? data.applications : [])
-    .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name).length;
+    .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name)
+    .filter(isProductApplication).length;
   const photoCount = [data.photos, data.completionPhotos, data.reportV2?.photos]
     .map((list) => (Array.isArray(list) ? list.length : 0))
     .reduce((max, n) => Math.max(max, n), 0);

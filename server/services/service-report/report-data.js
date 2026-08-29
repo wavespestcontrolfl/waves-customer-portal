@@ -4399,8 +4399,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         if (isBait === undefined) {
           let profile = null;
           try { profile = await resolveCompletionProfileForScheduledService(row, knex); } catch { profile = null; }
-          if (profile?.findingsType) isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE;
-          else if (profile?.projectType) isBait = false;
+          // A typed bait profile decides — except the installation profile,
+          // which freezes the same type but is not a monitoring check
+          // (codex P2 #3600 r19).
+          if (profile?.findingsType) {
+            isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE
+              && profile.serviceKey !== 'termite_installation_setup';
+          } else if (profile?.projectType) isBait = false;
           else isBait = isTermiteBaitServiceName(row?.service_type);
           verdictByIdentity.set(identity, isBait);
         }
@@ -4897,15 +4902,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // monitoring stations, NO active bait) — its completion profile freezes
     // the same typed type, but bait-deployed copy would misstate it
     // (codex P1 #3600 r18); it keeps the typed record too.
+    // Identity order (codex P1 #3600 r19): the completion-FROZEN service key
+    // (service_data.completedServiceKey — a permanent report must not
+    // change stage when an admin repoints the schedule row or a legacy
+    // record loses its link), then the live profile, then name tokens.
     termiteBaitStage: termiteBaitSnapshotOf(service)
       ? (() => {
-        const names = `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`;
-        if (laneProfile?.serviceKey === 'termite_installation_setup') return 'installation';
-        if (laneProfile?.serviceKey === 'termite_monitoring') return 'detection';
-        if (!laneProfile) {
-          if (/\b(install|installation|setup|set-up)\b/i.test(names)) return 'installation';
-          if (/\bmonitor(?:ing)?\b/i.test(names) && !/\bbait\b/i.test(names)) return 'detection';
+        const stageForKey = (key) => {
+          if (key === 'termite_installation_setup') return 'installation';
+          if (key === 'termite_monitoring') return 'detection';
+          return key ? 'monitoring' : null;
+        };
+        if (hasFrozenPrimary && frozenTraceData.completedServiceKey) {
+          return stageForKey(frozenTraceData.completedServiceKey);
         }
+        const fromProfile = stageForKey(laneProfile?.serviceKey || null);
+        if (fromProfile) return fromProfile;
+        const names = `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`;
+        if (/\b(install|installation|setup|set-up)\b/i.test(names)) return 'installation';
+        if (/\bmonitor(?:ing)?\b/i.test(names) && !/\bbait\b/i.test(names)) return 'detection';
         return 'monitoring';
       })()
       : null,

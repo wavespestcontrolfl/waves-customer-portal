@@ -256,9 +256,14 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     // baseline — the termite hero must read the companion's, never the roach's
     combined.activity = { score: 4, label: 'Roach Activity', levelWord: 'high', trend: 'up', trendWord: 'increased since the last visit', isBaseline: false };
     combined.companionReports[0].activity = { score: 1, label: 'Termite Activity', levelWord: 'low', trend: null, trendWord: null, isBaseline: true };
+    // one real perimeter product + the Trelona cartridge check: the header
+    // counts the product only (the section below lists the product only)
+    combined.applications.push({ id: 'app-perim', method: 'perimeter_spray', totalAmount: '1', amountUnit: 'gal', product: { name: 'Demand CS', category: 'insecticide', epa_reg: '100-1066', active_ingredient: 'Lambda-cyhalothrin' } });
     const { container } = renderReport(combined);
     // dashboard mounts once
     await screen.findByText('Termite activity observed at 2 stations', { selector: 'h2' });
+    expect(screen.getByText(/^1 product applied/)).toBeInTheDocument();
+    expect(screen.queryByText(/2 products applied/)).toBeNull();
     const hero = container.querySelector('#visit-summary');
     expect(within(hero).getByText('Baseline recorded today — trend starts next visit.')).toBeInTheDocument();
     expect(within(hero).queryByText(/increased since the last visit/)).toBeNull();

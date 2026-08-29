@@ -385,6 +385,26 @@ test('termite report: next monitoring visit skips an earlier liquid visit for th
   });
 });
 
+test('an upcoming installation appointment is skipped when searching for the next monitoring visit', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-install', service_key: 'termite_installation_setup', name: 'Termite Bait Station Installation', short_name: 'Install', category: 'termite' },
+      { id: 'svc-monitor', service_key: 'termite_bait', name: 'Termite Bait Station Service', short_name: 'Bait', category: 'termite' },
+    ],
+    service_completion_profiles: [
+      { service_key: 'termite_installation_setup', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+      { service_key: 'termite_bait', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+    ],
+    scheduled_services: [
+      { id: 'scheduled-install', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Bait Station Installation', window_start: '09:00:00', service_id: 'svc-install' },
+      { id: 'scheduled-check', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00', service_id: 'svc-monitor' },
+    ],
+  });
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-skip-install', knex, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-04-03');
+});
+
 test('termite report: the canonical completion-profile resolver is authoritative in both directions', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
@@ -516,6 +536,18 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
     LIVE_V2,
   );
   expect(detect.termiteBaitStage).toBe('detection');
+  // the completion-FROZEN key wins over a repointed live profile
+  const frozen = await buildReportV1Data(
+    {
+      ...TERMITE_SERVICE,
+      scheduled_service_id: 'sched-monitor',
+      service_data: JSON.stringify({ completedServiceKey: 'termite_installation_setup', typedReportSnapshot: { type: 'termite_bait_station', values: { stations_checked: 12 } } }),
+    },
+    'token-stage-frozen',
+    makeKnex({ ...fixtures, scheduled_services: [{ id: 'sched-monitor', customer_id: 'customer-1', service_id: 'svc-monitor', service_type: 'Termite Bait Station Service', scheduled_date: '2026-08-27', status: 'completed' }] }),
+    LIVE_V2,
+  );
+  expect(frozen.termiteBaitStage).toBe('installation');
   // a non-bait record carries no stage at all
   const pest = await buildReportV1Data(BASE_SERVICE, 'token-stage-pest', makeKnex({ ...fixtures, scheduled_services: [] }), LIVE_V2);
   expect(pest.termiteBaitStage).toBeNull();
