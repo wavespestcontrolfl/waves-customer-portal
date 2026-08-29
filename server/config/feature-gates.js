@@ -819,6 +819,17 @@ const gates = {
   // are exempt. Opt-in in EVERY environment; unset = today's behavior.
   smsSendWindow: process.env.GATE_SMS_SEND_WINDOW === 'true',
 
+  // Email-first 72h appointment reminders for ONE-TIME visits (owner
+  // rulings 2026-08-29): a one-time visit's 72h reminder DEFAULT channel
+  // becomes email — the appointment.reminder_72h template with the
+  // self-serve reschedule CTA and the card-hold fee-policy note — with the
+  // existing no-usable-email SMS fallback intact. Recurring-lineage visits
+  // (is_recurring / recurring_parent_id / recurring_pattern) keep their SMS
+  // rhythm; explicit 'both' preferences keep both legs; the 24h reminder is
+  // untouched. Customer-facing channel change: explicit opt-in in EVERY
+  // environment; unset = SMS-led 72h reminders (today's behavior).
+  reminder72hEmailFirst: process.env.GATE_REMINDER_72H_EMAIL_FIRST === 'true',
+
   // Estimate Deposit-Abandonment SMS — texts customers who started the
   // deposit payment step on a public estimate (a pending Stripe
   // PaymentIntent in estimate_deposits) but never completed it. Customer-
