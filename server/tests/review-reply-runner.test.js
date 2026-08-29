@@ -338,6 +338,28 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
   });
 
+  test('gate OFF: the scheduler entry runModeIndependentSweeps still releases legacy under-4★ parks and re-rings failed bells; processDueAutoReplies(off) reports the same and claims nothing (codex #3587 r3)', async () => {
+    delete process.env.GATE_REVIEW_AUTO_REPLY;
+    expect(Runner.mode()).toBe('off');
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    state.rows = [
+      row({ id: 'old-park', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana, sorry.', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_version: 'reply-v1' }),
+      row({ id: 'bell', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', review_reply: 'Our reply', auto_reply_error: 'bell_failed:review_edited_after_post:edit' }),
+      row({ id: 'due', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: new Date(Date.now() - 60000).toISOString() }),
+    ];
+    expect(await Runner.runModeIndependentSweeps()).toEqual({ bellsRetried: 1, lowRatingReleased: 1 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: null, auto_reply_draft: null });
+    expect(state.rows[1].auto_reply_error).toBeNull();
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
+    // Idempotent; the cron entry (mode off) runs the same sweeps and never claims the due row.
+    state.rows[0] = row({ id: 'old-park-2', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'unrated', auto_reply_draft: 'x', review_reply: null, auto_reply_version: 'reply-v1' });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ mode: 'off', bellsRetried: 0, lowRatingReleased: 1, claimed: 0, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
+    mockNotify.mockReset().mockResolvedValue({});
+  });
+
   test('pre-rule low-rating parks are swept back to NULL state; human drafts and reconciliation parks stay (codex #3587 r1)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [

@@ -842,16 +842,30 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
 }
 
 /**
+ * Sweeps that run on EVERY cron tick regardless of the posting mode — and
+ * regardless of the scheduler's own isEnabled('reviewAutoReply') guard,
+ * which calls this directly when the gate is off (codex #3587 r3):
+ *  - failed-bell retry (codex r53): a bell_failed stamp left while the lane
+ *    was on must still be re-rung after the gate is switched off;
+ *  - legacy under-4★ park release: pre-2026-08-29 drafts/parks must leave
+ *    the lane even if the lane itself is disabled during or after deploy.
+ * Each sweep is isolated so one failing never starves the other.
+ */
+async function runModeIndependentSweeps() {
+  const bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
+  const lowRatingReleased = await sweepLowRatingParks().catch((err) => { logger.warn(`[review-auto-reply] low-rating park sweep failed: ${err.message}`); return 0; });
+  return { bellsRetried, lowRatingReleased };
+}
+
+/**
  * Cron entry — processes due rows serially. Call under runExclusive.
  */
 async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   const cfg = config();
   const stats = { mode: cfg.mode, enqueued: 0, bellsRetried: 0, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
-  // The failed-bell sweep runs regardless of the posting mode (codex r53):
-  // a bell_failed stamp left while the lane was on must still be re-rung
-  // after the gate is switched off.
-  stats.bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
-  await sweepLowRatingParks().catch((err) => { logger.warn(`[review-auto-reply] low-rating park sweep failed: ${err.message}`); });
+  const sweeps = await runModeIndependentSweeps();
+  stats.bellsRetried = sweeps.bellsRetried;
+  stats.lowRatingReleased = sweeps.lowRatingReleased;
   if (cfg.mode === 'off') return stats;
   stats.enqueued = await enqueueMissedReviews({ cfg }).catch((err) => { logger.warn(`[review-auto-reply] catch-up enqueue failed: ${err.message}`); return 0; });
   const rows = await claimDueRows({ limit });
@@ -1670,6 +1684,7 @@ module.exports = {
   renewClaim,
   processClaimedRow,
   processDueAutoReplies,
+  runModeIndependentSweeps,
   postNow,
   skipAutoReply,
   dismissCancelFields,
