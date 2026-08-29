@@ -31,12 +31,6 @@ const SEEDS = [
   { service_key: 'palm_injection', add: ['palm_injection'] },
 ];
 
-function parseKeys(v) {
-  if (Array.isArray(v)) return v;
-  if (typeof v === 'string') { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; } }
-  return [];
-}
-
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services')) || !(await knex.schema.hasColumn('services', 'engine_keys'))) return;
   // Serialize the owner-check → stamp span against concurrent admin edits
@@ -86,16 +80,12 @@ exports.down = async function down(knex) {
   // with an admin edit (pre-push codex P1).
   await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
   for (const rec of applied) {
-    const row = await knex('services').where({ id: rec.id }).first('id', 'engine_keys');
-    if (!row) continue;
-    const current = parseKeys(row.engine_keys);
-    const remaining = current.filter((k) => !rec.added.includes(k));
-    if (remaining.length === current.length) continue; // admin already removed / changed it
-    // Compare-and-set on the array just read — an edit landing in between
-    // leaves the row alone rather than being overwritten.
+    // Revert ONLY an array that still equals exactly what up() wrote; an
+    // admin-edited array (anything added or removed since) is owner data and
+    // is left untouched (pre-push codex P1). Compare-and-set on that value.
     await knex('services').where({ id: rec.id })
-      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(current)])
-      .update({ engine_keys: rec.wasNull && remaining.length === 0 ? null : JSON.stringify(remaining), updated_at: knex.fn.now() });
+      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(rec.added)])
+      .update({ engine_keys: null, updated_at: knex.fn.now() });
   }
 };
 
