@@ -86,11 +86,21 @@ describe('composeAutopaySmsDigest', () => {
     expect(composed.text).toContain('lane NULL (inferred)');
   });
 
-  test('a send with no customer row is listed but not counted as a lane mismatch', () => {
+  test('a send with no customer row fails closed: unknown lane counts as a mismatch (codex r1)', () => {
     const composed = composeAutopaySmsDigest([row({ customer_id: null, customer_name: null, billing_mode: null, waveguard_tier: null, monthly_rate: null })]);
-    expect(composed.mismatches).toBe(0);
+    expect(composed.mismatches).toBe(1);
+    expect(composed.subject).toBe('FIX: 1 of 1 autopay text went to NON-monthly customers');
     expect(composed.text).toContain('(no name on file)');
-    expect(composed.text).toContain('lane no customer row');
+    expect(composed.text).toContain('lane unknown (no customer row)');
+  });
+
+  test('mismatches beyond the displayed page still escalate via the whole-window count (codex r1)', () => {
+    // 80 sends in the window, only the newest (monthly) row is on the page,
+    // but 3 non-monthly recipients sit past the LIMIT.
+    const composed = composeAutopaySmsDigest([row({ total_count: 80, mismatch_count: 3 })]);
+    expect(composed.mismatches).toBe(3);
+    expect(composed.subject).toBe('FIX: 3 of 80 autopay texts went to NON-monthly customers');
+    expect(composed.text).toContain('…and 79 more not shown');
   });
 
   test('html escapes the preview and reports overflow beyond the page', () => {

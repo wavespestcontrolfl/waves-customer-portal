@@ -68,6 +68,9 @@ async function loadSentAutopayTexts(since) {
   const { rows } = await db.raw(
     `
     SELECT COUNT(*) OVER () AS total_count,
+           -- Whole-window mismatch count (codex r1): a non-monthly recipient
+           -- beyond the display page must still escalate the subject.
+           COUNT(*) FILTER (WHERE cu.id IS NULL OR cu.billing_mode IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
            a.sent_at, a.entry_point, a.body_preview,
            a.metadata ->> 'original_message_type' AS message_type,
            a.customer_id,
@@ -95,8 +98,10 @@ function composeAutopaySmsDigest(rows) {
 
   const total = Number(sends[0]?.total_count) > 0 ? Number(sends[0].total_count) : sends.length;
   const lines = sends.map((r) => {
-    const lane = r.customer_id ? (r.billing_mode || 'NULL (inferred)') : 'no customer row';
-    const mismatch = Boolean(r.customer_id) && r.billing_mode !== 'monthly_membership';
+    // FAIL CLOSED (codex r1): a send with no customer row has an UNKNOWN
+    // lane — it cannot be vouched for as a monthly member, so it escalates.
+    const lane = r.customer_id ? (r.billing_mode || 'NULL (inferred)') : 'unknown (no customer row)';
+    const mismatch = r.billing_mode !== 'monthly_membership';
     return {
       when: etStamp(r.sent_at),
       who: r.customer_name || '(no name on file)',
@@ -109,7 +114,8 @@ function composeAutopaySmsDigest(rows) {
       customerId: r.customer_id,
     };
   });
-  const mismatches = lines.filter((l) => l.mismatch).length;
+  const pageMismatches = lines.filter((l) => l.mismatch).length;
+  const mismatches = Number(sends[0]?.mismatch_count) >= pageMismatches ? Number(sends[0].mismatch_count) : pageMismatches;
 
   const noun = `autopay text${total === 1 ? '' : 's'}`;
   const subject = mismatches > 0
