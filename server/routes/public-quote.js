@@ -92,6 +92,28 @@ function numberOrNull(...values) {
   return null;
 }
 
+// The wizard's existing-customer match (phone last-10 digits first, email
+// second; never a deleted row) — ONE definition shared by the pre-pricing
+// setup-waiver lookup and the post-pricing customer link (codex #3591 r14 P1).
+async function findExistingCustomerByContact(database, { contactPhone, contactEmail } = {}) {
+  const phoneDigits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+  const emailLc = String(contactEmail || '').trim().toLowerCase();
+  let existingCust = null;
+  if (phoneDigits.length === 10) {
+    existingCust = await database('customers')
+      .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
+      .whereNull('deleted_at')
+      .first();
+  }
+  if (!existingCust && emailLc) {
+    existingCust = await database('customers')
+      .whereRaw('LOWER(email) = ?', [emailLc])
+      .whereNull('deleted_at')
+      .first();
+  }
+  return existingCust || null;
+}
+
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
   // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
@@ -1146,6 +1168,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
+    // Rodent bait setup waiver needs the account's OTHER qualifying families
+    // BEFORE pricing (codex #3591 r14 P1): the customer link below runs after
+    // generateEstimate, so priorQualifyingServices is always empty here and a
+    // member's draft would freeze — and later bill — a $99 setup the rule
+    // waives. Resolved through the same contact rules as the link and the
+    // canonical loader; a lookup failure BLOCKS the rodent quote (retry)
+    // rather than mispricing it in either direction.
+    if (services.rodentBait) {
+      try {
+        const existingForWaiver = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
+        engineInput.setupWaiverPriorQualifyingServices = existingForWaiver
+          ? await require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys(db, existingForWaiver.id)
+          : [];
+      } catch (lookupErr) {
+        logger.error(`[public-quote] rodent setup-waiver account lookup failed: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Account lookup is temporarily unavailable — please retry in a moment.' });
+      }
+    }
     const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
@@ -1334,21 +1374,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // have it.
     let customerId = null;
     try {
-      const phoneDigits = String(contactPhone).replace(/\D/g, '').slice(-10);
-      const emailLc = contactEmail;
-      let existingCust = null;
-      if (phoneDigits.length === 10) {
-        existingCust = await db('customers')
-          .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${phoneDigits}`])
-          .whereNull('deleted_at')
-          .first();
-      }
-      if (!existingCust && emailLc) {
-        existingCust = await db('customers')
-          .whereRaw('LOWER(email) = ?', [emailLc])
-          .whereNull('deleted_at')
-          .first();
-      }
+      const existingCust = await findExistingCustomerByContact(db, { contactPhone, contactEmail });
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
@@ -2422,6 +2448,7 @@ module.exports._internals = {
   quoteOnRequestEstimate,
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
+  findExistingCustomerByContact,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,

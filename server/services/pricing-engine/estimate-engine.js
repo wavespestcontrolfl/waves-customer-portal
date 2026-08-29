@@ -1248,6 +1248,15 @@ function generateEstimate(input) {
   const priorQualifyingServices = Array.isArray(input.priorQualifyingServices)
     ? input.priorQualifyingServices
     : [];
+  // Setup-waiver-ONLY prior services (codex #3591 r14 P1): the public quote
+  // wizard prices before it links the customer, so it resolves the account's
+  // canonical qualifying families up front and passes them here — they
+  // decide the rodent bait-station setup waiver (owner rule: waived by any
+  // OTHER qualifying recurring service, on the estimate or already active)
+  // without changing the wizard's estimate-level tier pricing.
+  const setupWaiverPriorQualifyingServices = Array.isArray(input.setupWaiverPriorQualifyingServices)
+    ? input.setupWaiverPriorQualifyingServices
+    : [];
   // A customer with prior qualifying recurring services IS a recurring customer,
   // so prior services force this true even when the form serialized an explicit
   // recurringCustomer:false (e.g. a one-time-only estimate for an existing
@@ -1763,7 +1772,7 @@ function generateEstimate(input) {
   if (services.rodentBait && !rodentLegacyPin) {
     const rodentLine = lineItems.find((i) => i.service === 'rodent_bait' || i.service === 'commercial_rodent_bait');
     const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
-    const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices])]
+    const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices, ...setupWaiverPriorQualifyingServices])]
       .filter((key) => key !== 'rodent_bait');
     const isWaveGuardMember = determineWaveGuardTier(otherQualifiers).qualifyingCount > 0;
     if (rodentPriced && !isWaveGuardMember) {

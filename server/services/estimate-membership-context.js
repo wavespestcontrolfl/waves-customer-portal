@@ -38,6 +38,31 @@ const {
   unitLineValueKey,
 } = require('../utils/address-normalizer');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
+
+// Which of these rodent bait rows were created by a 2026-08-29+ (new-model)
+// estimate: the creating estimate's stored result carries the
+// perApplicationBilled / stations marker (rodentBaitLegacyReplaySignal
+// returns null). Rows without a source estimate, or whose estimate cannot be
+// read, are NOT new-model.
+async function rodentRowsWithNewModelProvenance(database, rows = []) {
+  const { rodentBaitLegacyReplaySignal } = require('./rodent-bait-legacy-replay');
+  const sourceIds = [...new Set(rows.map((row) => row.source_estimate_id).filter(Boolean).map(String))];
+  const newModelEstimateIds = new Set();
+  if (sourceIds.length) {
+    const estimates = await database('estimates').whereIn('id', sourceIds).select('id', 'estimate_data');
+    for (const est of estimates || []) {
+      let data = est.estimate_data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+      if (!data || typeof data !== 'object') continue;
+      const hasRodentRow = [data?.result?.recurring?.services, data?.result?.lineItems, data?.engineResult?.lineItems]
+        .some((arr) => Array.isArray(arr) && arr.some((svc) => String(svc?.service || '').toLowerCase() === 'rodent_bait'));
+      if (hasRodentRow && rodentBaitLegacyReplaySignal(data) === null) newModelEstimateIds.add(String(est.id));
+    }
+  }
+  return new Set(rows
+    .filter((row) => row.source_estimate_id && newModelEstimateIds.has(String(row.source_estimate_id)))
+    .map((row) => String(row.id)));
+}
 const {
   toQualifyingKey,
   toQualifyingKeys,
@@ -1521,7 +1546,7 @@ async function computeMembershipContext(database, {
         // A family this estimate re-quotes is already a priced line of the
         // estimate itself — never also listed as an existing extension.
         if (newKeys.includes(familyKey)) continue;
-        const eligibleRows = familyRows.filter((row) => {
+        let eligibleRows = familyRows.filter((row) => {
           if (planEligibleIds && !planEligibleIds.has(String(row.id))) return false;
           if (isCallbackServiceRow(row)) return false;
           const day = visitDateKey(row.scheduled_date);
@@ -1529,6 +1554,24 @@ async function computeMembershipContext(database, {
           return qualifyingKeysForRow(row).length === 1;
         });
         if (!eligibleRows.length) continue;
+        // Grandfathered rodent bait plans keep their snapshotted rate and
+        // never receive the new tier % (owner 2026-08-29) — they still COUNT
+        // toward the tier, but they are never repriced by an extension
+        // (codex #3591 r14 P1). Only rows whose creating estimate carries
+        // new-model provenance (perApplicationBilled / stations) qualify;
+        // rows with no source estimate cannot prove it and are left alone.
+        // FAIL CLOSED: a probe failure leaves the family off the plan.
+        if (familyKey === 'rodent_bait') {
+          let newModelIds;
+          try {
+            newModelIds = await rodentRowsWithNewModelProvenance(database, eligibleRows);
+          } catch (probeErr) {
+            logger.warn(`[membership-context] rodent provenance probe failed — family left off the extension plan: ${probeErr.message}`);
+            continue;
+          }
+          eligibleRows = eligibleRows.filter((row) => newModelIds.has(String(row.id)));
+          if (!eligibleRows.length) continue;
+        }
         const distinctAddresses = new Set(eligibleRows.map((row) => row.effective_service_address).filter(Boolean));
         if (distinctAddresses.size > 1) continue;
         // Composite visits AND pre-minted invoices park at SNAPSHOT time

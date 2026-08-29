@@ -8733,14 +8733,14 @@ function calculateRodentGuaranteeCombo(config = {}) {
     sqft, stories, roofType, entryPointsFound, includesScreening, constructionType,
   });
 
-  // Reuse legacy bait-station pricer (monthly) → quarterly.
-  // Auto-flag postExclusion: combo context = sealed structure, lighter scope.
-  const stations = stationCount || (Math.ceil(sqft / 500) + 2);
-  const bait = priceRodentBait(
-    { footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {}, roofType },
-    { postExclusion: true }
-  );
-  const baitQuarterly = (bait.monthly || 0) * 3;
+  // Bait stations at the standard footprint bracket (owner 2026-08-29): the
+  // post-exclusion modifier (~28% off, $55/mo floor) is RETIRED — one price
+  // for everyone — so the combo prices the same per-application figure a
+  // standalone quote would, and the station count is the bracket allowance
+  // unless the caller states one (codex #3591 r14 P2).
+  const bait = priceRodentBait({ footprint: sqft, lawnSqFt: 0, lotSqFt: sqft, features: {}, roofType });
+  const stations = stationCount || bait.stations;
+  const baitQuarterly = Number(bait.perVisit) || 0;
 
   const GUARANTEE_PREMIUM = { 12: 0.15, 24: 0.25 };
   const term = GUARANTEE_PREMIUM[guaranteeTerm] ? guaranteeTerm : 12;

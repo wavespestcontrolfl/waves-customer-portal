@@ -406,6 +406,29 @@ describe('revised rodent pricing rules', () => {
 
     expect(combo.breakdown.bundleDiscount).toBe(0);
     expect(combo.breakdown.baitExcludedFromBundleDiscount).toBe(true);
+    // Bait component = the standard bracket per application (post-exclusion
+    // modifier retired — codex #3591 r14 P2): 2,400 sf → 5 stations, $89.
+    const standalone = generateEstimate(baseInput({ homeSqFt: 2400, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(combo.breakdown.baitStationQuarterly).toBe(standalone.perVisit);
+    expect(combo.detail).toContain(`${standalone.stations} bait stations`);
+  });
+
+  test('wizard-supplied prior qualifying services waive the setup WITHOUT moving the estimate tier (codex #3591 r14 P1)', () => {
+    const solo = generateEstimate(baseInput({ services: { rodentBait: {} } }));
+    expect(solo.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeDefined();
+    const member = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['lawn_care'],
+    }));
+    expect(member.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+    expect(member.waveGuard.qualifyingCount).toBe(solo.waveGuard.qualifyingCount);
+    // Rodent itself never self-waives through this channel either.
+    const rodentOnlyPrior = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['rodent_bait'],
+    }));
+    expect(rodentOnlyPrior.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeDefined();
   });
 });
 

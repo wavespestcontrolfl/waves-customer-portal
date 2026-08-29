@@ -526,7 +526,7 @@ function SpecServicesPanel() {
       key: "rodentGuaranteeCombo",
       fn: "calculateRodentGuaranteeCombo",
       name: "Rodent Guarantee Combo",
-      desc: "Exclusion + Bait Stations + 12/24-mo guarantee. 10% bundle discount, 15–25% guarantee premium. Min $695 / $995. Auto-applies postExclusion modifier on bait stations (~28% off standalone, $55/mo floor).",
+      desc: "Exclusion + Bait Stations + 12/24-mo guarantee. No bundle discount on the bait component, 15–25% guarantee premium. Min $695 / $995. Bait stations price at the standard footprint bracket (per quarterly application, station allowance by home size) — the post-exclusion modifier was retired 2026-08-29.",
     },
   ];
   return (

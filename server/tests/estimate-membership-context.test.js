@@ -36,6 +36,8 @@ function fakeDb({
   addonQueryThrows = false,
   mintedInvoiceLinks = [],
   mintedProbeThrows = false,
+  estimateRows = [],
+  estimatesQueryThrows = false,
   // Opt-in catalog-join support. WITHOUT catalogRows the builder has no
   // leftJoin at all, so the catalog and cadence loaders throw and degrade
   // exactly as they did before this parameter existed — every pre-existing
@@ -126,6 +128,10 @@ function fakeDb({
           return prepaidTerms;
         }
         if (table === 'scheduled_services') return scheduledRows;
+        if (table === 'estimates') {
+          if (estimatesQueryThrows) throw new Error('relation does not exist');
+          return estimateRows;
+        }
         if (table === 'invoices') {
           if (probesServiceIds) {
             if (mintedProbeThrows) throw new Error('relation does not exist');
@@ -2257,6 +2263,39 @@ describe('existing-service tier extension snapshot', () => {
     expect(ctx.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
     expect(ctx.existingServices).toEqual([]);
     expect(ctx.discountAppliesTo).toBe('new_services_only');
+  });
+
+  test('gate on: a GRANDFATHERED rodent bait plan counts toward the tier but is never extension-repriced; a new-model one is (codex #3591 r14 P1)', async () => {
+    mockExtendExistingGate = true;
+    const legacyRows = [
+      { id: 'r1', service_type: 'Rodent Bait Stations', scheduled_date: '2099-02-05', estimated_price: 147, source_estimate_id: 'est-legacy' },
+      { id: 'r2', service_type: 'Rodent Bait Stations', scheduled_date: '2099-05-05', estimated_price: 147, source_estimate_id: 'est-legacy' },
+    ];
+    const legacyEstimate = { id: 'est-legacy', estimate_data: { result: { recurring: { services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49 }] } } } };
+    const legacy = await computeMembershipContext(fakeDb({
+      scheduledRows: legacyRows,
+      estimateRows: [legacyEstimate],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(legacy.upgrade).toMatchObject({ fromLabel: 'Bronze', toLabel: 'Silver' });
+    expect(legacy.existingServices).toEqual([]);
+
+    const newRows = legacyRows.map((row) => ({ ...row, estimated_price: 89, source_estimate_id: 'est-new' }));
+    const newEstimate = { id: 'est-new', estimate_data: { result: { recurring: { services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 }] } } } };
+    const fresh = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows,
+      estimateRows: [newEstimate],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(fresh.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
+
+    // No source estimate → cannot prove new-model → left alone. Probe failure → fail closed.
+    const unsourced = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(unsourced.existingServices).toEqual([]);
+    const failed = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows, estimateRows: [newEstimate], estimatesQueryThrows: true,
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(failed.existingServices).toEqual([]);
   });
 
   test('gate on: Bronze→Silver lawn add-on lists existing pest at the delta rate with its upcoming visits', async () => {
