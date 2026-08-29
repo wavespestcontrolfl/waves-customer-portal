@@ -58,6 +58,46 @@ test('applies the move and atomically increments the change count', async () => 
   expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false });
 });
 
+test('the tapped row\'s pending restore is fenced on the landed slot; a miss stamps without the status flip (local audit)', async () => {
+  const tappedWhere = jest.fn();
+  const fenced = jest.fn().mockResolvedValue(0); // staff confirmed / moved it after the commit
+  const plain = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'pending', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where(pred) { tappedWhere(pred); return this; }, update: fenced },
+    { where() { return this; }, update: plain },
+    { insert },
+  ];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
+  expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00' });
+  expect(plain.mock.calls[0][0].status).toBeUndefined();
+  expect(insert).not.toHaveBeenCalled();
+});
+
+test('a sibling reported without a landed slot is stamped but never rewound (cannot be fenced)', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landed: null },
+    ] },
+  });
+  const updateSib = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    { where() { return this; }, update: updateSib },
+    { insert },
+  ];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+  expect(updateSib.mock.calls[0][0].status).toBeUndefined();
+  expect(insert).not.toHaveBeenCalled();
+});
+
 test('preserves pending: restores pending + writes a compensating history row', async () => {
   const update = jest.fn().mockResolvedValue(1);
   const insert = jest.fn().mockResolvedValue();
@@ -125,7 +165,7 @@ test('a grouped stop moved as a unit: every moved sibling gets the same bookkeep
     success: true,
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
-      { id: 's2', isPrimary: false, previousStatus: 'pending' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
     ] },
   });
   const updateTapped = jest.fn().mockResolvedValue(1);
@@ -151,7 +191,7 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
     success: true,
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
       { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
-      { id: 's2', isPrimary: false, previousStatus: 'pending' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending', landed: { scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' } },
     ] },
   });
   const updateTapped = jest.fn().mockResolvedValue(1);
@@ -168,7 +208,8 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
   db.mockImplementation(() => queue.shift());
 
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
-  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed' });
+  // fenced on status AND the landed slot (local audit): a newer confirm/move is never rewound
+  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' });
   expect(updateSibPlain.mock.calls[0][0].status).toBeUndefined();
   expect(insert).not.toHaveBeenCalled();
 });

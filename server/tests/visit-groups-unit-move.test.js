@@ -261,9 +261,10 @@ describe('moveVisitAsUnit', () => {
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'auto' } });
     expect(rebooker.reschedule.mock.calls[1][5]).toMatchObject({ seriesPolicy: 'single', visitPolicy: 'single' });
+    const landed = { scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' };
     expect(out.visitMove.members).toEqual([
-      { id: 'a', isPrimary: true, previousStatus: 'confirmed' },
-      { id: 'b', isPrimary: false, previousStatus: 'pending' },
+      { id: 'a', isPrimary: true, previousStatus: 'confirmed', landed },
+      { id: 'b', isPrimary: false, previousStatus: 'pending', landed },
     ]);
   });
 
@@ -529,7 +530,10 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     // b (t1 → t9) re-pointed through the canonical writer on a transaction; c already on t9 is not touched
     expect(assignDispatchJob).toHaveBeenCalledTimes(1);
     // skipVisitSeam: the per-row seam must not run on a half-reassigned visit (codex r16 P1) — step 4 runs it per member after the retarget
-    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true });
+    // expectTechnicianId = the PLANNED pre-move tech (local audit): a newer operator reassignment is never overwritten
+    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1' });
+    // every moved member reports the slot it landed on, for the caller's fenced bookkeeping
+    expect(out.visitMove.members.find((m) => m.id === 'b').landed).toEqual({ scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' });
     // and the parent still carries the technician
     const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.scheduled_date);
     expect(patch.values).toMatchObject({ technician_id: 't9' });
@@ -550,6 +554,12 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(out.visitMove.moved).toEqual(['a', 'b']);
     expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED' }]);
     expect(out.warnings.some((w) => /did not move with this stop/.test(w))).toBe(true);
+    // a concurrent operator reassignment (ASSIGNMENT_STALE) is a failed member, not retried, not overwritten
+    jest.clearAllMocks(); db.__calls.length = 0; db.__script = script({ members: [member('a'), member('b')] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Job was reassigned concurrently - the planned technician is stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b', code: 'ASSIGNMENT_STALE' })]);
     // unassign (null) goes through the same writer
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: null } });

@@ -261,14 +261,25 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
       updated_at: db.fn.now(),
     };
-    if (postStatus === 'pending') stamp.status = 'pending';
-    await db('scheduled_services').where({ id: service.id }).update(stamp);
     if (postStatus === 'pending') {
-      // The rebooker just logged pending→confirmed; record the compensating
-      // confirmed→pending so the job_status_history timeline stays consistent.
-      await db('job_status_history').insert({
-        job_id: service.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
-      });
+      // Fenced on the exact slot + status this move wrote (local codex
+      // audit): a staff confirm or a newer move landing between the commit
+      // and this bookkeeping is newer state — never rewound to pending or
+      // stamped as this run's. A miss stamps without the status flip.
+      const restored = await db('scheduled_services')
+        .where({ id: service.id, status: 'confirmed', scheduled_date: best.date, window_start: best.start_time })
+        .update({ ...stamp, status: 'pending' });
+      if (Number(restored) === 1) {
+        // The rebooker just logged pending→confirmed; record the compensating
+        // confirmed→pending so the job_status_history timeline stays consistent.
+        await db('job_status_history').insert({
+          job_id: service.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+        });
+      } else {
+        await db('scheduled_services').where({ id: service.id }).update(stamp);
+      }
+    } else {
+      await db('scheduled_services').where({ id: service.id }).update(stamp);
     }
   } catch (stampErr) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
@@ -296,12 +307,14 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
         auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
         updated_at: db.fn.now(),
       };
-      if (sib.previousStatus === 'pending') {
-        // Fenced on the post-move 'confirmed' the rebooker wrote (codex r5):
-        // a cancel/complete/start that landed after the unit move must not
-        // be rewound to pending, and the history row only follows a real
-        // restoration.
-        const restored = await db('scheduled_services').where({ id: sib.id, status: 'confirmed' }).update({ ...stamp, status: 'pending' });
+      if (sib.previousStatus === 'pending' && sib.landed) {
+        // Fenced on the post-move 'confirmed' the rebooker wrote (codex r5)
+        // AND the exact slot the unit move landed (local audit): a staff
+        // confirm/reschedule after the unit move is newer state — never
+        // rewound to pending or stamped as this run's. The history row only
+        // follows a real restoration. A mover that reports no landed slot
+        // cannot be fenced ⇒ stamp only (fail closed on the status flip).
+        const restored = await db('scheduled_services').where({ id: sib.id, status: 'confirmed', ...sib.landed }).update({ ...stamp, status: 'pending' });
         if (Number(restored) === 1) {
           await db('job_status_history').insert({
             job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,

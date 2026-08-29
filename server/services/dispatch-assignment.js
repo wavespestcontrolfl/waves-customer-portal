@@ -115,7 +115,7 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -128,6 +128,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   if (!job) throw httpError(404, 'Job not found');
   if (TERMINAL_STATUSES.includes(job.status)) {
     throw httpError(409, `Cannot reassign a ${job.status} job`);
+  }
+  // Planned-baseline fence (codex #3609 local audit): a caller that planned
+  // this reassignment from an earlier read (the unit mover's locked plan)
+  // passes the technician it expected to find; a newer operator assignment
+  // must not be overwritten with the older plan. The in-trx CAS below then
+  // pins that same baseline through the locks.
+  if (expectTechnicianId !== undefined && (job.technician_id || null) !== (expectTechnicianId || null)) {
+    throw Object.assign(httpError(409, 'Job was reassigned concurrently - the planned technician is stale'), { code: 'ASSIGNMENT_STALE' });
   }
 
   let tech = null;

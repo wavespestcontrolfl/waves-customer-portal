@@ -229,9 +229,9 @@ async function openMembers(t, visitId) {
  * write left dispatch state disagreeing with visit ownership. Runs on the
  * caller's transaction; no-op when the row already carries the tech.
  */
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam });
+  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
 }
 
 /**
@@ -1853,7 +1853,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // (later siblings + the parent still on the old tech) and detach
           // this row for good (codex r16 P1); step 4 runs the seam for every
           // member AFTER the parent retarget carries the new technician.
-          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true }));
+          // expectTechnicianId (local audit): the planned pre-move technician
+          // from the LOCKED plan is the baseline — an operator reassignment
+          // that landed after the sibling's move is newer and wins; this
+          // member is then reported failed/stale, never overwritten.
+          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null }));
           return;
         } catch (err) {
           lastErr = err;
@@ -1995,7 +1999,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // members: per-row pre-move state so a caller with its own post-move
   // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
   // to EVERY row this move touched, not just the tapped one (codex r4).
-  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus }));
+  // `landed` = the slot the move wrote (date + window bounds the plan asserts)
+  // so a caller's post-move bookkeeping can fence its writes on it (a newer
+  // move/confirm after the unit move must never be rewound — local audit).
+  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus, landed: landedState[x.id] || null }));
   const visitMove = { visitId: plan.visitId, moved, failed, members, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
 }
