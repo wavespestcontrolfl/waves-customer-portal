@@ -1778,6 +1778,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the list rate instead of the engine-authorized net.
             perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
             stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
+            // Tier-count opt-out frozen at quote time (codex #3591 r23 P1
+            // parity with the automated-lead mirror; the %-exclusion flags
+            // above already ride generically).
+            ...(item.service === 'rodent_bait' && (item.tierQualifier === false || item.countsTowardWaveGuardTier === false)
+              ? { tierQualifier: false, countsTowardWaveGuardTier: false }
+              : {}),
           })),
           waveGuard: estimate?.waveGuard || null,
         },

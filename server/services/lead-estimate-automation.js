@@ -319,6 +319,18 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   };
 }
 
+function rodentEligibilityFreeze(item = {}) {
+  if (String(item?.service || '').toLowerCase() !== 'rodent_bait') return {};
+  return {
+    ...(item.tierQualifier === false || item.countsTowardWaveGuardTier === false
+      ? { tierQualifier: false, countsTowardWaveGuardTier: false }
+      : {}),
+    ...(item.excludeFromPctDiscount === true || item.discountable === false
+      ? { excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false, discountEligible: false }
+      : {}),
+  };
+}
+
 function compactLineItem(item = {}) {
   return {
     service: item.service,
@@ -347,6 +359,11 @@ function compactLineItem(item = {}) {
     perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
     stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
     pricingBasis: item.pricingBasis ?? undefined,
+    // The rodent row's LIVE eligibility posture at generation (codex #3591
+    // r23 P1): a draft generated with tier_qualifier off / the % exclusion
+    // on must keep reading that way when viewed or accepted later, never be
+    // reinterpreted under whatever policy is live then.
+    ...rodentEligibilityFreeze(item),
     quoteRequired: item.quoteRequired || item.requiresManualReview || item.requiresMeasurement || false,
     reason: item.reason || item.manualReviewReason || item.manualReviewReasons?.[0] || null,
   };

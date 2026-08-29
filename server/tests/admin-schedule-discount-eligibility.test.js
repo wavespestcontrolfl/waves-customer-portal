@@ -122,6 +122,22 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true, isCallback: true, ...quarterlyPest,
     })).toBe(false);
+    // Rodent BAIT stations are coverage only while the live
+    // rodent_waveguard.tier_qualifier flag is on (codex #3591 r23 P1).
+    const baitBooking = {
+      isRecurring: true, isCallback: false, ...quarterlyPest,
+      serviceType: 'Quarterly Rodent Bait Station Service',
+      serviceRecord: { service_key: 'rodent_bait_quarterly', name: 'Quarterly Rodent Bait Station Service' },
+    };
+    expect(bookingCreatesWaveGuardCoverage(baitBooking)).toBe(true);
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      expect(bookingCreatesWaveGuardCoverage(baitBooking)).toBe(false);
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
     // Rodent-led recurring work is not a WaveGuard plan family.
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true,

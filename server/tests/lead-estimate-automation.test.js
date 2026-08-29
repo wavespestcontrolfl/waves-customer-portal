@@ -184,6 +184,28 @@ describe('lead estimate automation gate', () => {
     // The persisted shape must NOT read as a pre-realignment legacy plan.
     const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
     expect(rodentBaitLegacyReplaySignal(draft.estimateData)).toBeNull();
+    // Default policy: no opt-out flags ride the compact row.
+    expect(rodent.tierQualifier).toBeUndefined();
+    expect(rodent.excludeFromPctDiscount).toBeUndefined();
+    // Live policy OFF at generation is frozen into the draft (codex #3591 r23 P1).
+    const constants = require('../services/pricing-engine/constants');
+    const original = { tq: constants.RODENT.tierQualifier, ex: constants.RODENT.excludeFromPctDiscount };
+    try {
+      constants.RODENT.tierQualifier = false;
+      constants.RODENT.excludeFromPctDiscount = true;
+      const frozen = buildAutomatedLeadDraftEstimate({
+        readiness,
+        intake: { serviceInterest: 'Rodent bait station service', fullAddress: '123 Main St, Venice, FL 34285' },
+        body: { homeSqFt: 2200, lotSqFt: 9000 },
+      }).estimateData.engineResult.lineItems.find((l) => l.service === 'rodent_bait');
+      expect(frozen).toEqual(expect.objectContaining({
+        perApplicationBilled: true, tierQualifier: false, countsTowardWaveGuardTier: false,
+        excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false,
+      }));
+    } finally {
+      constants.RODENT.tierQualifier = original.tq;
+      constants.RODENT.excludeFromPctDiscount = original.ex;
+    }
   });
 
   test('keeps unsupported scoped services in manual review draft state', () => {

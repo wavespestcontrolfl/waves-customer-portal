@@ -63,13 +63,17 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
   test('upcoming rows carry the server-derived WaveGuard qualification that follows the live rodent flag (codex #3591 r19 P1)', async () => {
     const rodentRow = { ...row, id: 'svc-r', service_type: 'Rodent Bait Stations' };
     const trapRow = { ...row, id: 'svc-t', service_type: 'Rodent Trapping' };
-    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow]));
+    // Stale label on a row repointed to the bait program: the CATALOG
+    // identity decides (codex #3591 r23 P1).
+    const staleLabelRow = { ...row, id: 'svc-s', service_type: 'Rodent Trapping', catalog_service_key: 'rodent_bait_quarterly', catalog_service_name: 'Quarterly Rodent Bait Station Service' };
+    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow]));
     await withServer(async (baseUrl) => {
       const body = await (await fetch(`${baseUrl}/schedule`)).json();
       const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
       expect(byId['svc-1'].waveguardQualifying).toBe(true);
       expect(byId['svc-r'].waveguardQualifying).toBe(true);
       expect(byId['svc-t'].waveguardQualifying).toBe(false);
+      expect(byId['svc-s'].waveguardQualifying).toBe(true);
     });
     // Live flag off → rodent bait no longer qualifies on the portal payload.
     const constants = require('../services/pricing-engine/constants');

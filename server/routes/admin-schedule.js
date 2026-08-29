@@ -70,6 +70,7 @@ const {
   isCommercialServiceRow,
   isNonBaitRodentServiceRow,
   syncCustomerWaveGuardPlanFromScheduledServices,
+  uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
@@ -1850,7 +1851,12 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
     service_name: serviceRecord?.name,
   };
   if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
-  return detectWaveGuardPlanKeys(row).length > 0;
+  // Through the LIVE family mapper (codex #3591 r23 P1): a detected
+  // rodent_bait key is not coverage while rodent_waveguard.tier_qualifier
+  // is off — the same rule the tier sync enforces, so a booking discount
+  // whose requirement is WaveGuard membership is never granted to a plan
+  // the sync will refuse to enroll.
+  return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
 async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {

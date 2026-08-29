@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
-const { toQualifyingKeys } = require('../services/waveguard-existing-services');
+const { qualifyingKeysForRow } = require('../services/waveguard-existing-services');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
 
@@ -69,9 +69,15 @@ router.get('/', async (req, res, next) => {
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      // Catalog identity for the qualification flag below (codex #3591 r23
+      // P1): a stale service_type label ("Rodent Trapping" on a row
+      // repointed to rodent_bait_quarterly) must not decide coverage.
+      .leftJoin('services as catalog_svc', 'scheduled_services.service_id', 'catalog_svc.id')
       .select(
         'scheduled_services.*',
-        'technicians.name as technician_name'
+        'technicians.name as technician_name',
+        'catalog_svc.service_key as catalog_service_key',
+        'catalog_svc.name as catalog_service_name'
       )
       .orderBy('scheduled_services.scheduled_date', 'asc');
 
@@ -148,7 +154,11 @@ router.get('/', async (req, res, next) => {
         // (the same classifier alignment uses, which follows the LIVE
         // rodent_waveguard.tier_qualifier flag) — the portal reads this
         // instead of re-deriving coverage from the label (codex #3591 r19 P1).
-        waveguardQualifying: toQualifyingKeys(s.service_type).length > 0,
+        waveguardQualifying: qualifyingKeysForRow({
+          service_type: s.service_type,
+          service_key: s.catalog_service_key,
+          service_name: s.catalog_service_name,
+        }).length > 0,
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS
         // to the office. Same-customer row, so exposing the token here adds
