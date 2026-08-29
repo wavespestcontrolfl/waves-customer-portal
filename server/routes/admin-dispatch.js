@@ -4544,31 +4544,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         .first('ss.visit_id', 'sv.status as visit_status');
       if (membership && membership.visit_id
           && String(membership.visit_status || '') !== 'dissolved') {
-        // Until the Phase-2 packet endpoint exists, an OPEN visit with no
-        // completion packet has no other completion path — stranding the
-        // row behind a 409 would make scheduled work impossible to finish
-        // if the gate were flipped early (codex #3590 r1 P1). Doc rev-4
-        // fallback applies: legacy completion of a child DISSOLVES the
-        // visit first (its rows return to the per-row path), atomically
-        // under the stop lock. A visit with ANY packet — or already
-        // closing/closed — still hard-409s: that is the double-completion
-        // race the guard exists for.
-        const fallbackDissolved = await db.transaction(async (trx) => {
-          const visit = await trx('service_visits')
-            .where({ id: membership.visit_id }).first();
-          if (!visit) return false;
-          if (String(visit.status) === 'dissolved') return true;
-          if (String(visit.status) !== 'open') return false;
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', visit.stop_base_key]);
-          const packet = await trx('visit_completion_packets')
-            .where({ visit_id: visit.id }).first('id');
-          if (packet) return false;
-          await trx('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
-          await trx('service_visits').where({ id: visit.id })
-            .update({ status: 'dissolved', close_reason: 'legacy_completion', closed_at: trx.fn.now() });
-          return true;
-        });
-        if (!fallbackDissolved) {
+        // READ-ONLY here (codex #3590 r2 P1: nothing may mutate the visit
+        // before ownership/validation): hard-409 only when a completion
+        // packet exists — that is the double-completion race the guard
+        // exists for. An OPEN packet-less visit falls through; the
+        // POST-claim re-check (after ownership + validators + the durable
+        // claim) applies the Phase-1 dissolve fallback atomically.
+        const packet = await db('visit_completion_packets')
+          .where({ visit_id: membership.visit_id }).first('id');
+        if (packet || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
           return res.status(409).json({
             error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
             code: 'visit_grouped',
@@ -5308,6 +5292,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // its committed stamp here and stop before any side effect.
     if (claim.action === 'proceed') {
       const groupedNow = await db.transaction(async (trx) => {
+        // Lock ORDER matches stamping (codex #3590 r2 P1): stop advisory
+        // lock FIRST, then the row lock. The stop key is derived from the
+        // row's own stop fields, so both sides serialize on the same key
+        // whether or not the row is attached yet.
+        const { stopBaseKey } = require('../services/visit-groups');
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', stopBaseKey({
+          propertyId: svc.property_id,
+          customerId: svc.customer_id,
+          scheduledDate: svc.scheduled_date,
+        })]);
         const lockedRow = await trx('scheduled_services')
           .where({ id: svc.id }).forUpdate().first('visit_id');
         if (!lockedRow || !lockedRow.visit_id) return null;
@@ -5315,10 +5309,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           .where({ id: lockedRow.visit_id }).first();
         if (!parent) return lockedRow.visit_id; // orphan: fail closed
         if (String(parent.status) === 'dissolved') return null;
-        // Same Phase-1 fallback as the pre-claim guard: an open visit with
-        // no packet dissolves and legacy completion proceeds.
+        // Phase-1 fallback (post-ownership, post-validation, post-claim):
+        // an open visit with no packet dissolves and legacy completion
+        // proceeds; any packet or closing/closed visit hard-blocks.
         if (String(parent.status) === 'open') {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', parent.stop_base_key]);
           const packet = await trx('visit_completion_packets')
             .where({ visit_id: parent.id }).first('id');
           if (!packet) {

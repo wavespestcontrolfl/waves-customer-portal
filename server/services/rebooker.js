@@ -1322,6 +1322,16 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
     }
 
+    // Visit-group seam (visit-group-scope.md §2, R3 interim): a moved
+    // child whose stop no longer matches its visit detaches; the remainder
+    // dissolves when one untouched row is left. Unit-moves arrive with the
+    // #3562 collective-move integration. Best-effort post-commit.
+    try {
+      await require('./visit-groups').handleChildStopChanged(serviceId);
+    } catch (vgErr) {
+      logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+    }
+
     if (overlapWarned) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       return { success: true, originalDate, newDate, warnings: [slotOverlapWarning(newDateStr)] };

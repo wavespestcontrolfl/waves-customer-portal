@@ -28,6 +28,10 @@ const OPEN_STATUSES = ['open'];
 // Terminal scheduled_services statuses (CHECK constraint,
 // 20260426000004): rows in these states never join a visit.
 const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped'];
+// A 'rescheduled' row is a live visit AWAITING RE-PLACEMENT
+// (recurring-appointment-seeder.js:834) — its date/window are stale, so it
+// never JOINS a visit; it is not terminal for member counting.
+const JOIN_INELIGIBLE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
 
 /**
@@ -97,7 +101,7 @@ function canJoin(row, visit) {
   if (dateOnly(row.scheduled_date) !== dateOnly(visit.scheduled_date)) {
     return { ok: false, reason: 'date' };
   }
-  if (TERMINAL_ROW_STATUSES.includes(String(row.status || ''))) {
+  if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) {
     return { ok: false, reason: 'row_terminal' };
   }
   if (!row.groupable) return { ok: false, reason: 'not_groupable' };
@@ -266,7 +270,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       throw new Error('visit membership conflict: rows span two visits');
     }
     for (const r of fresh) {
-      if (TERMINAL_ROW_STATUSES.includes(String(r.status || ''))) {
+      if (JOIN_INELIGIBLE_STATUSES.includes(String(r.status || ''))) {
         throw new Error('visit membership conflict: a row is already terminal');
       }
       if (!r.groupable || !r.group_family) {
@@ -466,6 +470,55 @@ async function handleChildTerminal(scheduledServiceId) {
 }
 
 /**
+ * Reschedule/reassignment seam (doc §2, R3 interim): when a single grouped
+ * child's stop no longer matches its visit (date changed, window no longer
+ * overlaps, or a conflicting technician), the child DETACHES and the
+ * remainder dissolves if only one untouched member is left. The full
+ * group-moves-as-a-unit behavior arrives with the #3562 collective-move
+ * integration (next PR); this seam guarantees no visit ever holds a child
+ * for the wrong stop in the meantime. Best-effort, gate-independent.
+ */
+async function handleChildStopChanged(scheduledServiceId) {
+  try {
+    const row = await db('scheduled_services').where({ id: scheduledServiceId })
+      .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
+    if (!row || !row.visit_id) return false;
+    return await db.transaction(async (t) => {
+      const visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return false;
+      await lockStop(t, visit.stop_base_key);
+      const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
+        .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
+      if (!fresh || String(fresh.visit_id) !== String(visit.id)) return false;
+      const stillMatches = dateOnly(fresh.scheduled_date) === dateOnly(visit.scheduled_date)
+        && windowsOverlap(fresh.window_start, fresh.window_end, visit.window_start, visit.window_end)
+        && !(fresh.technician_id && visit.technician_id
+          && String(fresh.technician_id) !== String(visit.technician_id))
+        && !JOIN_INELIGIBLE_STATUSES.includes(String(fresh.status || ''));
+      if (stillMatches) return false;
+      await t('scheduled_services').where({ id: fresh.id }).update({ visit_id: null });
+      const remaining = await t('scheduled_services')
+        .where({ visit_id: visit.id })
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .count('id as n').first();
+      if (Number(remaining.n) <= 1) {
+        const activity = await visitActivity(visit.id, t);
+        if (canDissolve(activity).ok) {
+          await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
+          await t('service_visits').where({ id: visit.id })
+            .update({ status: 'dissolved', close_reason: 'row_moved', closed_at: t.fn.now() });
+        }
+      }
+      return true;
+    });
+  } catch (err) {
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] handleChildStopChanged(${scheduledServiceId}) skipped: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Stamping entry point for scheduling paths (converter same-trip rows,
  * recurring seeder, future admin actions). Gate-checked, best-effort:
  * grouping is an enhancement, so failures LOG and return null rather than
@@ -484,18 +537,18 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
         'ss.window_start', 'ss.window_end', 'ss.technician_id',
         'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
     if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
-    if (TERMINAL_ROW_STATUSES.includes(String(row.status || ''))) return null;
+    if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
       .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
       .where('ss.customer_id', row.customer_id)
       .where('ss.scheduled_date', dateOnly(row.scheduled_date))
       .whereNot('ss.id', row.id)
-      .whereNotIn('ss.status', TERMINAL_ROW_STATUSES)
+      .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
       .where('svc.groupable', true)
       .where('svc.group_family', row.group_family)
       .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
-      .select('ss.id');
+      .select('ss.id', 'ss.visit_id');
     if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
     else partnersQ.whereNull('ss.property_id');
     partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
@@ -536,6 +589,8 @@ module.exports = {
   maybeGroupRow,
   splitChild,
   handleChildTerminal,
+  handleChildStopChanged,
+  stopBaseKey,
   visitActivity,
   _test: {
     stopBaseKey,
