@@ -287,14 +287,20 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('services')) {
-    await knex('services')
-      .where({ service_key: 'rodent_bait_setup' })
-      .update({
-        base_price: 199.0,
-        description: 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.',
-        internal_notes: 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.',
-        updated_at: knex.fn.now(),
-      });
+    // Value-guarded (codex #3591 r3 P2): restore the catalog row only when
+    // it still holds this migration's $99 output — an operator edit after
+    // up() is authoritative and survives rollback untouched.
+    const setupRow = await knex('services').where({ service_key: 'rodent_bait_setup' }).first();
+    if (setupRow && Number(setupRow.base_price) === 99) {
+      await knex('services')
+        .where({ service_key: 'rodent_bait_setup' })
+        .update({
+          base_price: 199.0,
+          description: 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.',
+          internal_notes: 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.',
+          updated_at: knex.fn.now(),
+        });
+    }
   }
 
   if (await knex.schema.hasTable('pricing_changelog')) {

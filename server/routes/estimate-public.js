@@ -11187,7 +11187,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             billingTerm,
             recurringServices: conversionRecurringServices,
           });
-          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine)) {
+          // Disclosed rodent bait-station setup (owner 2026-08-29; codex
+          // #3591 r3 P1): a non-member's accepted estimate carries a
+          // one-time rodent_bait_setup row that the standard invoice must
+          // bill — frozen-disclosure rule: the amount comes from the STORED
+          // estimate (what the customer accepted), never a live constant.
+          const acceptedRodentSetupAmount = (() => {
+            const containers = [
+              conversionEstData.result?.oneTime?.items,
+              conversionEstData.result?.oneTime?.specItems,
+              conversionEstData.result?.specItems,
+              conversionEstData.oneTime?.items,
+            ];
+            for (const arr of containers) {
+              if (!Array.isArray(arr)) continue;
+              const row = arr.find((it) => String(it?.service || '').toLowerCase() === 'rodent_bait_setup'
+                || String(it?.name || '').toLowerCase() === 'rodent_bait_setup'
+                || /bait station setup/i.test(String(it?.name || '')));
+              const amt = Number(row?.price ?? row?.amount);
+              if (Number.isFinite(amt) && amt > 0) return Math.round(amt * 100) / 100;
+            }
+            return 0;
+          })();
+          if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
             // Frozen-disclosure resolver — bill (and narrate) exactly what
@@ -11198,6 +11220,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 description: 'WaveGuard Membership — one-time setup fee',
                 quantity: 1,
                 unit_price: acceptSetupFeeAmount,
+              });
+            }
+            if (acceptedRodentSetupAmount > 0) {
+              lineItems.push({
+                description: 'Bait Station Setup — one-time',
+                quantity: 1,
+                unit_price: acceptedRodentSetupAmount,
               });
             }
             if (includesFirstApplicationLine) {
@@ -11229,13 +11258,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 });
               }
             }
-            const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
-              ? 'WaveGuard Membership Setup + First Application'
-              : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
-            const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee plus first application.`
-              : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $${acceptSetupFeeAmount.toFixed(2)} setup fee only.`
+            const anySetupLine = setupFeeApplies || acceptedRodentSetupAmount > 0;
+            const setupTitleWord = setupFeeApplies ? 'WaveGuard Membership Setup' : 'Bait Station Setup';
+            const invoiceTitle = anySetupLine && includesFirstApplicationLine
+              ? `${setupTitleWord} + First Application`
+              : (anySetupLine ? setupTitleWord : 'First Service Application');
+            const setupNotesParts = [
+              setupFeeApplies ? `$${acceptSetupFeeAmount.toFixed(2)} setup fee` : null,
+              acceptedRodentSetupAmount > 0 ? `$${acceptedRodentSetupAmount.toFixed(2)} bait-station setup` : null,
+            ].filter(Boolean);
+            const invoiceNotes = anySetupLine && includesFirstApplicationLine
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} plus first application.`
+              : (anySetupLine
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — ${setupNotesParts.join(' plus ')} only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,

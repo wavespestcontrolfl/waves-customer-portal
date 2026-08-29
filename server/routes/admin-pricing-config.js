@@ -788,6 +788,50 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();
     await db('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+    // rodent_bait policy lives in TWO live stores (codex #3591 r3 P1):
+    // service_discount_rules feeds invoice/schedule discount paths
+    // (discount-engine applyTierDiscount) while the pricing engine reads
+    // pricing_config.rodent_waveguard (db-bridge syncs the WAVEGUARD maps
+    // from it). An edit here must mirror the shared flags into the
+    // authoritative row, or operators split generated-estimate behavior
+    // from billing behavior. Migration 20260829000040 aligned the rows;
+    // this keeps them aligned on every subsequent edit.
+    if (req.params.serviceKey === 'rodent_bait'
+      && (updates.tier_qualifier !== undefined || updates.exclude_from_pct_discount !== undefined)) {
+      const waveguardRow = await db('pricing_config').where({ config_key: 'rodent_waveguard' }).first();
+      if (waveguardRow) {
+        let waveguardData = {};
+        try {
+          waveguardData = typeof waveguardRow.data === 'string' ? JSON.parse(waveguardRow.data) : (waveguardRow.data || {});
+        } catch { waveguardData = {}; }
+        const nextData = { ...waveguardData };
+        if (typeof updates.tier_qualifier === 'boolean') nextData.tier_qualifier = updates.tier_qualifier;
+        if (typeof updates.exclude_from_pct_discount === 'boolean') nextData.exclude_from_pct_discount = updates.exclude_from_pct_discount;
+        if (JSON.stringify(nextData) !== JSON.stringify(waveguardData)) {
+          await db('pricing_config')
+            .where({ config_key: 'rodent_waveguard' })
+            .update({ data: JSON.stringify(nextData), updated_at: new Date() });
+          await insertPricingAudit({
+            configKey: 'rodent_waveguard',
+            oldValue: waveguardData,
+            newValue: nextData,
+            changedBy: req.technician?.name,
+            reason: req.body.reason || 'Mirrored from Discount Rules edit (rodent_bait shared policy)',
+          });
+          // Same immediate-resync pattern the pricing_config PUT uses —
+          // the mirrored flags must reach the engine now, not on the next
+          // cache cycle.
+          try {
+            const modular = require('../services/pricing-engine');
+            if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+          } catch { /* non-fatal */ }
+          try {
+            const bridge = require('../services/pricing-engine/db-bridge');
+            if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
+          } catch { /* non-fatal */ }
+        }
+      }
+    }
     if (existing) {
       const changedFields = Object.keys(updates).filter(
         (k) => k !== 'updated_at' && String(existing[k]) !== String(updates[k])

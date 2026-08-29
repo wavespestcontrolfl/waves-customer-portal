@@ -232,6 +232,19 @@ describe('revised rodent pricing rules', () => {
     expect(replay.waveGuard.activeServices).toEqual(['pest_control']);
     expect(replay.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
 
+    // The MAPPED result keeps the legacy shape (codex #3591 r3 P0): no
+    // perApplicationBilled/stations marker on the pinned row, so a
+    // persisted recompute still reads as legacy and the pin survives the
+    // next view/accept.
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    const mapped = mapV1ToLegacyShape(replay);
+    const mappedRodentRow = mapped.recurring.services.find(s => s.service === 'rodent_bait');
+    expect(mappedRodentRow.perApplicationBilled).toBeUndefined();
+    expect(mappedRodentRow.legacyPinnedReplay).toBe(true);
+    expect(mappedRodentRow.waveGuardDiscountEligible).toBe(false);
+    expect(rodentBaitLegacyReplaySignal({ result: mapped })).toEqual({ monthly: 49 });
+
     // Commercial: pin the stored cost-buildup annual exactly.
     const commercialReplay = generateEstimate(baseInput({
       propertyType: 'commercial',

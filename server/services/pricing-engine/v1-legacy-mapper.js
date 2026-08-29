@@ -872,11 +872,27 @@ function mapV1ToLegacyShape(v1Result) {
     svcAdd('Rodent Bait Stations', rbLI, {
       service: 'rodent_bait',
       annual: Number(rbLI.annual) || null,
-      stations: Number(rbLI.stations) || null,
       detail: rbLI.detail || null,
-      // Billing-unit marker — new rows bill per application; legacy
-      // monthly-billed rodent rows never carry it.
-      perApplicationBilled: true,
+      // A PINNED legacy replay keeps the full legacy row shape (codex
+      // #3591 r3 P0): no new-model marker/stations — a persisted recompute
+      // must still read as legacy so rodentBaitLegacyReplaySignal keeps
+      // pinning on every later view/accept — and the legacy discount
+      // posture rides the row explicitly.
+      ...(rbLI.legacyPinnedReplay === true
+        ? {
+          legacyPinnedReplay: true,
+          discountable: false,
+          discountEligible: false,
+          waveGuardDiscountEligible: false,
+          countsTowardWaveGuardTier: false,
+          excludeFromPctDiscount: true,
+        }
+        : {
+          stations: Number(rbLI.stations) || null,
+          // Billing-unit marker — new rows bill per application; legacy
+          // monthly-billed rodent rows never carry it.
+          perApplicationBilled: true,
+        }),
     });
   }
   // Recurring Foam — standalone recurring line (cadence-discounted). Stays in

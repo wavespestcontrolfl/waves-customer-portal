@@ -429,9 +429,13 @@ function buildRows() {
     unit: 'per application',
     // Footprint brackets (owner 2026-08-29): lot size, roof type, and the
     // retired post-exclusion modifier no longer move the price — one sweep
-    // over the footprint axis covers the full ladder.
+    // over the footprint axis covers the full ladder. The pest-derived
+    // FOOTPRINTS_SQFT tops out at 6,000 sf, but public residential quotes
+    // accept up to 20,000 sf and the ladder EXTENDS above 6,750 (codex
+    // #3591 r3 P2) — sweep the bracket boundaries and the supported upper
+    // footprint too so the published high matches the largest exact quote.
     values: sweepValues(
-      FOOTPRINTS_SQFT.map((f) => ({ f })),
+      [...new Set([...FOOTPRINTS_SQFT, 1750, 2750, 3750, 4750, 5750, 6750, 8000, 12000, 20000])].map((f) => ({ f })),
       ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
       (r) => r.perVisit),
     notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
