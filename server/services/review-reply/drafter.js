@@ -312,6 +312,10 @@ const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|
 // Words that may sit between a conjunction / comma and the coordinated word
 // without changing what it is ("and even Marcus", "and not just the ants").
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
+// Where a coordinated noun phrase ends: a plural-only verb or a determiner /
+// preposition / pronoun (the same words ORDINARY_FOLLOWER_RE treats as
+// ordinary-word evidence).
+const PHRASE_STOP_WORDS = new Set("are were have aren't weren't haven't do don't love hate need tend come go get keep make take know seem look stay find want like thrive show mean matter help a an the this that these those your our my its their every any some no each all both of in on at to for from by about around down up out off over under into through after before during without within you we it they us them than as".split(' '));
 const POSSESSIVE_ROLE_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'its', 'the', 'a', 'an', 'one', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {
@@ -345,6 +349,22 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
     if (POSSESSIVE_ROLE_ITEMS.has(next)) return false;
     if (!(SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next))) return false;
     tail = tail.slice(nextM[0].length);
+    // Scan on through the coordinated phrase (codex #3580 r8: "and very
+    // talented Marcus"): a capitalised or name-like token before a clause stop
+    // — punctuation, a plural-only verb, a determiner / preposition / pronoun —
+    // is a name riding on an adjective run.
+    let tok;
+    let scanned = 0;
+    while (scanned++ < 12 && (tok = /^\s*([\p{L}'-]+|[.,;:!?])/u.exec(tail)) !== null) {
+      const t = tok[1];
+      if (/^[.,;:!?]$/.test(t)) break;
+      if (COORD_RE.test(tail)) break;
+      if (/^\p{Lu}/u.test(t)) return false;
+      const lt = t.toLowerCase();
+      if (names.has(lt) || COMMON_FIRST_NAMES.has(lt)) return false;
+      if (PHRASE_STOP_WORDS.has(lt)) break;
+      tail = tail.slice(tok[0].length);
+    }
     coord = COORD_RE.exec(tail);
     if (!coord) return true;
     tail = coord[1];
