@@ -480,6 +480,15 @@ async function handleChildTerminal(scheduledServiceId) {
           || !TERMINAL_ROW_STATUSES.includes(String(fresh.status || ''))) {
         return false;
       }
+      // Same freeze rule as stop changes: a packet/artifact/link/payment
+      // froze the member set — a terminal child stays recorded on the
+      // visit (the closeout path accounts for it), never detached.
+      const frozenCheck = canSplit(await visitActivity(visit.id, t));
+      if (!frozenCheck.ok && frozenCheck.reason !== 'visit_not_open') {
+        const logger = require('./logger');
+        logger.warn(`[visit-groups] terminal child on frozen visit ${visit.id} (row ${fresh.id}, ${frozenCheck.reason}) — membership preserved`);
+        return false;
+      }
       // Terminal child leaves the group (its record keeps history via the
       // packet items / service_records, not via visit_id).
       const cleared = await t('scheduled_services')
