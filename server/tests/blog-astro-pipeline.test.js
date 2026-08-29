@@ -4585,6 +4585,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   test('stripManagedBodyImages resolves rendered spans structurally — angle-destination and wrapped-alt managed images are stripped too (GH r23)', () => {
     const body = '## A\n\nProse.\n\n![gen](</images/blog/x/body-1.webp>)\n\n![wrapped\nalt](/images/blog/x/body-2.webp)\n\nMore.';
     expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\nMore.');
+    // A wrapped-alt removal must not shift later lines: a managed definition after it still goes, unrelated prose stays (hook P0).
+    const shifted = '![wrapped\nalt][pic]\n\nKeep this prose.\n\n[pic]: /images/blog/x/body-1.webp\nAnd this line too.';
+    expect(AstroPublisher.stripManagedBodyImages(shifted, 'x')).toBe('Keep this prose.\n\nAnd this line too.');
   });
 
   test('refresh lane: stale managed assets ABOVE the first free name are swept from the directory listing (GH r23)', async () => {

@@ -4354,19 +4354,17 @@ function stripManagedBodyImages(body, slug) {
     }
     if (src && isManaged(src) && renderedSrcs.has(src)) removals.push([span.start, span.end]);
   }
-  // Splice the image syntax OUT (last first so offsets hold), then tidy the
-  // touched lines: collapse the double space an inline removal leaves and
-  // drop lines that only held a removed image.
+  // Splice the image syntax OUT but KEEP its newlines (a wrapped alt spans
+  // lines): line counts never change, so `lines[i]` and `rawLines[i]` stay
+  // aligned for the definition-line pass below. Every line a removed span
+  // covered is "touched": its leftover is tidied, an emptied line dropped.
   let text = raw;
-  const touchedLineStarts = new Set();
+  const touched = new Set();
   for (const [from, to] of removals.sort((a, b) => b[0] - a[0])) {
-    touchedLineStarts.add(raw.lastIndexOf('\n', from) + 1);
-    text = text.slice(0, from) + text.slice(to + 1);
+    for (let li = lineOf(from); li <= lineOf(to); li += 1) touched.add(li);
+    text = text.slice(0, from) + raw.slice(from, to + 1).replace(/[^\n]/g, '') + text.slice(to + 1);
   }
   const rawLines = raw.split('\n');
-  const touched = new Set();
-  let pos = 0;
-  rawLines.forEach((line, i) => { if (touchedLineStarts.has(pos)) touched.add(i); pos += line.length + 1; });
   const lines = text.split('\n');
   const kept = [];
   const titleOnly = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
