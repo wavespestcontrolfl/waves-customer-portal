@@ -303,14 +303,18 @@ treatment treatments visits results protection prevention nothing something ever
 // fail on shape.
 const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
 // …and when the evidence went through a conjunction or comma, the word after
-// it may not be a name in ANY case (codex #3580 r3: "Roaches and marcus" —
-// the lowercase allowed name would otherwise vouch for the opener).
-function ordinaryFollows(rest, names) {
+// it must itself be ordinary and may not be a name in ANY case (codex #3580
+// r3 "Roaches and marcus"; hook "Roaches and tasha").
+function ordinaryFollows(rest, names, reviewWords) {
   if (!ORDINARY_FOLLOWER_RE.test(rest)) return false;
   const coord = /^\s*(?:and|or|but|nor|with|[,;:])\s+([\p{Ll}'-]+)/u.exec(rest);
   if (!coord) return true;
   const next = coord[1].toLowerCase();
-  return !(names.has(next) || COMMON_FIRST_NAMES.has(next));
+  // The coordinated word must itself be positively ordinary — a starter, a
+  // listed opener, or the reviewer's own word — and never a name in any case
+  // (hook: an UNKNOWN lowercase word, "Roaches and tasha", is not evidence).
+  if (names.has(next) || COMMON_FIRST_NAMES.has(next)) return false;
+  return SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next);
 }
 
 
@@ -596,7 +600,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ordinaryFollows(body.slice(pn.index + pn[0].length), nameWords)) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ordinaryFollows(body.slice(pn.index + pn[0].length), nameWords, reviewWords)) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in

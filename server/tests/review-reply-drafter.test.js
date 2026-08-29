@@ -457,6 +457,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoaches and marcus are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches, marcus and the crew are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches and kevin are glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
+    // hook: an unknown lowercase word after the conjunction is not evidence either.
+    expect(verify(good('Hi Dana,\n\nRoaches and tasha are glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, tasha and the crew are glad Marcus could help.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
