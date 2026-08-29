@@ -2265,19 +2265,24 @@ function blankMarkdownHtmlBlocks(text) {
   const lines = String(text || '').split('\n');
   let closeRe = null; // type 1: ends on the line carrying the closing tag
   let inBlock = false; // types 6/7: end at a blank line
-  let prevBlank = true;
+  // A type-7 block needs a BLOCK BOUNDARY, not specifically a blank line
+  // (hook P1): a heading or thematic break ends the previous block, so a
+  // standalone `<span>` directly after `## H` opens a raw HTML block. Only
+  // a paragraph line (ordinary text) blocks it — type 7 cannot interrupt a
+  // paragraph. A closed HTML block is a boundary too.
+  let atBoundary = true;
   const blankLine = (l) => ' '.repeat(l.length);
   return lines.map((l) => {
     const blank = l.trim() === '';
-    if (closeRe) { const done = closeRe.test(l); if (done) closeRe = null; prevBlank = blank; return blankLine(l); }
-    if (inBlock) { if (blank) { inBlock = false; prevBlank = true; return l; } return blankLine(l); }
+    if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
+    if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
     const core = l.replace(LIST_MARKER_PREFIX_RE, '');
     const t1 = core.match(HTML_BLOCK_TYPE1_RE);
     if (t1) {
       closeRe = new RegExp(`</${t1[1]}>`, 'i');
       const done = closeRe.test(l);
       if (done) closeRe = null;
-      prevBlank = false;
+      atBoundary = done;
       return blankLine(l);
     }
     const delim = HTML_BLOCK_DELIMITED.find((d) => d.open.test(core));
@@ -2285,11 +2290,11 @@ function blankMarkdownHtmlBlocks(text) {
       closeRe = delim.close;
       const done = closeRe.test(core.replace(delim.open, ''));
       if (done) closeRe = null;
-      prevBlank = false;
+      atBoundary = done;
       return blankLine(l);
     }
-    if (HTML_BLOCK_TYPE6_RE.test(core) || (prevBlank && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; prevBlank = false; return blankLine(l); }
-    prevBlank = blank;
+    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; atBoundary = false; return blankLine(l); }
+    atBoundary = blank || contentGuardrails.isInterruptingBlock(l);
     return l;
   }).join('\n');
 }

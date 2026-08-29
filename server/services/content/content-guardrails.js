@@ -5028,6 +5028,7 @@ module.exports = {
   parseLinkDestination,
   eachMarkdownLink,
   isThematicBreak,
+  isInterruptingBlock,
   blankHiddenContent,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,

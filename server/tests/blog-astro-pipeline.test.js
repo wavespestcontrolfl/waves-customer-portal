@@ -5449,6 +5449,16 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
   });
 
+  test('bodyImageRefs: a type-7 HTML block opens at any BLOCK BOUNDARY in .md — directly after a heading, not only after a blank line (hook P1)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '## H\n<span>\n![h7](/images/blog/x/body-1.webp)\n</span>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // …but a type-7 opener cannot interrupt a PARAGRAPH: the span line is
+    // paragraph text and the image renders.
+    const para = 'Prose line.\n<span>\n![kept](/images/blog/x/body-3.webp)';
+    expect(bodyImageRefs(para, { mdx: false }).map((r) => r.alt)).toEqual(['kept']);
+  });
+
   test('bodyImageRefs: a LIST ITEM may open a raw HTML block in .md (`- <div>`) — images inside it are literal text (GH r28)', () => {
     const { bodyImageRefs } = AstroPublisher._internals;
     const body = '- <div>\n  ![li](/images/blog/x/body-9.webp)\n</div>\n\n![real](/images/blog/x/body-1.webp)';
