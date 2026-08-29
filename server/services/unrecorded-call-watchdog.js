@@ -39,8 +39,10 @@
  * overlapping pods must not both ring; the sidAlreadyAlerted pre-read is
  * only a cheap filter). More than AGGREGATE_THRESHOLD fresh misses in one
  * pass = recording is broadly broken → ONE aggregate bell keyed on the SET
- * of fresh SIDs (same set on two pods → same key → one bell; a later pass
- * with new misses → new set → its own bell) that carries every SID.
+ * of fresh SIDs (a later pass with new misses → new set → its own bell)
+ * that carries every SID. The whole step runs under the cron-lock advisory
+ * lock (`unrecorded-call-alert`) so two overlapping pods — whose sets may
+ * overlap without being identical — never both insert.
  *
  * A caller call_log already matched to a customer gets a different
  * instruction — open the customer, don't mint a duplicate lead.
@@ -115,6 +117,17 @@ async function alertUnrecordedCalls(rows, { now = new Date() } = {}) {
   if (!isEnabled('unrecordedCallWatchdog')) {
     return { skipped: true, reason: 'gated_off' };
   }
+  // The sweep itself is unlocked; two pods' Twilio lookups can disagree on
+  // one call, so their fresh sets overlap without being identical and a
+  // set-hash key alone would let both insert an aggregate. The advisory
+  // lock serializes the pre-read + insert across pods: the second pod runs
+  // after the first committed and sees those SIDs settled. Non-blocking —
+  // a held lease skips this pass; the next 5-min sweep re-evaluates.
+  const { runExclusive } = require('../utils/cron-lock');
+  return runExclusive('unrecorded-call-alert', () => alertUnrecordedCallsLocked(rows, { now }));
+}
+
+async function alertUnrecordedCallsLocked(rows, { now = new Date() } = {}) {
   const missed = findUnrecordedCalls(rows, { now });
 
   const fresh = [];
