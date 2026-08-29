@@ -133,6 +133,7 @@ const EMPTY_SVC = {
   closeout_requirements_source: "inferred_v1",
   customer_visible: true,
   booking_enabled: true,
+  public_quote_selectable: false,
   sort_order: 100,
   icon: "",
   color: "#18181B",
@@ -576,6 +577,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
         {chk("requires_follow_up", "Requires Follow-up")}
         {chk("customer_visible", "Customer Visible")}
         {chk("booking_enabled", "Booking Enabled")}
+        {chk("public_quote_selectable", "Quote Form Selectable")}
         {chk("is_active", "Active")}
       </div>
       {form.requires_follow_up && (
