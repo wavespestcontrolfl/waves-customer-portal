@@ -5281,20 +5281,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // lock (codex #3590 r12 P1): stamping (visit-groups.createOrJoinVisit)
     // checks for live claims and stamps under the same lock, so the claim
     // can no longer land between stamping's READ COMMITTED snapshot and its
-    // commit. The lock lives in its own short transaction; the claim itself
-    // keeps running on the root connection (autocommit) because its
-    // unique-violation recovery path issues follow-up queries that a
-    // failed INSERT would poison inside a transaction. Either order is now
-    // honest: stamping first ⇒ the recheck below sees the stamp; claim
-    // first ⇒ stamping sees the committed claim and refuses.
-    const claim = await db.transaction(async (lockTrx) => {
-      await require('../services/visit-groups').lockStopForRow(lockTrx, svc.id);
-      return CompletionAttempts.claimCompletionAttempt({
-        serviceId: svc.id,
-        idempotencyKey,
-        requestHash: CompletionAttempts.hashCompletionRequest(req.body),
-      });
-    });
+    // commit. The claim runs ON the lock transaction's connection (r13: a
+    // nested root-pool checkout under a burst could exhaust the pool) —
+    // its INSERT is savepoint-wrapped inside claimCompletionAttempt so the
+    // unique-violation recovery path survives. lockStopForRow revalidates
+    // the stop key under the lock and throws VISIT_STOP_MOVED on a
+    // concurrent reschedule (r13) — retried like the recheck below.
+    let claim = null;
+    for (let lockAttempt = 0; lockAttempt < 3; lockAttempt += 1) {
+      try {
+        claim = await db.transaction(async (lockTrx) => {
+          await require('../services/visit-groups').lockStopForRow(lockTrx, svc.id);
+          return CompletionAttempts.claimCompletionAttempt({
+            serviceId: svc.id,
+            idempotencyKey,
+            requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+          }, lockTrx);
+        });
+        break;
+      } catch (lockErr) {
+        if (lockErr && lockErr.code === 'VISIT_STOP_MOVED' && lockAttempt < 2) continue;
+        throw lockErr;
+      }
+    }
     if (claim.action === 'replay') {
       // A prior success whose fire-and-forget dissolve failed transiently
       // would otherwise never be repaired (codex r10): re-run the fresh-
@@ -13189,15 +13198,15 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
-  let recapLegacyVisitId = null;
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     // Visit-group guard (codex #3590 r4; AFTER ownership per r10 P2 so an
     // unowned tech never learns visit ids): a grouped row completes
     // per-row only when its visit is dissolvable — same contract as
-    // /:serviceId/complete. An open packet-less visit is dissolved AFTER
-    // the recap durably commits (below); packet or closing/closed
-    // hard-blocks; not_found falls through to the route's own 404.
+    // /:serviceId/complete. An open packet-less visit is dissolved INSIDE
+    // submitRecap's transaction (codex r13: the recap has no durable
+    // attempt whose replay could retry a post-commit cleanup); packet or
+    // closing/closed hard-blocks; not_found falls through to the 404.
     {
       const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
       if (!gate.ok && gate.reason !== 'not_found') {
@@ -13207,7 +13216,6 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
           visitId: gate.visitId || null,
         });
       }
-      recapLegacyVisitId = (gate.ok && gate.openVisitId) || null;
     }
     const { actorType, actorId } = recapActor(req);
     const {
@@ -13226,18 +13234,6 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
-    // Dissolve from a FRESH read, not the preflight capture (codex r5): a
-    // stamp can commit between the preflight and submitRecap's row lock,
-    // in which case the preflight saw null. Either way the row completed
-    // through the legacy path, so any open packet-less visit it belongs
-    // to must dissolve; the helper no-ops on anything else.
-    try {
-      const nowRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('visit_id');
-      const dissolveId = (nowRow && nowRow.visit_id) || recapLegacyVisitId;
-      if (dissolveId) {
-        void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveId, { expectChildId: req.params.serviceId });
-      }
-    } catch { /* best-effort */ }
     res.json(result);
   } catch (err) { next(err); }
 });

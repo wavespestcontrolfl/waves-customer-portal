@@ -625,7 +625,9 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
         .select('id');
       if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
-      for (const r of await regroup.limit(20)) {
+      // Every linked row, in id order — a cap left rows beyond it with no
+      // later regroup pass (codex #3590 r13 P2).
+      for (const r of await regroup.orderBy('id', 'asc')) {
         await maybeGroupRow(r.id, { database, createdBy: 'converter' });
       }
     } catch (vgErr) {
