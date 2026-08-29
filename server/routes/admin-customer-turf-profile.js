@@ -22,6 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
 
 router.use(adminAuthenticate);
 router.use(requireTechOrAdmin);
@@ -131,11 +132,15 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const profile = await db('customer_turf_profiles')
-      .where({ customer_id: customerId })
-      .first();
+    const [profile, prefs] = await Promise.all([
+      db('customer_turf_profiles').where({ customer_id: customerId }).first(),
+      db('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at'),
+    ]);
 
-    res.json({ profile: profile || null });
+    // Freshness token for the PUT (codex #3565 gh-r44): the panel echoes the
+    // move stamp it was rendered against, so a save that races a primary-
+    // address change cannot confirm the former home's county/grass.
+    res.json({ profile: profile || null, irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null });
   } catch (err) {
     next(err);
   }
@@ -163,17 +168,67 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // is the merge set; customer_id stays the conflict key and is
     // never mutated.
     const insertRow = { customer_id: customerId, ...fields };
+    const countyConfirmed = (req.body || {}).county_confirmed === true
+      && typeof fields.county === 'string' && !!fields.county.trim();
+    // Same contract for the grass: an EXPLICIT review flag (the client sets
+    // it only when the grass field was touched this session) — a Bahia →
+    // Bahia move has no value change to observe, and without this signal
+    // the grass could stay on the unknown fallback forever (codex gh-r42).
+    const grassReviewed = (req.body || {}).grass_confirmed === true
+      && typeof fields.grass_type === 'string' && !!fields.grass_type.trim();
+    // Rendered-against move stamp, echoed from the GET (codex gh-r44) — the
+    // same freshness contract as the portal autosave: an absent token (or a
+    // stale one — the address changed after the form loaded) saves the
+    // profile but confirms NOTHING for the weekly plan.
+    const stampMs = (v) => (v ? new Date(v).getTime() : null);
+    const hasRenderStamp = 'confirmed_as_of' in (req.body || {});
+    const renderedAgainstMs = stampMs((req.body || {}).confirmed_as_of ?? null);
     // Customer-lock fence (#3391 GitHub round): FOR UPDATE on the turf row
     // cannot serialize the NO-ROW case, so this upsert could insert the
     // customer's first profile between the click-to-estimate mint's null
     // read and its estimate insert. Shared fence — every price-bearing
     // turf writer takes it (contract-pinned).
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
-    const [saved] = await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
-      .insert(insertRow)
-      .onConflict('customer_id')
-      .merge({ ...fields, updated_at: new Date() })
-      .returning('*'));
+    const [saved] = await withTurfProfileFence(db, customerId, async (trx) => {
+      // Prior grass, read under the fence: a save that CHANGES the grass is
+      // an actual review of the current lawn and re-confirms it for the
+      // weekly plan after a move; the form re-sends every loaded field, so
+      // an unchanged value proves nothing (same lesson as the county —
+      // codex #3565 gh-r32/r41).
+      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
+      const rows = await trx('customer_turf_profiles')
+        .insert(insertRow)
+        .onConflict('customer_id')
+        .merge({ ...fields, updated_at: new Date() })
+        .returning('*');
+      // The fence already holds the prefs advisory lock, so this read is
+      // serialized against the address fan-out's stamp write (gh-r44).
+      const prefsRow = await trx('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at');
+      const requestFresh = stampMs(prefsRow?.irrigation_home_changed_at) == null
+        || (hasRenderStamp && renderedAgainstMs === stampMs(prefsRow.irrigation_home_changed_at));
+      const grassEdited = ((typeof fields.grass_type === 'string' && fields.grass_type.trim()
+        && fields.grass_type !== (priorRow ? priorRow.grass_type : null)) || grassReviewed) && requestFresh;
+      if (grassEdited) {
+        const { GRASS_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
+        await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
+      }
+      // A county the technician EXPLICITLY reviewed on this save
+      // (`county_confirmed: true` — the client sets it only when the county
+      // field was edited in this session) is their statement about the
+      // CURRENT home: it confirms the turf county in the sprinkler-settings
+      // ledger, so the weekly watering plan may trust it for jurisdiction
+      // again after a move. Payload presence alone proves nothing — the
+      // form re-sends every loaded field on every save, so a grass-type
+      // edit would otherwise re-confirm the former home's county (codex
+      // #3565 gh-r32/r33). SAME transaction as the profile write, under the
+      // customer row lock every address move also takes first: a move can
+      // never land between the two and be followed by a confirmation of
+      // the former home's county (hook P1 on 45beb0731).
+      if (countyConfirmed && requestFresh) {
+        await confirmIrrigationFields(trx, customerId, [COUNTY_CONFIRMED_FIELD]);
+      }
+      return rows;
+    });
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });

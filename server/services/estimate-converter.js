@@ -3766,6 +3766,15 @@ const EstimateConverter = {
     // persist to the end of the caller's transaction.
     let effectiveCustomer = customer;
     if (!suppressRecurringConversion && database.isTransaction) {
+      // Property-preferences advisory lock BEFORE the customer row lock
+      // (global order — codex #3565 gh-r39): the grass-type persist below
+      // runs under withTurfProfileFence, which takes this advisory lock;
+      // row-then-advisory inside the same acceptance transaction deadlocks
+      // against executeMerge / address saves.
+      await database.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
       const lockedCustomerRow = await database('customers')
         .where({ id: customerId })
         .forUpdate()

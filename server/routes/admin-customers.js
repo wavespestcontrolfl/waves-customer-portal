@@ -3737,6 +3737,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // ordering: BEFORE the customers row lock below (customer-comms-
           // lock.js contract — revertMerge takes comms first, then
           // FOR-UPDATEs rows; row-lock-first-then-wait-here would deadlock).
+          // Property-preferences advisory lock FIRST — one global order
+          // (prefs advisory → comms → combined → customers row → prefs row)
+          // shared with executeMerge and the portal autosave: any path that
+          // takes it after another of these locks forms an AB-BA deadlock
+          // with a path taking them the other way (codex #3565 gh-r38/r39).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(req.params.id)],
+          );
           if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
             await lockCustomerComms(trx, req.params.id);
           }
@@ -3816,6 +3825,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // Coordinates cleared ATOMICALLY with the address (and the move
+          // stamp the fan-out writes in this same transaction): a committed
+          // move must never leave the former home's lat/lng readable beside
+          // the new address — the weekly watering sweep would fetch the old
+          // premise's rainfall under the new home (codex #3565 gh-r46). The
+          // async re-geocode below refills them.
+          if (['address_line1', 'city', 'state', 'zip'].some((f) => updates[f] !== undefined)) {
+            await trx('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
+          }
           // Only an ACTUAL rate change invalidates the attribution (codex
           // #3245 r4): the directory editor posts the whole form on every
           // save, so a presence check would wipe the seeded components on a
@@ -3989,7 +4007,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
-      await db('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
+      // lat/lng were already cleared inside the update transaction (gh-r46).
       // Re-geocode the customer, then mirror the fresh coords onto the primary
       // property — syncPrimaryAddress cleared them on the address edit, so without
       // this the property row would stay permanently null after every address edit.

@@ -181,18 +181,97 @@ function snapshotMatchesLine1(snapshot, line1) {
   return snapshotMatchesContact(snapshot, { address_line1: line1 });
 }
 
+// The ONE writer of the sprinkler-settings move guard: stamp the move and
+// reset the per-field confirmation set on the customer's preference row.
+// Callers: this fan-out (a move, an address removal), the different-homes
+// customer merge, and the primary-residence promotion (codex #3565 gh-r26).
+// Never touches the settings themselves. Returns the row count.
+async function markSprinklerSettingsMoved(customerId, conn = db) {
+  if (!customerId) return 0;
+  // Same customer-scoped lock the prefs PUT serializes on: an autosave begun
+  // for the old home cannot commit after this reset and re-add a stale field
+  // (callers pass their transaction; the lock is transaction-scoped).
+  await conn.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['property-preferences', String(customerId)],
+  );
+  const stamp = { irrigation_home_changed_at: new Date(), irrigation_confirmed_fields: JSON.stringify([]) };
+  const n = await conn('property_preferences').where({ customer_id: customerId }).update(stamp);
+  if (n) return n;
+  // No preferences row (tech-only irrigation readings are common): the guard
+  // must still exist — upsert a minimal row carrying only the stamp.
+  await conn('property_preferences')
+    .insert({ customer_id: customerId, ...stamp })
+    .onConflict('customer_id')
+    .merge(stamp);
+  return 1;
+}
+
+// Two customer rows describe DIFFERENT homes (normalized street, unit, zip,
+// city) — the premise test the sprinkler-settings move guard uses, shared
+// with the customer merge (a duplicate pair can be the old and new home).
+function homesDiffer(a, b) {
+  const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
+  // Street + unit resolved the way snapshotMatchesContact does: an inline
+  // unit on line 1 ("123 Main St Apt 4") is the same premise as line 1 +
+  // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Suffix-
+  // normalized ("Main Street" == "Main St") like every street compare here.
+  const premise = (row) => {
+    const inline = splitStreetLineUnit(row?.address_line1 || '');
+    return {
+      street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
+      unit: unitKey(row?.address_line2 || inline.unit || ''),
+    };
+  };
+  const pa = premise(a);
+  const pb = premise(b);
+  const za = zip5(a?.zip);
+  const zb = zip5(b?.zip);
+  const ca = addressMatchKey(a?.city);
+  const cb = addressMatchKey(b?.city);
+  // ZIP is authoritative when both sides have one (postal city names alias —
+  // Bradenton / Lakewood Ranch share 34211, same rule as placeCorroborates);
+  // city decides only when both sides have a city and no ZIP compare is
+  // possible. Missing place evidence on either side is never contradictory
+  // evidence — completing a blank city/ZIP is not a move (codex gh-r29/r30).
+  const placeDiffers = (za && zb) ? za !== zb : ((ca && cb) ? ca !== cb : false);
+  return pa.street !== pb.street
+    || pa.unit !== pb.unit
+    || placeDiffers;
+}
+
 async function propagateCustomerAddressChange({ before, after }, conn = db) {
   const counts = { leads: 0, estimates: 0 };
   const customerId = (after && after.id) || (before && before.id);
   if (!customerId) return counts;
   // An address REMOVAL is not propagated — blanking a lead/estimate snapshot
   // would destroy the only remaining record of where service was requested.
-  if (!addressMatchKey(after && after.address_line1)) return counts;
+  // The sprinkler-settings move guard still applies: the settings described
+  // the home that was just cleared (hook P1 on a40e19f53).
+  if (!addressMatchKey(after && after.address_line1)) {
+    if (addressMatchKey(before && before.address_line1)) {
+      counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
+    }
+    return counts;
+  }
 
   const matchesCustomerAddress = (snapshot) =>
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
+  // The primary HOME moved (street, city or zip): the customer's sprinkler
+  // settings on property_preferences describe the former property's system.
+  // Stamp the move so the weekly watering plan withholds exact controller
+  // minutes until the settings are re-saved for the new home (codex #3565
+  // gh-r19). Only the stamp is written — the settings themselves stay for
+  // the customer to reconfirm or edit.
+  // A unit is a distinct premise (the report's plan binding treats it so):
+  // moving between units in one building is a move too — hook P1 on
+  // 75b90bf11. Normalized keys, so a formatting correction never counts.
+  const homeMoved = !!before && homesDiffer(before, after);
+  if (homeMoved) {
+    counts.property_preferences = await markSprinklerSettingsMoved(customerId, conn);
+  }
   const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
   };
@@ -420,6 +499,8 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
 
 module.exports = {
   addressMatchKey,
+  homesDiffer,
+  markSprinklerSettingsMoved,
   formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,

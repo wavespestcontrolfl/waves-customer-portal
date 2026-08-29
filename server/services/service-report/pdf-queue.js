@@ -84,6 +84,10 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
       'customers.has_left_google_review',
       knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
       knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+      // A stamped (rental) address that diverges from the home: the weekly
+      // watering plan is computed for the HOME parcel/county, so the report
+      // for the other property must not carry it (codex #3565 r6 P1).
+      knex.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
       'technicians.name as technician_name',
       'technicians.photo_url as technician_photo_url',
       'technicians.avatar_url as technician_avatar_url',
@@ -169,7 +173,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields
@@ -194,6 +198,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       logger,
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
+      pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;

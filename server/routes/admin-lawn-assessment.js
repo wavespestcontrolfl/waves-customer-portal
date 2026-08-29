@@ -353,8 +353,20 @@ router.post('/assess', async (req, res, next) => {
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
 
-    // Verify customer exists
-    const customer = await db('customers').where({ id: customerId }).first();
+    // Verify customer exists. The premise AND the move stamp are read in one
+    // transaction under the prefs advisory lock — a move committing between
+    // two separate reads could pair the NEW stamp with the OLD in-memory
+    // address, letting the final stamp comparison confirm the former lawn's
+    // grass (codex gh-r47).
+    const { customer, preAnalysisMoveStamp } = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
+      const cust = await trx('customers').where({ id: customerId }).first();
+      const prefs = cust ? await trx('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at') : null;
+      return { customer: cust, preAnalysisMoveStamp: prefs?.irrigation_home_changed_at || null };
+    });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // If serviceId is provided, validate it exists AND belongs to the
@@ -371,6 +383,33 @@ router.post('/assess', async (req, res, next) => {
       }
       scheduledService = svc;
     }
+
+    // Grass-confirmation freshness (codex #3565 gh-r45/r47): the customer
+    // premise and move stamp above were snapshotted atomically BEFORE the
+    // long-running analysis (a move committing mid-analysis must void the
+    // confirmation); the linked visit stamped for a DIFFERENT premise than
+    // the current home (a backfilled prior-address assessment) never
+    // confirms the new home's grass.
+    const fanoutPremise = require('../services/customer-address-fanout');
+    const svcPremise = scheduledService ? {
+      address_line1: scheduledService.service_address_line1,
+      address_line2: scheduledService.service_address_line2,
+      city: scheduledService.service_address_city,
+      zip: scheduledService.service_address_zip,
+    } : null;
+    const svcPremiseUsable = !!(svcPremise
+      && fanoutPremise.addressMatchKey(svcPremise.address_line1)
+      && fanoutPremise.addressMatchKey(customer.address_line1));
+    const assessedElsewhere = svcPremiseUsable
+      && fanoutPremise.homesDiffer(svcPremise, { address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip });
+    // After a RECORDED move, absence of premise evidence is not innocence:
+    // photos backfilled against an unstamped legacy service could be of the
+    // former lawn — confirmation then requires a usable service premise that
+    // positively matches the current home (codex gh-r46). With no move on
+    // record, an unstamped service stays confirmable as before.
+    const premiseProven = preAnalysisMoveStamp
+      ? (svcPremiseUsable && !assessedElsewhere)
+      : !assessedElsewhere;
 
     // Photo quality gating — runs in parallel with a small cap so a
     // 3-photo upload doesn't pay 3× the latency of a 1-photo upload.
@@ -659,13 +698,32 @@ router.post('/assess', async (req, res, next) => {
         // the click-to-estimate mint's turf revalidation — every
         // price-bearing turf writer takes the shared fence.
         const { withTurfProfileFence } = require('../services/customer-pricing-ai');
-        await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
-          .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
-          .onConflict('customer_id')
-          .merge({
-            grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
-            updated_at: new Date(),
-          }));
+        await withTurfProfileFence(db, customerId, async (trx) => {
+          const prior = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
+          await trx('customer_turf_profiles')
+            .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
+            .onConflict('customer_id')
+            .merge({
+              grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
+              updated_at: new Date(),
+            });
+          // The AI read observed a lawn: when it actually set the grass
+          // (blank before), that re-establishes it for the weekly plan
+          // after a move (codex #3565 gh-r41) — but only when the photos
+          // describe the CURRENT home: the linked visit must not be stamped
+          // for another premise, and no move may have committed since the
+          // analysis began (stamp compared under the fence's prefs advisory
+          // lock — gh-r45). The grass VALUE still fills either way; only
+          // the ledger entry is withheld.
+          const stampNow = (await trx('property_preferences')
+            .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+          const stampMs = (v) => (v ? new Date(v).getTime() : null);
+          const grassFresh = premiseProven && stampMs(stampNow) === stampMs(preAnalysisMoveStamp);
+          if (!prior?.grass_type && grassFresh) {
+            const { GRASS_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
+            await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
+          }
+        });
       } catch (grassErr) {
         logger.warn?.(`[lawn-assessment] grass-type auto-capture skipped for ${customerId}: ${grassErr.message}`);
       }

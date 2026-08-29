@@ -47,6 +47,9 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
+const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
+const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -318,10 +321,24 @@ function portalIrrigationInches(propertyPrefs) {
   }).inchesPerWeek;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
-  const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
-  const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
-  const prefsIrrigationInches = portalIrrigationInches(propertyPrefs);
+// Every irrigation source the card would size from, checked against the
+// move guard the weekly email applies (one shared resolver).
+function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
+  return scheduleUnconfirmedAfterMove({
+    ...(propertyPrefs || {}),
+    turf_irrigation_inches_per_week: turfProfile?.irrigation_inches_per_week ?? null,
+    assessment_irrigation_inches_per_week: assessment?.irrigation_inches_per_week ?? null,
+  });
+}
+
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null, scheduleUnconfirmed = false } = {}) {
+  // Sprinkler settings follow the home: after a move every source — portal,
+  // turf profile, assessment — is withheld until re-saved, so the card
+  // never pairs the new home's rain with the former home's irrigation and
+  // total rows (codex gh-r25). "Not on file" + a re-enter note instead.
+  const turfIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(turfProfile?.irrigation_inches_per_week);
+  const assessmentIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(assessment.irrigation_inches_per_week);
+  const prefsIrrigationInches = scheduleUnconfirmed ? null : portalIrrigationInches(propertyPrefs);
   // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
   // shows. The customer's own schedule takes priority over turf/assessment readings.
   // (A figure derived from their runtime entries counts as a portal entry — same
@@ -2025,6 +2042,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   // failed prefs read stamps random so the cache re-renders instead of
   // serving stale (same fail-open-to-rerender posture as the outer catch).
   let irrigationStamp;
+  // The week-plan snapshot this signature describes (ISO sent_at, or null);
+  // callers pass it back as pinnedWeekPlanSentAt so the render uses exactly
+  // the plan the cache key was computed from.
+  let weekPlanSentAt = null;
   try {
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
@@ -2033,15 +2054,39 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // carries it: an A→B→A edit sequence during a render would otherwise
     // restore the original stamp while the render read B (TOCTOU) — the
     // timestamp makes every edit sequence change the signature.
-    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
+    // The move stamp + confirmation set ride too: the fan-out stamps a move
+    // without touching updated_at, and a cached PDF keyed before it would
+    // keep serving the former home's irrigation rows.
+    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}:moved=${prefs?.irrigation_home_changed_at ? new Date(prefs.irrigation_home_changed_at).toISOString() : ''}:conf=${typeof prefs?.irrigation_confirmed_fields === 'string' ? prefs.irrigation_confirmed_fields : JSON.stringify(prefs?.irrigation_confirmed_fields || [])}`;
+    // The week plan is a render input too: a new Monday snapshot, a restriction
+    // policy change/expiry, or the gate itself must re-render a cached PDF.
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
+  }
+  // The week-plan identity is resolved OUTSIDE the fail-open prefs catch and
+  // STRICTLY: a failed lookup here would otherwise stamp plan=none and pin
+  // the render plan-less — the queued PDF path could then mail an
+  // irreversible attachment without the plan the Monday email carried.
+  // Propagating refuses the render; the caller retries.
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
+    // The premise this key describes — resolved here, never trusted from a
+    // partial lookup row (see loadServicePremise).
+    const premise = await loadServicePremise(service, knex);
+    // loadCurrentWeekPlan already returns null once the policy it was
+    // decided under is no longer in force, so its identity is the stamp —
+    // and only when the snapshot binds to THIS premise (planBindsToService,
+    // the shared rule; the coarse stamped_address_diverges flag would drop
+    // a same-home postal-city correction — codex gh-r42): an address change
+    // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
+    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
+    irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
   }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
   if (!assessment?.id) {
     const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
-    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}` };
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanSentAt };
   }
 
   const recs = typeof assessment.recommendations === 'string'
@@ -2051,13 +2096,38 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanSentAt };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
 // a report view should not 500 because an assessment read blipped. An
 // unreadable state yields a value nothing can match, forcing a re-render
 // instead of serving a stale object.
+// Cache-LOOKUP callers (pdf-queue getOrRenderServiceReportPdf) pass a PARTIAL
+// service row — no serviced address, no stamped_address_diverges — so the
+// premise binding below would match every snapshot and a cached lawn PDF
+// could be served under the OLD home's plan after a same-week address change
+// (codex #3565 gh-r16). Resolve the premise exactly as the full render row
+// does (loadServiceRecordForPdf: stamped visit address, else the home). A
+// failed read throws — the signature wrapper turns that into a no-match key
+// and the PDF re-renders instead of matching a stale one.
+async function loadServicePremise(service, knex = db) {
+  if (service?.stamped_address_diverges !== undefined && service?.address_line1 !== undefined) return service;
+  const row = await knex('service_records')
+    .where({ 'service_records.id': service.id })
+    .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
+    .first(
+      knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+      knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+      knex.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
+    );
+  if (!row) throw new Error(`service_record ${service?.id || 'unknown'}: premise unavailable for the week-plan cache key`);
+  return { ...service, ...row };
+}
+
 async function lawnAssessmentPdfSignature(service, knex = db) {
   try {
     return (await resolveCanonicalLawnRender(service, knex)).signature;
@@ -2242,7 +2312,7 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
@@ -2555,11 +2625,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       weekWeatherUnfrozen = true;
     }
   }
+  const lawnScheduleUnconfirmed = reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment });
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
     propertyPrefs,
     fawnSnapshot,
+    scheduleUnconfirmed: lawnScheduleUnconfirmed,
     serviceDate: assessment.service_date,
     completionRainfallInchesToday: firstNumber(
       completionConditions.rain_24h_in,
@@ -2571,6 +2643,60 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     completionRainConfidence,
     completionRainSource,
   });
+  // This week's watering plan (GATE_IRRIGATION_WEEK_PLAN): the Monday email's
+  // SNAPSHOT for the current week, so the card and the inbox agree. No
+  // snapshot (report before Monday's sweep, customer outside the audience,
+  // policy changed mid-week) → no callout: a "this week" instruction must
+  // never be built from a historical report's weather and season.
+  waterContext.weekPlan = null;
+  // The card says WHY the irrigation row is not on file after a move.
+  waterContext.scheduleUnconfirmed = lawnScheduleUnconfirmed;
+  // A render pinned to a SENT plan must produce that plan or refuse — the
+  // live gate and premise checks below are visibility rules for unpinned
+  // renders, never a way past the pin: a gate flipped off between the
+  // signature pod and the /data pod (rollout, kill switch), or a stamp that
+  // now diverges, would otherwise answer a plan-less page under the
+  // plan-present key (codex gh-r17).
+  if (typeof pinnedWeekPlanSentAt === 'string') {
+    if (!featureGates.isEnabled('irrigationWeekPlan')) throw new PinnedWeekPlanUnavailable('gate_off');
+  }
+  // Plan visibility is decided by planBindsToService (the shared homesDiffer
+  // premise rule) alone — the coarse stamped_address_diverges flag marks a
+  // same-home postal-city correction (Bradenton → Lakewood Ranch at the
+  // same street + ZIP) as diverged and would drop a plan the fine predicate
+  // accepts; a genuinely stamped-elsewhere service (rental) still fails the
+  // binding below (codex gh-r42).
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
+    // Pinned renders are STRICT: a failed lookup must refuse the render
+    // rather than cache a plan-less page under a plan-present key.
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });
+    // The plan binds to the HOME the sweep decided it for: the serviced
+    // address (stamped, else the customer's current mirror) must be that
+    // home — a mid-week move makes the stamp match the NEW address while
+    // the snapshot's weather and county belong to the old one.
+    // Full PREMISE identity, unit included (planBindsToService — the same
+    // predicate the cache signature applies).
+    const servicedElsewhere = !!snapshot && !planBindsToService(snapshot, service);
+    // A pinned render whose snapshot no longer binds to this premise (the
+    // customer mirror moved between the signature and this lookup, with no
+    // stamp to flag it) is a refusal, never a plan-less payload under the
+    // plan-present key (codex gh-r18).
+    if (servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
+    if (snapshot?.plan && !servicedElsewhere) {
+      // Compare against the runtime Monday's decision saw, never today's prefs.
+      const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+      // The card credits a REQUIRED watering-in against the plan only when
+      // this visit sits inside the plan week — a reopened older report
+      // loads the current week's snapshot and must not count a treatment
+      // watered in weeks ago as one of this week's runs.
+      // prescribesRun: a hold plan (zero runs) never has a run for a
+      // treatment watering-in to cover — the card keeps treatment-first but
+      // must not claim a nonexistent run was covered (codex gh-r16).
+      // afterTreatment: the plan reduced by a credited watering-in (the card
+      // shows it INSTEAD of the unreduced plan under the credit note).
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }) } : null;
+    }
+  }
 
   return {
     assessmentId: assessment.id,
@@ -2629,15 +2755,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // this figure renders beside the water balance, and the two must come
       // from the same source or one report shows a tech reading next to a
       // balance computed from the customer's own (possibly derived) schedule.
-      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs)
-        ?? numberOrNull(turfProfile.irrigation_inches_per_week)
-        ?? numberOrNull(assessment.irrigation_inches_per_week),
+      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) ? null
+        : (portalIrrigationInches(propertyPrefs)
+          ?? numberOrNull(turfProfile.irrigation_inches_per_week)
+          ?? numberOrNull(assessment.irrigation_inches_per_week)),
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : (propertyPrefs ? {
-      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs),
+      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile: null, assessment }) ? null : portalIrrigationInches(propertyPrefs),
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
@@ -2979,6 +3106,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
+    // undefined = unpinned (live snapshot); null = the signature saw none.
+    pinnedWeekPlanSentAt: opts.pinnedWeekPlanSentAt,
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
@@ -4975,6 +5104,8 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
+  loadServicePremise,
+  reportScheduleUnconfirmed,
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,
