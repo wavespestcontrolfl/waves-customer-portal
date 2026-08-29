@@ -2163,7 +2163,12 @@ function normalizeAngleDestinations(text) {
 // requires; an unknown or unterminated reference stays literal text.
 function decodeDestination(src) {
   const text = decodeHTMLStrict(String(src ?? ''));
-  try { return decodeURIComponent(text); } catch (_) { return text; }
+  // The browser resolves `?query`/`#fragment` BEFORE percent-decoding, so
+  // `/detail.webp?v=2` requests `detail.webp` (validated by pathname) while
+  // `%3F` stays a literal character in the filename. The body keeps the
+  // authored URL — refs are validation identity, never rewritten (GH r27).
+  const path = text.split(/[?#]/)[0];
+  try { return decodeURIComponent(path); } catch (_) { return path; }
 }
 // Every image the rendered body shows — inline (`![alt](dest "title")`),
 // full/collapsed/shortcut reference (`![alt][label]`, `![alt][]`, `![alt]`)
@@ -2439,8 +2444,8 @@ function scanBodySections(body, { title = '', mdx = true } = {}) {
 
 // The H2 heading a committed image sits under in the LIVE body (null when
 // the body no longer references it).
-function liveSectionForImage(content, src, { title = '' } = {}) {
-  const { sections } = scanBodySections(content, { title });
+function liveSectionForImage(content, src, { title = '', mdx = true } = {}) {
+  const { sections } = scanBodySections(content, { title, mdx });
   return sections.find((sec) => sec.images.includes(src)) || null;
 }
 // A section's CONTEXT for reuse decisions: heading + the opening prose the
@@ -2505,7 +2510,9 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
   // The intro pseudo-section is named by the TITLE; the live side must use
   // the live file's title, not the new draft's, or a retitled article
   // would always match its old intro illustration.
-  const liveSection = liveSectionForImage(liveBody, src, { title: liveTitle || title });
+  // Rescanned in the live file's own flavour — a raw HTML block before a
+  // section's prose must not change the derived lead in `.md` (GH r27).
+  const liveSection = liveSectionForImage(liveBody, src, { title: liveTitle || title, mdx });
   if (!liveSection) return null;
   // Same heading AND same opening prose — a rewritten section under a kept
   // heading gets a new picture.
@@ -3491,9 +3498,17 @@ async function publishRefresh(draft, brief = {}) {
   let refreshImages = { body: newBody, files: [], newAlts: [] };
   if (refreshBlogTarget) {
     const heroSrc = String(nextFrontmatter?.hero_image?.src || '');
+    // The managed-image directory is keyed by the PUBLISHED ROUTE — the
+    // frontmatter slug the creating lane stamped — not the source file's
+    // path: a flat file can render a nested route, and the new-post lane
+    // filed its body images under that route (GH r27). A legacy post
+    // without a safe frontmatter slug keeps the path-derived key.
+    let refreshAssetSlug;
+    try { refreshAssetSlug = slugPathFromFrontmatter(nextFrontmatter); }
+    catch (_) { refreshAssetSlug = filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''); }
     refreshImages = await resolveBodyImages({
       frontmatter: nextFrontmatter,
-      slug: filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''),
+      slug: refreshAssetSlug,
       body: newBody,
       existingFile: { path: filePath, file: existing },
       brief,

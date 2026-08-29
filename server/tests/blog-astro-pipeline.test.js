@@ -5017,6 +5017,33 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(AstroPublisher.stripManagedBodyImages(shifted, 'x')).toBe('Keep this prose.\n\nAnd this line too.');
   });
 
+  test('refresh lane: the managed-image directory is keyed by the PUBLISHED frontmatter route, not the source file path — a flat file rendering a nested route sweeps the route directory (GH r27)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/pest-control/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const a1 = '/images/2026/01/hibiscus-detail.webp';
+    const a2 = '/images/2026/01/oleander-detail.webp';
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Hibiscus detail](${a1})\n\n## Oleander\n\nOleander prose.\n\n![Oleander detail](${a2})\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    const w = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const a1Webp = await w(1); const a2Webp = await w(2);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === `public${a1}`) return { content: '', sha: 'a1', raw: { content: a1Webp } };
+      if (path === `public${a2}`) return { content: '', sha: 'a2', raw: { content: a2Webp } };
+      return null;
+    });
+    gh.listDir.mockResolvedValue([]);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    // The sweep looked in the ROUTE directory the creating lane files under.
+    expect(gh.listDir).toHaveBeenCalledWith('public/images/blog/pest-control/shrub-diseases-sarasota-fl');
+  });
+
   test('refresh lane: a managed-image listing failure propagates as a transient error — no PR on a partial deletion set (GH r25)', async () => {
     const heroSrc = '/images/2025/12/shrub-diseases.webp';
     const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
@@ -5420,6 +5447,28 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
     // A same-line close ends the block on its own line.
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
+  });
+
+  test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '![v](/images/blog/x/detail.webp?v=2)\n\n![f](/images/blog/x/other.webp#figure)\n\n![enc](/images/blog/x/what%3Fname.webp)';
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([
+      '/images/blog/x/detail.webp',
+      '/images/blog/x/other.webp',
+      // A percent-encoded `?` is part of the FILENAME, not a query.
+      '/images/blog/x/what?name.webp',
+    ]);
+  });
+
+  test('reusableLiveBodyImage judges the live section in the live file\'s own flavour: a raw HTML block before the prose does not change the .md lead (GH r27)', () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const src = '/images/blog/x/body-1.webp';
+    const liveBody = `## Section\n\n<div>Noise text</div>\n\nActual lead prose here.\n\n![Live alt](${src})\n`;
+    const existingFile = { path: 'src/content/blog/x.md', file: { content: `---\ntitle: T\n---\n${liveBody}` } };
+    // .md: the div is a raw HTML block — lead = the real prose → context matches.
+    expect(reusableLiveBodyImage(existingFile, src, 'Section', { title: 'T', lead: 'Actual lead prose here.', mdx: false })).toBe('Live alt');
+    // .mdx: the div's inner text renders — the lead differs → no reuse.
+    expect(reusableLiveBodyImage(existingFile, src, 'Section', { title: 'T', lead: 'Actual lead prose here.', mdx: true })).toBeNull();
   });
 
   test('bodyImageRefs: a reference label over 999 characters neither defines nor renders — the reference stays literal text (GH r26)', () => {
