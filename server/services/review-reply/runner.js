@@ -135,31 +135,44 @@ function lowRatingExitFields(reason) {
   return { auto_reply_status: null, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: null, auto_reply_attempts: 0 };
 }
 
-// Rows the OLD rule parked as low_rating / unrated with a pipeline draft
-// (before the 2026-08-29 ruling) leave the lane the same way; bounded and
-// idempotent, so it simply runs every tick. Human / Agent Ops drafts are
-// theirs (untouched); a live publish claim means a publisher is mid-flight;
-// low_rating_requested / unrated_requested (a draft a person asked for via
-// Post now) is not a legacy park and is never touched.
+// Rows the OLD rule parked as low_rating / unrated (before the 2026-08-29
+// ruling) leave the lane: automation state is released (NULL status with the
+// reason stamped; due, claims, error and retry counter cleared) but the TEXT
+// STAYS — review_reply / auto_reply_draft are never touched. Before the
+// *_requested reasons existed, a draft a person asked for via Post now was
+// stored with exactly the same status / reason / version as an automatic
+// park, so the two cannot be told apart afterwards; a leftover "[DRAFT]" is
+// simply a draft on the card the person may use or discard (hook on #3587:
+// no data loss on ambiguous legacy rows). Bounded and idempotent, so it
+// runs every tick. Human / Agent Ops drafts are theirs (untouched); a live
+// publish claim means a publisher is mid-flight; a live auto-reply claim
+// (Post now stamps one via claimDueRows(force) BEFORE it verifies and takes
+// the publish claim) means an operator action is mid-flight — both are
+// excluded from the read AND re-checked in the compare-and-set, so the
+// sweep never clears a claim it does not own. low_rating_requested /
+// unrated_requested is not a legacy park and is never selected.
 async function sweepLowRatingParks({ limit = 50 } = {}) {
+  const nowIso = new Date().toISOString();
   const rows = await db('google_reviews')
     .where('auto_reply_status', STATUS.PARKED)
     .whereIn('auto_reply_reason', ['low_rating', 'unrated'])
     .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
-    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [nowIso])
+    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [nowIso])
     .limit(limit)
-    .select('id', 'review_reply', 'auto_reply_draft', 'auto_reply_reason');
+    .select('id', 'auto_reply_reason');
   let n = 0;
   for (const r of (rows || [])) {
-    // Compare-and-set on EVERYTHING the eligibility read saw — status, reason,
-    // version, publish claim, reply slot — so a concurrent Skip / sync /
-    // publisher transition wins (hook on #3587); only OUR draft is removed.
-    const ours = r.auto_reply_draft && r.review_reply === asDraft(r.auto_reply_draft);
+    // Compare-and-set on everything the eligibility read saw — status,
+    // reason, version, both claims — so a concurrent Skip / sync / Post now /
+    // publisher transition wins.
+    const casIso = new Date().toISOString();
     const updated = await db('google_reviews')
-      .where({ id: r.id, review_reply: r.review_reply, auto_reply_status: STATUS.PARKED, auto_reply_reason: r.auto_reply_reason })
+      .where({ id: r.id, auto_reply_status: STATUS.PARKED, auto_reply_reason: r.auto_reply_reason })
       .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
-      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
-      .update({ ...lowRatingExitFields(r.auto_reply_reason), auto_reply_claimed_until: null, ...(ours ? { review_reply: null, reply_updated_at: null } : {}) });
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [casIso])
+      .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [casIso])
+      .update({ auto_reply_status: null, auto_reply_reason: r.auto_reply_reason, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0, auto_reply_claimed_until: null });
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
   if (n) logger.info(`[review-auto-reply] ${n} under-4★ park(s) from before the 2026-08-29 rule left the lane`);

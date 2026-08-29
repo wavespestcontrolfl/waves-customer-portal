@@ -348,7 +348,7 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'due', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: new Date(Date.now() - 60000).toISOString() }),
     ];
     expect(await Runner.runModeIndependentSweeps()).toEqual({ bellsRetried: 1, lowRatingReleased: 1 });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: null, auto_reply_draft: null });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: 'Hi Dana, sorry.' });
     expect(state.rows[1].auto_reply_error).toBeNull();
     expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
     // Idempotent; the cron entry (mode off) runs the same sweeps and never claims the due row.
@@ -371,12 +371,19 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'asked', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Asked for.', review_reply: '[DRAFT] Asked for.', auto_reply_version: 'reply-v1' }),
       // Under a live publish claim: a publisher is mid-flight, untouched.
       row({ id: 'claimed', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'y', review_reply: '[DRAFT] y', auto_reply_version: 'reply-v1', publish_claimed_until: '2099-01-01T00:00:00Z' }),
+      // Under a live AUTO-REPLY claim: Post now holds it while it verifies, untouched (hook r3).
+      row({ id: 'postnow', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'z', review_reply: '[DRAFT] z', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
+      // An EXPIRED auto-reply claim is not a claim.
+      row({ id: 'expired', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'w', review_reply: '[DRAFT] w', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2000-01-01T00:00:00Z' }),
     ];
-    expect(await Runner.sweepLowRatingParks()).toBe(2);
+    expect(await Runner.sweepLowRatingParks()).toBe(3);
     expect(state.rows[4]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', review_reply: '[DRAFT] Asked for.' });
     expect(state.rows[5]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] y' });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: null, auto_reply_draft: null, auto_reply_due_at: null });
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: null });
+    expect(state.rows[6]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] z', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
+    expect(state.rows[7]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] w', auto_reply_draft: 'w', auto_reply_claimed_until: null });
+    // Released rows keep their TEXT (a pre-rule Post-now draft is indistinguishable from an automatic one — no data loss); only automation state goes.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: 'Hi Dana, sorry.', auto_reply_drafted_at: '2026-08-28T00:00:00Z', auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0 });
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: 'Thanks.' });
     expect(state.rows[2]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Human words.' });
     expect(state.rows[3]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     // Idempotent, and it runs on every tick.
