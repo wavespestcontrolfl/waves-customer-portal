@@ -141,7 +141,7 @@ t.string('expected_persistence');                 // durable | rotating | unknow
 t.string('link_type').notNullable();              // board lane the placement will carry; CHECK (link_type IN CLAIMABLE_LINK_TYPES — editorial|resource|guest_post|haro|directory|citation|social) so a path can never qualify with a lane the worker cannot lease (§6.3 validity also asserts it)
 t.numeric('confidence', 3, 2);                    // 0–1 — CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)); the investigator's JSON schema and the §6.3 validity step assert the same range (a value outside [0,1] ⇒ INVALID), so a malformed confidence can never clear a floor
 t.integer('revision').notNullable().defaultTo(1);  // display/global counter: +1 whenever ANY in-place authority- or approval-relevant field changes (acquisition_type / submission_url changes supersede the row instead — see above)
-t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, currency, payment_required, legal_attestation, legal_terms_hash, merchant_binding
+t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, currency, fee_scope, payment_required, legal_attestation, legal_terms_hash, merchant_binding
 t.integer('revision_communication').notNullable().defaultTo(1);  // +1 only on communication inputs: link_type, expected_rel, legal_attestation, legal_terms_hash (recipient/draft live on the approval hash)
 t.integer('revision_execution').notNullable().defaultTo(1);      // +1 only on execution inputs: account_required, email_verification, agent_completable, legal_attestation, legal_terms_hash
 // Approvals and authority rows bind to THEIR dimension's revision (§3.3b/§3.6b); a price change bumps revision_payment
@@ -223,7 +223,8 @@ t.uuid('approval_id');                 // NULL while an OWNER_* decision is pend
 t.uuid('floor_waiver_id');             // → seo_link_floor_waivers when this dimension was decided under a floor waiver (§6.3 1b); `level` still holds the UNDERLYING decision — never OWNER_OVERRIDE — and the claim checks the waiver's validity in addition to the level
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
 t.string('instance_key').notNullable().defaultTo('-:1'); // the ACTION INSTANCE this row governs: `${kind}:${generation}` — kind '-' = initial acquisition/send, a renewal's renewal_period_key, or 'followup'; generation starts at 1 and the bridge opens `${kind}:${n+1}` when the previous instance ended in a NON-successful terminal outcome (`failed`/`skipped`/`send_error` reconciled as not sent) and a retry is warranted (re-investigation or owner "retry") — OR when the Judge records a VERIFIED LOSS of a successfully acquired placement (the retained `lost-link-recovery.js` reopen): the reopen starts a new recovery cycle with a fresh, unsatisfied instance for every dimension (`-:${n+1}`), so the replacement draft/acquisition needs its own decision and approval — each new instance is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances; a successful instance (`placed`/`sent`) never gets a successor of the same kind
-t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
+t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed
+t.timestamp('ended_at'); t.string('end_outcome'); // TERMINAL marker for an instance that finished WITHOUT success (failed/skipped/reconciled-not-sent/voided/superseded-by-next-generation) — written when the next generation is opened; the claim contract and the bridge's stale-row scan read ONLY rows with ended_at IS NULL (the current instance per (prospect, dimension, kind) — partial UNIQUE on that triple WHERE ended_at IS NULL), so an old failed instance never blocks or is re-decided (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
 t.unique(['prospect_id', 'dimension', 'instance_key']);
 ```
 The bridge job writes one row per dimension the path touches — the dimensions are
@@ -340,7 +341,9 @@ this table (a domain discovered by three feeders credits all three; "first-touch
 "any-touch" are both reportable) — **but only touches recorded BEFORE the placement was
 acquired** (`seen_at` < the timestamp of the successful acquisition attempt — the same `seo_link_attempts` row the §8 learning join uses; `first_live_at` is only the fallback when no attempt exists, i.e. never for executed placements — and never `existing_backlink`, which is observational):
 a feeder that merely notices a link after it converted earns no attribution and cannot
-bias `P(live at D30 | source, path)`. Recursive lineage follows `source_ref` chains here.
+bias `P(live at D30 | source, path)`. §8 learning joins DISTINCT `(placement, source)` — a
+placement counts once per source however many touch rows that source recorded (the rows stay
+for provenance), so repeatedly-noticed domains are not overweighted. Recursive lineage follows `source_ref` chains here.
 
 ### 3.5 Provenance enum (`seo_link_domains.source`, `seo_link_domain_sources.source`)
 
@@ -378,13 +381,13 @@ Every `OWNER_*` decision is an approval row that freezes exactly what was approv
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.integer('path_revision').notNullable();     // the path's revision_<dimension of this approval's action> at approval time (§3.2) — never the global counter
-t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, currency, payment_required, legal_attestation, legal_terms_hash, merchant_binding}; communication = {link_type, expected_rel, legal_attestation, legal_terms_hash, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, legal_terms_hash, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence} AND the `instance_key` (so the hash itself differs per generation). A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
+t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, currency, fee_scope, payment_required, legal_attestation, legal_terms_hash, merchant_binding}; communication = {link_type, expected_rel, legal_attestation, legal_terms_hash, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, legal_terms_hash, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence} AND the `instance_key` (so the hash itself differs per generation). A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
 t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // CHECK (authority IN (the §6.1 OWNER_* levels EXCEPT OWNER_OVERRIDE/OWNER_MANUAL_PAYMENT/OWNER_INPUT_REQUIRED)) — the OWNER_* level being granted; a floor waiver is never an approval row (it has no dimension/action/instance — `seo_link_floor_waivers` is its only record)
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT (money_action AND decision = 'approved') OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid APPROVAL without a ceiling cannot exist, while a `rejected`/`watch` decision on a payment card is an audit row with no approved terms: CHECK (decision = 'approved' OR (approved_amount_cents IS NULL AND max_payable_cents IS NULL)) (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT (money_action AND decision = 'approved') OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
-t.jsonb('terms_snapshot').notNullable();      // PER DIMENSION — exactly the fields of this approval's `decision_inputs_hash` set (§3.6b), nothing from another dimension: payment approvals snapshot estimated_cost_cents (the quoted initial amount), currency (always 'USD' — the approval insert refuses otherwise), renewal_period, renewal_cost_cents, payment_required, legal_attestation, legal_terms_hash (+ the agreement URL — the exact terms the owner read) and, for payment approvals, the COMPLETE canonical merchant_binding from the path (§3.2: checkout_origin, processor.host, processor.merchant_account_id, issuer_merchant_descriptor) the owner approved — a processor host alone never appears here; copied, never referenced
+t.jsonb('terms_snapshot').notNullable();      // PER DIMENSION — exactly the fields of this approval's `decision_inputs_hash` set (§3.6b), nothing from another dimension: payment approvals snapshot estimated_cost_cents (the quoted initial amount), currency (always 'USD' — the approval insert refuses otherwise), fee_scope, renewal_period, renewal_cost_cents, payment_required, legal_attestation, legal_terms_hash (+ the agreement URL — the exact terms the owner read) and, for payment approvals, the COMPLETE canonical merchant_binding from the path (§3.2: checkout_origin, processor.host, processor.merchant_account_id, issuer_merchant_descriptor) the owner approved — a processor host alone never appears here; copied, never referenced
 t.string('dimension').notNullable();          // CHECK (dimension IN ('execution','payment','communication')) — the authority dimension this approval satisfies
 t.string('action').notNullable();             // CHECK (action IN ('acquire','accept_terms','purchase','renewal','outreach_send','outreach_followup')) AND CHECK ((dimension='execution' AND action IN ('acquire','accept_terms')) OR (dimension='payment' AND action IN ('purchase','renewal')) OR (dimension='communication' AND action IN ('outreach_send','outreach_followup'))) — `accept_terms` = accepting/signing an agreement or vendor terms (its own execution-dimension instance `terms:<generation>`, action_hash = the exact `legal_terms_hash`; an outreach path with `legal_attestation` therefore carries communication/outreach_send AND execution/accept_terms — permission to send an email is never permission to sign) — an approval authorizes exactly one action in exactly one dimension; a paid membership has an execution/acquire approval AND a separate payment/purchase approval
 t.text('instance_key').notNullable();         // the §3.3b ACTION INSTANCE this approval authorizes (`${kind}:${generation}`, e.g. '-:1', '-:2', 'annual:1', 'followup:1'); must EQUAL the `seo_link_placement_authorities.instance_key` it is attached to (checked in the approval transaction, together with `approval.authority === authorities.level` for that dimension — an approval issued for a different OWNER_* level never satisfies the row; the locked claim re-checks the same equality; regression test required) and the instance the claim is leasing (checked in the locked claim) — an approval for generation 1 can never satisfy generation 2 after `voided`/`reconciled_not_charged`/`failed`; the owner approves each retry generation afresh
@@ -655,7 +658,7 @@ preferred_provider           = 'deterministic_runner'   (CHECK against the provi
 **Payment and communication are independent authorities.** The decision returns a SET of
 required authorities, one per dimension the path touches: `payment` (when
 `payment_required`), `communication` (when the path is an outreach/content type), and
-`execution` — derived from the path's REQUIRED ACTIONS, not its label: every non-outreach type (free/account/claim/membership/human-step) AND any outreach/content path whose flags require execution steps (`account_required=true`, a form/`content_submission` submit, or `legal_attestation=true` → the `accept_terms` instance): such a path carries communication (the message) AND an `acquire` execution row (account creation + submit), each decided and approved separately — a send approval is never permission to create an account or submit a form; the legal case, §3.3b: the function then emits BOTH the communication decision AND
+`execution` — derived from the path's REQUIRED ACTIONS, not its label: every non-outreach type (free/account/claim/membership/human-step) AND any outreach/content path whose flags require execution steps (`account_required=true`, a form/`content_submission` submit, or `legal_attestation=true` → the `accept_terms` instance): such a path carries communication (the message) AND an `acquire` execution instance (account creation + submit) AND, when `legal_attestation=true`, a SEPARATE `accept_terms` execution instance — three rows, each decided and approved separately — a send approval is never permission to create an account or submit a form, and approving the agreement never authorizes the submission; the legal case, §3.3b: the function then emits BOTH the communication decision AND
 an execution decision for that instance — `OWNER_LEGAL` when
 `policy.legal_attestation_requires_owner` (default true), else the normal execution rules
 (`AUTO_ACCOUNT`/`AUTO_FREE` per policy, the acceptance still bound to `legal_terms_hash`) —
@@ -715,9 +718,12 @@ OUTREACH_TYPES = (resource_outreach, editorial_outreach, partnership, content_su
 # 2a. EXECUTION dimension — every non-outreach type, PLUS any outreach type whose required actions include
 #     execution steps (account_required, a form/content submission, or legal_attestation → the accept_terms instance)
 if path.acquisition_type not in OUTREACH_TYPES or path.account_required or path.acquisition_type == content_submission or path.legal_attestation:
-    execution =
+    # TWO execution instances when both apply: `acquire` (-:n) and, independently, `accept_terms` (terms:n)
+    if path.legal_attestation:
+        execution[accept_terms] = OWNER_LEGAL if policy.legal_attestation_requires_owner else (AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT)
+    if path.acquisition_type not in OUTREACH_TYPES or path.account_required or path.acquisition_type == content_submission:
+      execution[acquire] =
         OWNER_HUMAN_STEP  if not path.agent_completable                                                   # a human must act; never AUTO_*
-        else OWNER_LEGAL  if path.legal_attestation and policy.legal_attestation_requires_owner
         else OWNER_MEMBERSHIP if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner
         else (AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT) if path.account_required
         else (AUTO_FREE if auto_free_acquisition === true else OWNER_FREE)
@@ -778,9 +784,13 @@ for that **(domain, page, location_key)** — the same triple `findPlacementRow`
 unique key enforces, so a second GBP location is never suppressed by the first — with the
 path's `fee_scope` (investigator output, CHECK IN ('per_location','account_wide'); required when
 `payment_required`) deciding how payment is modelled: `account_wide` (one membership/association
-fee covering every profile on the shared account) creates ONE purchase and ONE payment
-authority instance on the FIRST placement and links every sibling to it via
-`seo_link_prospects.payment_group_id` (the purchase/duplicate guard and renewal are keyed by
+fee covering every profile on the shared account) creates ONE purchase on the FIRST placement's group and links every sibling to it via
+`seo_link_prospects.payment_group_id`; every sibling still gets its OWN payment authority
+row (the claim contract loads per-placement authorities, unchanged) with `level` copied
+from the group's decision and `group_purchase_id` → the group's purchase, and the settlement
+of that one purchase marks `satisfied_at` on EVERY row in the group in the same transaction
+(a sibling's payment row is never independently approvable or reservable — its card is the
+group's) (the purchase/duplicate guard and renewal are keyed by
 the group; siblings' payment dimension is satisfied by the group's settled purchase and never
 reserves), while `per_location` keeps a purchase per placement — runs the
 §6.3 decision, stamps `authority` on the **placement**
@@ -1108,8 +1118,8 @@ the response was lost, cleared only by the existing Sent-folder `reconcileSendEr
 path, never retried before it), `follow_up_send_token` (its own idempotency claim, same
 advisory-lock shape as the first send), `follow_up_attempted_at` (stamped at claim time under
 the same lock exactly like `outreach_attempted_at`; the retained `dailySendCount` is extended
-to count it — `(outreach_attempted_at >= since)::int + (follow_up_attempted_at >= since)::int +
-prior attempts` — so a follow-up consumes the policy cap and the hard cap like an initial
+to count it — `COALESCE((outreach_attempted_at >= since)::int, 0) + COALESCE((follow_up_attempted_at >= since)::int, 0) +
+prior attempts` (both terms COALESCEd exactly like the shipped expression — a NULL follow-up timestamp must not null the whole row and drop the initial send from SUM) — so a follow-up consumes the policy cap and the hard cap like an initial
 send and initial + follow-up sends can never exceed the daily limit). A due follow-up is
 **drafted before it can be sent**, exactly like the first message: `mode=draft` ALSO leases
 `contacted` rows with `follow_up_status='due'` (draft-only, grants nothing beyond composing
@@ -1331,7 +1341,11 @@ that cannot complete it. Outreach: `OutreachProvider` = drafter + `link-prospect
   it, but `backlink-monitor.js` never touches the board and the verifier scans only rows with
   a `live_url` or `status='placed'`): step 4 adds a post-scan reconciliation that, after each
   Sunday scan, matches new/active scan-tracked `seo_backlinks` to `contacted`/`negotiating`
-  placements by canonical domain + target-page variants and moves them to `placed` with
+  placements by canonical domain + target-page variants AND the location/profile identity (the
+  backlink's `source_url` matched against each candidate placement's own profile URL /
+  account identity, §3.3b) — when the domain-page match is not unique across `location_key`s
+  and no profile identity resolves it, it REFUSES to reconcile and parks an owner card instead
+  of moving every sibling — and moves the one matched placement to `placed` with
   `live_url`/`backlink_id` (the verifier then promotes to `live`/`indexed`), so a publisher
   who posts the link without any worker report still lands in D30 and source reporting.
 - **D30 survival** = a **sampled observation at the cutoff**, not an inference from
