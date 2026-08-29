@@ -1019,6 +1019,22 @@ describe('PR codex r22 (b4db7a542)', () => {
     const bond = { url: '/termite/termite-bond-warranty/', body: '---\ntitle: Termite Bond Warranty Guide\nslug: /termite/termite-bond-warranty/\nprimary_keyword: termite bond warranty\ncategory: termite\n---\n\nWarranty terms vary. Warranty renewals are yearly. Warranty transfers happen at sale. Most owners read the warranty once, and the warranty covers retreatment.\n' };
     expect(gate.indexCorpus([bond]).properNouns.has('warranty')).toBe(false);
   });
+  test('a legacy-lane row (flat write) keeps the same-leaf collision even with a category; more countries; bare Fla. is statewide (r34)', () => {
+    const corpus = [{ url: '/pest-control/springtails/', body: '---\ntitle: Springtails Explained\nslug: /pest-control/springtails/\nprimary_keyword: springtails\ncategory: pest-control\n---\n\ntext\n' }];
+    const index = gate.indexCorpus(corpus);
+    // publishAstro writes src/content/blog/springtails.md — the live legacy route's file — whatever the category.
+    return gate.evaluateBlogPostRow({ id: 'p1', title: 'Springtails Near Sarasota Pools', keyword: 'springtails near pools', slug: 'springtails', category: 'mosquito', astro_status: null }, { index, category: 'mosquito' }).then((r) => {
+      expect(r.findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+      for (const t of ['Russia pest control', 'Ukraine termite treatment', 'pest control in Iran', 'Moscow exterminator', 'Prague bed bugs']) {
+        expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+        expect(gate.geoBlockReason(t, { allowStatewide: true })).toBe(gate.CODES.GEO_OUT_OF_AREA);
+      }
+      expect(gate.classifyGeoScope('Pest Control in Fla.').scope).toBe('statewide');
+      expect(gate.classifyGeoScope('pest control fla').scope).toBe('statewide');
+      expect(gate.classifyGeoScope('Southwest Fla. pest control').scope).toBe('regional');
+      expect(gate.classifyGeoScope('a flag on the lawn in sarasota').scope).toBe('footprint');
+    });
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

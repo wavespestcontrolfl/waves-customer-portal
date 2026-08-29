@@ -104,7 +104,9 @@ const CODES = Object.freeze({
 // city. County names are the footprint counties only — out-of-area counties
 // live in the guardrails blocklist and classify as out_of_area.
 const REGIONAL_RE = /\b(southwest florida|southwest fla?\.?|sw florida|sw fla?\.?|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
-const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
+// Bare "Fla" / "Fla." is the same statewide framing as "Florida" (the
+// regional matcher wins for "Southwest Fla." — scope precedence).
+const STATEWIDE_RE = /\bflorida\b|\bfl\b|\bfla\b\.?/i;
 // Compounds where "Florida"/"fl" is not geography: the Florida room (a
 // lanai-style sunroom), the fluid ounce, and the governed pest / weed names
 // that carry the word (service-pricing + the live corpus: Florida woods
@@ -314,7 +316,7 @@ const NATIONWIDE_RE = new RegExp(
 const SCIENCE_EXEMPT_RE = /\b(?:(?:low|high|soil|leaf|tissue|available|excess|deficient|deficiency|deficiencies|adequate|optimal|foliar|calcium|magnesium|potassium|nitrogen|phosphorus|sulfur|iron|ppm|mg\/l|percent|%)\s+(?:ca|mg|k|n|p|s|fe|mn|zn|cu|b|mo|al|na|cl|co|ni)|(?:ca|mg|k|n|p|fe|mn|zn|cu|na|al|co|ni)\s+(?:levels?|deficienc(?:y|ies)|ratios?|content|uptake|availability|toxicity|sufficiency|in\s+(?:soil|soils|turf|lawns?|grass|leaves|plants?|tissue))|ga(?:3)?\s+(?:applications?|treatments?|sprays?|levels?|rates?|concentrations?|sensitivity)|ct\s+(?:values?|scans?|products?|calculations?|concentration))\b/gi;
 // Tech terms that read as a leading postal abbreviation ("Wi-Fi" → WI).
 const TECH_EXEMPT_RE = /\bwi-?fi\b/gi;
-const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
+const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan|russia|ukraine|iran|iraq|syria|afghanistan|north korea|myanmar|burma|cambodia|laos|nepal|sri lanka|ethiopia|tanzania|uganda|sudan|algeria|tunisia|libya|lebanon|kuwait|oman|bahrain|yemen|uruguay|paraguay|bolivia|ecuador|belize|iceland|hungary|romania|bulgaria|croatia|serbia|slovakia|slovenia|czech republic|czechia|belarus|lithuania|latvia|estonia|luxembourg|moldova|armenia|azerbaijan|kazakhstan|uzbekistan|mongolia|fiji|papua new guinea|moscow|kyiv|kiev|tehran|baghdad|kabul|damascus|hanoi|ho chi minh city|phnom penh|kathmandu|colombo|addis ababa|dar es salaam|kampala|khartoum|algiers|tunis|tripoli|amman|beirut|kuwait city|muscat|manama|montevideo|asuncion|la paz|quito|guayaquil|reykjavik|budapest|bucharest|sofia|zagreb|belgrade|bratislava|ljubljana|prague|minsk|vilnius|riga|tallinn|chisinau|yerevan|baku|almaty|tashkent|ulaanbaatar|helsinki|geneva|milan|turin|hamburg|cologne|lyon|marseille|porto|seville|krakow|rotterdam|antwerp|gothenburg)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico|district of columbia)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
@@ -680,7 +682,9 @@ function isLiveRow(post = {}) {
 async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLiveIndex, category = null } = {}) {
   if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
-  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
+  // flatWrite: publishAstro commits src/content/blog/<leaf>.md for a
+  // leaf-only slug whatever the category — the same-leaf collision applies.
+  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, flatWrite: true, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
   // Two stages (the runner's pattern): geo first WITHOUT the corpus — a
   // deterministic geo block never fetches the live corpus and still returns
   // its verdict during a GitHub outage; only a geo-clean row loads it.
@@ -1005,7 +1009,10 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // canonicalizes to /<category>/<leaf>/ and adopts by exact route (a flat
   // file rendering another category is skipped), so only that route can
   // collide — it is already in `routes`.
-  const leafOnly = selfUrl.split('/').filter(Boolean).length === 1 && !category;
+  // A legacy-lane row (publishAstro) is written to the FLAT
+  // src/content/blog/<leaf>.md whatever its category (candidate.flatWrite),
+  // so its same-leaf check stays regardless of category.
+  const leafOnly = selfUrl.split('/').filter(Boolean).length === 1 && (!category || !!candidate.flatWrite);
   // A NEW blog may not reuse a live post's URL — or its LEAF: the publisher
   // writes a leaf-only row slug to src/content/blog/<leaf>.md, which can
   // overwrite the legacy file serving the category-qualified URL. Either way
