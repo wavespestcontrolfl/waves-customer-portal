@@ -668,7 +668,12 @@ function attachTermiteReportV2(data, service = {}) {
   // and an installation is not a monitoring check — its pins and counts
   // must never read as "stations inspected" (codex P1 #3600 r15). The
   // typed cards stand for installations; the dashboard is monitoring-only.
-  const stage = data.termiteBaitStage || null;
+  // report-data passes the resolved stage; callers that build the payload
+  // without it (tests, future composers) resolve it from the record with
+  // the SAME function, so the gate can never drift from the PDF signature.
+  const stage = Object.prototype.hasOwnProperty.call(data, 'termiteBaitStage')
+    ? (data.termiteBaitStage || null)
+    : recordStage(service);
   delete data.termiteBaitStage;
   if (process.env.TERMITE_REPORT_V2 !== 'true') return data;
   // Installation visits and detection-only monitoring programs (no active
@@ -676,7 +681,9 @@ function attachTermiteReportV2(data, service = {}) {
   // (codex P1 #3600 r15 / r18). The PDF signature stays a superset: a
   // record it keys as -termv2 that renders without the dashboard only
   // re-renders once on the flip, never serves a stale render as current.
-  if (stage === 'installation' || stage === 'detection' || stage === 'replacement') return data;
+  // An UNKNOWN stage (legacy companion with no frozen key) fails closed the
+  // same way (local codex P1 r36): only a resolved monitoring stage renders.
+  if (stage !== 'monitoring') return data;
   const resolved = termiteBaitSnapshotOf(service);
   if (!resolved) return data;
   // The customer-visible report entry that matches the snapshot: the
@@ -784,17 +791,32 @@ function attachTermiteReportV2(data, service = {}) {
  */
 function frozenTermiteServiceKey(service = {}) {
   const data = serviceDataOf(service);
-  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey') && data.completedServiceKey) {
-    return String(data.completedServiceKey);
-  }
   const resolved = termiteBaitSnapshotOf(service);
-  const snapshotKey = resolved?.snapshot?.serviceKey;
-  return snapshotKey ? String(snapshotKey) : null;
+  const snapshotKey = resolved?.snapshot?.serviceKey ? String(resolved.snapshot.serviceKey) : null;
+  const completedKey = data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey') && data.completedServiceKey
+    ? String(data.completedServiceKey)
+    : null;
+  // Source-aware (local codex P1 r36): a COMPANION snapshot's own frozen key
+  // is the termite section's identity and outranks the record-level key,
+  // which names the PRIMARY service. Today completion stamps both from the
+  // primary's completion profile (a companion is a `{type, delivery}` section
+  // of that profile — the only live one is pest_termite_bait_quarterly, a
+  // monitoring check), so the two agree; a future per-companion freeze
+  // lands here without touching the stage rule.
+  if (resolved?.source === 'companion') return snapshotKey || completedKey;
+  return completedKey || snapshotKey;
 }
 
 function recordStage(service = {}) {
   const frozenStage = stageForServiceKey(frozenTermiteServiceKey(service));
   if (frozenStage) return frozenStage;
+  // Display-name tokens describe the record's PRIMARY service. They say
+  // nothing about a companion termite section, so a legacy companion that
+  // froze no key at all has an UNKNOWN stage → null, and both consumers
+  // (the render gate and the PDF signature) fail closed to the typed record
+  // (local codex P1 r36). Primaries keep the name fallback for records
+  // completed before service keys were frozen.
+  if (termiteBaitSnapshotOf(service)?.source === 'companion') return null;
   const name = String(service.service_type || '');
   if (INSTALLATION_NAME_RE.test(name)) return 'installation';
   if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return 'detection';

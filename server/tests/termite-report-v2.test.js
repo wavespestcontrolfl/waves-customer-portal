@@ -618,8 +618,9 @@ describe('attachTermiteReportV2 — the one composer shared by the route and the
   it('a pest PRIMARY with a termite COMPANION keeps its own Pest V2 dashboard beside the companion dashboard', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
     const combinedService = { service_data: JSON.stringify({
+      completedServiceKey: 'pest_termite_bait_quarterly',
       typedReportSnapshot: { type: 'pest_general', values: {} },
-      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES }],
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', serviceKey: 'pest_termite_bait_quarterly', values: CLEAN_VALUES }],
     }) };
     const data = attachTermiteReportV2({
       serviceLine: 'pest',
@@ -638,15 +639,21 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     if (original === undefined) delete process.env.TERMITE_REPORT_V2;
     else process.env.TERMITE_REPORT_V2 = original;
   });
+  // Completion stamps the record-level key AND every companion snapshot's
+  // serviceKey from the primary's completion profile (admin-dispatch);
+  // pest_termite_bait_quarterly is the live profile that declares a
+  // termite_bait_station companion.
   const combined = { service_data: JSON.stringify({
-    typedReportSnapshot: { type: 'cockroach', values: {} },
+    completedServiceKey: 'pest_termite_bait_quarterly',
+    typedReportSnapshot: { type: 'cockroach', serviceKey: 'pest_termite_bait_quarterly', values: {} },
     companionReportSnapshots: [
-      { type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES },
+      { type: 'termite_bait_station', delivery: 'auto_send', serviceKey: 'pest_termite_bait_quarterly', values: CLEAN_VALUES },
     ],
   }) };
   const internalOnly = { service_data: JSON.stringify({
-    typedReportSnapshot: { type: 'cockroach', values: {} },
-    companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'internal_only', values: CLEAN_VALUES }],
+    completedServiceKey: 'pest_termite_bait_quarterly',
+    typedReportSnapshot: { type: 'cockroach', serviceKey: 'pest_termite_bait_quarterly', values: {} },
+    companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'internal_only', serviceKey: 'pest_termite_bait_quarterly', values: CLEAN_VALUES }],
   }) };
 
   it('resolves the primary first, then an auto_send companion; internal_only companions never qualify', () => {
@@ -734,8 +741,9 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
   it('never consumes a non-termite program map (rodent primary + termite companion renders the RODENT pins)', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
     const service = { service_data: JSON.stringify({
-      typedReportSnapshot: { type: 'rodent_bait_station', values: {} },
-      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES }],
+      completedServiceKey: 'rodent_termite_bait_bundle',
+      typedReportSnapshot: { type: 'rodent_bait_station', serviceKey: 'rodent_termite_bait_bundle', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', serviceKey: 'rodent_termite_bait_bundle', values: CLEAN_VALUES }],
     }) };
     const data = attachTermiteReportV2({
       typedReport: { type: 'rodent_bait_station', visitSequence: 1 },
@@ -751,6 +759,32 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     process.env.TERMITE_REPORT_V2 = 'true';
     expect(attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [] }, internalOnly).termiteReportV2).toBeUndefined();
     expect(attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [{ type: 'termite_bait_station', internalOnly: true }] }, combined).termiteReportV2).toBeUndefined();
+  });
+
+  it('a companion stage is source-aware: its own key first, then the frozen primary key; a legacy companion with neither fails closed', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const legacy = { service_type: 'Termite Bait Station Service', service_data: JSON.stringify({
+      typedReportSnapshot: { type: 'cockroach', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES }],
+    }) };
+    // the primary's display name says nothing about the companion section
+    expect(recordStage(legacy)).toBeNull();
+    expect(termiteReportV2PdfSignature(legacy)).toBe('');
+    const data = attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [{ type: 'termite_bait_station', visitSequence: 2, internalOnly: false }] }, legacy);
+    expect(data.termiteReportV2).toBeUndefined();
+    // the companion's own frozen key outranks the record-level primary key
+    const ownKey = { service_data: JSON.stringify({
+      completedServiceKey: 'pest_termite_bait_quarterly',
+      typedReportSnapshot: { type: 'cockroach', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', serviceKey: 'termite_installation_setup', values: CLEAN_VALUES }],
+    }) };
+    expect(recordStage(ownKey)).toBe('installation');
+    expect(termiteReportV2PdfSignature(ownKey)).toBe('');
+    // a termite-program PRIMARY key still decides for a companion stamped from it
+    expect(recordStage(combined)).toBe('monitoring');
+    expect(termiteReportV2PdfSignature(combined)).toBe('-termv2');
+    // a primary keeps the record-level key first (unchanged order)
+    expect(recordStage({ service_data: JSON.stringify({ completedServiceKey: 'termite_installation_setup', typedReportSnapshot: { type: 'termite_bait_station', serviceKey: 'termite_bait', values: {} } }) })).toBe('installation');
   });
 
   it('the PDF signature keys on the companion snapshot too', () => {

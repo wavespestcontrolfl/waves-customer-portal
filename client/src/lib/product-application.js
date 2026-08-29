@@ -38,6 +38,13 @@ export function isProductApplication(app) {
   const monitoringLine = /\b(termite|termitic\w*|rodent|rodentic\w*|rats?|mouse|mice)\b/i.test(identity);
   const deviceToken = /station|cartridge|monitor/i.test(identity);
   if (monitoringLine && deviceToken) return false;
+  // …and a termite / rodent BAIT is device work too, whatever the method: a
+  // "Recruit HD Termite Bait" or rodenticide bait row recorded under
+  // bait_placement loads a station, it does not treat the property. The
+  // server authority (isNonBaitPesticideProduct) already excludes the whole
+  // bait family; this mirror must not admit it through the method shortcut
+  // (local codex P1 #3600 r36). Ordinary applied pest baits keep passing.
+  if (monitoringLine && /bait/i.test(identity)) return false;
   if ((app.method || 'perimeter_spray') !== 'station_check') return true;
   // station_check context: checking a station baited with a registered
   // rodenticide / termiticide bait applies nothing, whatever its EPA number.
