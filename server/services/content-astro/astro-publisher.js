@@ -4272,18 +4272,60 @@ function scheduledBlogFilePathForPost(post) {
 // live in the Astro repo, never in blog_posts.content: a body mirrored back
 // into the row (scheduler-lane remediation) must not carry references that
 // exist only on a PR branch — a later republish would fail on them.
-// Removes those image lines (and the blank line that framed them).
+// Every rendered form is removed via the shared scanner — inline images,
+// reference-style images (`![alt][pic]`) and the definitions that point at
+// a managed path — then lines left empty by the removal are dropped.
 function stripManagedBodyImages(body, slug) {
   const prefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
-  const lines = String(body || '').split('\n');
-  const out = [];
-  for (const line of lines) {
-    const refs = imageRefsInText(line, new Map());
-    const managedOnly = refs.length > 0 && refs.every((r) => String(r.src || '').startsWith(prefix)) && line.replace(/!\[[^\]]*\]\([^)]*\)/g, '').trim() === '';
-    if (managedOnly) continue;
-    out.push(line);
+  const raw = String(body || '');
+  const isManaged = (src) => String(src || '').startsWith(prefix);
+  const defs = contentGuardrails.markdownReferenceDefinitions(raw);
+  const removals = [];
+  for (const span of contentGuardrails.eachMarkdownLink(raw)) {
+    if (!span.isImage) continue;
+    let src = null;
+    if (span.kind === 'inline') src = decodeDestination(contentGuardrails.parseLinkDestination(raw.slice(span.destStart, span.destEnd + 1), { allowEmpty: true }) || '');
+    else if (span.kind !== 'malformed') {
+      const tail = span.kind === 'reference' ? raw.slice(span.refStart, span.refEnd + 1) : '';
+      const label = contentGuardrails.normalizeReferenceLabel(tail || raw.slice(span.labelStart + 1, span.labelEnd));
+      if (label && defs.has(label)) src = decodeDestination(defs.get(label));
+    }
+    if (src && isManaged(src)) removals.push([span.start, span.end]);
   }
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  // Splice the image syntax OUT (last first so offsets hold), then tidy the
+  // touched lines: collapse the double space an inline removal leaves and
+  // drop lines that only held a removed image.
+  let text = raw;
+  const touchedLineStarts = new Set();
+  for (const [from, to] of removals.sort((a, b) => b[0] - a[0])) {
+    touchedLineStarts.add(raw.lastIndexOf('\n', from) + 1);
+    text = text.slice(0, from) + text.slice(to + 1);
+  }
+  const rawLines = raw.split('\n');
+  const touched = new Set();
+  let pos = 0;
+  rawLines.forEach((line, i) => { if (touchedLineStarts.has(pos)) touched.add(i); pos += line.length + 1; });
+  const lines = text.split('\n');
+  const kept = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = rawLines[i].match(/^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:/);
+    if (m) {
+      const label = contentGuardrails.normalizeReferenceLabel(m[1]);
+      if (defs.has(label) && isManaged(decodeDestination(defs.get(label)))) continue; // managed definition line
+    }
+    if (touched.has(i)) {
+      const tidy = lines[i].replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,;:!?])/g, '$1').trim();
+      if (tidy === '') continue; // the line only held the removed image
+      kept.push(tidy);
+      continue;
+    }
+    kept.push(lines[i]);
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+// Same, keyed by the row (publishAstro's slug fallback for a nullable slug).
+function stripManagedBodyImagesForPost(body, post) {
+  return stripManagedBodyImages(body, post?.slug || slugify(post?.title || ''));
 }
 
 module.exports = {
@@ -4312,6 +4354,7 @@ module.exports = {
   scheduledBlogFilePath,
   scheduledBlogFilePathForPost,
   stripManagedBodyImages,
+  stripManagedBodyImagesForPost,
   // Length clamps reused by the autonomous runner to normalize a draft's
   // title/meta BEFORE the quality gate (the gate runs before publish, so the
   // in-publisher normalization above is too late to salvage a length overshoot).

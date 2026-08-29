@@ -2160,7 +2160,7 @@ async function maybeRemediateBlogPost(post, deps = {}) {
       // failed PR fail on assets that never landed. publishAstro re-inserts
       // (reusing the live pictures) on the next publish.
       const pub = deps.astroPublisher || require('../content-astro/astro-publisher');
-      const mirrored = typeof pub.stripManagedBodyImages === 'function' ? pub.stripManagedBodyImages(body, row.slug) : body;
+      const mirrored = typeof pub.stripManagedBodyImagesForPost === 'function' ? pub.stripManagedBodyImagesForPost(body, row) : body;
       const patch = { content: mirrored, updated_at: new Date() };
       // Whitelisted frontmatter fixes mirror into their row columns for the
       // same reason the body does: publishAstro rebuilds frontmatter from

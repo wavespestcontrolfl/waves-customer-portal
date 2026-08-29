@@ -4531,7 +4531,12 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('stripManagedBodyImages removes publisher-managed body-N references (and only those) from a body mirrored into blog_posts (GH r22)', () => {
     const body = '## A\n\nProse.\n\n![gen](/images/blog/x/body-1.webp)\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore ![inline](/images/blog/x/body-2.webp) text.\n\n![gen2](/images/blog/x/body-2.webp)';
-    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore ![inline](/images/blog/x/body-2.webp) text.');
+    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore text.');
+    // Reference-style managed images and their definitions go too; a definition for a NON-managed path stays (hook P1).
+    const ref = '## A\n\nProse.\n\n![gen][pic]\n\n![keep][photo]\n\n[pic]: </images/blog/x/body-1.webp>\n[photo]: /images/2025/12/photo.webp';
+    expect(AstroPublisher.stripManagedBodyImages(ref, 'x')).toBe('## A\n\nProse.\n\n![keep][photo]\n\n[photo]: /images/2025/12/photo.webp');
+    // Nullable slug → publishAstro's slugify(title) fallback.
+    expect(AstroPublisher.stripManagedBodyImagesForPost('P.\n\n![g](/images/blog/ant-trails-in-bradenton/body-1.webp)', { slug: null, title: 'Ant Trails in Bradenton' })).toBe('P.');
     expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
   });
 
