@@ -39,6 +39,15 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  *    channel='sms').
  * 11. The commercial-schedule admin notification is deferred: dispatched
  *    exactly once after commit, never when the accept transaction rolls back.
+ *
+ * Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS, owner ruling 2026-08-28):
+ * 12. Gate on + the client attests the served version → ONE estimate_acceptances
+ *    row (verbatim snapshot, ip, ua, accepted_at) written in the accept
+ *    transaction, estimates.terms_version + customers.accepted_terms_version
+ *    stamped; a rolled-back accept leaves no record. A stale version 409s
+ *    TERMS_VERSION_STALE before any mutation; an absent one (a pre-gate tab)
+ *    accepts unrecorded. A gate-off server ignores the field and records
+ *    nothing. The recorded IP is the proxy-validated req.ip.
  */
 
 // ── In-memory fake knex ────────────────────────────────────────────────────
@@ -104,6 +113,8 @@ jest.mock('../models/db', () => {
     b.orWhereNull = () => b;
     b.orWhereNot = () => b;
     b.first = async () => {
+      // Simulated read failure for fail-closed assertions (state.failTables).
+      if (state.failTables && state.failTables.has(table)) throw new Error(`simulated db failure: ${table}`);
       const row = matched()[0];
       return row ? { ...row } : undefined;
     };
@@ -201,6 +212,20 @@ jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
   markLinkedLeadEstimateViewed: jest.fn(async () => ({})),
 }));
+// Gate values are fixed at module load; this passthrough lets the acceptance
+// -terms cases flip GATE_ESTIMATE_ACCEPTANCE_TERMS per test.
+const mockGateState = { acceptanceTerms: false, acceptanceTermsRequired: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (gate) => {
+      if (gate === 'estimateAcceptanceTerms') return mockGateState.acceptanceTerms;
+      if (gate === 'estimateAcceptanceTermsRequired') return mockGateState.acceptanceTermsRequired;
+      return actual.isEnabled(gate);
+    },
+  };
+});
 jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({})),
 }));
@@ -1117,5 +1142,214 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(db.__state.tables.customers).toHaveLength(0);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
+  const acceptanceTerms = require('../services/acceptance-terms-text');
+  const CURRENT = acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+
+  function seed(overrides) {
+    resetStore(recurringPestEstimate(overrides));
+    db.__state.tables.estimate_acceptances = [];
+  }
+
+  afterEach(() => { mockGateState.acceptanceTerms = false; mockGateState.acceptanceTermsRequired = false; });
+
+  test('gate on + attested version: one verbatim record in the accept txn, estimate + customer stamped', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-1', token: 'tok-terms-1-x0123456789' });
+    conversionOk();
+
+    const res = await fetch(`${base}/api/estimates/tok-terms-1-x0123456789/accept`, {
+      method: 'PUT',
+      // A requester-supplied X-Forwarded-For must never become the recorded
+      // IP: the record takes req.ip (proxy-validated under index.js's
+      // trust-proxy setting; the loopback here, where nothing is trusted).
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '198.51.100.77' },
+      body: JSON.stringify({ termsVersion: CURRENT }),
+    });
+    expect(res.status).toBe(200);
+
+    const records = db.__state.tables.estimate_acceptances;
+    expect(records).toHaveLength(1);
+    // The accept path minted the customer row itself — the record follows
+    // that id, not the converter's.
+    const customerId = storedEstimate().customer_id;
+    expect(customerId).toBeTruthy();
+    expect(records[0]).toMatchObject({
+      estimate_id: 'est-terms-1',
+      customer_id: customerId,
+      method: 'public_estimate',
+      terms_version: CURRENT,
+      terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+      user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
+    });
+    expect(records[0].ip).toMatch(/127\.0\.0\.1|::1/);
+    expect(records[0].ip).not.toContain('198.51.100.77');
+    expect(records[0].accepted_at).toBeTruthy();
+    expect(storedEstimate().terms_version).toBe(CURRENT);
+    expect(db.__state.tables.customers.find((c) => c.id === customerId).accepted_terms_version).toBe(CURRENT);
+    // The post-commit copy email is keyed on THIS acceptance record.
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-terms-1', acceptanceId: records[0].id }));
+  });
+
+  test('a rolled-back accept leaves no record and no stamps', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-2', token: 'tok-terms-2-x0123456789' });
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
+
+    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT });
+    expect(failed.status).toBeGreaterThanOrEqual(500);
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+    expect(db.__state.tables.customers.some((c) => c.accepted_terms_version)).toBe(false);
+  });
+
+  test('stale version → 409 TERMS_VERSION_STALE before any mutation', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-3', token: 'tok-terms-3-x0123456789' });
+
+    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01' });
+    expect(stale.status).toBe(409);
+    expect(stale.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test('a termite/WDO estimate (own signed agreement) never gets a record, even when a version is sent', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({
+      id: 'est-terms-t',
+      token: 'tok-terms-t-x0123456789',
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 35 }] },
+          oneTime: { items: [], membershipFee: 0 },
+        },
+      }),
+    });
+    conversionOk();
+    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT });
+    expect(res.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+  });
+
+  test('acceptanceRecordForEstimate: strict document reads fail on a missing row or a read error; the page is fail-soft', async () => {
+    const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+    seed({ id: 'est-rec-1', token: 'tok-rec-1-x01234567890', status: 'accepted', terms_version: CURRENT });
+    const accepted = { id: 'est-rec-1', status: 'accepted', terms_version: CURRENT };
+    // Nothing recorded: not applicable.
+    expect(await acceptanceRecordForEstimate({ id: 'x', status: 'accepted', terms_version: null })).toBeNull();
+    // terms_version says a row exists but none does.
+    expect(await acceptanceRecordForEstimate(accepted)).toBeNull();
+    await expect(acceptanceRecordForEstimate(accepted, { strict: true })).rejects.toThrow(/acceptance record missing/);
+    // A row: customer-facing shape.
+    db.__state.tables.estimate_acceptances.push({
+      id: 'abcdef1234567890', estimate_id: 'est-rec-1', terms_version: CURRENT, terms_text: 'Line.', accepted_at: '2026-08-28T10:35:00Z', ip: '203.0.113.9', user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
+    });
+    expect(await acceptanceRecordForEstimate(accepted, { strict: true })).toMatchObject({ recordId: 'ACC-ABCDEF12', termsText: 'Line.', ipMasked: '203.0.x.x', device: 'iPhone · Safari' });
+    // Read failure: page → null, document → throws.
+    db.__state.failTables = new Set(['estimate_acceptances']);
+    try {
+      expect(await acceptanceRecordForEstimate(accepted)).toBeNull();
+      await expect(acceptanceRecordForEstimate(accepted, { strict: true })).rejects.toThrow(/simulated db failure/);
+    } finally {
+      db.__state.failTables = null;
+    }
+  });
+
+  test('acceptanceTermsApplyTo: cancel-anytime lanes only, fail closed', () => {
+    const { acceptanceTermsApplyTo } = require('../routes/estimate-public');
+    const pest = { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [] } };
+    const withData = (extra, result = pest) => ({ estimate_data: JSON.stringify({ result, ...extra }) });
+    expect(acceptanceTermsApplyTo(withData({}))).toBe(true);
+    expect(acceptanceTermsApplyTo({ estimate_data: { result: pest } })).toBe(true);
+    // Mapped termite rows.
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait' }] }, oneTime: { items: [] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    // Raw pricing-engine WDO line: canonical underscored key, no display name.
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'wdo_inspection', price: 125 }] } }))).toBe(false);
+    // Canonical pre-slab identities carry no literal "termite".
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termidor', name: 'Pre-Slab Termidor' }] } }))).toBe(false);
+    // Other supported containers: root one_time.items, nested result.results.
+    expect(acceptanceTermsApplyTo(withData({ one_time: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, results: { oneTime: { items: [{ name: 'Termite foam treatment' }] } } }))).toBe(false);
+    // Engine-shaped rows (result.lineItems / raw engineResult.lineItems).
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, lineItems: [{ service: 'termite_bond', bondTerm: 'annual' }] }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({ engineResult: { lineItems: [{ service: 'termite_trenching', description: 'Termidor trench' }] } }))).toBe(false);
+    // Terms-neutral lanes: any commercial proposal, commercial category, invoice-mode billing.
+    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, buildings: [{ lineItems: [{ description: 'Pest service', frequency: 'quarterly' }] }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, commercialTerms: { initialTermMonths: 12, paymentTerms: 'net30' } } }))).toBe(false);
+    expect(acceptanceTermsApplyTo({ ...withData({}), category: 'COMMERCIAL' })).toBe(false);
+    expect(acceptanceTermsApplyTo({ ...withData({}), bill_by_invoice: true })).toBe(false);
+    // Fail closed: malformed / empty / non-object rows.
+    expect(acceptanceTermsApplyTo({ estimate_data: '{not json' })).toBe(false);
+    expect(acceptanceTermsApplyTo({ estimate_data: null })).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [] }, oneTime: { items: [] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: ['pest'] }, oneTime: { items: [] } }))).toBe(false);
+  });
+
+  test('an annual-prepay accept is terms-neutral: no record, no 409, even with a version sent', async () => {
+    mockGateState.acceptanceTerms = true;
+    mockGateState.acceptanceTermsRequired = true;
+    seed({ id: 'est-terms-p', token: 'tok-terms-p-x0123456789' });
+    conversionOk();
+    const res = await putAccept('tok-terms-p-x0123456789', { paymentMethodPreference: 'prepay_annual' });
+    expect(res.status).not.toBe(409);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test('absent version: accepts unrecorded under `true` (pre-gate tab), refused under `required`; gate OFF records nothing (kill switch)', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
+    conversionOk();
+    const preGate = await putAccept('tok-terms-4-x0123456789', {});
+    expect(preGate.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+
+    mockGateState.acceptanceTermsRequired = true;
+    seed({ id: 'est-terms-4r', token: 'tok-terms-4r-x012345678' });
+    EstimateConverter.convertEstimate.mockClear();
+    const required = await putAccept('tok-terms-4r-x012345678', {});
+    expect(required.status).toBe(409);
+    expect(required.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    mockGateState.acceptanceTermsRequired = false;
+
+    // Kill switch is absolute: gate OFF ⇒ nothing recorded, even when the
+    // tab attests the current version (it loaded before the switch was pulled).
+    mockGateState.acceptanceTerms = false;
+    seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
+    conversionOk();
+    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
+    expect(gateOff.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+    // Gate off ⇒ a stale version is not inspected (nothing recorded, no 409).
+    seed({ id: 'est-terms-6', token: 'tok-terms-6-x0123456789' });
+    conversionOk();
+    const gateOffStale = await putAccept('tok-terms-6-x0123456789', { termsVersion: 'v2000-01' });
+    expect(gateOffStale.status).toBe(200);
   });
 });

@@ -2263,7 +2263,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
                   </div>
                 ))}
                 <div className="sr-cell-note">
-                  <a href="/?tab=plan">View your warranty in the portal</a>
+                  <a href="/?tab=documents">View your warranty in the portal</a>
                 </div>
               </div>
             ) : null;

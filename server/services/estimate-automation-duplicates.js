@@ -201,8 +201,75 @@ async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
   return withAutomatedEstimatePhoneLocks([phone], callback, options);
 }
 
+/**
+ * Supersede support for a clarify-reply re-draft — two steps that bracket
+ * the duplicate check so the original is NEVER lost:
+ *   1. lockSupersededDraftInTx — SELECT … FOR UPDATE the unsent 'draft'
+ *      (not archived, not sent); returns the row or null. The caller
+ *      excludes it from the open-estimate listing by id.
+ *   2. archiveSupersededDraftInTx — after the replacement row is inserted
+ *      (same transaction), archive it with the superseded stamp. If the
+ *      duplicate check blocks or the insert never happens, nothing is
+ *      archived and the transaction leaves the original standing.
+ * A sent/scheduled/terminal row never qualifies (the send flow or the
+ * customer owns it). Marker + estimator_engine stamp mirror the
+ * linkage-invalidation precedent (estimator-engine/index.js).
+ */
+async function lockSupersededDraftInTx(trx, { estimateId, attempt = null }) {
+  if (!trx || !estimateId) return null;
+  // 'scheduled' = an unsent draft with a due time; superseding it must
+  // also cancel that schedule (archive below returns it to an inert draft).
+  // 'send_failed' = a refused/failed delivery attempt (the reprice guard
+  // itself parks a row there) — still unsent, still ours to replace.
+  const stale = await trx('estimates')
+    .select('id', 'status', 'estimate_data')
+    .where({ id: estimateId })
+    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    // The re-price attempt that stamped this row must still own it: an
+    // operator revision deletes the token, invalidating any in-flight
+    // re-draft so it can never archive a corrected draft.
+    .modify((q) => { if (attempt) q.whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(attempt)]); })
+    .forUpdate()
+    .first();
+  return stale || null;
+}
+
+async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
+  if (!trx || !stale?.id) return false;
+  let data = {};
+  try {
+    data = typeof stale.estimate_data === 'string' ? JSON.parse(stale.estimate_data) : (stale.estimate_data || {});
+  } catch { data = {}; }
+  if (!data || typeof data !== 'object') data = {};
+  data.estimatorEngine = {
+    ...(data.estimatorEngine || {}),
+    superseded_at: new Date().toISOString(),
+    superseded_reason: reason || 'superseded',
+  };
+  const changed = await trx('estimates')
+    .where({ id: stale.id })
+    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .update({
+      archived_at: new Date(),
+      // A scheduled row returns to an inert draft with no due time — the
+      // cron must never deliver the superseded price (same transition as
+      // linkage invalidation, estimator-engine/index.js).
+      status: 'draft',
+      scheduled_at: null,
+      estimate_data: JSON.stringify(data),
+      updated_at: new Date(),
+    });
+  return changed > 0;
+}
+
 module.exports = {
   acquireAutomatedEstimateLocks,
+  lockSupersededDraftInTx,
+  archiveSupersededDraftInTx,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

@@ -3952,6 +3952,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
+  // post-call timer is in-memory and the sweep window is 24h, so a Gmail
+  // hang must never be able to starve it (hook P1).
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./missed-call-bell').sweepMissedCalls();
+    } catch (err) {
+      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
   // Runs before the 7:30 digest so the digest reports what actually happened.
   // =========================================================================
@@ -5477,6 +5491,40 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Review sequence processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MIN — Automatic Google review replies. Rows the GBP sync queued
+  // (jittered due time) are claimed atomically and drafted; 4-5★ post to
+  // Google in `auto` mode, everything else parks for a human. Mode gate
+  // GATE_REVIEW_AUTO_REPLY (off|shadow|auto) is read inside the runner so
+  // an unset gate is a no-op tick.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('reviewAutoReply')) {
+      // Gate off: only the failed-bell sweep runs (a bell_failed stamp left
+      // while the lane was on must still be re-rung) — codex r54.
+      try {
+        await runExclusive('review-auto-reply', async () => {
+          const { retryFailedEditedBells } = require('./review-reply/runner');
+          const n = await retryFailedEditedBells();
+          if (n > 0) logger.info(`Review auto-reply (off): re-rang ${n} failed bell(s)`);
+        });
+      } catch (err) { logger.warn(`Review auto-reply bell sweep (gate off) failed: ${err.message}`); }
+      return;
+    }
+    try {
+      await runExclusive('review-auto-reply', async () => {
+        const { processDueAutoReplies } = require('./review-reply/runner');
+        const stats = await processDueAutoReplies();
+        if (stats.bellsRetried > 0) logger.info(`Review auto-reply: re-rang ${stats.bellsRetried} failed bell(s)`);
+        if (stats.claimed > 0) {
+          logger.info(`Review auto-reply (${stats.mode}): ${stats.claimed} claimed, ${stats.posted} posted, ${stats.drafted} drafted, ${stats.parked} parked, ${stats.skipped} skipped, ${stats.retry} retry, ${stats.errors} errors`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Review auto-reply processing failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

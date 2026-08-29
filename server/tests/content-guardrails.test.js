@@ -4779,3 +4779,11 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(inList).toEqual([false, false, true, true, true, true, true, true, false, false, false, false]);
   });
 });
+
+describe('offFootprintCityFinding — metro-named compounds (PR #3549 hook)', () => {
+  const guardrails = require('../services/content/content-guardrails');
+  test('pest / material compounds are not footprint claims; a served-city claim about the metro still is', () => {
+    expect(guardrails._internals.offFootprintCityFinding('Our lawn techs treat Columbus grass, San Jose scale on citrus, and Boston ferns on the lanai.')).toBeNull();
+    expect(guardrails._internals.offFootprintCityFinding('We proudly serve Portland homes every week.')).not.toBeNull();
+  });
+});

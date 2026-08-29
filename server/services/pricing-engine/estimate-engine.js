@@ -74,6 +74,7 @@ function lawnLineProtectedAnnual(item, { marginFloorArmed = false, programMinimu
 }
 const { calculatePropertyProfile } = require('./property-calculator');
 const { deriveModifiers, deriveNotes } = require('./modifiers');
+const { trustedUnitBand } = require('./unit-band-pricing');
 const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
@@ -84,6 +85,7 @@ const {
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
+  pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
@@ -749,7 +751,30 @@ function generateEstimate(input) {
         activeServiceKeys.push('commercial_pest');
       }
     } else {
-      const result = pricePestControl(property, {
+      // Residential-unit bedroom band (GATE_UNIT_BAND_PRICING): the
+      // estimator engine resolved the band row into the input, so the
+      // per-visit dollars come from the table and the footprint ladder
+      // never runs for this line. Absent → today's pricer, untouched.
+      // engineInputs are browser-controlled on the recompute paths, so
+      // only a row the resolver SIGNED for this input's address is
+      // honored (trustedUnitBand) — a hand-built or transplanted snapshot
+      // prices on the standard ladder.
+      const bandVerdict = trustedUnitBand(input, 'pest', {
+        requestedFrequency: services.pest.frequency || 'quarterly',
+        roachType: services.pest.roachType || 'none',
+      });
+      const result = bandVerdict.status === 'trusted'
+        ? pricePestControlUnitBand(property, {
+          band: bandVerdict.band,
+          frequency: services.pest.frequency || 'quarterly',
+          bedroomCount: input.unitBandPricing.bedroomCount,
+        })
+        : bandVerdict.status === 'untrusted'
+        // Fail CLOSED: a snapshot that no longer verifies must not
+        // re-price on the footprint ladder (stored quotes keep their
+        // dollars or visibly stop).
+        ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
+        : pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',
         // No caller-provided version → defer to pricePestControl's own live
         // default (v2 curve). The old `|| 'v1'` fallback silently pinned
@@ -777,7 +802,12 @@ function generateEstimate(input) {
         });
       }
       lineItems.push(result);
-      activeServiceKeys.push('pest_control');
+      // A fail-closed band line (quoteRequired, $0) is not an active
+      // recurring service: it must not grant the recurring-customer perk,
+      // count toward the WaveGuard tier, or read as "recurring pest
+      // present" to the one-time pricers (same rule as the commercial
+      // manual-quote branches).
+      if (!result.quoteRequired) activeServiceKeys.push('pest_control');
       recurringPestRoachType = result.roachType || 'none';
 
       // Auto-add the one-time Initial Roach Knockdown when recurring pest is
@@ -1159,7 +1189,21 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       addCommercialManualQuote('pest_control');
     } else {
-      const result = priceOneTimePest(property, {
+      const oneTimeVerdict = trustedUnitBand(input, 'oneTimePest', { roachType: services.oneTimePest.roachType || 'none' });
+      const result = oneTimeVerdict.status === 'trusted'
+        ? priceOneTimePestUnitBand(property, {
+          band: oneTimeVerdict.band,
+          urgency: services.oneTimePest.urgency || 'NONE',
+          afterHours: services.oneTimePest.afterHours || false,
+          isRecurringCustomer,
+          // Same incentive clamp anchor as the footprint pricer: the
+          // band-priced recurring line's per-visit, when one was priced.
+          recurringPerVisit: lineItems.find(l => l.service === 'pest_control' && l.pricingBasis === 'caller_stated_bedroom_count')?.basePrice ?? null,
+          bedroomCount: input.unitBandPricing.bedroomCount,
+        })
+        : oneTimeVerdict.status === 'untrusted'
+        ? unitBandQuoteRequiredLine('one_time_pest', oneTimeVerdict.reason)
+        : priceOneTimePest(property, {
         urgency: services.oneTimePest.urgency || 'NONE',
         afterHours: services.oneTimePest.afterHours || false,
         isRecurringCustomer,

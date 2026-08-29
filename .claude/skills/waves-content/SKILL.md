@@ -50,6 +50,35 @@ this skill.
   lane). Near-me terms are INTENTIONAL on service/city pages — including the
   ~2,000-char city-page metaTitles; never "fix" those.
 - **No door-to-door sales content.** Ever.
+- **Blog topic targeting (owner rulings 2026-08-27, after astro #476 Tampa /
+  #490 second-Taexx / #491 "… in Florida"):** a NEW supporting blog may not be
+  built around (1) an out-of-footprint geo in its keyword/title/slug —
+  educational mentions are fine, targeting Tampa demand is not; (2)
+  statewide-only framing — "… in Florida"/"FL" with no served city or SWFL
+  anchor is too broad (localize or drop the qualifier; bare statewide GSC
+  demand is fine, the writer localizes it); (3) an entity a live post already
+  owns — one entity, one post; grow it as a REFRESH of the owner, never a
+  sibling (the in-wall post owns "Taexx"). Enforced deterministically by
+  `topic-targeting-gate.js`: runner step 2d pre-draft (silent skip
+  `topic_targeting:<CODE>`, corpus-unavailable → review), post-draft check on
+  the writer's own title/slug framing AND emitted primary_keyword ownership
+  (one redraft, then skip), GSC miner (out-of-area demand →
+  `do_not_publish`), and every legacy `blog_posts` producer — idea lane,
+  `generatePost` (block de-queues the row: status → idea, reason in
+  `astro_publish_error`), `publishAstro` (`BLOG_TOPIC_TARGETING_BLOCKED`,
+  parked as deterministic). Already-live rows are refreshes → exempt.
+  Ownership = a proper-noun token from ANY candidate targeting field —
+  primary keyword, title, slug, meta description, secondary keywords, H2/H3
+  headings (the same set the corpus index counts) — that ≤3 live posts carry
+  in their targeting fields and the owner carries ≥3×, same category (unknown
+  category → every category, owners unioned). Moving an owned entity into a
+  "secondary" field does not evade it. A row/brief city must be a served
+  locality or SWFL region. The gate also re-runs on the branch file right
+  before every merge (mergeAstro + the autonomous poller). Geo
+  coverage = the canonical content-guardrails blocklist + any other US
+  state/postal abbreviation; common-word place names (Homestead, Boston…)
+  count only with geo context and stay OUT of the prose blocklist. Persisted
+  per run in `autonomous_runs.topic_targeting_result`.
 - **No fumigation, insulation, or wildlife-trapping content** (rodent stays
   core).
 - **No bulk FAQ frontmatter expansion** on the remaining service spoke pages.

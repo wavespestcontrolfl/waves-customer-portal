@@ -1419,6 +1419,21 @@ function normalizeMosquitoAddOnCount(value, key) {
 // ============================================================
 // PEST CONTROL
 // ============================================================
+// Per-visit cost model shared by the footprint pricer and the bedroom-band
+// pricer — fully allocated (on-site + drive time + chemicals).
+function pestVisitCostModel({ roachType = 'none', frequency = 'quarterly', visitsPerYear = 4, annual = 0 } = {}) {
+  const chemCost = { talak: 1.30, taurus: 4.87, surfactant: 0.50 }; // per service
+  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.talak + chemCost.taurus + chemCost.surfactant);
+  const onSiteMin = frequency === 'monthly' ? 20 : 25;
+  const onSiteLaborCost = GLOBAL.LABOR_RATE * onSiteMin / 60;
+  const driveLaborCost = GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60;
+  const directServiceCost = onSiteLaborCost + materialPerVisit; // no drive
+  const fullyAllocatedCost = directServiceCost + driveLaborCost; // includes drive
+  const annualCost = fullyAllocatedCost * visitsPerYear + GLOBAL.ADMIN_ANNUAL;
+  const margin = annual > 0 ? (annual - annualCost) / annual : 0;
+  return { materialPerVisit, onSiteLaborCost, driveLaborCost, directServiceCost, fullyAllocatedCost, annualCost, margin };
+}
+
 function pricePestControl(property, options = {}) {
   const {
     frequency: requestedFrequencyInput = 'quarterly',
@@ -1515,15 +1530,10 @@ function pricePestControl(property, options = {}) {
   const monthly = Math.round(annual / 12 * 100) / 100;
 
   // Cost estimate — fully allocated (on-site + drive time + chemicals)
-  const chemCost = { talak: 1.30, taurus: 4.87, surfactant: 0.50 }; // per service
-  const materialPerVisit = (roachType === 'german' ? 15 : roachType === 'regular' ? 10 : chemCost.talak + chemCost.taurus + chemCost.surfactant);
-  const onSiteMin = frequency === 'monthly' ? 20 : 25;
-  const onSiteLaborCost = GLOBAL.LABOR_RATE * onSiteMin / 60;
-  const driveLaborCost = GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60;
-  const directServiceCost = onSiteLaborCost + materialPerVisit; // no drive
-  const fullyAllocatedCost = directServiceCost + driveLaborCost; // includes drive
-  const annualCost = fullyAllocatedCost * visitsPerYear + GLOBAL.ADMIN_ANNUAL;
-  const margin = annual > 0 ? (annual - annualCost) / annual : 0;
+  const {
+    materialPerVisit, onSiteLaborCost, driveLaborCost, directServiceCost,
+    fullyAllocatedCost, annualCost, margin,
+  } = pestVisitCostModel({ roachType, frequency, visitsPerYear, annual });
 
   // ── Tier array: quarterly / bimonthly / monthly pre-priced ──
   // Consumed by property-lookup-v2 /calculate-estimate and future tier UIs.
@@ -5335,6 +5345,230 @@ function priceOneTimePest(property, options = {}) {
   };
 }
 
+// ── Residential-unit bedroom-band pricing (GATE_UNIT_BAND_PRICING) ──
+// The estimator engine resolves the band row (pricing-engine/unit-band-
+// pricing.js) and passes it INSIDE engineInput.unitBandPricing, so the
+// engine stays synchronous and a stored draft replays the row that priced
+// it. These pricers never look at square footage: the per-visit dollars
+// ARE the band (owner ruling 2026-08-11 #1 — a band must never masquerade
+// as imputed sqft through the footprint brackets).
+
+const UNIT_BAND_LABELS = {
+  studio: 'Studio',
+  one_bedroom: '1 bedroom',
+  two_bedroom: '2 bedrooms',
+  three_bedroom: '3 bedrooms',
+  four_plus: '4+ bedrooms',
+};
+
+// Band rows exist for quarterly and bi-monthly only (same per-visit
+// price); the public ladder renders whatever tiers the line carries.
+const UNIT_BAND_TIER_FREQUENCIES = ['quarterly', 'bimonthly'];
+
+// Number(null) is 0 — a missing count must stay null, never read as a studio.
+function statedBedroomCount(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+// Fail-closed line for a unit-band snapshot the engine cannot honor
+// (signature/address/key/cadence mismatch): NO dollars and quoteRequired,
+// so a stored quote visibly stops instead of silently re-pricing on the
+// footprint ladder. An operator re-drafts; the public page shows the row
+// as quote-required (price null), never a changed amount.
+function unitBandQuoteRequiredLine(service, reason) {
+  const recurring = service === 'pest_control';
+  return {
+    service,
+    quoteRequired: true,
+    requiresManualReview: true,
+    pricingConfidence: 'low',
+    manualReviewReasons: [`unit_band_snapshot_${reason || 'unverified'}`],
+    reason: 'Unit pricing could not be verified for this estimate — re-draft it before sending.',
+    pricingBasis: 'caller_stated_bedroom_count',
+    footprintUsed: null,
+    footprintSource: 'bedroom_band',
+    footprintWasDefaulted: false,
+    ...(recurring
+      // visitsPerYear stays positive: the engine's post-rounding divides
+      // annual by it (0/0 would be NaN on a line that must read $0).
+      ? { basePrice: 0, perApp: 0, annual: 0, monthly: 0, visitsPerYear: 4, tiers: [], roachType: 'none', pricingVersion: 'unit_band' }
+      : { price: 0, roachType: 'none' }),
+    warnings: [`unit_band_snapshot_${reason || 'unverified'}`],
+  };
+}
+
+function pricePestControlUnitBand(property, options = {}) {
+  const band = options.band || {};
+  const perVisit = Number(band.recurringPrice);
+  if (!(perVisit > 0)) {
+    throw new Error('pricePestControlUnitBand requires a positive band recurringPrice');
+  }
+  const frequencyMeta = normalizePestFrequency(options.frequency || band.intentFrequency || 'quarterly');
+  const frequency = frequencyMeta.frequency;
+  if (!UNIT_BAND_TIER_FREQUENCIES.includes(frequency)) {
+    throw new Error(`pricePestControlUnitBand has no band for cadence '${frequency}'`);
+  }
+  const visitsPerYear = PEST.frequencies[frequency] || 4;
+  const perApp = Math.round(perVisit * 100) / 100;
+  const annual = Math.round(perApp * visitsPerYear * 100) / 100;
+  const monthly = Math.round(annual / 12 * 100) / 100;
+  const costs = pestVisitCostModel({ roachType: 'none', frequency, visitsPerYear, annual });
+  const tiers = UNIT_BAND_TIER_FREQUENCIES.map((freqKey) => {
+    const v = PEST.frequencies[freqKey];
+    const ann = Math.round(perApp * v * 100) / 100;
+    return {
+      frequency: freqKey,
+      freq: v,
+      perApp,
+      annual: ann,
+      monthly: Math.round(ann / 12 * 100) / 100,
+      label: freqKey === 'bimonthly' ? 'Bi-Monthly' : 'Quarterly',
+      recommended: freqKey === frequency,
+      selected: freqKey === frequency,
+      isSelected: freqKey === frequency,
+      systemRecommended: false,
+      isRecommended: false,
+    };
+  });
+  return {
+    service: 'pest_control',
+    basePrice: perApp,
+    footprintAdj: 0,
+    additionalAdj: 0,
+    propAdj: 0,
+    roachType: 'none',
+    requestedRoachType: 'none',
+    roachTypeWasDefaulted: false,
+    roachAddOn: 0,
+    freqMult: 1,
+    frequency,
+    visitsPerYear,
+    // Not a footprint curve version — replays and the public ladder read
+    // this and must never re-derive a curve from the stored line.
+    pricingVersion: 'unit_band',
+    requestedFrequency: frequencyMeta.requestedFrequency,
+    selectedFrequency: frequency,
+    frequencySource: frequencyMeta.frequencySource,
+    frequencyWasDefaulted: frequencyMeta.frequencyWasDefaulted,
+    requestedPropertyType: property?.propertyType,
+    propertyType: 'residential_unit',
+    propertyTypeWasDefaulted: false,
+    perApp, annual, monthly,
+    tiers,
+    costs: {
+      materialPerVisit: Math.round(costs.materialPerVisit * 100) / 100,
+      onSiteLaborCost: Math.round(costs.onSiteLaborCost * 100) / 100,
+      driveLaborCost: Math.round(costs.driveLaborCost * 100) / 100,
+      directServiceCost: Math.round(costs.directServiceCost * 100) / 100,
+      fullyAllocatedCost: Math.round(costs.fullyAllocatedCost * 100) / 100,
+      annualCost: Math.round(costs.annualCost),
+    },
+    margin: Math.round(costs.margin * 1000) / 1000,
+    marginFloorOk: costs.margin >= GLOBAL.MARGIN_FLOOR,
+    initialFee: PEST.initialFee,
+    // Provenance — never a number: the band did not measure anything.
+    footprintUsed: null,
+    footprintSource: 'bedroom_band',
+    footprintWasDefaulted: false,
+    pricingBasis: 'caller_stated_bedroom_count',
+    pricingBand: band.band,
+    pricingBandLabel: UNIT_BAND_LABELS[band.band] || band.band,
+    bedroomCount: statedBedroomCount(options.bedroomCount),
+    includedScope: band.includedScope || null,
+    scopeExclusions: Array.isArray(band.scopeExclusions) ? [...band.scopeExclusions] : [],
+    // Customer-facing scope line (ruling #5) — the legacy mapper carries it
+    // onto the service row's detail so the public estimate shows it.
+    scopeNote: band.scopeNote || null,
+    bandEffectiveDate: band.effectiveDate || null,
+    requiresManualReview: false,
+    manualReviewReasons: [],
+    pricingConfidence: 'high',
+    warnings: uniqueList([...frequencyMeta.frequencyWarnings]),
+  };
+}
+
+function priceOneTimePestUnitBand(property, options = {}) {
+  const band = options.band || {};
+  const bandPrice = Number(band.recurringPrice);
+  if (!(bandPrice > 0)) {
+    throw new Error('priceOneTimePestUnitBand requires a positive band price');
+  }
+  const {
+    urgency = 'NONE',
+    afterHours = false,
+    isRecurringCustomer = false,
+  } = options;
+  // The seeded one-time row already carries the one-time rule (2.2× band,
+  // $199 floor) TO THE CENT ($202.40 / $217.80 / $239.80) and the table is
+  // DB-authoritative, so the math runs in integer cents and an unmodified
+  // row reaches the customer exactly as seeded. Urgency, after-hours and
+  // the recurring-customer discount stack in the footprint pricer's order,
+  // then the floor re-applies so a discount can never undercut it.
+  const preUrgencyCents = Math.round(bandPrice * 100);
+  const preUrgencyPrice = preUrgencyCents / 100;
+  const urgencyMultiplier = getOneTimeUrgencyMultiplier({ urgency, afterHours });
+  const discountBaseCents = Math.round(preUrgencyCents * urgencyMultiplier);
+  const recurringCustomerDiscountRate = isRecurringCustomer ? (WAVEGUARD.recurringCustomerOneTimePerk || 0) : 0;
+  const discountedCents = Math.round(discountBaseCents * (1 - recurringCustomerDiscountRate));
+  const floorCents = Math.round((ONE_TIME.pest.floor || 0) * 100);
+  let priceCents = Math.max(floorCents, discountedCents);
+  const recurringPerVisit = Number(options.recurringPerVisit) > 0 ? Number(options.recurringPerVisit) : null;
+  const recurringVisitOneCost = recurringPerVisit === null
+    ? null
+    : Math.round((recurringPerVisit + (PEST.initialFee || 0)) * 100) / 100;
+  const recurringIncentiveClampApplied = recurringVisitOneCost !== null
+    && priceCents <= Math.round(recurringVisitOneCost * 100);
+  if (recurringIncentiveClampApplied) priceCents = Math.round(recurringVisitOneCost * 100) + 100;
+  const price = priceCents / 100;
+  const discountBase = discountBaseCents / 100;
+  return {
+    service: 'one_time_pest',
+    price,
+    urgency,
+    afterHours,
+    isRecurringCustomer,
+    basePrice: recurringPerVisit,
+    quarterlyPerApp: recurringPerVisit,
+    multiplier: null,
+    recurringVisitOneCost,
+    recurringIncentiveClampApplied,
+    baseSource: 'unit_band_row',
+    baselinePestBasePrice: null,
+    selectedFloor: ONE_TIME.pest.floor,
+    floorAppliedBeforeUrgency: false,
+    floorAppliedAfterDiscount: priceCents > discountedCents,
+    requestedRoachType: 'none',
+    roachType: 'none',
+    roachTypeWasDefaulted: false,
+    preUrgencyPrice,
+    urgencyMultiplier,
+    subtotalBeforeRecurringCustomerDiscount: discountBase,
+    recurringCustomerDiscountRate,
+    recurringCustomerDiscountAmount: Math.max(0, discountBaseCents - priceCents) / 100,
+    discountHandledByPricingFunction: true,
+    // Customer-facing scope line — the one-time row's detail on the public
+    // estimate (legacy mapper reads li.detail).
+    detail: band.scopeNote || null,
+    scopeNote: band.scopeNote || null,
+    footprintUsed: null,
+    footprintSource: 'bedroom_band',
+    footprintWasDefaulted: false,
+    pricingBasis: 'caller_stated_bedroom_count',
+    pricingBand: band.band,
+    pricingBandLabel: UNIT_BAND_LABELS[band.band] || band.band,
+    bedroomCount: statedBedroomCount(options.bedroomCount),
+    includedScope: band.includedScope || null,
+    scopeExclusions: Array.isArray(band.scopeExclusions) ? [...band.scopeExclusions] : [],
+    bandEffectiveDate: band.effectiveDate || null,
+    requiresManualReview: false,
+    manualReviewReasons: [],
+    pricingConfidence: 'high',
+    warnings: [],
+  };
+}
+
 // ============================================================
 // ONE-TIME LAWN
 // ============================================================
@@ -8541,6 +8775,7 @@ module.exports = {
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
+  pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,

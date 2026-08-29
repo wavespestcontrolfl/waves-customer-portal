@@ -972,6 +972,12 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // another linked review still proves they reviewed. Only the audit-log
   // insert stays best-effort, outside the transaction.
   let reversedCustomerId = null;
+  // Auto-reply reconciliation (codex r36): a POSTED automatic reply may
+  // carry the PREVIOUS customer's public-safe facts (city, tenure,
+  // categories); a pending pipeline draft was grounded on them. Inside the
+  // same transaction the row is parked / requeued exactly like a reviewer
+  // edit; the action bell rings after commit.
+  let autoReplyParkedPosted = false;
   const linkedCount = await conn.transaction(async (trx) => {
     // Paid-payout serialization INSIDE the relink transaction (pre-push
     // P0 ×2): lock the payout row FOR UPDATE regardless of status so a
@@ -991,6 +997,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     // must roll BOTH back: committing a re-attributed payout beside an
     // un-relinked review leaves an inconsistency payroll could pay (GH
     // codex #3483 r6 P1) — so a zero-row relink throws INSIDE the trx.
+    // The FULL row as it is now, locked for this transaction (hook P1): the
+    // outer `review` read predates the location lock, and an automatic
+    // publish may have completed since. The auto-reply reconciliation below
+    // must CAS against the live state, and a publish in flight (live claim)
+    // must not have its customer moved underneath it.
+    const beforeRelink = { ...((await trx('google_reviews').where({ id: review.id }).forUpdate().first()) || review) };
+    if (beforeRelink.publish_claimed_until && new Date(beforeRelink.publish_claimed_until) > new Date()) {
+      throw operationalError('A reply is being posted for this review right now — try again in a moment', 409, 'reply_publish_in_flight');
+    }
     const count = await trx('google_reviews')
       .where({ id: review.id })
       .whereNull('missing_since')
@@ -1009,6 +1024,21 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     const linked = (Array.isArray(count) ? count.length : count) > 0;
     if (!linked) {
       throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+    }
+    // Run the reconciliation on EVERY relink (codex r58): a same-customer
+    // confirmation over a click_auto link changes the grounding identity
+    // (review-only → customer-grounded) even though customer_id is unchanged;
+    // applyReviewEditFields is a no-op when nothing moved.
+    {
+      const { applyReviewEditFields } = require('./review-reply/runner');
+      const n = await applyReviewEditFields(beforeRelink.id, beforeRelink, {
+        star_rating: beforeRelink.star_rating, review_text: beforeRelink.review_text, reviewer_name: beforeRelink.reviewer_name, customer_id: customerId,
+        // A manual confirmation moves the link off click_auto: the grounding
+        // now USES the customer, so the identity changes even when the
+        // customer id itself is unchanged.
+        link_source: technicianId ? 'manual' : 'manual_no_visit',
+      }, { conn: trx });
+      if (n > 0 && beforeRelink.auto_reply_status === 'posted') autoReplyParkedPosted = true;
     }
     if (existingPayout) {
       const payoutPatch = {
@@ -1087,6 +1117,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     }
     return count;
   });
+  if (autoReplyParkedPosted) {
+    const { notifyReviewEditedAfterPost } = require('./review-reply/runner');
+    await notifyReviewEditedAfterPost(review, { location_id: review.location_id, star_rating: review.star_rating, cause: 'attribution', conn });
+  }
   if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }

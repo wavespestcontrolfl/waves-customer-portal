@@ -82,6 +82,7 @@ const getComparisonTableGate = lazy('comparison-table-gate', './comparison-table
 const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
+const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
 
 // Bucket for operator-authored intercept briefs (intercept-brief-seeder),
 // single-sourced with the sync guardrail-option derivation (the writer's
@@ -385,6 +386,75 @@ class AutonomousRunner {
       });
     }
 
+    // 2d. Topic-targeting gate (owner rulings 2026-08-27) — NEW supporting
+    //     blogs only, before any writer spend. Three deterministic checks on
+    //     the brief's targeting (primary keyword / working title / slug):
+    //     built around an out-of-footprint geo (Tampa), statewide-only
+    //     framing ("… in Florida"), or an entity a live post already owns
+    //     (a second Taexx post next to /pest-control/in-wall-pest-control/).
+    //     A by-design block skips silently (exceptions-only); the module or
+    //     the blog corpus being unavailable is an engine fault → review.
+    //     Refreshes are exempt: refreshing the entity owner IS the sanctioned
+    //     move. Geo runs first so a geo block never loads the corpus.
+    const topicGate = getTopicTargetingGate();
+    const topicApplicable = topicGate
+      ? topicGate.isApplicable({ actionType: run.action_type, pageType: brief.page_type })
+      : run.action_type === 'new_supporting_blog';
+    let topicIndex = null;
+    if (topicApplicable) {
+      const ob = brief?.voice_constraints?.operator_brief || null;
+      const candidate = {
+        actionType: run.action_type,
+        pageType: brief.page_type,
+        query: brief.target_keyword || opp.query || null,
+        title: ob?.working_title || null,
+        slug: ob?.slug || null,
+        // The city the writer is bound to localize to (category seeds carry
+        // one with a generic title/slug) — a semantic field, validated as a
+        // served locality like a blog_posts row's city.
+        city: ob?.city || brief.city || opp.city || null,
+        service: brief.service || opp.service || null,
+      };
+      let topicResult;
+      if (!topicGate) {
+        topicResult = { ok: false, error: 'topic_targeting_gate_unavailable' };
+      } else {
+        try {
+          topicResult = topicGate.evaluate(candidate, { requireCorpus: false });
+          if (topicResult.ok && topicResult.skipped === 'no_corpus') {
+            const corpus = await this._loadBlogCorpus({ required: true });
+            if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+            topicIndex = topicGate.indexCorpus(corpus);
+            topicResult = topicGate.evaluate(candidate, { index: topicIndex, requireCorpus: true });
+          }
+        } catch (err) {
+          topicResult = { ok: false, error: `topic_targeting_gate:${err.message}` };
+        }
+      }
+      run.topic_targeting_result = topicResult;
+      if (topicResult.error) {
+        logger.error(`[autonomous-runner] topic-targeting gate unavailable for ${opp.id}: ${topicResult.error}`);
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'topic_targeting_unavailable',
+          reviewer_notes: `Topic-targeting gate could not run (${topicResult.error}); new blog held rather than drafted unchecked.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken });
+        return finalized;
+      }
+      if (!topicResult.ok) {
+        const codes = (topicResult.findings || []).map((f) => f.code);
+        const skipReason = `topic_targeting:${codes[0] || 'blocked'}`;
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: skipReason,
+          reviewer_notes: (topicResult.findings || []).map((f) => `${f.code}: ${f.message}`).join(' | '),
+        });
+        await this._skipClaimOrThrow(queue, opp.id, skipReason, { claimToken });
+        return finalized;
+      }
+    }
+
     if (brief.action_type === 'add_internal_links') {
       let result;
       try {
@@ -640,6 +710,48 @@ class AutonomousRunner {
       await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken });
       return finalized;
     }
+    // Topic targeting on the EMITTED draft is judged BEFORE the guardrail
+    // verdict is acted on: the single feedback retry (one gate_retry per
+    // opportunity) must carry every actionable finding, so a guardrail
+    // failure folds these in and a guardrail pass falls through to the topic
+    // verdict below. Corpus index reused from 2d; loaded only if 2d never
+    // needed it.
+    let topicFraming = null;
+    if (draft && topicApplicable) {
+      if (!topicGate) {
+        topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_UNAVAILABLE', message: 'topic-targeting gate failed to load' }] };
+      } else {
+        try {
+          if (!topicIndex) {
+            const corpus = await this._loadBlogCorpus({ required: true });
+            if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+            topicIndex = topicGate.indexCorpus(corpus);
+          }
+          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+        } catch (err) {
+          topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
+        }
+      }
+      run.topic_targeting_result = { ...(run.topic_targeting_result || {}), framing: topicFraming };
+      // An ENGINE failure (gate unavailable / threw) is not the writer's
+      // mistake: fail closed exactly like step 2d — hold for review without
+      // spending the single feedback retry.
+      const engineFailure = (topicFraming.findings || []).find((f) => f.code === 'TOPIC_TARGETING_UNAVAILABLE' || f.code === 'TOPIC_TARGETING_ERROR');
+      if (engineFailure) {
+        logger.error(`[autonomous-runner] post-draft topic-targeting gate could not run for ${opp.id}: ${engineFailure.message}`);
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'topic_targeting_unavailable',
+          reviewer_notes: `Post-draft topic-targeting gate could not run (${engineFailure.message}); draft held for review rather than published unchecked.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken });
+        return finalized;
+      }
+    }
+    const topicBlocking = topicFraming && !topicFraming.ok
+      ? topicFraming.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
+      : [];
+
     if (contentGuardrails && draft) {
       // Option derivation is shared with the named-competitor approval
       // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
@@ -678,9 +790,24 @@ class AutonomousRunner {
         // feedback so the second attempt hears them too (Codex r3 P2) —
         // pass/fail stays P0/P1-only.
         const advisory = guardResult.findings.filter((f) => f.severity === 'P2').slice(0, 2);
-        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`
+          + (topicBlocking.length ? `; topic targeting also failed: ${topicBlocking.map((f) => `${f.severity} ${f.code}`).join('; ')}` : '');
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
-          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...advisory],
+          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...topicBlocking, ...advisory],
+        });
+      }
+    }
+
+    // 3c'. Topic verdict on its own (the guardrails passed): same one-redraft-
+    //      then-skip loop; the finding tells the writer how to re-anchor.
+    if (topicFraming) {
+      const framing = topicFraming;
+      if (!framing.ok) {
+        const blocking = framing.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        const skipReason = framing.stage === 'ownership' ? 'topic_ownership_failed' : 'topic_framing_failed';
+        const notes = `Topic targeting failed on the draft (${framing.stage || 'framing'}): ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
+          claimToken, skipReason, notes, blocking,
         });
       }
     }
@@ -2849,6 +2976,39 @@ class AutonomousRunner {
       throw e;
     }
 
+    // Topic targeting on the stored draft too (owner rulings 2026-08-27): a
+    // remediated/edited pending draft can introduce statewide or out-of-area
+    // framing, or an owned entity, after the pre-park check. Fresh live
+    // corpus; module or corpus unavailable → fail closed (operator retries).
+    const topicGateMod = getTopicTargetingGate();
+    const topicApplies = topicGateMod
+      ? topicGateMod.isApplicable({ actionType: run.action_type, pageType: brief.page_type })
+      : run.action_type === 'new_supporting_blog';
+    if (topicApplies) {
+      if (!topicGateMod) {
+        const e = new Error('Topic-targeting gate unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+        e.statusCode = 409;
+        throw e;
+      }
+      let topicRecheck;
+      try {
+        const corpus = await this._loadBlogCorpus({ required: true });
+        if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+      } catch (err) {
+        const e = new Error(`Topic-targeting gate could not re-validate the stored draft (${err.message}) — retry once the live blog corpus is reachable`);
+        e.statusCode = 409;
+        throw e;
+      }
+      if (!topicRecheck.ok) {
+        const codes = topicRecheck.findings.map((f) => `${f.severity} ${f.code}`).join('; ');
+        const e = new Error(`Topic targeting no longer passes on the stored draft (${topicRecheck.stage}): ${codes}`);
+        e.statusCode = 409;
+        e.details = topicRecheck.findings;
+        throw e;
+      }
+    }
+
     // Same canary / publish-cap guards as the autonomous lane (now serialized
     // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
@@ -3440,6 +3600,9 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
       facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
       protected_check: JSON.stringify(run.protected_check || {}),
+      // NULL when the gate did not run (non-applicable runs) — the review
+      // read model must not render a verdict that never happened.
+      topic_targeting_result: run.topic_targeting_result ? JSON.stringify(run.topic_targeting_result) : null,
       seo_completion_gate_ms: run.seo_completion_gate_ms || null,
       draft_payload: JSON.stringify(run.draft_payload || {}),
       agent_id: run.agent_id || null,

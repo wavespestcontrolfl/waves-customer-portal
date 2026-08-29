@@ -516,15 +516,36 @@ async function moveStopsToDay(input) {
   // about an "unchanged" appointment (and never closes its reminder windows
   // as if a real reschedule notice replaced them).
   const stopDateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
-  const movable = movableAnyDate.filter((s) => stopDateOnly(s.scheduled_date) !== dateStr);
+  const movableByDate = movableAnyDate.filter((s) => stopDateOnly(s.scheduled_date) !== dateStr);
   const skippedUnchanged = movableAnyDate
     .filter((s) => stopDateOnly(s.scheduled_date) === dateStr)
     .map((s) => ({ id: s.id }));
+  // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this batch mover
+  // writes ONE row per stop and cannot shift a cadence visit's sister
+  // visits, so with the gate on a recurring stop moving to another date is
+  // refused — reported as skipped_collective — on BOTH passes, so the
+  // proposal promises exactly the set the confirmed pass moves (hook r17
+  // P1: the refusal used to live only in the commit loop, and an operator
+  // could confirm a proposal that then moved nothing). Refuse-don't-drop,
+  // same as reschedule_appointment. Gate off: the move is a this-visit-only
+  // date exception (rebooker.dateExceptionStamp). The gate read is the
+  // rebooker's own (lazy — only when a recurring stop is in the set).
+  const collectiveGateOn = movableByDate.some((s) => s.is_recurring === true)
+    && require('../rebooker').collectiveMoveGateOn();
+  const skippedCollective = collectiveGateOn
+    ? movableByDate.filter((s) => s.is_recurring === true).map((s) => ({ id: s.id, status: s.status, reason: 'collective_move_required' }))
+    : [];
+  const movable = collectiveGateOn ? movableByDate.filter((s) => s.is_recurring !== true) : movableByDate;
   if (!movable.length) {
+    let error = 'Every movable stop\'s window has already passed today — pick a later window or a future date';
+    if (skippedCollective.length && !skippedUnchanged.length && !skippedElapsed.length) {
+      error = 'Every selected stop is a recurring-plan visit — with collective moves on, move it from dispatch or Edit appointment so its later visits move with it';
+    } else if (skippedUnchanged.length && !skippedElapsed.length) {
+      error = 'Every selected stop is already on that date — nothing to move';
+    }
     return {
-      error: skippedUnchanged.length && !skippedElapsed.length
-        ? 'Every selected stop is already on that date — nothing to move'
-        : 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      error,
+      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
@@ -550,6 +571,7 @@ async function moveStopsToDay(input) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
+      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
@@ -560,7 +582,7 @@ async function moveStopsToDay(input) {
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const {
     LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
-    needsLifecycleRewind, applyTrackLifecycleCas,
+    needsLifecycleRewind, applyTrackLifecycleCas, dateExceptionStamp,
   } = require('../rebooker');
   const movedIds = new Set();
   // Committed stops whose landing block overlaps another appointment on the
@@ -661,6 +683,7 @@ async function moveStopsToDay(input) {
       )
         .update({
         scheduled_date: dateStr,
+        ...(observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
         // Old day's sequence number is meaningless on the new date — NULL
         // appends the stop after the target day's ordered run.
         route_order: null,
@@ -814,6 +837,7 @@ async function moveStopsToDay(input) {
     return {
       error: 'No stops were moved — every selected stop changed concurrently (status, date, or window) while the move was pending; re-check and retry',
       ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+      ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     };
@@ -847,6 +871,7 @@ async function moveStopsToDay(input) {
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
+    ...(skippedCollective.length ? { skipped_collective: skippedCollective } : {}),
   };
 }
 

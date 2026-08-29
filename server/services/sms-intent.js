@@ -57,6 +57,109 @@ const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b|\b(?:noon|midn
 const SMS_REACTION_TARGET_RE = '(?:[\\u201c"][^\\u201d"]+[\\u201d"]|an?\\s+(?:image|photo|video|audio message|attachment|message))';
 const SMS_REACTION_RE = new RegExp(`^(liked|loved|disliked|laughed at|emphasized|questioned)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
 const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|heart|dislike|laugh|emphasis|question mark)\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+// iOS 17.4+/18 emoji tapbacks arrive as `Reacted ❤️ to "…"` / `Removed ❤️ from
+// "…"` (any emoji, incl. skin-tone + ZWJ sequences). Missed until 2026-08-28:
+// the quoted appointment text then read as prose and tripped the scheduling
+// detector + the full bell/push pipeline.
+const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator}|[0-9#*]\\ufe0f?\\u20e3|[\\u{E0020}-\\u{E007F}])+';
+const EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+${EMOJI_SEQ_RE}\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+
+// Pure conversation-closers: the whole message is courtesy — "Thanks!",
+// "Ok great", "Sounds good, see you then", "👍". Deliberately narrow: a bare
+// "yes"/"no" is NOT courtesy (it answers a question we asked), a question
+// mark or any scheduling/reschedule signal disqualifies, and anything mixed
+// ("Thanks, but you missed the backyard") falls through to the normal
+// pipeline. The drafter's own contract already defines this class as
+// "warrants NO reply" — this is the deterministic notification-side twin.
+const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
+// Tokens that only close a thread when they sit NEXT TO a real closer: a bare
+// "Ok" / "Okay" can answer an operational question ("does 9am work?") the
+// same way a bare "yes" does, so alone it stays loud. Bare affirmatives
+// (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
+const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
+// Compositional fragments in the grammar ("again", "a lot", "so much", "for
+// the update") only ride along with a real closer word; alone they are
+// content ("Again" = the pests are back). At least one anchor is required
+// (hook P1).
+const CLOSER_ANCHOR_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate|much\s+appreciated|see\s+(?:you|ya)|have\s+a\s+(?:good|great|nice|wonderful)|cheers|my\s+pleasure|welcome|all\s+set)`, 'iu');
+const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
+// One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
+// you guys!"). Only KNOWN addressees qualify — the people customers actually
+// thank by name here plus generic team words. A denylist cannot be fail-safe
+// ("Thanks spider" is a sighting, not a closer — hook P1 ×2).
+const THANKS_FAMILY_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|got\s+it|(?:you'?re\s+)?welcome|my\s+pleasure)`;
+const KNOWN_ADDRESSEES = new Set(['adam', 'virginia', 'sandy', 'waves', 'guys', 'team', 'all', 'yall', 'everyone', 'both', 'man', 'buddy', 'friend', 'sir', 'maam', 'bro', 'brother', 'dude']);
+const COURTESY_WITH_NAME_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){0,3}${THANKS_FAMILY_RE}\\s*,?\\s*(?:you\\s+)?([a-z']{2,15})[,.!]*$`, 'iu');
+// Emoji that read as an acknowledgement when they are the WHOLE message.
+// Anything outside this list (❓ 🚨 📞 🐜 …) is a request, not a closer
+// (hook P1), so it is left in place and the courtesy grammar fails on it.
+const ACK_EMOJI_RE = /(?:[\u{1F44D}\u{1F44C}\u{1F64F}\u{1F44F}\u{1F64C}\u{1F91D}\u{1F4AF}\u{1FAF6}\u{1F60A}\u{1F642}\u{1F600}\u{1F601}\u{1F603}\u{1F604}\u{1F917}\u{1F970}\u{1F60D}\u{1F618}\u{1F44B}\u{2705}\u{2714}\u{2764}\u{1F9E1}\u{1F49B}\u{1F49A}\u{1F499}\u{1F49C}\u{1F5A4}\u{1F90D}\u{2665}\u{263A}\u{2728}\u{1F389}\u{1F44A}\u{1F498}\u{1F495}\u{1F496}\u{1F497}\u{1F49E}]\ufe0f?(?:\p{Emoji_Modifier}|\u200d\p{Extended_Pictographic}\ufe0f?)*)+/gu;
+const COURTESY_MAX_CHARS = 60;
+
+// Reaction SENTIMENT: only explicitly affirmative tapbacks can be quiet.
+// "Disliked …", "Questioned …", "Laughed at …" and non-acknowledgement emoji
+// (❓ 🚨) express something and stay loud; removals are undo events (quiet).
+const AFFIRMATIVE_SMS_REACTION_RE = new RegExp(`^(?:liked|loved)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+const ACK_EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+(${EMOJI_SEQ_RE})\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+function isAffirmativeSmsReaction(body) {
+  const text = String(body || '').trim();
+  if (!text) return false;
+  if (AFFIRMATIVE_SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)) return true;
+  const m = ACK_EMOJI_SMS_REACTION_RE.exec(text);
+  if (!m) return false;
+  return m[1].replace(ACK_EMOJI_RE, '').replace(/[\ufe0f\u200d]/gu, '').length === 0;
+}
+
+// Does the OUTBOUND a tapback quotes ask a question / give a reply directive?
+// The quoted target is authoritative (a later non-question outbound must not
+// mask it). Unquoted targets ("an image", "a photo") ask nothing.
+const ASKS_RE = /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i;
+function reactionTargetAsksQuestion(body) {
+  const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
+  if (!m) return false;
+  return ASKS_RE.test(m[1]);
+}
+
+/**
+ * A tapback that needs nobody's attention: explicitly affirmative (or an
+ * undo) AND its quoted target asked nothing.
+ */
+function isQuietSmsReaction(body) {
+  return isSmsReaction(body) && isAffirmativeSmsReaction(body) && !reactionTargetAsksQuestion(body);
+}
+
+/**
+ * True when the message is a pure conversation closer with nothing to answer.
+ *
+ * `awaitingAnswer` = did OUR last text ask the customer a question or give a
+ * reply directive? Default true = strict: nothing is quiet without context.
+ * With awaitingAnswer=false, gratitude / sign-offs ("Thanks!", "Appreciate it
+ * Adam"), bare affirmatives ("Sounds good", "Okay") and acknowledgement emoji
+ * (👍 🙏 ❤️) are closers. With an open question every one of them stays loud —
+ * after "does 9am work?" a 👍 is the answer, and "Thanks!" is a non-answer.
+ * Always loud: any "?", digits, scheduling/reschedule/away signal, mixed
+ * content, non-acknowledgement emoji (❓ 🚨 🐜). Fail-safe direction: doubt →
+ * false.
+ */
+function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
+  const raw = String(body || '').trim();
+  if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
+  if (/[?]/.test(raw)) return false;
+  const stripped = raw.replace(ACK_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (!stripped) return !awaitingAnswer; // acknowledgement-emoji-only
+  if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
+  if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
+  if (WEAK_ONLY_RE.test(stripped)) return !awaitingAnswer; // bare ok / okay
+  const named = COURTESY_WITH_NAME_RE.exec(stripped);
+  const grammar = COURTESY_ONLY_RE.test(stripped)
+    || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
+  if (!grammar || !CLOSER_ANCHOR_RE.test(stripped)) return false;
+  // Gratitude honors the open question too: "Thanks!" after "please confirm
+  // someone will be home" did not answer it (hook P1). The tiers differ only
+  // in what the grammar accepts; the context decides for all of them.
+  return !awaitingAnswer;
+}
 
 function hasSchedulingIntent(body) {
   if (!body || typeof body !== 'string') return false;
@@ -89,7 +192,8 @@ function hasSchedulingIntent(body) {
 function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
   const text = body.trim();
-  return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text);
+  return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text)
+    || EMOJI_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text);
 }
 
 // Reschedule/away intent — a strict SUBSET of scheduling intent. Scheduling
@@ -251,4 +355,4 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent };
+module.exports = { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isAffirmativeSmsReaction, reactionTargetAsksQuestion, isCourtesyOnly, hasRescheduleOrAwayIntent };

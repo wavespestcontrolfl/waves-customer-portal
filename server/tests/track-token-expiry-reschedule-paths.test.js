@@ -5,6 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+  planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -45,6 +46,7 @@ function chain(overrides = {}) {
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
 }
@@ -81,8 +83,10 @@ describe('track token expiry on reschedule paths', () => {
     });
 
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return updateQuery;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -93,6 +97,8 @@ describe('track token expiry on reschedule paths', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return dbQueries.shift();
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -161,10 +167,12 @@ describe('track token expiry on reschedule paths', () => {
     // any row updates — no clash here.
     const collisionProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
 
-    const scheduledQueries = [siblingsQuery, collisionProbe, firstUpdate, secondUpdate];
+    const scheduledQueries = [siblingsQuery, siblingsQuery, parentLookup, collisionProbe, firstUpdate, secondUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -178,6 +186,8 @@ describe('track token expiry on reschedule paths', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -198,8 +208,10 @@ describe('track token expiry on reschedule paths', () => {
     expect(firstUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
       bindings: ['2027-06-03', '12:30:00'],
     });
+    // The sibling keeps its OWN window (date-only sweep), so its expiry is
+    // derived from its new date + stored 11:00 end, not the anchor's 12:30.
     expect(secondUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
-      bindings: ['2027-06-10', '12:30:00'],
+      bindings: ['2027-06-10', '11:00:00'],
     });
   });
 
@@ -223,12 +235,15 @@ describe('track token expiry on reschedule paths', () => {
     const scheduledQueries = [servicesQuery, updateQuery];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
     // The mover wraps each per-stop CAS in a short trx solely to hold the
     // tech-day advisory fence (tech-day-lock.js) — model that real surface:
     // the CAS update runs on the trx, the fence probes go through trx.raw.
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueries.shift();
       throw new Error(`Unexpected trx table ${table}`);
     });

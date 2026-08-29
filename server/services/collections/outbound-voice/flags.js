@@ -112,8 +112,38 @@ async function flagWrongNumber(customerId, { detail, createdBy } = {}) {
   return res;
 }
 
+/** Active (unreleased) flags on a customer, oldest first. */
+async function activeFlags(customerId) {
+  if (!customerId) return [];
+  return db('collections_flags')
+    .where({ customer_id: customerId })
+    .whereNull('released_at')
+    .orderBy('created_at', 'asc')
+    .select('flag', 'reason', 'created_by', 'created_at');
+}
+
+/**
+ * Release an active flag — stamp released_at, never delete (the row is the
+ * paper trail). Idempotent: nothing active ⇒ { ok:true, released:0 }.
+ */
+async function releaseFlag({ customerId, flag }) {
+  if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
+  try {
+    const released = await db('collections_flags')
+      .where({ customer_id: customerId, flag })
+      .whereNull('released_at')
+      .update({ released_at: db.fn.now() });
+    return { ok: true, released: Number(released) || 0 };
+  } catch (err) {
+    logger.error(`[collections-flags] flag release FAILED customer=${customerId} flag=${flag}: ${err.message}`);
+    return { ok: false, reason: 'release_failed' };
+  }
+}
+
 module.exports = {
   writeFlag,
+  releaseFlag,
+  activeFlags,
   revokeAutomatedVoiceConsent,
   placeDisputeHold,
   flagWrongNumber,

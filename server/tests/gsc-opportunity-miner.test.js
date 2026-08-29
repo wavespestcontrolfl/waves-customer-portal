@@ -233,6 +233,17 @@ describe('conversionIntentScore', () => {
 // ── actionForOpportunity ────────────────────────────────────────────
 
 describe('actionForOpportunity', () => {
+  test('owner ruling 2026-08-27: blog demand built around an out-of-footprint metro is demoted; statewide demand stays (framing is judged post-draft)', () => {
+    for (const bucket of ['no_content_yet', 'seasonal_rising', 'striking_distance', 'aeo_gap']) {
+      expect(actionForOpportunity({ bucket, query: 'wdo inspection tampa', service: 'termite' })).toBe('do_not_publish');
+      expect(actionForOpportunity({ bucket, query: 'pest control st. petersburg fl' })).toBe('do_not_publish');
+    }
+    expect(actionForOpportunity({ bucket: 'no_content_yet', query: 'kinds of ants in florida' })).toBe('new_supporting_blog');
+    expect(actionForOpportunity({ bucket: 'no_content_yet', query: 'ghost ants in sarasota kitchens' })).toBe('new_supporting_blog');
+    // Page actions are untouched: a city×service row is footprint-anchored by construction.
+    expect(actionForOpportunity({ bucket: 'no_content_yet', query: 'termite inspection tampa', city: 'Sarasota', service: 'termite' })).toBe('create_or_refresh_city_service_page');
+  });
+
   test('near-me / transactional queries NEVER become blog posts (operator directive 2026-06-11)', () => {
     for (const q of ['exterminator near me', 'rat removal near me', 'pest control near-me', 'exterminator nearby', 'NEAR ME exterminator']) {
       expect(actionForOpportunity({ bucket: 'seasonal_rising', query: q })).toBe('do_not_publish');

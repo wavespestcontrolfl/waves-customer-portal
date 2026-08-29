@@ -219,6 +219,26 @@ export default function CallRoutingSettingsV2() {
             </div>
           )}
 
+          {/* Spanish vestibule */}
+          <Row
+            label="Spanish menu (press 2)"
+            hint="Adds “Para español, oprima dos” to the greeting. Press 2 hands the call to the same AI agent in Spanish. Needs the env gate GATE_VOICE_SPANISH_MENU and a reachable relay endpoint; off = greeting unchanged."
+          >
+            <Switch checked={!!config.spanishMenuEnabled} onChange={(v) => setField("spanishMenuEnabled", v)} />
+          </Row>
+
+          {config.spanishMenuEnabled && (
+            <Row label="Spanish voice (optional)" hint="ElevenLabs voice id for Spanish sessions. Leave blank to use Twilio's default Spanish voice.">
+              <Input
+                type="text"
+                value={config.spanishVoice || ""}
+                onChange={(e) => setField("spanishVoice", e.target.value)}
+                placeholder="blank = Twilio default es-US voice"
+                className="w-full md:w-72"
+              />
+            </Row>
+          )}
+
           {/* Agent connect timeout */}
           <Row label="Agent answer timeout" hint="If the AI doesn't pick up within this many seconds, the caller drops to voicemail. Keep short so a dead agent fails fast.">
             <div className="flex items-center gap-2">

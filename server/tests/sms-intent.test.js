@@ -1,4 +1,4 @@
-const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 
 describe('SMS intent helpers', () => {
   test('detects scheduling changes and schedule lookups', () => {
@@ -47,6 +47,84 @@ describe('SMS intent helpers', () => {
     ]) {
       expect(isSmsReaction(body)).toBe(false);
       expect(hasRescheduleOrAwayIntent(body)).toBe(true);
+    }
+  });
+});
+
+describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)', () => {
+  // iOS 17.4+ renders any-emoji tapbacks as `Reacted <emoji> to "…"`. The
+  // quoted text is OUR outbound — scanning it as customer prose tripped the
+  // scheduling detector on "Your service is scheduled …".
+  test('detects the iOS emoji tapback formats (incl. skin tone + ZWJ)', () => {
+    expect(isSmsReaction('Reacted ❤️ to "Good afternoon! Your service is scheduled for Thursday"')).toBe(true);
+    expect(isSmsReaction('Reacted 👍🏽 to \u201cok\u201d')).toBe(true);
+    expect(isSmsReaction('Reacted 👨‍👩‍👧 to an image')).toBe(true);
+    expect(isSmsReaction('Removed ❤️ from "Thanks for the update"')).toBe(true);
+    expect(isSmsReaction('Reacted 1️⃣ to "Your service is scheduled for Thursday"')).toBe(true); // keycap (hook P1)
+    expect(isSmsReaction('I reacted badly to the spray')).toBe(false);
+    expect(hasSchedulingIntent('Reacted ❤️ to "Your service is scheduled for Thursday"')).toBe(true); // still prose to that detector — the webhook gates on isSmsReaction first
+  });
+
+  test('bare affirmatives and 👍 are closers only when we are NOT awaiting an answer', () => {
+    for (const t of ['Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Okay', 'Ok great', 'Np', 'All set', '👍', '🙏🙏', 'Ok 👍']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "does 9am work?" → 👍 is the answer
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]); // default = strict
+    }
+  });
+
+  test('bare affirmatives and 👍 are closers only when we are NOT awaiting an answer', () => {
+    for (const t of ['Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Okay', 'Ok great', 'Np', 'All set', '👍', '🙏🙏', 'Ok 👍']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "does 9am work?" → 👍 is the answer
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]); // default = strict
+    }
+    for (const t of ['Thanks!', 'Sounds good, thanks!', 'Thank you 🙏']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "please confirm…" → "Thanks!" is a non-answer (hook P1)
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    }
+    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works', 'Again', 'A lot', 'So much', 'For the update', 'again!']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]); // real content stays loud regardless
+    }
+  });
+
+  test('pure courtesy closers are detected (no open question)', () => {
+    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Sounds good, thanks!', 'Got it, thank you', 'Perfect, thanks Adam!', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'You too!', 'Have a great weekend']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+    }
+  });
+
+  test('anything that wants an answer is NOT courtesy (fail-safe direction)', () => {
+    for (const t of [
+      'Yes', 'No', 'Sure', 'Yep', 'Yup', 'Okay', 'Ok', 'K', // may answer a question we asked → stay loud (hook P1)
+      'Good morning', 'Good afternoon', 'Hello', 'Bye', // greetings open threads, they do not close them (hook P1)
+      'Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Ok great', 'Np', 'No problem', 'All set', '👍', // bare affirmatives / 👍 can answer "does 9am work?" — strict default (hook P1)
+      'Thanks again Adam. Your opinion do you think the second session is going to be enough?',
+      'Thanks, but you missed the backyard',
+      'Sure, 8 AM works',
+      'Ok. I won\u2019t be home then Thanks for stopping by.',
+      'Thanks! Can we reschedule to Friday?',
+      'Hey Adam', 'Hello Adam, good afternoon.',
+      'Sounds good let me know if you have any issues or need me! Appreciate it.',
+      'Thanks — the invoice says $81', '', null,
+      'Ok call', 'Thanks help', 'Thanks spray', 'Thanks reschedule', 'Thanks spider', 'Got it charge', 'Thanks Tyler', // only KNOWN addressees after a thanks (hook P1 ×2)
+      '❓', '🚨', '📞', '🐜', '👍❓', // non-acknowledgement emoji are content (hook P1)
+    ]) {
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
+    }
+  });
+});
+
+describe('isQuietSmsReaction — only affirmative tapbacks on non-questions are quiet', () => {
+  const { isQuietSmsReaction } = require('../services/sms-intent');
+  test('affirmative tapbacks on statements are quiet', () => {
+    for (const t of ['Liked "See you Thursday between 2 and 4"', 'Loved “Report is in your portal”', 'Reacted 👍 to "All done for today"', 'Reacted ❤️ to an image', 'Removed a like from "ok"', 'Removed ❤️ from "ok"']) {
+      expect([t, isQuietSmsReaction(t)]).toEqual([t, true]);
+    }
+  });
+  test('reactions that answer a question, or express concern, stay loud', () => {
+    for (const t of ['Reacted 👍 to "Does 9am work?"', 'Liked "Reply YES to confirm Thursday"', 'Disliked "We will treat inside"', 'Questioned "Your service is scheduled Thursday"', 'Laughed at "All done"', 'Reacted ❓ to "All done"', 'Reacted 🚨 to "All done"', 'Emphasized "See you Thursday"']) {
+      expect([t, isQuietSmsReaction(t)]).toEqual([t, false]);
     }
   });
 });

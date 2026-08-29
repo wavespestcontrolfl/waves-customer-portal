@@ -102,7 +102,7 @@ describe('Payment Methods row hierarchy', () => {
     await screen.findByText(/Auto Pay method/);
     const live = rowFor('4242');
     expect(within(live).getByRole('button', { name: 'Replace card' })).toBeInTheDocument();
-    expect(within(live).getByRole('button', { name: 'Turn off Auto Pay' })).toBeInTheDocument();
+    expect(within(live).getByRole('button', { name: 'Turn off' })).toBeInTheDocument();
     expect(within(live).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
 
     const spare = rowFor('1881');
@@ -125,7 +125,7 @@ describe('Payment Methods row hierarchy', () => {
     api.getAutopay.mockResolvedValue(autopayPayload());
     render(<BillingTab customer={customer} />);
     await screen.findByText(/Auto Pay method/);
-    fireEvent.click(within(rowFor('4242')).getByRole('button', { name: 'Turn off Auto Pay' }));
+    fireEvent.click(within(rowFor('4242')).getByRole('button', { name: 'Turn off' }));
     await waitFor(() => expect(api.updateAutopay).toHaveBeenCalledWith({ autopay_enabled: false }));
     expect(showCustomerConfirm).toHaveBeenCalled();
     await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(2));

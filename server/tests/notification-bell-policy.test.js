@@ -31,6 +31,12 @@ jest.mock('../services/dashboard-alerts', () => ({
 jest.mock('../services/dashboard-alerts-cron', () => ({
   COUNT_ESCALATION_COOLDOWN_MS: {},
 }));
+jest.mock('../services/email/email-classifier', () => ({ classifyEmail: jest.fn(() => Promise.resolve(null)) }));
+jest.mock('../services/newsletter-proof', () => ({
+  isProofApprovalEnabled: () => true,
+  parseProofToken: (s) => (/\[PROOF-/.test(String(s || '')) ? 'tok' : null),
+}));
+jest.mock('../services/content/email-approvals', () => ({ isApprovalControlMessage: jest.fn(() => Promise.resolve(false)) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technicianId = 'admin-1';
@@ -51,12 +57,13 @@ const bellPolicy = require('../services/notification-bell-policy');
 function chainMock(result) {
   const chain = {};
   const methods = [
-    'join', 'where', 'whereNull', 'whereRaw', 'whereIn', 'orderBy',
+    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy',
     'limit', 'offset', 'select', 'first', 'insert', 'update',
     'count', 'returning', 'onConflict', 'merge',
   ];
   for (const m of methods) chain[m] = jest.fn(() => chain);
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  chain.catch = (reject) => Promise.resolve(result).catch(reject);
   return chain;
 }
 
@@ -108,35 +115,41 @@ describe('NotificationService.create under the bell policy', () => {
     expect(result).toEqual({ id: null, suppressed: true, reason: 'bell_policy' });
   });
 
-  test('gate on: allowlisted category (billing exception) still rings', async () => {
+  test('gate on: allowlisted category (inbound_sms) rings; billing is silent by default (owner ruling 2026-08-28)', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n2' }]);
     mockTables({ notifications, notification_preferences: chainMock([]) });
 
-    const result = await NotificationService.notifyAdmin(
-      'billing', 'Card number heard on a recorded call', 'PCI event body',
-    );
-
+    const result = await NotificationService.notifyAdmin('inbound_sms', 'SMS from a customer', 'body');
     expect(notifications.insert).toHaveBeenCalled();
     expect(result).toEqual({ id: 'n2' });
+
+    const silenced = await NotificationService.notifyAdmin(
+      'billing', 'Card number heard on a recorded call', 'PCI event body',
+    );
+    expect(silenced.suppressed).toBe(true);
   });
 
-  test('gate on: trigger denylist beats the category allowlist (payment_succeeded FYI)', async () => {
+  test('gate on: job applications are silent by default (own overridable category, not new_lead)', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n3' }]);
     mockTables({ notifications, notification_preferences: chainMock([]) });
 
+    // An applicant is not a customer (owner ruling 2026-08-28): the trigger
+    // carries its own job_application category — silent by default, and the
+    // owner can re-enable it without touching the customer new_lead lane.
     const silenced = await NotificationService.notifyAdmin(
-      'payment', 'Payment received', '$50.00 from customer',
-      { metadata: { triggerKey: 'payment_succeeded' } },
+      'job_application', 'New job application', 'Applicant',
+      { metadata: { triggerKey: 'new_job_application' } },
     );
     expect(notifications.insert).not.toHaveBeenCalled();
     expect(silenced.suppressed).toBe(true);
+    expect(bellPolicy.OVERRIDABLE_CATEGORY_SET.has('job_application')).toBe(true);
 
-    // …while payment_failed (allowlisted trigger, same category) rings.
+    // …while new_lead (allowlisted category) rings.
     const rang = await NotificationService.notifyAdmin(
-      'payment', 'Payment failed', '$50.00 — customer',
-      { metadata: { triggerKey: 'payment_failed' } },
+      'new_lead', 'New lead submitted', 'Prospect',
+      { metadata: { triggerKey: 'new_lead' } },
     );
     expect(notifications.insert).toHaveBeenCalledTimes(1);
     expect(rang).toEqual({ id: 'n3' });
@@ -203,7 +216,7 @@ describe('NotificationService.create under the bell policy', () => {
     mockTables({ notifications, notification_preferences: prefs });
 
     // Static allowlist still rings…
-    const rang = await NotificationService.notifyAdmin('dispute', 'Dispute opened: $80', 'body');
+    const rang = await NotificationService.notifyAdmin('voicemail_callback', 'Voicemail — a customer', 'body');
     expect(rang).toEqual({ id: 'n7' });
     // …and static default-deny still silences. Notifications never throw.
     const silenced = await NotificationService.notifyAdmin('payout', 'Payout deposited: $10', 'body');
@@ -237,15 +250,11 @@ describe('codex r1 — required emissions keep ringing', () => {
     expect(site).toMatch(/bell:\s*true/);
   });
 
-  test('gate on: estimate_deposit_reconcile_needed rings through a category:system override off', async () => {
-    mockTables({
-      notification_preferences: chainMock([
-        { trigger_key: 'category:system', bell_enabled: false },
-      ]),
-    });
+  test('gate on: estimate_deposit_reconcile_needed no longer rings by default (owner ruling 2026-08-28)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({
       category: 'system', triggerKey: 'estimate_deposit_reconcile_needed',
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
   });
 
   test('gate on: extension-request path rings (bell:true) so the 24h claim logic is unaffected', async () => {
@@ -466,16 +475,20 @@ describe('bellAllowed decision order', () => {
     })).resolves.toBe(false);
   });
 
-  test('twilio_failure keeps ringing even with a category:system override off', async () => {
-    mockTables({
-      notification_preferences: chainMock([
-        { trigger_key: 'category:system', bell_enabled: false },
-      ]),
-    });
+  test('twilio_failure no longer rings by default (owner ruling 2026-08-28)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({ category: 'system', triggerKey: 'twilio_failure' }))
-      .resolves.toBe(true);
-    // A plain system-category notification stays silenced.
-    await expect(bellPolicy.bellAllowed({ category: 'system' })).resolves.toBe(false);
+      .resolves.toBe(false);
+  });
+
+  test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
+      await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
+    }
+    for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
+      await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
+    }
   });
 });
 
@@ -629,5 +642,137 @@ describe('live dashboard-alert overlay under the bell policy', () => {
       expect(json.notifications[1]).toMatchObject({ id: 'p1' });
     });
     expect(computeDashboardAlerts).toHaveBeenCalled();
+  });
+});
+
+describe('customer_email_received eligibility (email-sync) — sender must authenticate', () => {
+  const { customerEmailBellEligible } = require('../services/email/email-sync');
+  const base = { customerId: 'c1', classification: null, listUnsubscribe: null, labelIds: ['INBOX'], fromAddress: 'jane@customer-domain.com', receivedAt: new Date().toISOString() };
+  test('aligned DKIM/SPF for the From domain rings', () => {
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=pass header.d=customer-domain.com; spf=pass smtp.mailfrom=customer-domain.com' })).toBe(true);
+  });
+  test('failed or unaligned auth (spoofed From) never rings', () => {
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=fail header.d=customer-domain.com; spf=fail' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=pass header.d=attacker.example' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: null })).toBe(false);
+  });
+  test('vendor/bulk/non-inbox/unknown-sender mail never rings', () => {
+    const ok = 'dkim=pass header.d=customer-domain.com';
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, classification: 'vendor' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, listUnsubscribe: '<mailto:x>' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, labelIds: ['SENT'] })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, customerId: null })).toBe(false);
+  });
+  test('historical mail (full-sync backfill) never rings — only arrivals within 24h', () => {
+    const ok = 'dkim=pass header.d=customer-domain.com';
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString() })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: null })).toBe(false);
+    // First-connect fullSync: even a fresh timestamp never rings.
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, backfill: true })).toBe(false);
+  });
+});
+
+
+describe('missed-call bell eligibility (customer communication, owner ruling 2026-08-28)', () => {
+  const { missedCallEligible } = require('../services/missed-call-bell');
+  const base = { direction: 'inbound', customer_id: 'c1', answered_by: 'missed', recording_sid: null, call_outcome: null, metadata: null };
+  test('an unanswered inbound call from a customer with no voicemail rings', () => {
+    expect(missedCallEligible(base)).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: null })).toBe(true); // hung up at the prompt
+    expect(missedCallEligible({ ...base, answered_by: 'unknown' })).toBe(true);
+  });
+  test('no recorded outcome (Studio status_callback fallback rows): only an unanswered Twilio status counts as missed (codex r4)', () => {
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'no-answer' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'busy' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(false); // may have been handled by the flow
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'failed' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: undefined, status: undefined })).toBe(false);
+  });
+  test('answered, voicemail-left, AI-handled, outbound, unknown-caller or already-notified calls never ring', () => {
+    expect(missedCallEligible({ ...base, answered_by: 'human' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: 'ai_agent' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: 'RE1' })).toBe(false); // voicemail lane
+    expect(missedCallEligible({ ...base, voicemail_callback_alerted_at: '2026-08-28T00:00:00Z' })).toBe(false); // voicemail lane already rang
+    expect(missedCallEligible({ ...base, call_outcome: 'ai_handled' })).toBe(false);
+    expect(missedCallEligible({ ...base, direction: 'outbound' })).toBe(false);
+    expect(missedCallEligible({ ...base, customer_id: null })).toBe(false);
+    const now = Date.parse('2026-08-28T12:00:00Z');
+    expect(missedCallEligible({ ...base, metadata: { missed_call_settled_at: '2026-08-28T00:00:00Z' } }, now)).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: JSON.stringify({ missed_call_settled_at: '2026-08-28T00:00:00Z' }) }, now)).toBe(false);
+    // A LIVE lease (taken <10 min ago) blocks; a STALE one (owner died) is reclaimable.
+    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T11:55:00Z' } }, now)).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T11:40:00Z' } }, now)).toBe(true);
+  });
+});
+
+describe('customer-email bell retry sweep — terminal rows are stamped, control mail is never classified (hook P1 ×2)', () => {
+  const { sweepUnclaimedCustomerEmailBells } = require('../services/email/email-sync');
+  const { classifyEmail } = require('../services/email/email-classifier');
+  const fresh = new Date().toISOString();
+  const aligned = 'dkim=pass header.d=customer-domain.com';
+  test('unauthenticated and control rows are SETTLED without a bell so they cannot occupy the oldest-50 page', async () => {
+    const rows = [
+      { id: 'e-spoof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'hi', label_ids: ['INBOX'], received_at: fresh, authentication_results: 'dkim=fail', classification: null, is_archived: false },
+      { id: 'e-proof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'Re: ACT: [PROOF-ab12cd34] Lineup', label_ids: ['INBOX'], received_at: fresh, authentication_results: aligned, classification: null, is_archived: false },
+    ];
+    const emails = chainMock(rows);
+    db.schema = { hasColumn: jest.fn(() => Promise.resolve(true)) };
+    mockTables({ emails });
+    const rung = await sweepUnclaimedCustomerEmailBells();
+    expect(rung).toBe(0);
+    expect(classifyEmail).not.toHaveBeenCalled();
+    const stamps = emails.update.mock.calls.filter(([arg]) => arg && arg.customer_bell_settled_at instanceof Date);
+    expect(stamps).toHaveLength(2);
+    expect(emails.update.mock.calls.some(([arg]) => arg && arg.customer_bell_claimed_at)).toBe(false);
+    const stampedIds = emails.where.mock.calls.filter(([arg]) => arg && typeof arg === 'object' && arg.id).map(([arg]) => arg.id);
+    expect(stampedIds).toEqual(expect.arrayContaining(['e-spoof', 'e-proof']));
+  });
+  test('an eligible unclassified row is CLAIMED before the classifier runs (cross-pod lock precedes auto-actions)', async () => {
+    const row = { id: 'e-live', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'Question about my service', label_ids: ['INBOX'], received_at: fresh, authentication_results: aligned, classification: null, is_archived: false };
+    const emails = chainMock([row]);
+    // The claim UPDATE must report 1 row; awaiting the chain resolves the
+    // row list for the sweep SELECT and `1` for the claim/other updates.
+    let calls = 0;
+    emails.then = (resolve, reject) => Promise.resolve(calls++ === 0 ? [row] : 1).then(resolve, reject);
+    emails.first = jest.fn(() => Promise.resolve({ classification: null, is_archived: false }));
+    db.schema = { hasColumn: jest.fn(() => Promise.resolve(true)) };
+    mockTables({ emails, notification_preferences: chainMock([]), technicians: chainMock([]), notifications: chainMock([{ id: 'n1' }]) });
+    await sweepUnclaimedCustomerEmailBells();
+    expect(classifyEmail).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-live' }));
+    const claimCall = emails.update.mock.calls.findIndex(([arg]) => arg && arg.customer_bell_claimed_at instanceof Date);
+    expect(claimCall).toBeGreaterThanOrEqual(0);
+    expect(emails.update.mock.invocationCallOrder[claimCall]).toBeLessThan(classifyEmail.mock.invocationCallOrder[0]);
+  });
+});
+
+describe('voicemail supersedes a missed-call bell for the same call (hook P1)', () => {
+  test('supersedeMissedCallAdmin retires only unread admin missed_call bells carrying that callLogId', async () => {
+    const notifications = chainMock(1);
+    mockTables({ notifications });
+    await expect(NotificationService.supersedeMissedCallAdmin({ callLogId: 'call-1' })).resolves.toBe(1);
+    expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
+    expect(notifications.whereNull).toHaveBeenCalledWith('read_at');
+    expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
+    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date) });
+  });
+  test('no callLogId = no-op', async () => {
+    mockTables({});
+    await expect(NotificationService.supersedeMissedCallAdmin({})).resolves.toBe(0);
+  });
+});
+
+describe('notification payload sanitizer — opaque ids survive (codex r6)', () => {
+  const { __private } = require('../services/notification-triggers');
+  test('emailId / callLogId keep their value while real contact fields are still masked', () => {
+    const out = __private.sanitizeNotificationPayload('customer_email_received', {
+      emailId: '5f2c1e4a-1111-2222-3333-444455556666',
+      customer_id: 'c1',
+      fromEmail: 'jane@customer-domain.com',
+      phone: '+19415551234',
+    });
+    expect(out.emailId).toBe('5f2c1e4a-1111-2222-3333-444455556666');
+    expect(out.customer_id).toBe('c1');
+    expect(out.fromEmail).not.toBe('jane@customer-domain.com');
+    expect(out.phone).not.toBe('+19415551234');
   });
 });

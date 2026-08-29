@@ -8,28 +8,9 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const MODELS = require('../../config/models');
 const { etDateString, addETDays, startOfETMonth, etMonthStart, parseETDateTime } = require('../../utils/datetime-et');
 
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function isDraftReply(reply) {
-  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
-}
-
-function hasRealReply(reply) {
-  return Boolean(reply) && !isDraftReply(reply);
-}
-
-function whereNeedsRealReply(qb, column = 'review_reply') {
-  qb.where(function needsRealReply() {
-    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
-  });
-}
-
-function whereHasRealReply(qb, column = 'review_reply') {
-  qb.whereNotNull(column).where(column, 'not like', `${DRAFT_REPLY_PREFIX}%`);
-}
+const { DRAFT_REPLY_PREFIX, isDraftReply, hasRealReply, whereNeedsRealReply, whereHasRealReply } = require('../review-reply/draft-prefix');
 
 const REVIEW_TOOLS = [
   {
@@ -75,8 +56,9 @@ Use for: "post that reply", "send the response I just approved"`,
       properties: {
         review_id: { type: 'string' },
         reply_text: { type: 'string', description: 'The reply to post' },
+        grounding_token: { type: 'string', description: 'The grounding_token returned by draft_review_reply for this exact draft (required — binds the reply to the review it was written for AND to the exact reply_draft text; submit that text unchanged)' },
       },
-      required: ['review_id', 'reply_text'],
+      required: ['review_id', 'reply_text', 'grounding_token'],
     },
   },
   {
@@ -153,7 +135,7 @@ async function executeReviewTool(toolName, input) {
       case 'get_review_stats': return await getReviewStats();
       case 'get_unresponded_reviews': return await getUnrespondedReviews(input);
       case 'draft_review_reply': return await draftReviewReply(input.review_id);
-      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text);
+      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text, input.grounding_token);
       case 'get_outreach_candidates': return await getOutreachCandidates(input);
       case 'trigger_review_request': return await triggerReviewRequest(input);
       case 'search_reviews': return await searchReviews(input);
@@ -250,98 +232,111 @@ async function getUnrespondedReviews(input) {
 
 async function draftReviewReply(reviewId) {
   const review = await db('google_reviews').where('id', reviewId).first();
-  if (!review) return { error: 'Review not found' };
+  if (!review || review.reviewer_name === '_stats') return { error: 'Review not found' };
   if (review.missing_since) {
     return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
   }
-
-  // Get location name
-  let locationName = 'Southwest Florida';
-  try {
-    const { WAVES_LOCATIONS } = require('../../config/locations');
-    const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id);
-    if (loc) locationName = loc.name;
-  } catch {}
-
-  // Get customer city if matched
-  let customerCity = '';
-  if (review.customer_id) {
-    const cust = await db('customers').where('id', review.customer_id).first();
-    if (cust) customerCity = cust.city || '';
+  // ONE drafter for every path (admin button, this tool, the auto-reply
+  // runner): public-safe grounding + deterministic verifier, via the shared
+  // cross-provider dispatcher. No raw SDK client, no second prompt.
+  const { buildReplyGrounding } = require('../review-reply/grounding');
+  const Drafter = require('../review-reply/drafter');
+  const grounding = await buildReplyGrounding(review);
+  const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
+  const draft = await Drafter.draftReviewReply({ grounding, recentReplies });
+  if (!draft.ok) {
+    return {
+      error: draft.reason === 'provider_unavailable'
+        ? 'Reply providers are unavailable right now.'
+        : `No draft passed the safety checks (${(draft.rejections || []).join(', ')}) — this one needs a human-written reply.`,
+    };
   }
-
-  const Anthropic = require('@anthropic-ai/sdk');
-  if (!process.env.ANTHROPIC_API_KEY) return { error: 'ANTHROPIC_API_KEY not set' };
-
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  const msg = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 500,
-    messages: [{
-      role: 'user',
-      content: `Write a Google review reply for Waves Pest Control ${locationName}.
-
-Review by: ${review.reviewer_name}
-Rating: ${review.star_rating}/5
-Text: ${review.review_text || '(No comment — just a star rating)'}
-Customer city: ${customerCity || 'unknown'}
-
-Rules:
-- Max 2 paragraphs, warm and genuine
-- Use "we" and "our" (first person plural)
-- For low ratings: acknowledge concern, offer to make it right
-- For high ratings: thank specifically, mention local connection
-- Naturally include 1-2 service keywords (pest control, lawn care)
-- End with: The 🌊 Waves Pest Control ${locationName} Team`
-    }],
-  });
-
-  const draft = msg.content[0]?.text || '';
-
   return {
     draft: true,
     review_id: reviewId,
     reviewer: review.reviewer_name,
     rating: review.star_rating,
     review_text: review.review_text,
-    reply_draft: draft,
-    note: 'This is a DRAFT. Say "post it" or "send it" to submit, or "revise it" to regenerate.',
+    reply_draft: draft.text,
+    reply_mode: draft.mode,
+    // Binds this draft to the review + account facts it was written from;
+    // submit_review_reply requires it (validated inside the publish claim).
+    grounding_token: require('../review-reply/runner').groundingToken(review, grounding, draft.text),
+    note: 'This is a DRAFT. Say "post it" or "send it" to submit (pass grounding_token back), or "revise it" to regenerate.',
   };
 }
 
 
-async function submitReviewReply(reviewId, replyText) {
-  const review = await db('google_reviews').where('id', reviewId).first();
-  if (!review) return { error: 'Review not found' };
-  // Same lockout as POST /api/admin/reviews/:id/reply: a stamped review has
-  // no live GBP resource, so recording a local reply here would falsely
-  // report it as "visible on Google once synced".
-  if (review.missing_since) {
-    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+async function submitReviewReply(reviewId, replyText, groundingToken) {
+  const { parseGroundingToken } = require('../review-reply/runner');
+  // Posts to Google through the canonical publisher (liveness lock + audit).
+  // This tool used to write review_reply locally and claim the reply would
+  // "sync to Google" — it never did. Now it either reaches Google or errors.
+  const { publishReviewReply, ReviewReplyError } = require('../review-reply/publisher');
+  let submitGuard = null;
+  // reply_text is a MODEL-proposed tool argument: it may differ from the
+  // verified draft the operator saw. Re-run the canonical verifier against
+  // fresh grounding before anything reaches Google (fail closed).
+  try {
+    const review = await db('google_reviews').where('id', reviewId).first();
+    if (!review || review.reviewer_name === '_stats') return { error: 'Review not found' };
+    if (review.missing_since) return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+    const { buildReplyGrounding } = require('../review-reply/grounding');
+    const Drafter = require('../review-reply/drafter');
+    const grounding = await buildReplyGrounding(review);
+    const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
+    const verdict = Drafter.verifyReplyText(replyText, grounding, { recentReplies });
+    if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply, or post it from the Reviews page editor.`, code: 'verifier_reject', rejection: verdict };
+    // The draft is bound to the review + account facts it was WRITTEN from
+    // (the grounding_token draft_review_reply returned), not to whatever the
+    // row says at submission time: a reviewer rewrite the sync recorded in
+    // between must refuse a draft written for the old review. Same shared
+    // guard as the editor's AI drafts, validated inside the publish claim.
+    const { pipelineDraftGuard } = require('../review-reply/runner');
+    const parsedToken = parseGroundingToken(groundingToken);
+    if (!parsedToken) {
+      return { error: 'Draft it first with draft_review_reply and pass its grounding_token back unchanged — the token binds the reply to the review it was written for.', code: 'grounding_token_required' };
+    }
+    // Conversational confirmation approves ONE text: the reply_draft the
+    // operator read. A different verifier-valid variant is not approved.
+    const { replyTextFingerprint } = require('../review-reply/runner');
+    if (!parsedToken.text || parsedToken.text !== replyTextFingerprint(replyText)) {
+      return { error: 'reply_text must be exactly the reply_draft that was approved. Re-run draft_review_reply if a different wording is wanted.', code: 'draft_text_mismatch' };
+    }
+    submitGuard = pipelineDraftGuard(replyText, { groundingToken });
+  } catch (err) {
+    if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
+    return { error: `Could not verify the reply before posting (${err.message}).`, code: 'verify_failed' };
   }
-
-  // Guards the read-then-write race: the hourly sync can stamp the row
-  // between the check above and this update.
-  const updated = await db('google_reviews')
-    .where('id', reviewId)
-    .whereNull('missing_since')
-    .update({
-      review_reply: replyText,
-      reply_updated_at: new Date(),
+  try {
+    const result = await publishReviewReply({
+      reviewId,
+      text: replyText,
+      actor: { type: 'ib', adminUserId: null },
+      // This tool submits a draft for an UNANSWERED review; it is not an
+      // explicit edit of a known reply, so it takes the non-overwrite path
+      // (local + live Google reply checks) and yields to anyone who answered
+      // meanwhile.
+      allowOverwrite: false,
+      autoFields: require('../review-reply/runner').manualReplyCloseFields(db),
+      guard: submitGuard,
+      expectedAccountFingerprint: parseGroundingToken(groundingToken).account,
     });
-  if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+    const review = await db('google_reviews').where('id', reviewId).first();
+    logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId}`);
+    return {
+      success: true,
+      review_id: reviewId,
+      reviewer: review?.reviewer_name || null,
+      google_posted: result.googlePosted,
+      note: result.googlePosted
+        ? 'Reply posted to Google.'
+        : 'Google Business Profile is not configured in this environment — the reply was saved locally only.',
+    };
+  } catch (err) {
+    if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
+    throw err;
   }
-
-  logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId} by ${review.reviewer_name}`);
-
-  return {
-    success: true,
-    review_id: reviewId,
-    reviewer: review.reviewer_name,
-    note: 'Reply saved. It will be visible on Google once synced via the GBP API.',
-  };
 }
 
 

@@ -353,3 +353,21 @@ describe('shipped-manifest content rules', () => {
     }
   });
 });
+
+
+describe('manifest framing (PR #3549 topic-targeting gate)', () => {
+  test('every curated brief\'s pinned title and slug pass the framing gate strictly — the runner would otherwise skip the row at step 2d', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const gate = require('../services/content/topic-targeting-gate');
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'data', 'category-seed-topics-v1.json'), 'utf8'));
+    const failures = [];
+    for (const brief of manifest.briefs) {
+      for (const [where, text] of [['working_title', brief.working_title], ['slug', gate._internals.slugWords(brief.slug)]]) {
+        const reason = gate.geoBlockReason(String(text || ''));
+        if (reason) failures.push(`${brief.id} ${where}: ${reason} — ${text}`);
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+});

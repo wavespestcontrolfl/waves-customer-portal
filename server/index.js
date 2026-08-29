@@ -958,7 +958,15 @@ try {
 // so `npm run dev` still auto-migrates against the local DB. Run
 // `npm run db:migrate` manually if you want to migrate without
 // starting the dev server.
-httpServer.listen(PORT, () => {
+// Prime the catalog-name cache BEFORE accepting traffic so the first
+// requests already display real service identities instead of the lossy
+// regex fallback (service-catalog-names.js). Bounded: a slow/failed prime
+// falls back to today's behavior rather than delaying boot.
+const primeCatalogNames = config.nodeEnv === 'test'
+  ? Promise.resolve()
+  : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
+
+primeCatalogNames.then(() => httpServer.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
@@ -1137,6 +1145,28 @@ httpServer.listen(PORT, () => {
     // and a live quote draft. The sweep strips the stranded pricing
     // (fail-safe: price-less single visit, office converts from the live
     // draft) and rings an admin bell. No-op when nothing is stranded.
+    // Backlink Manager v2 step 1: registry catch-up — (a) copies any legacy
+    // seo_signup_attempts row (written by an old pod during the rolling deploy)
+    // into seo_link_attempts; (b) links every board row that has no registry
+    // domain/path yet (rows inserted by old pods after the migration, and by
+    // the board writers until step 2 routes them through the registry
+    // transactionally). Both idempotent to a fixed point; once at boot, then
+    // every 6h; the signup-runner repeats (a) per run.
+    {
+      const linkRegistryCatchup = async () => {
+        try {
+          const { runExclusive } = require('./utils/cron-lock');
+          await runExclusive('link-registry-catchup', async () => {
+            const { backfillLegacyAttempts, backfillLegacyBoard } = require('./services/seo/link-registry-backfill');
+            const db = require('./models/db');
+            await backfillLegacyBoard(db, { log: (m) => logger.info(m) });
+            await backfillLegacyAttempts(db, { log: (m) => logger.info(m) });
+          }, { recordHealth: false });
+        } catch (err) { logger.warn(`[link-registry] catch-up failed: ${err.message}`); }
+      };
+      setTimeout(linkRegistryCatchup, 90 * 1000).unref();
+      setInterval(linkRegistryCatchup, 6 * 60 * 60 * 1000).unref();
+    }
     {
       const runWizardActivationSweep = async () => {
         try {
@@ -1227,6 +1257,33 @@ httpServer.listen(PORT, () => {
       const m = process.memoryUsage();
       logger.info(`[mem] RSS: ${Math.round(m.rss/1024/1024)}MB | Heap: ${Math.round(m.heapUsed/1024/1024)}/${Math.round(m.heapTotal/1024/1024)}MB`);
     }, 5 * 60 * 1000);
+
+    // Collective series moves: finish the post-commit effects of any
+    // series_moves row whose pass died after the commit (reminder sync,
+    // conflict card, board broadcast, the requested customer text) —
+    // idempotent via the row's markers + lease; no-op when nothing is
+    // pending. RECOVERY, not a scheduled job: it runs regardless of the
+    // GATE_CRON_JOBS master gate (like the recording fallback above) —
+    // the request paths that create series_moves rows are gated on
+    // GATE_ADMIN_COLLECTIVE_MOVE alone, and an environment with that on and
+    // the cron fleet off must still finish a dead pass (codex r11 P1).
+    // Safe with the collective gate off (no rows appear).
+    {
+      const { runExclusive } = require('./utils/cron-lock');
+      if (config.nodeEnv !== 'test') {
+        require('node-cron').schedule('*/15 * * * *', async () => {
+          try {
+            await runExclusive('series-move-effects-reconcile', async () => {
+              const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
+              const out = await reconcileSeriesMoveEffects();
+              if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
+            });
+          } catch (err) {
+            logger.error(`[cron] series move effects reconcile failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+      }
+    }
 
     // Weekly: recompute all assessment analytics (product efficacy, protocol
     // performance, benchmarks, contradictions). Sunday 4 AM ET via node-cron —
@@ -1338,7 +1395,7 @@ httpServer.listen(PORT, () => {
       }
     }
   })();
-});
+}));
 
 // Graceful shutdown — Railway sends SIGTERM ~30s before forced kill on
 // deploy. Drain Socket.io connections first (clients see a clean

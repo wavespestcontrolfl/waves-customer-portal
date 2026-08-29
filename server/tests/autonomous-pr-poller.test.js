@@ -24,6 +24,9 @@ jest.mock('../services/content-astro/github-client', () => ({
   getFile: jest.fn(),
   getBranchSha: jest.fn(),
   env: jest.fn(() => ({ defaultBranch: 'main' })),
+  closePr: jest.fn().mockResolvedValue({}),
+  deleteRef: jest.fn().mockResolvedValue({}),
+  retireBranch: jest.fn().mockResolvedValue(true),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -45,6 +48,14 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
   // exercise the genuine derivation rather than a hand-written copy.
   _internals: jest.requireActual('../services/content-astro/astro-publisher')._internals,
 }));
+// Pre-merge topic-targeting recheck (PR #3549): the gate module is stubbed
+// clean by default; the block test overrides evaluateDraftTargeting.
+jest.mock('../services/content/topic-targeting-gate', () => ({
+  loadLiveIndex: jest.fn().mockResolvedValue({ posts: [] }),
+  evaluateDraftTargeting: jest.fn(() => ({ ok: true, findings: [] })),
+  // REAL lock helper: the tests drive it through the db.transaction stub.
+  withTopicMergeLock: jest.requireActual('../services/content/topic-targeting-gate').withTopicMergeLock,
+}));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
 }));
@@ -59,7 +70,15 @@ const pagesPoll = require('../services/content-astro/pages-poll');
 const publisher = require('../services/content-astro/astro-publisher');
 const indexNow = require('../services/seo/indexnow-submit');
 const social = require('../services/social-media');
+const topicGate = require('../services/content/topic-targeting-gate');
 const poller = require('../services/content/autonomous-pr-poller');
+// The topic-merge lock's transaction: queries delegate to the db mock (so
+// setupDb records the park writes), raw() answers the advisory-lock probe.
+function fakeTrx(locked) {
+  const trx = (...args) => db(...args);
+  trx.raw = jest.fn().mockResolvedValue({ rows: [{ locked }] });
+  return trx;
+}
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
 
@@ -75,6 +94,7 @@ function makeRun(overrides = {}) {
       type: 'draft',
       frontmatter: {
         canonical: CANONICAL,
+        slug: '/pest-control/test-post/',
         primary_keyword: 'test keyword',
         service_areas_tag: ['Venice'],
         title: 'Test Post',
@@ -126,6 +146,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
       }),
       whereNot: jest.fn(() => q),
       whereNotIn: jest.fn(() => q),
+      forUpdate: jest.fn(() => q),
       whereNull: jest.fn(function (col) {
         q._filters[`null:${col}`] = true;
         return q;
@@ -210,6 +231,13 @@ function runUpdates(updates) {
 }
 
 beforeEach(() => {
+  // Topic-gated merges run recheck → merge inside db.transaction under an
+  // advisory lock; the bare jest.fn() db grants it by default.
+  db.transaction = jest.fn(async (fn) => fn(fakeTrx(true)));
+  // Default: the PR head's blog file is readable and the topic recheck is
+  // clean (the recheck fails closed on an unreadable file).
+  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
+  topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: true, findings: [] }));
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
   pagesPoll.liveUrlResponds.mockResolvedValue(true);
@@ -768,6 +796,319 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     gh.getBranchSha.mockResolvedValueOnce('main-tip-2');
     res = await poller.pollPending();
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7) and PARKS the run (r12)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, stage: 'ownership', findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'Entity "taexx" is already owned by a live post' }] }));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, parked: true, reason: expect.stringMatching(/^topic_targeting_blocked: P0 TOPIC_CANNIBALIZES_EXISTING/) });
+    // The head file — not the stored draft — is what was re-evaluated, against a fresh index.
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', expect.any(String));
+    expect(topicGate.loadLiveIndex).toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Test Post');
+    // Deterministic → parked out of the pending set (CAS on the pending state), queue row stamped, PR untouched.
+    const runPark = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'topic_targeting_blocked');
+    expect(runPark).toBeDefined();
+    expect(runPark.updates.reviewer_notes).toMatch(/TOPIC_CANNIBALIZES_EXISTING/);
+    expect(runPark.updates.poll_pending_reason).toBeNull();
+    const queuePark = updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'topic_targeting_blocked');
+    expect(queuePark).toBeDefined();
+    expect(db.transaction).toHaveBeenCalledTimes(1); // both park writes ran inside the lock transaction
+    // The PR is retired with the park (r13): closed + branch deleted, remediation row terminal.
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+  });
+
+  test('a GitHub failure while retiring the PR leaves the park DURABLE (committed) and the PR is reconciled next tick', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'owned' }] }));
+    gh.closePr.mockRejectedValueOnce(new Error('github 502'));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    // The park is durable regardless of GitHub: run + queue moved to topic_targeting_blocked…
+    expect(res.results[0]).toMatchObject({ pending: true, parked: true });
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'topic_targeting_blocked')).toBeDefined();
+    // …the retire was attempted after the commit and failed best-effort (no terminal mark yet).
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeUndefined();
+  });
+
+  test('reconcileTopicBlockedPrs retires a parked run whose PR is still open, and leaves closed ones alone', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review' });
+    const updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/autonomous-test', sha: 'HEADSHA1' } });
+    const r1 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r1).toMatchObject({ count: 1, retired: 1 });
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+
+    jest.clearAllMocks();
+    setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r2).toMatchObject({ count: 1, retired: 0 });
+    expect(gh.closePr).not.toHaveBeenCalled();
+
+    // Pending (non-parked) runs are never touched even if the query fake returns them.
+    jest.clearAllMocks();
+    setupDb({ pending: [makeRun()] });
+    const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r3).toMatchObject({ count: 0 });
+    expect(gh.getPr).not.toHaveBeenCalled();
+  });
+
+  test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
+    const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
+    const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
+      const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
+      return q;
+    });
+    const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
+    // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
+    let trx = fakeTrx({ row: parkedRow });
+    expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
+    expect(trx.mock.results[0].value.forUpdate).toHaveBeenCalled();
+    // Dismissed / requeued meanwhile → withheld.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
+    // A newer sibling owns the opportunity → withheld.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    // Cannot verify (lock error, or a run without created_at) → fail closed.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, throwOn: 'lock timeout' }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(makeRun({ created_at: null }), fakeTrx({ row: parkedRow }))).toBe(false);
+    // No opportunity → nothing to lock.
+    expect(await poller._internals.queueRowStillParkedLocked(makeRun({ opportunity_id: null }), fakeTrx({ row: null }))).toBe(true);
+  });
+
+  test('reconcileTopicBlockedPrs: a closed PR reopened and merged during branch retirement is UN-PARKED, not stamped closed (codex r32 P1)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    const updates = setupDb({ pending: [parked] });
+    gh.getPr
+      .mockResolvedValueOnce({ number: 42, state: 'closed', merged: false, head: { ref: 'content/blog-old' } })
+      .mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z', head: { ref: 'content/blog-old' } });
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r).toMatchObject({ count: 1, retired: 0, unparked: 1 });
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'astro_pr_pending_merge')).toBeDefined();
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeUndefined();
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.poll_pending_reason === 'topic_block_pr_retired')).toBeUndefined();
+  });
+
+  test('reconcileTopicBlockedPrs: a closed PR whose branch is not verified deleted stays in the set (no terminal stamp, no marker) (hook r28 P1)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    let updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false, head: { ref: 'content/blog-old' } });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/blog-old');
+    expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
+    // Open PR: the retire closes it, but still is not retired until the branch is verified gone.
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/blog-old' } });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(r).toMatchObject({ retired: 0 });
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
+  });
+
+  test('reconcileTopicBlockedPrs: a failed terminal stamp ({ error }, never a throw) keeps the run in the set — no retired marker, no supersede (hook r25 P1)', async () => {
+    const rem = require('../services/content/codex-remediation');
+    const spy = jest.spyOn(rem, 'markPrTerminal').mockResolvedValue({ updated: 0, error: 'db down' });
+    try {
+      // Closed PR: the marker stamp must NOT land.
+      const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+      let updates = setupDb({ pending: [parked] });
+      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+      await poller._internals.reconcileTopicBlockedPrs(gh);
+      expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+      // Merged + opportunity moved on: no supersede either.
+      jest.clearAllMocks();
+      spy.mockResolvedValue({ updated: 0, error: 'db down' });
+      updates = setupDb({ pending: [parked], queueFirst: { id: parked.opportunity_id, status: 'pending_review', skip_reason: 'astro_pr_pending_merge' } });
+      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+      const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+      expect(r).toMatchObject({ superseded: 0, unparked: 0 });
+      expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'superseded_by_review_queue_action')).toBeUndefined();
+    } finally { spy.mockRestore(); }
+  });
+
+  test('reconcileTopicBlockedPrs: a merged PR whose opportunity was requeued/dismissed meanwhile is retired as SUPERSEDED (terminal merged stamp), never re-owned (r22)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    // The operator followed the park note: the queue row is back at the pending reason (requeued).
+    const updates = setupDb({ pending: [parked], queueFirst: { id: parked.opportunity_id, status: 'pending_review', skip_reason: 'astro_pr_pending_merge' } });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r).toMatchObject({ count: 1, retired: 0, unparked: 0, superseded: 1 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    const sup = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'superseded_by_review_queue_action');
+    expect(sup).toBeDefined();
+    expect(sup.updates.reviewer_notes).toMatch(/merged by a human after the topic-targeting park, but the opportunity has moved on/);
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'merged')).toBeDefined();
+  });
+
+  test('reconcileTopicBlockedPrs: a PR merged by a human after the park is UN-PARKED into the merged lifecycle; a closed PR gets its terminal stamp (r15)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review' });
+    let updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r1 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r1).toMatchObject({ count: 1, retired: 0, unparked: 1 });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    const runBack = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'astro_pr_pending_merge');
+    expect(runBack).toBeDefined();
+    expect(runBack.updates.reviewer_notes).toMatch(/merged after the topic-targeting park/);
+    expect(updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'astro_pr_pending_merge')).toBeDefined();
+
+    // Un-park is transactional (hook): both writes on the transaction, exact-row CAS.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r2).toMatchObject({ count: 1, retired: 0, unparked: 0 });
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+    // Terminal bookkeeping done → the row leaves the reconcile set (marker), no state change.
+    const retiredMark = updates.find((u) => u.table === 'autonomous_runs');
+    expect(retiredMark.updates).toEqual(expect.objectContaining({ poll_pending_reason: 'topic_block_pr_retired' }));
+    expect(retiredMark.updates.skip_reason).toBeUndefined();
+
+    // A lost queue CAS rolls the un-park back (nothing changes; retried next tick).
+    jest.clearAllMocks();
+    setupDb({ pending: [parked], updateResult: 0 });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r3).toMatchObject({ count: 1, unparked: 0 });
+
+    // A NEWER run for the same opportunity → this run is stale: the queue row is not ours (hook, r16 push).
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked], newerRun: { id: 'run-newer' } });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r4 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r4).toMatchObject({ count: 1, unparked: 0 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+
+    // No created_at on the reconciled row → the guard fails CLOSED (no un-park), never silently passes.
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [{ ...parked, created_at: null }] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r5 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r5).toMatchObject({ count: 1, unparked: 0 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()], updateResult: 0 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'owned' }] }));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'queue_row_moved_during_gating' });
+    expect(res.results[0].parked).toBeUndefined();
+  });
+
+  test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    db.transaction = jest.fn(async (fn) => fn(fakeTrx(false)));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'topic_merge_lock_busy' });
+  });
+
+  test('the recheck adopts the flat-path file the publisher updated in place (codex r20)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    // Nothing at the category path; the legacy flat file renders this route.
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/test-post.mdx'
+      ? { content: '---\ntitle: Flat Legacy Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' }
+      : null));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Flat Legacy Post');
+    expect(gh.getFile.mock.calls.map((c) => c[0])).toEqual(['src/content/blog/pest-control/test-post.mdx', 'src/content/blog/pest-control/test-post.md', 'src/content/blog/test-post.mdx']);
+  });
+
+  test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/test-post.mdx'
+      ? { content: '---\ntitle: Lawn Post\nslug: /lawn-care/test-post/\n---\n\nBody.\n' }
+      : null));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: branch file .* unreadable/) });
+  });
+
+  test('an unreadable head file fails the recheck closed (deferred, not merged)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: branch file .* unreadable/) });
+    // Transient (not a gate verdict): no park.
+    expect(res.results[0].parked).toBeUndefined();
   });
 
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {

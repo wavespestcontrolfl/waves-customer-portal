@@ -2514,6 +2514,7 @@ const PROSPECT_VIEWS = [
   { key: "notindexed", label: "Live · not indexed", statuses: ["live"] },
   { key: "indexed", label: "Indexed", statuses: ["indexed"] },
   { key: "lost", label: "Lost", statuses: ["lost"] },
+  { key: "parked", label: "Parked", statuses: ["awaiting_owner", "watching"] }, // v2: owner decision / unactionable today
 ];
 
 // Outreach (M3b): link types whose prospects can be drafted + sent as one-to-one email.
@@ -2528,6 +2529,8 @@ const PROSPECT_STATUS_COLOR = {
   indexed: D.green,
   lost: D.red,
   rejected: D.red,
+  awaiting_owner: D.amber,
+  watching: D.muted,
 };
 
 function LinkBuildingBoard({ canRun }) {

@@ -356,6 +356,19 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Collective series moves on every staff surface (owner rulings 2026-07-30
+  // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
+  // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
+  // modal, an SMS date reply, a choke-point delegation from any future caller
+  // — shifts the customer's future sister visits by the same delta (date
+  // only: siblings keep window/status/tech; manual date exceptions shift by
+  // the delta instead of regenerating). Auto-dispatch nudges are excluded by
+  // construction. Read directly in rebooker.js (collectiveMoveGateOn) — this
+  // entry keeps the flip checklist honest; series_moves rows are the
+  // telemetry to review before un-gating. Kill switch: unset. Gate off: the
+  // drag confirm's explicit "Reschedule series" button still works as before.
+  adminCollectiveMove: process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
@@ -510,6 +523,15 @@ const gates = {
   // calls route exactly as they do today. Behaviour is further tuned (and can be
   // disabled live with no deploy) via the `call_routing` system_settings row.
   voiceAiAgent: process.env.GATE_VOICE_AI_AGENT === 'true',
+
+  // Spanish language vestibule on inbound calls — "Para español, oprima dos"
+  // folded into the greeting; press 2 hands the call to the SAME Sandy relay
+  // agent in an es-US session. Customer-facing and on the live call path, so
+  // explicit opt-in in EVERY environment. Off ⇒ /voice TwiML is byte-identical
+  // to today (no <Gather> is rendered). Also requires voiceAiAgent + a reachable
+  // relay endpoint + `spanishMenuEnabled` in the call_routing settings row —
+  // the vestibule is never offered when no Spanish session could start.
+  voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
@@ -1124,6 +1146,12 @@ const gates = {
   // Google review attributed to a customer (4-5 stars) → the matching
   // location's Review Thank You sequence. Once per customer ever.
   reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
+  // Automatic Google review replies. The gate is a MODE, not a boolean:
+  // GATE_REVIEW_AUTO_REPLY = off (unset) | shadow (drafts only) | auto
+  // (4-5★ post to Google; 1-3★ + unrated always park for a human). This
+  // boolean is the "lane is on at all" view for status surfaces; the runner
+  // reads the mode itself (services/review-reply/runner.js). Kill = unset.
+  reviewAutoReply: ['shadow', 'auto'].includes(String(process.env.GATE_REVIEW_AUTO_REPLY || '').trim().toLowerCase()),
   // Autopay charge failure → payment_failed sequence, REPLACING the
   // transactional retry-notice email (owner rule: one email; the failure SMS
   // with the card-update link is unchanged). 14-day dedupe = one enrollment
@@ -1351,6 +1379,24 @@ const gates = {
   // blocks on a browser. Off in prod until the rendered document is verified.
   // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
   estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
+
+  // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
+  // renders a one-line authorization + inline "View terms" drawer directly
+  // above Accept (same steps, no extra page) and the accept route records
+  // the verbatim text/version, time, IP and device on `estimate_acceptances`
+  // + stamps estimates.terms_version / customers.accepted_terms_version.
+  // Off ⇒ /data payload and the accept flow are byte-identical to today and
+  // nothing is recorded (nothing was shown). Counsel reviews the copy once
+  // before this flips. Kill switch: unset GATE_ESTIMATE_ACCEPTANCE_TERMS.
+  //
+  // Rollout is two-step on the same variable: `true` shows + records, and
+  // an accept that carries NO attestation (a tab loaded before the flip —
+  // legacy SSR page or the previous bundle) still accepts unrecorded, so no
+  // live tokenized flow is stranded; `required` (flip once every open tab
+  // has had time to reload) refuses an unattested accept with the
+  // reloadable 409 too, so every acceptance under the gate has its record.
+  estimateAcceptanceTerms: ['true', 'required'].includes(process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS),
+  estimateAcceptanceTermsRequired: process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS === 'required',
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to

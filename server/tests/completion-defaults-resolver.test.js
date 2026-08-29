@@ -22,6 +22,7 @@ function makeKnex(ops) {
     const chain = {
       where: jest.fn(() => chain),
       andWhere: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
       leftJoin: jest.fn(() => chain),
       join: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),

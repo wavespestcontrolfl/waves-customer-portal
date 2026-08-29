@@ -3158,9 +3158,14 @@ export default function EstimateToolViewV2({
     setVerifySaveState("");
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
-  // Live engine preview for the stale-imagery turf fallback (codex P1 r2 +
-  // pre-push P1 r3 #3098). profile.turfFallbackPreviewSf is computed from
-  // lookup-time facts; when the rep edits the fields that feed pricing,
+  // Live engine preview for the treatable-turf "Lot estimate" fallback.
+  // Originally stale-imagery only (codex P1 r2 + pre-push P1 r3 #3098);
+  // widened 2026-08-28 to EVERY profile: the local lot × (1 − impervious%)
+  // − beds heuristic below skipped the building footprint, hardscape and
+  // the engine's plausible-max cap, so a 2026 new build (AI turf 0 sf,
+  // impervious 0%) showed "Lot est. 4,920 sf" — the whole parcel, house
+  // included — while /calculate-estimate priced 2,368 and the customer's
+  // estimate said so. When the rep edits the fields that feed pricing,
   // re-ask /turf-preview so the displayed number keeps tracking what
   // /calculate-estimate will price. The payload is the SAME profile shape
   // doGenerate builds (spread profile + the identical form overrides,
@@ -3168,14 +3173,24 @@ export default function EstimateToolViewV2({
   // server can run it through the real translate/engine boundary.
   // Debounced; a sequence counter drops out-of-order responses. Null while
   // no fresh answer — the render falls back to the profile's lookup-time
-  // value.
-  const [staleImageryPreviewSf, setStaleImageryPreviewSf] = useState(null);
-  const staleImageryPreviewSeq = useRef(0);
+  // value (stale-imagery path) or the local heuristic (fail-open).
+  const [enginePreviewSf, setEnginePreviewSf] = useState(null);
+  const enginePreviewSeq = useRef(0);
   const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
+  const previewLotSqFt =
+    parseNonNegativeInteger(form.lotSqFt) ??
+    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
+    0;
   useEffect(() => {
-    setStaleImageryPreviewSf(null);
-    if (!turfUnobservable) return undefined;
-    const seq = ++staleImageryPreviewSeq.current;
+    setEnginePreviewSf(null);
+    // Bump the sequence BEFORE any early return so an in-flight answer for
+    // the previous profile can never land after the lot clears (pre-push
+    // P1: switching to a lot-less address would otherwise re-display the
+    // prior property's turf area).
+    const seq = ++enginePreviewSeq.current;
+    // Without a lot the engine has nothing to derive from — the local
+    // heuristic returns null there too, so skip the round-trip.
+    if (previewLotSqFt <= 0) return undefined;
     const timer = setTimeout(async () => {
       try {
         // The SAME builder doGenerate uses — preview and priced request
@@ -3193,19 +3208,19 @@ export default function EstimateToolViewV2({
         });
         if (!r.ok) return;
         const data = await r.json();
-        if (seq !== staleImageryPreviewSeq.current) return;
+        if (seq !== enginePreviewSeq.current) return;
         const sf = Number(data?.turfSf);
         // Zero is a REAL engine answer (footprint + hardscape can consume
         // the lot) — coercing it to null would fall back to a stale
         // positive number (codex P2 r4 #3098). Null only for no-answer.
-        setStaleImageryPreviewSf(Number.isFinite(sf) && sf >= 0 ? Math.round(sf) : null);
+        setEnginePreviewSf(Number.isFinite(sf) && sf >= 0 ? Math.round(sf) : null);
       } catch {
-        // Fall back to the lookup-time profile value.
+        // Fall back to the lookup-time profile value / local heuristic.
       }
     }, 350);
     return () => clearTimeout(timer);
   }, [
-    turfUnobservable,
+    previewLotSqFt,
     enrichedProfile,
     form.lotSqFt,
     form.homeSqFt,
@@ -5046,15 +5061,15 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
     0;
   const lotEstimateTurfSqFt = (() => {
-    // Stale-imagery conflict (turfObservation 'unobservable'): show the
-    // number the pricing engine will ACTUALLY use — its building/hardscape
-    // legacy fallback — not the local 20%/15% heuristic below. Live value
-    // from /turf-preview tracks form edits; the profile's lookup-time
-    // turfFallbackPreviewSf covers the gap until it answers.
+    // Show the number the pricing engine will ACTUALLY use — footprint,
+    // hardscape and plausible-max cap included — not the local 20%/15%
+    // heuristic below. Live value from /turf-preview tracks form edits;
+    // on the stale-imagery path the profile's lookup-time
+    // turfFallbackPreviewSf covers the gap until it answers. The heuristic
+    // is only the fail-open fallback for a preview miss.
     const enginePreview = parseNonNegativeInteger(
-      turfUnobservable
-        ? (staleImageryPreviewSf ?? enrichedProfile?.turfFallbackPreviewSf)
-        : null,
+      enginePreviewSf ??
+        (turfUnobservable ? enrichedProfile?.turfFallbackPreviewSf : null),
     );
     // Zero included: an engine 0 (footprint + hardscape consume the lot) is
     // the authoritative answer, not a miss — falling through to the local
@@ -6556,7 +6571,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcTs" label="Tree & Shrub" />{" "}
-              <CheckboxV2 k="svcInjection" label="Palm Injection" />{" "}
+              <CheckboxV2 k="svcInjection" label="Palm Injection Service" />{" "}
               {form.svcInjection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-2 gap-3">
@@ -6641,7 +6656,7 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-              <CheckboxV2 k="svcMosquito" label="Mosquito Program" />
+              <CheckboxV2 k="svcMosquito" label="Mosquito Control" />
               {(form.svcMosquito || form.svcOnetimeMosquito) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -6778,7 +6793,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />{" "}
-              <CheckboxV2 k="svcRodentBait" label="Rodent Bait Stations" />
+              <CheckboxV2 k="svcRodentBait" label="Rodent Bait Station" />
               {livePreview.recurringCount > 0 && (
                 <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-zinc-50 border-hairline border-zinc-300 text-12 text-zinc-900">
                   {livePreview.recurringCount} service
@@ -6797,7 +6812,7 @@ export default function EstimateToolViewV2({
               )}
               <SubGroupLabel>One-Time Services</SubGroupLabel>{" "}
               <SubGroupLabel className="mt-3">Lawn</SubGroupLabel>{" "}
-              <CheckboxV2 k="svcOnetimeLawn" label="Lawn Treatment" />
+              <CheckboxV2 k="svcOnetimeLawn" label="One-Time Lawn Care Service" />
               {form.svcOnetimeLawn && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -6815,7 +6830,7 @@ export default function EstimateToolViewV2({
                   </FieldV2>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcPlugging" label="Lawn Plugging" />
+              <CheckboxV2 k="svcPlugging" label="Lawn Plugging Service" />
               {form.svcPlugging && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -6841,7 +6856,7 @@ export default function EstimateToolViewV2({
                   </div>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcTopdress" label="Top Dressing" />{" "}
+              <CheckboxV2 k="svcTopdress" label="Lawn Top Dressing Service" />{" "}
               {form.svcTopdress && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -6960,10 +6975,10 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <SubGroupLabel className="mt-3">Termite</SubGroupLabel>{" "}
-              <CheckboxV2 k="svcWdo" label="WDO / Termite Inspection" />{" "}
-              <CheckboxV2 k="svcTrenching" label="Termite Trenching" />{" "}
-              <CheckboxV2 k="svcBoracare" label="Termite Attic Remediation" />
-              <CheckboxV2 k="svcPreslab" label="Pre-Slab Termiticide Treatment" />
+              <CheckboxV2 k="svcWdo" label="WDO Inspection Service" />{" "}
+              <CheckboxV2 k="svcTrenching" label="Termite Trenching Service" />{" "}
+              <CheckboxV2 k="svcBoracare" label="Bora-Care Wood Treatment Service" />
+              <CheckboxV2 k="svcPreslab" label="Slab Pre-Treat Termite Service" />
               {hasAnyTermiteSelection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -7244,7 +7259,7 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-              <CheckboxV2 k="svcFoam" label="Termite Foam Treatment" />
+              <CheckboxV2 k="svcFoam" label="Termite Foam Service" />
               {form.svcFoam && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -7295,9 +7310,9 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <SubGroupLabel className="mt-3">Pest</SubGroupLabel>{" "}
-              <CheckboxV2 k="svcOnetimePest" label="Pest Treatment" />{" "}
-              <CheckboxV2 k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
-              <CheckboxV2 k="svcFlea" label="Flea Treatment" />{" "}
+              <CheckboxV2 k="svcOnetimePest" label="One-Time Pest Control Service" />{" "}
+              <CheckboxV2 k="svcOnetimeMosquito" label="One-Time Mosquito Control Service" />{" "}
+              <CheckboxV2 k="svcFlea" label="Flea Control Service" />{" "}
               {form.svcFlea && (
                 <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
@@ -7509,7 +7524,7 @@ export default function EstimateToolViewV2({
                   )}
                 </div>
               )}
-              <CheckboxV2 k="svcRoach" label="Cockroach Specialty Service" />
+              <CheckboxV2 k="svcRoach" label="Cockroach Treatment Service" />
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -7579,8 +7594,8 @@ export default function EstimateToolViewV2({
                     ))}
                 </div>
               )}
-              <CheckboxV2 k="svcWasp" label="Wasp/Bee/Stinging Insect" />{" "}
-              <CheckboxV2 k="svcBedbug" label="Bed Bug Treatment" />
+              <CheckboxV2 k="svcWasp" label="Bee / Wasp Nest Removal Service" />{" "}
+              <CheckboxV2 k="svcBedbug" label="Bed Bug Treatment Service" />
               {form.svcBedbug && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
@@ -7665,7 +7680,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               <SubGroupLabel className="mt-3">Rodent</SubGroupLabel>{" "}
-              <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping" />{" "}
+              <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping Service" />{" "}
               {form.svcRodentTrap && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="text-12 text-zinc-600 mb-3">
@@ -7753,7 +7768,7 @@ export default function EstimateToolViewV2({
                   </div>{" "}
                 </div>
               )}
-              <CheckboxV2 k="svcExclusion" label="Rodent Exclusion" />
+              <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
                   <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Wire Mesh Points</p>
@@ -7797,7 +7812,7 @@ export default function EstimateToolViewV2({
                   </FieldV2>
                 </div>
               )}
-              <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee (annual, renewable)" />
+              <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee Service" />
               {form.svcRodentGuarantee && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium mb-2">

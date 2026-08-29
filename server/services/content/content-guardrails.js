@@ -1962,7 +1962,7 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Estero', 'Lehigh Acres', 'St. Petersburg', 'Tampa', 'Winter Haven',
   'Plant City', 'Clearwater', 'Orlando', 'Miami', 'Jacksonville',
   'Fort Lauderdale', 'Tallahassee', 'Gainesville', 'Lakeland', 'Kissimmee',
-  'Ocala', 'Port St. Lucie', 'West Palm Beach', 'Hialeah', 'Boca Raton',
+  'Ocala', 'Port St. Lucie', 'Palm Beach', 'West Palm Beach', 'Hialeah', 'Boca Raton',
   // Broader FL metros (curated — full-state coverage stays a curated list
   // by design).
   'Daytona Beach', 'Melbourne', 'Palm Bay', 'Vero Beach', 'Fort Pierce',
@@ -1974,6 +1974,72 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   // deliberately absent.
   'Lee County', 'Collier County', 'Pinellas County', 'Hendry County',
   'DeSoto County', 'Polk County', 'Miami-Dade County', 'Broward County',
+  // 2026-08-27 (topic-targeting gate, hook r4): the remaining FL cities of
+  // ~40k+ plus named destination geos, and the US metros a writer might
+  // target. Still curated: this list also drives the PROSE footprint-claim
+  // scan, so places that are ordinary words or person names (Sunrise,
+  // Plantation, Cocoa, Mobile, Stuart, Brandon, Homestead, Jupiter, Boston,
+  // Phoenix, Austin, …) stay out — "protects your homestead" is not a claim
+  // about Homestead, FL. The topic-targeting gate matches those separately,
+  // and only with geographic context (topic-targeting-gate CONTEXT_PLACE_NAMES).
+  'Coral Springs', 'Miramar', 'Pompano Beach', 'Deerfield Beach',
+  'Boynton Beach', 'Delray Beach', 'Lauderhill', 'Tamarac', 'Miami Gardens', 'Miami Beach', 'Doral', 'Coral Gables', 'North Miami', 'Pembroke Pines', 'Palm Beach Gardens', 'Royal Palm Beach', 'Lake Worth', 'Titusville', 'Merritt Island', 'Cocoa Beach', 'Palm Coast', 'Ormond Beach',
+  'Port Orange', 'New Smyrna Beach', 'Deltona', 'DeLand', 'Sanford', 'Apopka',
+  'Altamonte Springs', 'Winter Park', 'Winter Garden', 'Winter Springs',
+  'Oviedo', 'Poinciana', 'Bartow', 'Haines City', 'Lake Wales',
+  'Zephyrhills', 'Wesley Chapel', 'New Port Richey', 'Dunedin', 'Pinellas Park', 'Palm Harbor', 'Tarpon Springs', 'Oldsmar', 'Temple Terrace',
+  'Valrico', 'Fort Walton Beach', 'Crestview',
+  'Panama City Beach', 'Lake City', 'Palatka', 'Fernandina Beach',
+  'Jacksonville Beach', 'Ponte Vedra', 'Leesburg', 'Mount Dora', // The Villages → topic-targeting-gate CONTEXT_PLACE_NAMES (ordinary phrase in prose)
+  'Crystal River', 'Homosassa', 'Dade City', 'Wauchula',
+  'Avon Park', 'Okeechobee', 'Clewiston', 'Belle Glade', 'Jensen Beach',
+  'Hobe Sound', 'Key West', 'Key Largo', 'Islamorada', 'Everglades City',
+  'Fort Myers Beach', 'North Fort Myers', 'Ave Maria',
+  // Hillsborough County is NOT here: its south end is served (locations.js),
+  // so the topic-targeting gate treats the county as out-of-area only when no
+  // served locality anchors the targeting (SPLIT_COUNTY_RE).
+  'Pasco County', 'Hernando County', 'Citrus County',
+  'Marion County', 'Volusia County', 'Brevard County', 'Seminole County',
+  'Osceola County', 'Orange County', 'Palm Beach County', 'Martin County',
+  'St. Lucie County', 'Indian River County', 'Duval County', 'Leon County',
+  'Escambia County', 'Okaloosa County', 'Alachua County', 'Highlands County',
+  'Hardee County', 'Glades County', 'Monroe County', 'Sumter County',
+  // Major out-of-state metros.
+  'Atlanta', 'San Antonio', 'Tucson',
+  'Las Vegas', 'Los Angeles', 'San Diego', 'San Francisco', 'Sacramento',
+  'Seattle', 'Denver', 'Chicago', 'Detroit', 'Minneapolis', 'St. Louis',
+  'Kansas City', 'Nashville', 'Memphis', 'Raleigh', 'Birmingham', 'New Orleans', 'Baton Rouge', 'Louisville', 'Cincinnati',
+  'Pittsburgh', 'Philadelphia', 'New York', 'Brooklyn', 'Bronx', 'Manhattan', 'Staten Island', 'Long Island', 'Harlem', 'Baltimore',
+  'Virginia Beach', 'Indianapolis', 'Milwaukee', 'Oklahoma City',
+  'Tulsa', 'Albuquerque', 'Salt Lake City', 'Honolulu',
+  // 2026-08-28 (PR #3549 codex r11): the remaining major US metros. Unique
+  // place names only — person-name / common-word metros (Jackson, Lincoln,
+  // Madison, Aurora, Mesa, Orange, Buffalo, Arlington, Springfield, Salem,
+  // Eugene, …) live in topic-targeting-gate CONTEXT_PLACE_NAMES instead.
+  'Columbus', 'Omaha', 'Boise', 'Portland', 'Fort Worth', 'El Paso', 'Anaheim',
+  'Bakersfield', 'Fresno', 'Long Beach', 'Oakland', 'San Jose', 'Stockton',
+  'Chula Vista', 'Irvine', 'Santa Ana', 'Modesto', 'Santa Rosa', 'Salinas',
+  'Santa Barbara', 'Oxnard', 'Palm Springs', 'Escondido', 'Colorado Springs',
+  'Fort Collins', 'Boulder', 'Wichita', 'Topeka', 'Lexington', 'Newark',
+  'Jersey City', 'Trenton', 'Toledo', 'Akron', 'Dayton', 'Youngstown',
+  'Corpus Christi', 'Laredo', 'Lubbock', 'Plano', 'Amarillo', 'Abilene', 'Waco',
+  'Midland', 'Odessa', 'Brownsville', 'McAllen', 'Killeen', 'Beaumont',
+  'Galveston', 'Spokane', 'Tacoma', 'Bellevue', 'Everett', 'Olympia',
+  'Des Moines', 'Cedar Rapids', 'Little Rock', 'Fayetteville', 'Chattanooga',
+  'Knoxville', 'Greensboro', 'Durham', 'Winston-Salem', 'Asheville',
+  'Chesapeake', 'Norfolk', 'Roanoke', 'St. Paul', 'Anchorage', 'Scottsdale',
+  'Tempe', 'Flagstaff', 'Yuma', 'Provo', 'Ogden', 'Cheyenne', 'Billings',
+  'Missoula', 'Fargo', 'Sioux Falls', 'Albany', 'Syracuse', 'Hartford',
+  'Bridgeport', 'Worcester', 'Huntsville', 'Shreveport', 'Peoria', 'Rockford',
+  'Fort Wayne', 'Evansville', 'Grand Rapids', 'Ann Arbor', 'Lansing', 'Flint',
+  'Erie', 'Scranton', 'Allentown', 'Harrisburg', 'Wilmington', 'Greenville',
+  'Spartanburg', 'Myrtle Beach', 'Santa Fe', 'Las Cruces', 'Nampa', 'Reno',
+  'Carson City', 'Green Bay', 'Kenosha',
+  // Out-of-footprint localities that CONTAIN a served city name — listed so
+  // the topic gate's out-of-area precedence wins over the embedded served
+  // match ("Venice Beach pest control" is California, not Venice, FL).
+  'Venice Beach', 'Sarasota Springs', 'Palmetto Bay', 'Englewood Cliffs',
+  'Laurel Springs',
 ]);
 
 function outOfAreaCities() {
@@ -2885,6 +2951,12 @@ const PRE_DISCLAIMER_GLUE_RE = /^[\s,;:]*(?:(?:and|or|nor|all|both|are|is|sit|si
 // colon-terminated claim intro ("We serve these cities:") to each item.
 const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
 
+// Metro names inside pest / plant / material compounds are not places —
+// stripped before the prose footprint scan AND the topic-targeting gate's
+// out-of-area matchers (the gate imports this so both scans agree).
+// Turf-cultivar shorthand in LAWN context ("doveweed in st augustine", "…lawn is Bermuda") is the grass, not the city / country; a following service or geo word keeps the geographic reading ("pest control in St. Augustine", "Bermuda pest control").
+const GEO_COMPOUND_EXEMPT_RE = /\b(?:san\s+jose\s+scales?|portland\s+cement|columbus\s+grass|boston\s+(?:fern|ivy|terrier)s?|baltimore\s+orioles?|nashville\s+warblers?|savannah\s+sparrows?|houston\s+toads?|denver\s+boots?|memphis\s+style|chicago\s+style|new\s+york\s+style|philadelphia\s+cream\s+cheese|buffalo\s+grass|kentucky\s+bluegrass|bermuda\s*grass|st\.?\s*augustine\s*(?:grass|lawns?|sod|turf)|phoenix\s+palms?|jupiter\s+plants?|(?:navel|sour|sweet|blood|mandarin|valencia|wild|bitter)\s+oranges?|oranges?\s+(?:(?:pests?|bugs?|insects?)\b(?!\s+(?:control|removal|exterminat\w*|treatments?|services?|compan\w+)\b)|trees?|groves?|oil|peels?|juice|blossoms?|rust\s+mites?)|(?:doveweed|torpedo\s*grass|dollarweed|crabgrass|nutsedge|sedges?|weeds?|grubs?|chinch\s+bugs?|sod\s+webworms?|armyworms?|mole\s+crickets?|brown\s+patch|large\s+patch|gray\s+leaf\s+spot|dollar\s+spot|take-?all\s+root\s+rot|fungus|thatch|fertiliz\w+|mowing|watering|overseeding|weed\s+control|lawns?|turf|sod)\s+(?:in|on|for|into)\s+(?:st\.?\s*augustine|bermuda|zoysia|bahia|centipede)(?:\s*grass)?\b(?!\s+(?:pest|termite|exterminat\w*|rodent|mosquito|county|fl\b|florida|island|beach|homes?|homeowners|households|houses|residents|neighborhoods|neighbourhoods|communities|properties|families|businesses|customers|hoas?|condos?|apartments|area))|\b(?:is|are|was|were|vs\.?|versus|or|and|than|to)\s+(?:bermuda|zoysia|bahia|centipede|st\.?\s*augustine)(?:\s*grass)?\b(?!\s+(?:pest|termite|exterminat\w*|rodent|mosquito|county|fl\b|florida|island|beach|triangle|homes?|homeowners|households|houses|residents|neighborhoods|neighbourhoods|communities|properties|families|businesses|customers|hoas?|condos?|apartments|area)))\b/gi;
+
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a
   // URL is not a rendered claim. Blank them (keeping anchor text) first.
@@ -2904,7 +2976,8 @@ function offFootprintCityFinding(text) {
     .replace(/\s(?:href|src)\s*=\s*\"[^\"]*\"/gi, ' ')
     .replace(/\s(?:href|src)\s*=\s*'[^']*'/gi, ' ')
     .replace(/\]\(\s*[^)]*\)/g, '](#)')
-    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '');
+    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '')
+    .replace(GEO_COMPOUND_EXEMPT_RE, ' ');
   if (!s) return null;
   const cities = outOfAreaCities();
   const cityRes = cities.map((city) => {
@@ -4947,5 +5020,6 @@ module.exports = {
   // so callers need no pre-scrub of their own.
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
+  GEO_COMPOUND_EXEMPT_RE,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

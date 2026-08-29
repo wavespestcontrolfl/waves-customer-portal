@@ -114,7 +114,12 @@ function daysAgo(days) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
-function isCourtesyCloser(body) {
+function isCourtesyCloser(body, metadata = null) {
+  // The webhook's context-aware detector stamps sms_log.metadata.courtesyOnly
+  // on arrival; honor it here so a resolved closer never raises an exception.
+  let meta = metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  if (meta && meta.courtesyOnly === true) return true;
   return COURTESY_CLOSER_RE.test(String(body || '').trim());
 }
 
@@ -188,7 +193,7 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     .where('created_at', '>=', inboundFloor)
     .orderBy('created_at', 'desc')
     .limit(SMS_SCAN_CAP)
-    .select('id', 'created_at', 'message_type', 'message_body', 'from_phone', 'to_phone');
+    .select('id', 'created_at', 'message_type', 'message_body', 'from_phone', 'to_phone', 'metadata');
 
   // One scan covering both legs' type sets; each leg narrows below.
   const outboundRows = await knex('sms_log')
@@ -256,7 +261,7 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     // Courtesy closer as the LAST message = the customer signed off. Applied
     // post-selection, exactly as the digest does, so a closing "Thanks!"
     // retires the thread instead of resurfacing the older substantive message.
-    if (isCourtesyCloser(row.message_body)) continue;
+    if (isCourtesyCloser(row.message_body, row.metadata)) continue;
     // Answered = a genuine human reply on THIS thread (same peer, same one of
     // our numbers) after the inbound. Endpoint scoping is what stops a reply
     // on one thread from clearing another.

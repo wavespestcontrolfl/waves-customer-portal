@@ -32,6 +32,9 @@ jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
   markRescheduleNoticeSent: jest.fn().mockResolvedValue({ updated: 1 }),
 }));
+jest.mock('../routes/admin-dispatch', () => ({
+  applySeriesMoveEffects: jest.fn().mockResolvedValue({ notificationSent: true, notificationError: null, conflicts: [], seriesMoveId: 'sm-1' }),
+}));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
@@ -40,6 +43,7 @@ const { etParts, etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const RescheduleSMS = require('../services/reschedule-sms');
+const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
 
 db.fn = { now: jest.fn(() => 'NOW()') };
 
@@ -209,9 +213,11 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     const result = await RescheduleSMS.handleRescheduleReply('cust-1', '2');
 
+    // The move carries the schedule this reply observed as its expect pin.
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-06', { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
       'weather_rain', 'customer_sms',
+      { sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00' } },
     );
     // The re-book moved the visit, so the reminder row must be re-armed onto
     // the new slot — otherwise the promised day-before reminder never fires.
@@ -219,6 +225,41 @@ describe('handleRescheduleReply — confirm-in-place', () => {
       'svc-1', '2026-07-06T08:00', { sendNotification: false, coverDueWindows: true },
     );
     expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-06' });
+  });
+
+  test('a date reply that shifted a cadence SERIES: the confirmation is the durable series text (notify recorded on the row), never a parallel send', async () => {
+    SmartRebooker.reschedule.mockResolvedValueOnce({
+      success: true, seriesMoveId: 'sm-1', newDate: '2026-07-06',
+      rescheduledOccurrences: [{ id: 'svc-1', date: '2026-07-06', windowStart: '08:00', windowEnd: '09:00' }],
+    });
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ sourceSurface: 'sms_reply', notifyRequested: true });
+    expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
+    expect(applySeriesMoveEffects.mock.calls[0][0]).toMatchObject({
+      serviceId: 'svc-1', newDate: '2026-07-06', notify: true, result: expect.objectContaining({ seriesMoveId: 'sm-1' }),
+    });
+    // The shared pass syncs every occurrence (anchor included) and sends the
+    // one customer text — no second sync, no second send from this path.
+    expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-06', smsSent: true, seriesMoveId: 'sm-1' });
+  });
+
+  test('a series reply whose effects pass dies still returns the committed move (the reconciler finishes the text) — no throw, no parallel send', async () => {
+    SmartRebooker.reschedule.mockResolvedValueOnce({
+      success: true, seriesMoveId: 'sm-1', newDate: '2026-07-06',
+      rescheduledOccurrences: [{ id: 'svc-1', date: '2026-07-06', windowStart: '08:00', windowEnd: '09:00' }],
+    });
+    applySeriesMoveEffects.mockRejectedValueOnce(new Error('lease store down'));
+    wire({ scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '14:00:00', status: 'confirmed' });
+
+    const result = await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ handled: true, action: 'rescheduled', newDate: '2026-07-06', smsSent: false });
   });
 
   test('same-day reply AFTER the quoted 2-hour window falls through to reschedule', async () => {
@@ -249,7 +290,18 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-04', { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
       'weather_rain', 'customer_sms',
+      { sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: '13:00:00', window_end: '15:00:00' } },
     );
+  });
+
+  test('the observed-schedule pin normalizes a JS Date scheduled_date to YYYY-MM-DD and pins a windowless start as null', async () => {
+    wire({ scheduled_date: new Date('2026-07-04T00:00:00Z'), window_start: null, window_end: null, status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: null, window_end: null },
+    });
   });
 
   test('a pending log WITHOUT options is ignored — inbound falls through to normal handling', async () => {

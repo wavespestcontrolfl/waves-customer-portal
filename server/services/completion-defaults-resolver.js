@@ -27,6 +27,7 @@
  */
 
 const db = require('../models/db');
+const { counterpartServiceName } = require('../config/service-name-aliases');
 const { hashResolvedSnapshot } = require('./completion-attempts');
 const { CITY_TO_LOCATION: CANONICAL_CITY_TO_LOCATION } = require('../config/locations');
 
@@ -89,15 +90,35 @@ async function loadActiveTemplate(serviceType, knex) {
   // for any future templates that get seeded directly without an alias
   // row — e.g. a one-off mosquito or termite protocol whose service_type
   // is unambiguous.
-  const aliased = await knex('protocol_template_service_types as pst')
-    .join('protocol_templates as pt', 'pt.id', 'pst.protocol_template_id')
-    .where('pst.service_type', serviceType)
+  //
+  // Both spellings of a cadence-convention rename are looked up (codex
+  // #3579 r3 P1): after the documented migration down() the catalog and
+  // the alias table carry the OLD names while deployed code still stamps
+  // the NEW labels — without the counterpart, those visits lose their
+  // one-tap protocol (no_active_protocol_template).
+  const candidates = [serviceType];
+  const counterpart = counterpartServiceName(serviceType);
+  if (counterpart) candidates.push(counterpart);
+  // Exact-match query shape is preserved for un-renamed names (single
+  // candidate) so the lookup contract is unchanged outside the rename set.
+  const byLabel = (q, col) => (candidates.length === 1 ? q.where(col, candidates[0]) : q.whereIn(col, candidates));
+  const aliased = await byLabel(
+    knex('protocol_template_service_types as pst')
+      .join('protocol_templates as pt', 'pt.id', 'pst.protocol_template_id'),
+    'pst.service_type',
+  )
     .andWhere('pt.status', 'active')
     .orderBy('pt.activated_at', 'desc')   // newest active wins on duplicate alias
     .first('pt.*');
   if (aliased) return aliased;
+  if (candidates.length === 1) {
+    return knex('protocol_templates')
+      .where({ service_type: serviceType, status: 'active' })
+      .first();
+  }
   return knex('protocol_templates')
-    .where({ service_type: serviceType, status: 'active' })
+    .whereIn('service_type', candidates)
+    .andWhere({ status: 'active' })
     .first();
 }
 
@@ -298,4 +319,5 @@ module.exports = {
   CUSTOMER_INTERACTION_CHOICES,
   // Exported for testing and for the preview endpoint's reason→copy mapping.
   REVIEW_GBP_BY_CITY,
+  __private: { loadActiveTemplate },
 };

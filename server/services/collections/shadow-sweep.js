@@ -19,24 +19,13 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
+const { etCalendarDayOf } = require('../../utils/datetime-et');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { etCalendarDayOf, etDateString } = require('../../utils/datetime-et');
+const { orderByDue, dueDayOf, daysOverdueOn, invoiceDaysOverdue, dunningTierForOverdue } = require('./account-anchor');
 const { withCaseLock } = require('./case-lock');
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function shadowGateEnabled() {
   return process.env.GATE_COLLECTIONS_SHADOW === 'true';
-}
-
-// Same escalation boundaries as the late-payment tiers (7/14/30/60/90); the
-// pilot window (14–60 days) means shadow cases land on 14/30/60.
-function dunningTierForOverdue(daysSince) {
-  if (daysSince < 14) return 7;
-  if (daysSince < 30) return 14;
-  if (daysSince < 60) return 30;
-  if (daysSince < 90) return 60;
-  return 90;
 }
 
 function maskPhone(phone) {
@@ -44,12 +33,24 @@ function maskPhone(phone) {
   return digits ? `***-***-${digits.slice(-4)}` : 'unknown';
 }
 
-function daysOverdueOn(now, dueValue) {
-  const dueStr = etCalendarDayOf(dueValue);
-  const nowStr = etDateString(now);
-  const [dy, dm, dd] = dueStr.split('-').map(Number);
-  const [ny, nm, nd] = nowStr.split('-').map(Number);
-  return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
+// jsonb {id: cents} (object or string) → sorted [[id, cents]] for compare.
+function normalizedCents(value) {
+  let map = value;
+  if (typeof map === 'string') { try { map = JSON.parse(map); } catch { map = null; } }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return [];
+  return Object.entries(map).map(([id, c]) => [String(id), Number(c)]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+}
+
+// Denials whose truth can CHANGE because of a row the incomplete read
+// dropped — the only ones such a read can excuse (gh r6): an omitted older
+// invoice could make the account old enough or supply the dunning history,
+// or be the only balance. It can never make the oldest due date YOUNGER
+// (pilot_overdue_too_long) or clear a surviving invoice's microdeposit
+// state — those, like flags and suppressions, are definitive.
+function isTransientOrBalanceDerived(reason) {
+  const r = String(reason).split(':')[0];
+  return r === 'policy_evaluation_error' || r === 'balance_read_incomplete' || r === 'no_eligible_balance'
+    || r === 'pilot_not_overdue_long_enough' || r === 'pilot_insufficient_dunning_history';
 }
 
 function normalizedIdSet(value) {
@@ -61,11 +62,14 @@ function normalizedIdSet(value) {
 
 // The opening line a live agent/automation WOULD read — surfaced on the card
 // so Adam reviews the exact words before anything ever dials in a later PR.
-function predictedOpeningScript({ firstName, amountDollars, invoiceTitle }) {
+function predictedOpeningScript({ firstName, amountDollars, invoiceTitle, invoiceCount = 1 }) {
   const name = firstName || 'there';
   const title = invoiceTitle || 'recent';
+  const balance = invoiceCount > 1
+    ? `an open balance of $${amountDollars} across ${invoiceCount} invoices, the oldest for your ${title} service`
+    : `an open balance of $${amountDollars} for your ${title} service`;
   return `Hi ${name}, this is Waves Pest Control with a quick billing follow-up. `
-    + `Our records show an open balance of $${amountDollars} for your ${title} service. `
+    + `Our records show ${balance}. `
     + `Do you have a moment to take care of that today, or would a payment link by text be easier?`;
 }
 
@@ -88,7 +92,9 @@ async function candidateCustomerIds() {
 // One admin card per case version, deduped restart-safely on the case's
 // idempotency key via the notifications metadata dedupeKey pattern
 // (call-ingest-watchdog convention).
-async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOverdue, verdict }) {
+// `invoices` = EVERY open invoice behind the snapshot, oldest-due first
+// (hook r3 P1: the total is the account's, never one invoice's).
+async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoices = [invoice], daysOverdue, verdict, now = new Date() }) {
   const existing = await db('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
@@ -102,7 +108,20 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
     firstName: customer.first_name,
     amountDollars,
     invoiceTitle: invoice?.title || invoice?.service_type,
+    invoiceCount: invoices.length,
   });
+  const invoiceLines = invoices.length > 1
+    ? [
+        `Invoices (${invoices.length}) - $${amountDollars} open balance; the oldest is ${daysOverdue} days past due:`,
+        ...invoices.map((inv) => {
+          const days = invoiceDaysOverdue(now, inv);
+          // Amount from the approved snapshot, never the display reload.
+          const cents = verdict.eligibleInvoiceCents?.[String(inv.id)];
+          const dollars = (Number.isFinite(Number(cents)) && cents != null ? Number(cents) / 100 : Number(invoiceAmountDue(inv))).toFixed(2);
+          return `  ${inv.invoice_number || inv.id} - $${dollars} (${days > 0 ? `${days} days past due` : 'not yet due'})`;
+        }),
+      ]
+    : [`Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`];
 
   const NotificationService = require('../notification-service');
   const notified = await NotificationService.notifyAdmin(
@@ -111,7 +130,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
     [
       'Shadow mode: no call will be placed. This is what the policy would propose.',
       `Phone: ${maskPhone(customer.phone)}`,
-      `Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`,
+      ...invoiceLines,
       `Consent evidence: ${verdict.consentEvidence?.source || 'unknown'}.`,
       `Predicted opening: "${script}"`,
     ].join('\n'),
@@ -152,10 +171,16 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // A transient evaluation ERROR is unknown, not a denial (codex r6):
         // during a DB/Stripe blip every customer would read denied and the
         // retirement pass would lapse EVERY valid case + dismiss its card.
-        // Preserve the case; only definitive denials lapse.
-        if (verdict.denialReasons.includes('policy_evaluation_error')) {
-          stillEligible.add(customerId);
-        }
+        // Preserve the case; only definitive denials lapse. An INCOMPLETE
+        // balance read (a payer-resolve / dunning-stop lookup blip) is the
+        // same kind of unknown (gh r5) — but ONLY when every other denial
+        // is itself derived from that unreliable balance (hook r12): a hard
+        // flag or suppression in the same verdict (payment plan, do-not-
+        // call, commercial, consent…) is definitive and lapses the case.
+        const reasons = verdict.denialReasons.map((r) => String(r).split(':')[0]);
+        const preserve = reasons.includes('policy_evaluation_error')
+          || (reasons.includes('balance_read_incomplete') && reasons.every(isTransientOrBalanceDerived));
+        if (preserve) stillEligible.add(customerId);
         continue;
       }
       stillEligible.add(customerId);
@@ -164,15 +189,26 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (!customer) continue;
 
       const invoiceIds = normalizedIdSet(verdict.eligibleInvoiceIds);
-      const invoice = await db('invoices')
-        .whereIn('id', verdict.eligibleInvoiceIds)
-        .orderBy('created_at', 'asc')
-        .first();
-      if (!invoice) continue;
-
-      const dueValue = invoice.due_date || invoice.created_at;
+      // The VERDICT is the one snapshot (hook r4): ids, per-invoice cents,
+      // balance, tier and anchor date all come from the policy's read. The
+      // reload below supplies display fields only (number, title, dates) and
+      // must agree with the verdict on ids and amounts — an edit between the
+      // two reads skips this customer until the next sweep re-evaluates.
+      const verdictCents = verdict.eligibleInvoiceCents || {};
+      const invoiceRows = orderByDue(await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*'));
+      const rowsAgree = JSON.stringify(normalizedIdSet(invoiceRows.map((r) => r.id))) === JSON.stringify(invoiceIds)
+        && invoiceRows.every((r) => Math.round(invoiceAmountDue(r) * 100) === Number(verdictCents[String(r.id)]))
+        // …and the same anchor day: a due date moved between the two reads
+        // would file a card whose itemization disagrees with its tier.
+        && (!verdict.eligibleAnchorDueDate || dueDayOf(invoiceRows[0]) === String(verdict.eligibleAnchorDueDate));
+      if (!invoiceRows.length || !rowsAgree) {
+        logger.info(`[collections-shadow] customer ${customerId}: invoice reload disagrees with the policy verdict — re-evaluated next sweep`);
+        continue;
+      }
+      const invoice = invoiceRows[0];
+      const dueValue = verdict.eligibleAnchorDueDate || dueDayOf(invoice);
       const daysOverdue = daysOverdueOn(now, dueValue);
-      const tier = dunningTierForOverdue(daysOverdue);
+      const tier = verdict.eligibleAccountTier ?? dunningTierForOverdue(daysOverdue);
 
       // Latest case across shadow AND lapsed (r4): a retired case that
       // requalifies must advance its version monotonically — treating it
@@ -262,6 +298,11 @@ async function runShadowSweep({ now = new Date() } = {}) {
         && existing.current_state === 'shadow'
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
         && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds)
+        // The LINE ITEMS are the proposal (gh r3): offsetting per-invoice
+        // changes keep the aggregate but the operator would approve stale
+        // amounts origination then cancels on. (A pre-column shadow case
+        // rotates once to gain its snapshot.)
+        && JSON.stringify(normalizedCents(existing.eligible_invoice_cents)) === JSON.stringify(normalizedCents(verdict.eligibleInvoiceCents))
         // Tier is part of the proposal (codex r3): an unpaid invoice
         // crossing 14→30→60 must rotate the version/key and re-file.
         && String(existing.idempotency_key || '').endsWith(`:${tier}`);
@@ -280,8 +321,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
             customer,
             caseRow: existing,
             invoice,
+            invoices: invoiceRows,
             daysOverdue,
             verdict,
+            now,
           });
           if (refiled) cardsFiled++;
         }
@@ -292,6 +335,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const idempotencyKey = `collections:${customerId}:${caseVersion}:${tier}`;
       const patch = {
         eligible_invoice_ids: JSON.stringify(invoiceIds),
+        // The per-invoice remainder the operator approves (origination holds
+        // the dial to exactly these line items).
+        eligible_invoice_cents: JSON.stringify(verdict.eligibleInvoiceCents || {}),
         eligible_balance_snapshot: verdict.eligibleBalanceCents,
         earliest_due_date: etCalendarDayOf(dueValue),
         case_version: caseVersion,
@@ -368,7 +414,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
       }
 
       const filed = await fileProposalCard({
-        dedupeKey: idempotencyKey, customer, caseRow, invoice, daysOverdue, verdict,
+        dedupeKey: idempotencyKey, customer, caseRow, invoice, invoices: invoiceRows, daysOverdue, verdict, now,
       });
       if (filed) {
         cardsFiled++;

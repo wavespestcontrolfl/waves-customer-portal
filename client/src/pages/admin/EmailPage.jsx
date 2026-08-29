@@ -254,6 +254,25 @@ export default function EmailPage() {
     }
   }, [status, loadStats, loadEmails, loadDigest]);
 
+  // Deep link from the "Email from <customer>" bell: /admin/email?id=<uuid>
+  // opens that message (it may be off the first page or archived, so it is
+  // fetched directly rather than looked up in the list). Runs once.
+  const deepLinkedRef = useRef(false);
+  useEffect(() => {
+    if (!status?.connected || deepLinkedRef.current) return;
+    const id = new URLSearchParams(window.location.search).get("id");
+    if (!id) return;
+    deepLinkedRef.current = true;
+    (async () => {
+      try {
+        const r = await adminFetch(`/api/admin/email/message/${id}`);
+        // GET /message/:id already marked it read server-side; hand openEmail
+        // the read state so it does not toggle it back (codex P2).
+        if (r.ok) openEmail({ ...(await r.json()), is_read: true });
+      } catch { /* the inbox still renders */ }
+    })();
+  }, [status]);
+
   const openEmail = async (email) => {
     setSelectedEmail(email);
     setReplyText("");

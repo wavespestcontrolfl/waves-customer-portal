@@ -588,16 +588,64 @@ function callBookingDateOnly(value) {
 // Callers invoke this best-effort outside their transaction: a failed
 // shift leaves the child where it was, and dispatch confirms follow-up
 // dates with the customer before dispatch anyway.
-async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate }) {
+const pendingCallFollowUpFilter = (parentServiceId) => ({
+  parent_service_id: parentServiceId,
+  source_action: 'ai_call_pipeline_followup',
+  status: 'pending',
+  customer_confirmed: false,
+});
+
+// The still-pending, never-confirmed call-created children of a parent and
+// the day each lands on after the parent's delta — what the shift writes
+// from, and the destination days a caller that runs the shift INSIDE its
+// own transaction must cover with rung-1 date-occupancy locks up front,
+// before any row lock (scheduling/occupancy.js ORDERING CONTRACT). [] when
+// nothing is to shift (no parent, bad dates, same date).
+async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }) {
+  const fromStr = callBookingDateOnly(fromDate);
+  const toStr = callBookingDateOnly(toDate);
+  if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
+  return conn('scheduled_services')
+    .where(pendingCallFollowUpFilter(parentServiceId))
+    .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes',
+      conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
+      conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
+}
+
+// The block a child occupies on its destination day, for the canonical
+// occupancy probe: stored end, else start + duration (60 default), null
+// when the block would cross midnight (then nothing is probed — the child
+// is skipped like a clash: never written onto an unprobed slot).
+function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
+  if (windowEnd) return String(windowEnd).slice(0, 5);
+  const m = String(windowStart || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const dur = Number(estimatedDurationMinutes) > 0 ? Number(estimatedDurationMinutes) : 60;
+  const endMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + dur;
+  if (endMin > 23 * 60 + 59) return null;
+  return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+}
+
+// options.occupancyHeld: the caller already holds rung-1 date-occupancy
+// locks for every destination day (a series move locks its whole date set
+// up front, BEFORE its row locks — taking them here would invert the
+// order); options.plan is then REQUIRED — the very rows the caller locked
+// for (planCallFollowUpShift, pre-lock), so a child that changed since is
+// judged against the locked set, never against a fresher unlocked read
+// (codex r12 P1). Otherwise the shift plans and takes the locks itself at
+// the start of its own transaction. options.report (optional out-param):
+// { skipped: [{ id, day, newDay }] } — children whose destination slot is
+// already booked; they keep their date (best-effort contract) instead of
+// being written onto an occupied slot (AGENTS.md booking conflict-check
+// rule; hook r20 P1). A caller that passes no report cannot surface those,
+// so the helper rings the durable schedule_conflict admin card itself
+// (codex r12 P2) — a follow-up that silently lost its spacing is an
+// operator problem either way.
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, plan = null, report = null }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
-  const filter = {
-    parent_service_id: parentServiceId,
-    source_action: 'ai_call_pipeline_followup',
-    status: 'pending',
-    customer_confirmed: false,
-  };
+  const filter = pendingCallFollowUpFilter(parentServiceId);
   // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
   // a date shift moves the child between tech-days, so it must hold the
   // same 'slot-reserve' fence every other date/tech writer holds — an
@@ -605,35 +653,120 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   // membership read, and its carried sequence number would interleave into
   // the new day's run. Every matched row changes day (delta is non-zero by
   // the guard above), so clearing route_order is correct for all of them.
+  if (occupancyHeld && !Array.isArray(plan)) {
+    throw new Error('shiftCallFollowUpsForParentMove: occupancyHeld requires the plan the caller locked for');
+  }
   const run = async (trx) => {
-    const kids = await trx('scheduled_services')
-      .where(filter)
-      .select('id', 'technician_id',
-        trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
-        trx.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
+    const kids = occupancyHeld ? plan : await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate });
     if (!kids.length) return 0;
+    const { acquireOccupancyLocks, findConflictingVisits } = require('./scheduling/occupancy');
+    // Rung 1 for every destination day, before the tech-day fence (rung 3)
+    // and every row lock below.
+    if (!occupancyHeld) await acquireOccupancyLocks(trx, [...new Set(kids.map((k) => k.new_day))]);
     const { lockTechDays } = require('./scheduling/tech-day-lock');
     await lockTechDays(trx, kids.flatMap((k) => [
       { techId: k.technician_id, date: k.day },
       { techId: k.technician_id, date: k.new_day },
     ]));
-    // Each write is keyed to the day OBSERVED before the lock (uncapped
-    // audit r28 P1): a reschedule that committed while we waited for the
-    // fence has already moved the child — shifting the NEWER date would
-    // double-move it into tech-days this transaction never locked. A day
-    // mismatch skips that child (best-effort contract: it stays where the
-    // newer writer put it).
+    // The pre-lock read only named the locks. Everything the probe and the
+    // write key on — day, tech, window, duration — is re-read UNDER the
+    // locks (hook r22 P1): a child whose tech or day changed meanwhile sits
+    // in tech-days this transaction never fenced and is skipped (best-effort
+    // contract: it stays where the newer writer put it); the probe uses the
+    // locked values, and the write CASes on every one of them so a
+    // concurrent window/tech edit between here and the UPDATE misses
+    // instead of moving an unprobed block.
+    const lockedById = new Map((await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate })).map((k) => [String(k.id), k]));
     let shifted = 0;
-    for (const k of kids) {
-      shifted += await trx('scheduled_services')
+    const skipped = [];
+    const shiftedRows = [];
+    // A child that appeared AFTER the plan (a call-recording reprocess
+    // created a missing follow-up) is not in the locked set the caller
+    // fenced for: not written — and reported, so the package's lost
+    // spacing is never silent (codex r19 P2).
+    if (occupancyHeld) {
+      const plannedIds = new Set(kids.map((k) => String(k.id)));
+      for (const [id, k] of lockedById) {
+        if (!plannedIds.has(id)) skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'added' });
+      }
+    }
+    for (const planned of kids) {
+      const k = lockedById.get(String(planned.id));
+      if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) {
+        // Plan drift (the child moved / was reassigned before the locked
+        // read): not written — and REPORTED, like a booked slot, so the
+        // caller's warning and the durable card say the package lost its
+        // spacing (codex r17 P2).
+        skipped.push({ id: planned.id, day: planned.day, newDay: planned.new_day, reason: 'changed' });
+        continue;
+      }
+      // Canonical occupancy check on the destination block (a windowless
+      // child occupies nothing and is not probed): a clash — or a block
+      // that cannot be probed — means the child is NOT written onto that
+      // slot; it keeps its date and is reported.
+      if (k.window_start) {
+        const probeEnd = followUpProbeEnd(k.window_start, k.window_end, k.estimated_duration_minutes);
+        const clash = probeEnd
+          ? await findConflictingVisits({
+            db: trx,
+            date: k.new_day,
+            windowStart: String(k.window_start).slice(0, 5),
+            windowEnd: probeEnd,
+            excludeServiceIds: [String(k.id)],
+            excludeStatuses: ['completed', 'cancelled'],
+          })
+          : [{ unprobed: true }];
+        if (clash.length) {
+          skipped.push({ id: k.id, day: k.day, newDay: k.new_day });
+          continue;
+        }
+      }
+      const wrote = await trx('scheduled_services')
         .where({ id: k.id })
         .where(filter)
+        // CAS on the locked read (knex object form renders null as IS NULL).
+        .where({
+          technician_id: k.technician_id ?? null,
+          window_start: k.window_start ?? null,
+          window_end: k.window_end ?? null,
+          estimated_duration_minutes: k.estimated_duration_minutes ?? null,
+        })
         .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [k.day])
         .update({
           scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
           route_order: null,
           updated_at: trx.fn.now(),
         });
+      if (Number(wrote) === 1) {
+        shifted += 1;
+        shiftedRows.push({ id: k.id, date: k.new_day, windowStart: k.window_start || null, windowEnd: k.window_end || null });
+      } else {
+        skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
+      }
+    }
+    // Shifted children (with their kept windows) — the caller's durable
+    // reminder sync must cover them (codex r19 P1).
+    if (report && typeof report === 'object' && shiftedRows.length) report.shifted = (report.shifted || []).concat(shiftedRows);
+    if (skipped.length) {
+      if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);
+      // The durable operator card rings for EVERY caller — a report only
+      // adds the response warning. A caller that dies after its transaction
+      // commits but before returning would otherwise be the only record of
+      // the follow-up that kept its date (codex r14 P2). Best-effort, own
+      // connection — a rolled-back caller trx leaves at worst a stale card.
+      {
+        try {
+          const NotificationService = require('./notification-service');
+          await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Call-booked follow-up visit kept its date',
+            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
+            { metadata: { parentServiceId, skipped } },
+          );
+        } catch (err) {
+          logger.error(`[call-booking] follow-up kept-date card failed for parent ${parentServiceId}: ${err.message}`);
+        }
+      }
     }
     return shifted;
   };
@@ -710,6 +843,7 @@ module.exports = {
   callBookingDateOnly,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
+  planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };

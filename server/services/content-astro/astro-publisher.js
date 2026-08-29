@@ -361,11 +361,43 @@ function normalizePostType(postType) {
   return mapped || 'location';
 }
 
+// The ONE service-area vocabulary. A served locality that is not itself a
+// service-area label resolves to its office's area (config/locations
+// CITY_TO_LOCATION: Ruskin → Parrish, Anna Maria → Bradenton); a footprint
+// region resolves to its areas. Anything else → [] (not publishable). The
+// topic-targeting gate validates semantic city fields through this, so a
+// row the gate accepts always carries schema-valid service_areas_tag.
+const OFFICE_SERVICE_AREA = Object.freeze({ bradenton: 'Bradenton', sarasota: 'Sarasota', venice: 'Venice', parrish: 'Parrish' });
+const REGION_SERVICE_AREAS = Object.freeze({
+  'manatee county': ['Bradenton', 'Lakewood Ranch', 'Palmetto', 'Parrish'],
+  'sarasota county': ['Sarasota', 'Venice', 'North Port'],
+  'charlotte county': ['Port Charlotte'],
+  'southwest florida': DEFAULT_SERVICE_AREAS, 'sw florida': DEFAULT_SERVICE_AREAS, swfl: DEFAULT_SERVICE_AREAS,
+  'southwest fl': DEFAULT_SERVICE_AREAS, 'southwest fla': DEFAULT_SERVICE_AREAS, 'sw fl': DEFAULT_SERVICE_AREAS, 'sw fla': DEFAULT_SERVICE_AREAS,
+  'gulf coast': DEFAULT_SERVICE_AREAS, suncoast: DEFAULT_SERVICE_AREAS, 'sun coast': DEFAULT_SERVICE_AREAS,
+});
+function serviceAreasForCity(city) {
+  const raw = String(city || '').trim();
+  if (!raw) return [];
+  if (SERVICE_AREAS.has(raw)) return [raw];
+  const key = raw.toLowerCase().replace(/[’'.]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  if (REGION_SERVICE_AREAS[key]) return [...REGION_SERVICE_AREAS[key]];
+  // "Manatee County, FL" / "Sarasota County, Florida" are the same regions —
+  // looked up again once the state suffix is off (the raw key first, so
+  // "Southwest Florida" keeps its own last word).
+  const locality = key.replace(/\s+(?:fl|florida)$/, '');
+  if (REGION_SERVICE_AREAS[locality]) return [...REGION_SERVICE_AREAS[locality]];
+  for (const area of SERVICE_AREAS) if (area.toLowerCase() === locality) return [area];
+  let officeByCity = {};
+  try { ({ CITY_TO_LOCATION: officeByCity } = require('../../config/locations')); } catch { officeByCity = {}; }
+  const office = officeByCity?.[locality];
+  return office && OFFICE_SERVICE_AREA[office] ? [OFFICE_SERVICE_AREA[office]] : [];
+}
+
 function normalizeServiceAreas(value, city) {
   const areas = normalizeArray(value).filter((area) => SERVICE_AREAS.has(area));
   if (areas.length > 0) return areas;
-  if (SERVICE_AREAS.has(city)) return [city];
-  return [];
+  return serviceAreasForCity(city);
 }
 
 function inferServiceAreas(frontmatter = {}, brief = {}) {
@@ -378,7 +410,7 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
   // empty so schema validation rejects the row; the fallback chain below is
   // reserved for genuinely generic posts with NO city signal (Codex r11).
   const explicitCity = String(frontmatter.city || brief.city || '').trim();
-  if (explicitCity && !SERVICE_AREAS.has(explicitCity)) return [];
+  if (explicitCity && serviceAreasForCity(explicitCity).length === 0) return [];
 
   const haystack = [
     frontmatter.title,
@@ -849,6 +881,116 @@ async function cleanupStaleAstroPr(post) {
   }
 }
 
+// Pay the close a merge-time topic block left owing (astro_retire_pr_number):
+// verify the PR's state on GitHub, close + delete its branch while it is
+// still open, and clear the debt ONLY on a verified terminal state — a
+// swallowed close failure therefore cannot leave the rejected PR
+// human-mergeable, because pages-poll calls this again every tick
+// (reconcileTopicBlockedPostPrs). Bound to the PR NUMBER, not the row's
+// current markers: a republish that opened a fresh PR meanwhile is never the
+// one closed here, and only that PR's own head branch is deleted. Found
+// merged (a human merged it between the park and the close) the violation is
+// live: the row follows the merge — the same transition mergeAstro applies to
+// an already-merged PR — while this PR still is the row's PR. Best-effort;
+// never throws.
+async function retireTopicBlockedPostPr(post) {
+  const prNumber = post.astro_retire_pr_number;
+  if (!prNumber) return { retired: false, reason: 'nothing_owed' };
+  const settle = () => db('blog_posts')
+    .where({ id: post.id, astro_retire_pr_number: prNumber })
+    .update({ astro_retire_pr_number: null, updated_at: new Date() });
+  // markPrTerminal never throws — it returns { error } — so the result is
+  // checked: the debt is settled only once the terminal bookkeeping landed,
+  // else the next pages-poll tick retries it (a closed PR must not stay
+  // recorded as parked/remediating).
+  const terminal = async (state) => {
+    try {
+      const { markPrTerminal } = require('../content/codex-remediation');
+      const res = await markPrTerminal(prNumber, state);
+      if (res?.error) throw new Error(res.error);
+      return true;
+    } catch (err) {
+      logger.warn(`[astro-publisher] markPrTerminal(${state}) for topic-blocked PR #${prNumber} failed: ${err.message} (retried next pages-poll tick)`);
+      return false;
+    }
+  };
+  try {
+    let pr = await gh.getPr(prNumber);
+    if (!pr) return { retired: false, reason: 'pr_unreadable' };
+    if (pr.state === 'open' && !pr.merged) {
+      await cleanupStaleAstroPr({ id: post.id, astro_pr_number: prNumber, astro_branch_name: pr.head?.ref || null });
+      pr = await gh.getPr(prNumber);
+      if (!pr || (pr.state === 'open' && !pr.merged)) {
+        logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is still open after the close attempt (retried next pages-poll tick)`);
+        return { retired: false, reason: 'still_open' };
+      }
+    }
+    if (!(pr.merged || pr.merged_at)) {
+      // Closed is not retired until its head branch is VERIFIED gone (a
+      // surviving branch lets the closed PR be reopened and merged); a
+      // failed delete keeps the debt for the next tick — also for PRs that
+      // were already closed when first seen.
+      if (!(await gh.retireBranch(pr.head?.ref))) {
+        logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is closed but its branch ${pr.head?.ref} still exists (retried next pages-poll tick)`);
+        return { retired: false, reason: 'branch_not_deleted' };
+      }
+      // Re-read AFTER the retirement: a PR reopened and merged between the
+      // read above and the delete must take the merged path, not be stamped
+      // closed with its debt cleared.
+      const after = await gh.getPr(prNumber);
+      if (after) pr = after;
+    }
+    if (pr.merged || pr.merged_at) {
+      logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} was MERGED before it could be retired — the row follows the merge`);
+      // `post` is a snapshot: an operator may have republished the fixed row
+      // while GitHub was being awaited, so the row can now belong to a
+      // replacement PR. Decide on the CURRENT row and let the merge write
+      // itself compare-and-set on astro_pr_number — the replacement
+      // lifecycle is never overwritten with the old PR's merged state.
+      const current = await db('blog_posts').where({ id: post.id }).first();
+      const merged = current && current.astro_pr_number === prNumber
+        ? await applyMergeEffect(post.id, current, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null, { onlyIfPrNumber: prNumber })
+        : 0;
+      // The same post-merge side effect both mergeAstro merge paths queue.
+      if (merged) queueInternalLinkPlanning(current);
+      if (!merged) logger.warn(`[astro-publisher] post ${post.id} moved on to another PR — merged topic-blocked PR #${prNumber} gets terminal bookkeeping only`);
+      if (!await terminal('merged')) return { retired: false, merged: true, reason: 'terminal_stamp_failed' };
+      await settle();
+      return { retired: false, merged: true };
+    }
+    if (!await terminal('closed')) return { retired: false, reason: 'terminal_stamp_failed' };
+    await settle();
+    logger.info(`[astro-publisher] retired topic-blocked PR #${prNumber} for post ${post.id}`);
+    return { retired: true };
+  } catch (err) {
+    logger.warn(`[astro-publisher] retire of topic-blocked PR #${prNumber} for post ${post.id} failed: ${err.message} (retried next pages-poll tick)`);
+    return { retired: false, reason: err.message };
+  }
+}
+
+// Every pages-poll tick: rows still owing a close (a retire that failed or
+// half-completed, or a PR a human merged meanwhile) are settled again. Cheap
+// — one getPr per owed row, and there are few; random rotation so one
+// persistently failing PR cannot starve the rest past the limit.
+async function reconcileTopicBlockedPostPrs() {
+  let rows = [];
+  try {
+    rows = await db('blog_posts').whereNotNull('astro_retire_pr_number').orderByRaw('random()').limit(25).select('*');
+  } catch (err) {
+    logger.warn(`[astro-publisher] topic-blocked PR reconcile query failed: ${err.message}`);
+    return { count: 0 };
+  }
+  let retired = 0;
+  let merged = 0;
+  for (const post of Array.isArray(rows) ? rows : []) {
+    if (!post || !post.astro_retire_pr_number) continue;
+    const r = await retireTopicBlockedPostPr(post);
+    if (r.retired) retired += 1;
+    if (r.merged) merged += 1;
+  }
+  return { count: rows.length, retired, merged };
+}
+
 // Run the LLM fact-check and throw BLOG_FACTCHECK_FAILED on a P0/P1 finding;
 // advisory P2s are logged. Shared by every blog-content publish path (new
 // admin draft, autonomous draft, refresh) so they all gate identically. The
@@ -941,6 +1083,68 @@ async function publishAstro(postId) {
       `cannot publish post ${postId}: an Astro PR is already in flight (status "${post.astro_status}"`
       + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
     );
+  }
+  // A row still owing GitHub a close for an earlier topic-blocked PR
+  // (astro_retire_pr_number) settles that FIRST, and fails closed if it
+  // cannot: a republish whose stale cleanup silently failed could otherwise
+  // be topic-blocked later and overwrite the older PR's debt, leaving that
+  // PR human-mergeable with nothing revisiting it. pages-poll keeps retrying
+  // the close each tick, so the refusal clears itself. BEFORE the topic gate:
+  // a merge the settlement discovers moves the row to 'merged', and the
+  // gate's failure stamp below must see that state, not race it.
+  if (post.astro_retire_pr_number) {
+    const r = await retireTopicBlockedPostPr(post);
+    if (!r.retired) {
+      const rErr = new Error(r.merged
+        ? `PR #${post.astro_retire_pr_number} was merged before it could be retired — the row now follows that merge; reload it before publishing again`
+        : `earlier topic-blocked PR #${post.astro_retire_pr_number} could not be retired yet (${r.reason || 'still open'}); republish is refused until it is closed (retried automatically each pages-poll tick)`);
+      rErr.code = 'BLOG_PR_RETIRE_PENDING';
+      throw rErr;
+    }
+  }
+  // Topic-targeting gate (owner rulings 2026-08-27) — a NEW post may not be
+  // built around an out-of-footprint geo, statewide-only framing, or an
+  // entity a live post already owns. Runs BEFORE the stale-PR cleanup below
+  // and before any spend or GitHub write, so a block never destroys an
+  // existing review artifact. A post already live on the hub is a refresh
+  // (exempt). Outside the main try on purpose: the row is stamped
+  // publish_failed with the reason and its PR/branch markers are left
+  // exactly as found. A block is deterministic (BLOG_TOPIC_TARGETING_BLOCKED
+  // → the scheduler parks it like the guardrails); an unavailable corpus is
+  // a transient fail-closed the scheduler retries.
+  {
+    const topicGate = require('../content/topic-targeting-gate');
+    // Compare-and-set on the lifecycle the gate was run against: the
+    // reconcile (pages-poll) can find this row's earlier PR merged while
+    // the gate is in flight and move the row to 'merged' — an ID-only stamp
+    // would revert a live post to publish_failed and strand it (pollPending
+    // selects merged, not publish_failed).
+    // `retire`: a DETERMINISTIC block on a retry row that still carries a PR
+    // (build_failed / publish_failed with markers) records the close it now
+    // owes for that PR in the same write — cleanupStaleAstroPr below is
+    // never reached, and an open rejected PR must not stay human-mergeable.
+    const stampTopicFailure = (message, { retire = false } = {}) => db('blog_posts').where({ id: postId, astro_status: post.astro_status ?? null }).update({
+      astro_status: 'publish_failed',
+      astro_publish_error: String(message).slice(0, 1000),
+      ...(retire && post.astro_pr_number ? { astro_retire_pr_number: post.astro_pr_number } : {}),
+    });
+    let topic;
+    try {
+      topic = await topicGate.evaluateBlogPostRow(post, { category: normalizeCategory(post.category, post.tag) || null });
+    } catch (err) {
+      await stampTopicFailure(`topic-targeting gate could not run: ${err.message}`);
+      throw err;
+    }
+    if (!topic.ok) {
+      const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
+      tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+      tErr.details = topic.findings;
+      const stamped = await stampTopicFailure(tErr.message, { retire: true });
+      // Debt durable → retire the rejected PR now (verified close + branch
+      // delete); a lost close is retried by every pages-poll tick.
+      if (stamped && post.astro_pr_number) await retireTopicBlockedPostPr({ ...post, astro_retire_pr_number: post.astro_pr_number });
+      throw tErr;
+    }
   }
   if (
     (post.astro_status === 'build_failed' || post.astro_status === 'publish_failed')
@@ -3401,7 +3605,7 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
     }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
-    const result = await gh.mergePr(post.astro_pr_number, {
+    const doMerge = () => gh.mergePr(post.astro_pr_number, {
       method: 'squash',
       title: isUnpublish ? `Unpublish: ${post.title}`.slice(0, 72) : `Blog: ${post.title}`.slice(0, 72),
       // Pin the merge to the exact head the hub-only/Codex gates just vetted —
@@ -3410,6 +3614,15 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       // manual/scheduler path did not).
       sha: pr.head?.sha,
     });
+    // Publish PRs: the ownership recheck and the merge run under one
+    // advisory lock so two PRs claiming the same entity cannot both pass
+    // against the same old corpus and both merge.
+    const result = isUnpublish
+      ? await doMerge()
+      : await require('../content/topic-targeting-gate').withTopicMergeLock(db, async () => {
+        await assertTopicTargetingStillClear(post, pr);
+        return doMerge();
+      });
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
     if (!isUnpublish) queueInternalLinkPlanning(post);
@@ -3420,8 +3633,56 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
     logger.error(`[astro-publisher] merge failed for ${postId}: ${err.message}`);
     await db('blog_posts').where({ id: postId }).update({
       astro_publish_error: err.message.slice(0, 1000),
+      // The merge-time topic-targeting block is deterministic for this branch
+      // + live corpus: leave the row retryable (publish_failed, markers kept
+      // for cleanupStaleAstroPr) instead of pr_open, which neither
+      // publish-astro nor the Retry UI accepts — same transition pages-poll
+      // applies on its auto-merge path.
+      // …and record the close the row now owes GitHub for the rejected PR
+      // (astro_retire_pr_number) in the SAME write, so the debt is as durable
+      // as the park itself.
+      // An older debt is never overwritten (publishAstro refuses to open a
+      // new PR while one is outstanding, so this is belt-and-braces): the
+      // older PR is the one nothing else tracks, while this PR keeps the
+      // row's markers for cleanupStaleAstroPr on the next republish.
+      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed', astro_retire_pr_number: post.astro_retire_pr_number || post.astro_pr_number } : {}),
       updated_at: new Date(),
     });
+    if (err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish) {
+      // The park is durable — now retire the PR. Left open it stays
+      // mergeable on GitHub until the operator republishes, and a human
+      // merge in that window ships the targeting violation the gate just
+      // refused. Same order as the autonomous lane's park (DB first, GitHub
+      // after); a failed or half-done close is repeated by every pages-poll
+      // tick (reconcileTopicBlockedPostPrs) until the PR is verified closed.
+      await retireTopicBlockedPostPr({ ...post, astro_retire_pr_number: post.astro_pr_number });
+    }
+    throw err;
+  }
+}
+
+// Owner rulings 2026-08-27: the topic-targeting gate ran when the PR was
+// opened, but a PR can sit under review while another post claiming the same
+// entity goes live, or its branch targeting can change during remediation.
+// Re-run the gate on the BRANCH frontmatter against a fresh corpus right
+// before merge. Refreshes (rows already live) are exempt; an unreadable
+// branch file or corpus fails closed (the next tick retries).
+async function assertTopicTargetingStillClear(post, pr) {
+  const topicGate = require('../content/topic-targeting-gate');
+  if (topicGate.isLiveRow(post)) return;
+  const ref = post.astro_branch_name || pr?.head?.ref;
+  const slug = post.slug || slugify(post.title);
+  const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
+  if (!resolved) {
+    throw new Error(`Astro PR #${pr.number} branch file could not be read for the topic-targeting recheck; republish the post before merge`);
+  }
+  const data = fm.parse(resolved.file.content)?.data || {};
+  const index = await topicGate.loadLiveIndex();
+  const topic = topicGate.evaluateDraftTargeting({ frontmatter: data, body: resolved.file.content }, { index, category: normalizeCategory(data.category || post.category, post.tag) || null });
+  if (!topic.ok) {
+    const err = new Error(`PR #${pr.number} cannot merge — topic-targeting gate is no longer clear against the live corpus: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
+    err.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+    err.details = topic.findings;
     throw err;
   }
 }
@@ -3576,7 +3837,10 @@ async function mergedHeroRef(slug) {
   }
 }
 
-async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+// `onlyIfPrNumber`: compare-and-set the merged stamp on the row's CURRENT
+// astro_pr_number (returns the affected row count — 0 when the row has moved
+// on to another PR); callers that hold a fresh row omit it.
+async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha, { onlyIfPrNumber = null } = {}) {
   // The PR left the open state — retire its codex_remediation_state row so
   // stale 'parked'/'remediating' rows over merged PRs don't read as live
   // park telemetry. Fail-soft bookkeeping (markPrTerminal never throws).
@@ -3642,7 +3906,8 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     // /images/blog path only resolves on the Astro site, not the portal origin.
     updates.featured_image_url = absoluteHeroUrl(rawHeroRef);
   }
-  await db('blog_posts').where({ id: postId }).update(updates);
+  const where = onlyIfPrNumber ? { id: postId, astro_pr_number: onlyIfPrNumber } : { id: postId };
+  return db('blog_posts').where(where).update(updates);
 }
 
 // ── Unpublish (soft, via revert PR) ────────────────────────────────
@@ -4403,6 +4668,9 @@ function stripManagedBodyImagesForPost(body, post) {
 
 module.exports = {
   publishAstro,
+  reconcileTopicBlockedPostPrs,
+  normalizeCategory,
+  serviceAreasForCity,
   publishOrUpdatePage,
   publishMetadataRewrite,
   publishRefresh,
@@ -4477,6 +4745,8 @@ module.exports = {
     slugPathFromFrontmatter,
     categoryRouteSlug,
     slugLeafOf,
+    blogRouteKey,
+    retireTopicBlockedPostPr,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     clampMetaDescription,

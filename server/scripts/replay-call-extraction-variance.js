@@ -49,6 +49,10 @@ const FIELD_GROUPS = {
     // card, so replay variance here is office-visible.
     'service_address_occupancy',
     'service_address_is_primary_residence',
+    // Caller-stated unit bedroom count (schema 1.10.0) — a bedroom-band
+    // pricing basis, so a model that hears "one-bedroom" differently
+    // changes the quote.
+    'bedroom_count',
     // Derived signature over additional_properties[] role fields (occupancy
     // + is_primary_residence per entry) — the nested values flatView keeps
     // as an array, compared as one order-insensitive string (codex #3418 r3).
