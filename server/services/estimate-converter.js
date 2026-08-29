@@ -2167,6 +2167,12 @@ function frozenSetupFeeAmount(estimateData = {}) {
 // customer accepted, never a live constant. 0 = no disclosed setup.
 function frozenRodentBaitSetupAmount(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
+  // A persisted ZERO decision for the rodent kind (wizard: claim already
+  // queued / lookup-failure waiver) outranks any leftover engine row —
+  // conversion never re-adds a setup the quote disclosed as absent (codex
+  // #3591 r26 P1; kind-aware so the membership fee's waiver is untouched).
+  const quote = data?.setupFeeQuote;
+  if (quote && quote.kind === 'rodent_bait_setup' && !(Number(quote.amount) > 0)) return 0;
   // Quote-wizard saves persist the disclosed setup ONLY as a raw engine
   // line (engineResult.lineItems / result.lineItems) — the mapped oneTime
   // containers exist on mapper-shaped saves alone (codex #3591 r5 P1), so

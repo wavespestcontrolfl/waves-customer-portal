@@ -368,14 +368,15 @@ function serviceKeysForEstimateSection(section = {}) {
       return;
     }
     if (typeof value === 'object') {
-      // A rodent row carrying the LIVE eligibility flags (row-level, from
-      // pricing_config.rodent_waveguard) contributes nothing when the server
-      // treats it as non-qualifying or non-discountable — the cross-sell
-      // copy must not count it toward "next tier / discount on every
-      // service" (codex #3591 r15 P2).
+      // A rodent row the server marked NON-QUALIFYING (row-level live
+      // tier_qualifier posture) contributes nothing to the tier count the
+      // cross-sell copy is built on (codex #3591 r15 P2). Discount
+      // eligibility is a SEPARATE flag: a tier-counted row that is merely
+      // excluded from the % still moves the tier (pest + rodent = Silver,
+      // lawn reaches Gold) — codex #3591 r26 P1.
       const rowKey = String(value.service || value.serviceKey || value.service_key || value.key || '').toLowerCase();
       if (rowKey === 'rodent_bait'
-        && (value.countsTowardWaveGuardTier === false || value.tierQualifier === false || value.waveGuardDiscountEligible === false)) {
+        && (value.countsTowardWaveGuardTier === false || value.tierQualifier === false)) {
         return;
       }
       [

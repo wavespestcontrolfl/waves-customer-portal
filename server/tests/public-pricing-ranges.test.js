@@ -85,6 +85,21 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('a bracket boundary beyond the 20,000 sf public cap is never sampled (codex #3591 r26 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitBrackets;
+    // 20,000 sf itself prices at the last bracket a public quote can reach
+    // ($300); the 50,000 sf boundary ($999) is beyond the cap and never sampled.
+    constants.RODENT.baitBrackets = [...original, { maxSqFt: 20000, stations: 20, perVisit: 300 }, { maxSqFt: 50000, stations: 40, perVisit: 999 }];
+    try {
+      const row = computePublicPricingRanges({ refresh: true }).services.find((svc) => svc.key === 'rodent_bait_program');
+      expect(row.high).toBe(300);
+    } finally {
+      constants.RODENT.baitBrackets = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
   test('rodent bait note tracks the live setup fee to the cent and disappears when the fee is disabled (codex #3591 r10 P2)', () => {
     const constants = require('../services/pricing-engine/constants');
     const original = constants.RODENT.baitSetupFee;

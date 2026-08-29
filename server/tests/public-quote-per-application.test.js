@@ -435,6 +435,33 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(setupFeeQuoteBasisForEstimate(rodentOnly, { commercialDetected: true })).toEqual({ qualifies: false, kind: null, amount: 0 });
   });
 
+  test('a ZERO rodent-setup decision strips the engine row + its one-time share from the draft, and the frozen resolver honors it (codex #3591 r26 P1)', () => {
+    const { stripWaivedRodentSetupFromDraft } = _internals;
+    const draft = {
+      oneTimeTotal: 99,
+      engineResult: {
+        summary: { oneTimeTotal: 99, rodentBaitSetupTotal: 99, year1Total: 455 },
+        lineItems: [{ service: 'rodent_bait', annual: 356 }, { service: 'rodent_bait_setup', price: 99 }],
+      },
+      setupFeeQuote: { amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' },
+    };
+    expect(stripWaivedRodentSetupFromDraft(draft)).toBe(99);
+    expect(draft.engineResult.lineItems.map((l) => l.service)).toEqual(['rodent_bait']);
+    expect(draft.oneTimeTotal).toBe(0);
+    expect(draft.engineResult.summary).toEqual({ oneTimeTotal: 0, rodentBaitSetupTotal: 0, year1Total: 356 });
+    const { frozenRodentBaitSetupAmount } = require('../services/estimate-converter');
+    // Belt: a draft that still carries the row but persisted the zero decision bills nothing.
+    expect(frozenRodentBaitSetupAmount({
+      engineResult: { lineItems: [{ service: 'rodent_bait_setup', price: 99 }] },
+      setupFeeQuote: { amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' },
+    })).toBe(0);
+    // The membership fee's zero waiver never suppresses a rodent setup line.
+    expect(frozenRodentBaitSetupAmount({
+      engineResult: { lineItems: [{ service: 'rodent_bait_setup', price: 99 }] },
+      setupFeeQuote: { amount: 0, waived: 'existing_member', kind: 'waveguard_membership' },
+    })).toBe(99);
+  });
+
   test('the account-level member waiver applies to the membership fee only; a rodent-only member still owes the rodent setup (codex #3591 r18 P1)', () => {
     const { resolveSetupFeeQuoteDecision } = _internals;
     const membership = { qualifies: true, kind: 'waveguard_membership', amount: 99 };

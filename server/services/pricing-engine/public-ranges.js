@@ -94,7 +94,10 @@ const RODENT_PUBLIC_MAX_SQFT = 20000;
 function rodentBaitSweepFootprints() {
   const brackets = Array.isArray(constants.RODENT.baitBrackets) ? constants.RODENT.baitBrackets : [];
   const ext = constants.RODENT.baitBracketExtension || {};
-  const points = brackets.map((b) => Number(b.maxSqFt)).filter((n) => Number.isFinite(n) && n > 0);
+  // Only boundaries a residential public quote can reach (public-quote clamps
+  // homes to 20,000 sf — codex #3591 r26 P2); the cap itself is always sampled.
+  const points = brackets.map((b) => Number(b.maxSqFt))
+    .filter((n) => Number.isFinite(n) && n > 0 && n <= RODENT_PUBLIC_MAX_SQFT);
   const top = points.length ? Math.max(...points) : 0;
   const step = Number(ext.perSqFt) > 0 ? Number(ext.perSqFt) : 1000;
   // The extension is monotonic (+stations/+$ per step), so its extrema are

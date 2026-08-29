@@ -642,6 +642,17 @@ describe('estimateAddServiceOffer', () => {
       ] }],
     }], 'recurring');
     expect(flaggedOff.body).toMatch(/Silver|10%|next/);
+    // Discount eligibility is NOT tier qualification: a tier-counted rodent
+    // row that is merely excluded from the % still makes pest + rodent
+    // Silver, so the lawn offer takes the multi-service copy (codex #3591 r26 P1).
+    const discountOnly = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4, waveGuardDiscountEligible: false },
+      ] }],
+    }], 'recurring');
+    expect(discountOnly.body).not.toMatch(/Silver|10%/);
   });
 
   it('uses member keys from collapsed bundle sections', () => {

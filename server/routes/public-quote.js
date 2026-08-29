@@ -153,6 +153,29 @@ function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQ
     : { amount: basis.amount, kind: basis.kind };
 }
 
+// Remove the engine's rodent_bait_setup line (and its share of the one-time
+// totals) from a persisted wizard draft whose setupFeeQuote decided ZERO for
+// the rodent kind (codex #3591 r26 P1).
+function stripWaivedRodentSetupFromDraft(estimateDataObj = {}) {
+  const engineResult = estimateDataObj?.engineResult;
+  if (!engineResult || !Array.isArray(engineResult.lineItems)) return 0;
+  let removed = 0;
+  engineResult.lineItems = engineResult.lineItems.filter((line) => {
+    if (String(line?.service || '').toLowerCase() !== 'rodent_bait_setup') return true;
+    removed = Math.round((removed + (Number(line?.price) || 0)) * 100) / 100;
+    return false;
+  });
+  if (!(removed > 0)) return 0;
+  const minus = (v) => Math.max(0, Math.round(((Number(v) || 0) - removed) * 100) / 100);
+  if (estimateDataObj.oneTimeTotal != null) estimateDataObj.oneTimeTotal = minus(estimateDataObj.oneTimeTotal);
+  if (engineResult.summary && typeof engineResult.summary === 'object') {
+    if (engineResult.summary.oneTimeTotal != null) engineResult.summary.oneTimeTotal = minus(engineResult.summary.oneTimeTotal);
+    if (engineResult.summary.rodentBaitSetupTotal != null) engineResult.summary.rodentBaitSetupTotal = minus(engineResult.summary.rodentBaitSetupTotal);
+    if (engineResult.summary.year1Total != null) engineResult.summary.year1Total = minus(engineResult.summary.year1Total);
+  }
+  return removed;
+}
+
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
   // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
@@ -1840,6 +1863,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         setupFeeQuote = await decideSetupFeeQuote(q);
         if (setupFeeQuote) estimateDataObj.setupFeeQuote = setupFeeQuote;
         else delete estimateDataObj.setupFeeQuote;
+        // A ZERO rodent-setup decision (claim already queued on the account,
+        // or the customer-favorable lookup-failure waiver) must also remove
+        // the engine's positive rodent_bait_setup row and its share of the
+        // one-time total from the persisted draft — otherwise a refreshed or
+        // staff-sent draft would still display and invoice the setup the
+        // decision waived (codex #3591 r26 P1). frozenRodentBaitSetupAmount
+        // honors the persisted zero decision as the belt.
+        if (setupFeeQuote?.kind === 'rodent_bait_setup' && !(Number(setupFeeQuote.amount) > 0)) {
+          stripWaivedRodentSetupFromDraft(estimateDataObj);
+        }
       };
       if (existingEst) {
         // archived_at: null revives a draft the self-booking path retired
@@ -2517,6 +2550,7 @@ module.exports._internals = {
   findExistingCustomerByContact,
   setupFeeQuoteBasisForEstimate,
   resolveSetupFeeQuoteDecision,
+  stripWaivedRodentSetupFromDraft,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,
