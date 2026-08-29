@@ -362,7 +362,10 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     // force a live post back to draft — so the overwrite only lands while
     // the row is still outside the pipeline. Callers on the queued lane
     // (scheduler 5am, bulk-generate, content-agent) are unaffected.
-    const updated = await whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId))
+    // …and on the SAME targeting snapshot the gate and the LLM used: content
+    // approved and written for the old title/keyword/slug/city/category must
+    // not land on a row an operator re-targeted meanwhile.
+    const updated = await whereTargetingUnchanged(whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)), post)
       .update({
         content,
         word_count: wordCount,
@@ -370,7 +373,11 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
         updated_at: new Date(),
       });
     if (!updated) {
-      const err = new Error('Post was published or entered the Astro pipeline while content was generating — nothing was overwritten');
+      const now = await db('blog_posts').where('id', blogPostId).first();
+      const edited = now && targetingChanged(post, now);
+      const err = new Error(edited
+        ? 'Post targeting was edited while content was generating — nothing was overwritten; re-run generation on the edited row'
+        : 'Post was published or entered the Astro pipeline while content was generating — nothing was overwritten');
       err.isOperational = true;
       err.statusCode = 409;
       throw err;

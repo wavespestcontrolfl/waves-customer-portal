@@ -586,6 +586,24 @@ async function resolveTargetForRun(run) {
  * stale tick-start validation. Errors propagate (transient → caught by
  * pollRun, retried next tick) so a lookup outage can never allow a merge.
  */
+// queueRowParkedState's rule under a transaction: lock the queue row (FOR
+// UPDATE) so nothing can move it until the caller commits, validate the
+// exact parked state, then the newer-sibling check. Fail closed: anything
+// that cannot be verified (a run without created_at, a lock error) is
+// "not parked".
+async function queueRowStillParkedLocked(run, trx) {
+  if (!run.opportunity_id) return true;
+  try {
+    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingSkipReasonForRun(run)) return false;
+    if (await newerSiblingRun(trx, run)) return false;
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] run ${run.id}: could not verify the queue row under lock: ${err.message} (merge withheld)`);
+    return false;
+  }
+}
+
 async function queueRowParkedState(run) {
   if (!run.opportunity_id) return { parked: true, row: null };
   const row = await db('opportunity_queue')
@@ -1311,7 +1329,10 @@ async function maybeAutoMerge(run, pr) {
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
         //     an operator dismiss/requeue landing during it must still block
         //     the merge — repeat the queue re-check immediately before merging.
-        if (!(await queueRowStillParked(run))) {
+        //     …and on THIS transaction with the queue row locked (FOR UPDATE),
+        //     held through the merge — a dismiss/requeue cannot land between
+        //     the check and gh.mergePr.
+        if (!(await queueRowStillParkedLocked(run, trx))) {
           logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
           withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
           return null;
@@ -1618,6 +1639,7 @@ module.exports = {
     maxAutoMergesPerPoll,
     prNumberFromUrl,
     reconcileTopicBlockedPrs,
+    queueRowStillParkedLocked,
     retireTopicBlockedPr,
     pendingSkipReasonForRun,
     isMetadataLane,

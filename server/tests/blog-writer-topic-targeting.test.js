@@ -169,6 +169,17 @@ describe('blog-writer generatePost — every persisted row is gated before write
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'post_1' }), expect.objectContaining({ category: 'termite' }));
   });
 
+  test('generated content is fenced on the targeting snapshot: a row re-targeted while the LLM ran gets a 409, nothing overwritten (hook r31 P1)', async () => {
+    const snapshot = { ...TAEXX_ROW, keyword: 'palm weevil sarasota', title: 'Palm Weevils in Sarasota', slug: 'palm-weevils-sarasota' };
+    let reads = 0;
+    // First read = the snapshot the gate + LLM use; later reads = the operator's edit.
+    const { writer, dbMock, dispatch } = load({ post: () => (reads++ === 0 ? snapshot : { ...snapshot, title: 'Palm Weevils in Venice', city: 'Venice' }), ideas: null, updateResult: 0 });
+    dispatch.mockResolvedValue({ ok: true, text: '## Palm weevils\n\nBody text for the post.' });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/targeting was edited while content was generating/) });
+    // The write was attempted (and CAS-refused) — never an unconditional overwrite.
+    expect(dbMock._updates.some((u) => u.patch.content)).toBe(true);
+  });
+
   test('a pre-loaded live index (bulk generation) is passed to the gate, so the corpus is not re-fetched per post (codex r30)', async () => {
     const { writer, dispatch } = load({ post: { ...TAEXX_ROW, keyword: 'palm weevil sarasota', title: 'Palm Weevils in Sarasota', slug: 'palm-weevils-sarasota' }, ideas: null, corpusError: 'github_down' });
     const gate = require('../services/content/topic-targeting-gate');

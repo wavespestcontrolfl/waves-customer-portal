@@ -781,6 +781,29 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getPr).not.toHaveBeenCalled();
   });
 
+  test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
+    const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
+    const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
+      const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
+      return q;
+    });
+    const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
+    // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
+    let trx = fakeTrx({ row: parkedRow });
+    expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
+    expect(trx.mock.results[0].value.forUpdate).toHaveBeenCalled();
+    // Dismissed / requeued meanwhile → withheld.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
+    // A newer sibling owns the opportunity → withheld.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    // Cannot verify (lock error, or a run without created_at) → fail closed.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, throwOn: 'lock timeout' }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(makeRun({ created_at: null }), fakeTrx({ row: parkedRow }))).toBe(false);
+    // No opportunity → nothing to lock.
+    expect(await poller._internals.queueRowStillParkedLocked(makeRun({ opportunity_id: null }), fakeTrx({ row: null }))).toBe(true);
+  });
+
   test('reconcileTopicBlockedPrs: a closed PR whose branch is not verified deleted stays in the set (no terminal stamp, no marker) (hook r28 P1)', async () => {
     const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
     let updates = setupDb({ pending: [parked] });
