@@ -22,7 +22,7 @@ describe('admin estimate roach UI copy', () => {
 
     expect(source).toContain('Standalone Native Cockroach Treatment');
     expect(source).toContain('German Roach Cleanout');
-    expect(source).toContain('Cockroach Specialty Service');
+    expect(source).toContain('Cockroach Treatment Service');
     expect(source).toContain('Standalone / Specialty Services');
     expect(source).toContain('Service Type');
     expect(source).toContain('German Roach Cleanout is a separate specialty program');

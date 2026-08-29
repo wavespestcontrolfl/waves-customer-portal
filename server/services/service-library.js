@@ -19,7 +19,7 @@ const SERVICE_COLS = [
   'default_equipment', 'default_products', 'typical_materials_cost',
   'requires_service_report', 'requires_application_log', 'required_photo_count',
   'requires_customer_signature', 'requires_customer_notice', 'closeout_requirements_source',
-  'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
+  'customer_visible', 'booking_enabled', 'public_quote_selectable', 'sort_order', 'icon', 'color',
   'is_active', 'is_archived',
   'created_at', 'updated_at',
 ];
@@ -45,7 +45,7 @@ const BOOLEAN_COLS = new Set([
   'is_waveguard', 'requires_follow_up', 'is_taxable', 'requires_license',
   'requires_service_report', 'requires_application_log',
   'requires_customer_signature', 'requires_customer_notice',
-  'customer_visible', 'booking_enabled', 'is_active', 'is_archived',
+  'customer_visible', 'booking_enabled', 'public_quote_selectable', 'is_active', 'is_archived',
 ]);
 
 function validationError(message) {
@@ -374,7 +374,7 @@ async function createService(data, { audit } = {}) {
     'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
     'default_equipment', 'default_products', 'typical_materials_cost',
     ...CLOSEOUT_REQUIREMENT_COLS,
-    'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
+    'customer_visible', 'booking_enabled', 'public_quote_selectable', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
   const numericKeys = new Set([
@@ -452,7 +452,7 @@ async function updateService(id, data, { audit } = {}) {
     'requires_license', 'license_category', 'requires_certification', 'min_tech_skill_level',
     'default_equipment', 'default_products', 'typical_materials_cost',
     ...CLOSEOUT_REQUIREMENT_COLS,
-    'customer_visible', 'booking_enabled', 'sort_order', 'icon', 'color',
+    'customer_visible', 'booking_enabled', 'public_quote_selectable', 'sort_order', 'icon', 'color',
     'is_active', 'is_archived',
   ];
   // Numeric columns — empty strings and NaN must become null or PostgreSQL rejects them
