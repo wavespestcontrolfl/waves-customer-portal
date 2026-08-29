@@ -2709,7 +2709,7 @@ function leadAddressCompareKey(v) {
 const ROUTE_WORDS = new Set(['route', 'rte', 'highway', 'hwy', 'sr', 'cr', 'us', 'interstate']);
 function canonicalizeInlineUnits(streetKey) {
   const {
-    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair, STREET_SUFFIX_ALIASES,
   } = require('../utils/address-normalizer');
   const tokens = String(streetKey || '').split(' ').filter(Boolean);
   // Same grammar as the shared peel: a designator counts only when the
@@ -2752,6 +2752,12 @@ function canonicalizeInlineUnits(streetKey) {
       break;
     }
     if (!run.length) { out.push(t); i += 1; continue; }
+    // A unit boundary must be defensible: the run comes after the house
+    // number and at least one street-name token, and is not followed by a
+    // street-suffix word — "123 Lot 5 Road" is a street NAME, not a lot,
+    // and reading it as a unit made a real dedicated "Apt 2" a conflict
+    // that was dropped (pre-push audit P1 on f65b5046d).
+    if (i < 2 || Object.prototype.hasOwnProperty.call(STREET_SUFFIX_ALIASES, tokens[j] || '')) { out.push(t); i += 1; continue; }
     const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
     unitKeys.push(key);
     runs.push({ start: i, end: j });

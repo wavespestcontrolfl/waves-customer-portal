@@ -64,6 +64,12 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St Floor 2', 'Fl 2')).toBe('100 Main St, Floor 2');
     expect(composeLeadAddress('100 Main St Lot 7', 'Lot 7')).toBe('100 Main St, Lot 7');
     expect(composeLeadAddress('100 Main St Space 12', 'Spc 12')).toBe('100 Main St, Space 12');
+    // A designator-shaped street NAME is not a unit: no false conflict, the real unit is appended;
+    // a genuine inline unit later in the same line still is one.
+    expect(analyzeLeadAddress('123 Lot 5 Road Sarasota FL 34236', 'Apt 2')).toEqual({ address: '123 Lot 5 Road Sarasota FL 34236, Apt 2', unitConflict: false });
+    expect(leadAddressCompareKey('123 Lot 5 Road Sarasota FL 34236')).not.toMatch(/\{u:/);
+    expect(analyzeLeadAddress('123 Lot 5 Road Apt 4 Sarasota FL 34236', 'Apt 2')).toEqual({ address: '123 Lot 5 Road Apt 4 Sarasota FL 34236', unitConflict: true });
+    expect(analyzeLeadAddress('123 Lot 5 Road Apt 4 Sarasota FL 34236', 'Apt 4').address).toBe('123 Lot 5 Road Apt 4 Sarasota FL 34236');
     // A numbered route's hash is the road, not a unit — no false conflict, the real unit is appended (r7 P2).
     expect(analyzeLeadAddress('123 State Road #64 Bradenton FL 34208', 'Apt 4')).toEqual({ address: '123 State Road #64 Bradenton FL 34208, Apt 4', unitConflict: false });
     expect(analyzeLeadAddress('500 Hwy #41 Venice FL 34285', 'Unit 2')).toEqual({ address: '500 Hwy #41 Venice FL 34285, Unit 2', unitConflict: false });
