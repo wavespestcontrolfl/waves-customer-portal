@@ -39,7 +39,13 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // section (#3516) — an older report with findings-derived or form
 // recommendations must re-render on next open instead of serving the
 // cached p6 object. Supersedes p6, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p7-recommendations-20260827';
+// p8: product-application identity moved to the shared
+// lib/product-application.js rule (#3600) — an EPA-registered mosquito
+// station now prints as an application and termite/rodent devices never
+// do, on every line. Cached p7 objects for any line could carry the old
+// product/EPA/precaution content, so they re-render on next open.
+// Supersedes p7, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p8-product-identity-20260829';
 
 const s3 = new S3Client({
   region: config.s3?.region,

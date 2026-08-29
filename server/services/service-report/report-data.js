@@ -4,6 +4,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -1551,6 +1552,7 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.termiteNextMonitoringVisit;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -3681,6 +3683,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
+    // Freezes the station denominator at the visit itself (codex P2 #3600
+    // r32) — same completion fields the visit-timing cells read.
+    // The public report query selects service_records.* without the
+    // scheduled-service completion columns, so use the already-resolved
+    // completionTime (record + scheduled row + timing evidence) first
+    // (codex P2 #3600 r34).
+    visitCompletedAt: completionTime || service.completed_at || service.actual_end_time || service.check_out_time || null,
     // Read off the FROZEN snapshot that actually OWNS the trapping program —
     // which may be a COMPANION, since typedTypes deliberately lets a
     // non-station primary carry a rodent_trapping companion and that
@@ -4381,6 +4390,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // Live-view only (stripLiveOnlyScheduleFields), termite line only.
+  let termiteNextMonitoringVisit = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4481,6 +4492,71 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     sameLineNextAppointment = toNextAppointment(nextApptRow);
     nextAppointment = sameLineNextAppointment
       || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
+
+    // Termite bait-station reports (typed identity): the "next monitoring visit" is the first
+    // upcoming BAIT-STATION appointment, selected here while the candidate
+    // rows are still in hand — the collapsed same-line pick above may be an
+    // earlier liquid/trench/inspection visit, which is termite work but not
+    // monitoring (codex P1 #3600 r3). Identity comes from the CANONICAL
+    // completion-profile resolver (service-completion-profiles.js — the
+    // same one the completion flow and the trace lane use), which already
+    // handles service_id links, service_key_snapshot, exact catalog names,
+    // and unique short names ("Bait Annual"); a typed profile decides in
+    // both directions, name tokens judge only rows with no typed profile
+    // (codex P1 #3600 r7). Scanned in date order, stopping at the first
+    // hit; best-effort — a resolver failure skips the row, never throws.
+    // Runs ONLY where the value can render: live view (pdf/static strip
+    // it), gate on, bait-station typed visit — each resolution is a few
+    // catalog reads, so gated-off and PDF builds must not pay for it
+    // (codex P2 #3600 r8).
+    // Keyed on the frozen typed identity, not the name-derived serviceLine:
+    // a "Bait Annual" short name detects as 'pest' while its snapshot is
+    // termite_bait_station (codex P1 #3600 r12) — same predicate as
+    // attachTermiteReportV2 and the PDF signature.
+    // Primary OR auto_send companion bait snapshot (combined visits) —
+    // the same resolver attachTermiteReportV2 and the PDF signature use.
+    if (
+      opts.mode === 'live'
+      && process.env.TERMITE_REPORT_V2 === 'true'
+      && termiteBaitSnapshotOf(service)
+    ) {
+      const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      let baitRow = null;
+      // The WHOLE candidate window (a customer on weekly service can have
+      // dozens of non-bait rows ahead of the annual check — codex P2 #3600
+      // r9). Resolution is memoized per identity (service_id ·
+      // service_key_snapshot · label): repeated weekly rows resolve once,
+      // so the cost is one resolution per DISTINCT service, not per row.
+      const verdictByIdentity = new Map();
+      for (const row of rows) {
+        const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
+        let isBait = verdictByIdentity.get(identity);
+        if (isBait === undefined) {
+          let profile = null;
+          let resolutionFailed = false;
+          // strict: a swallowed profile-table / identity-reload failure would
+          // surface as a default (typeless) profile and fall to the label
+          // (codex P2 #3600 r26) — make it throw, then skip the row.
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
+          // A typed bait profile decides — except the installation profile,
+          // which freezes the same type but is not a monitoring check
+          // (codex P2 #3600 r19). A FAILED resolution is not an unlinked
+          // legacy row: fail closed, never fall to the label (codex P2 r23).
+          if (resolutionFailed) isBait = false;
+          else if (profile?.findingsType) {
+            // …and neither the installation profile nor the detection-only
+            // termite_monitoring program (codex P2 #3600 r19 / r21).
+            isBait = profile.findingsType === TERMITE_BAIT_TYPED_TYPE
+              && isMonitoringServiceKey(profile.serviceKey);
+          } else if (profile?.projectType) isBait = false;
+          else isBait = isTermiteBaitServiceName(row?.service_type);
+          verdictByIdentity.set(identity, isBait);
+        }
+        if (isBait) { baitRow = row; break; }
+      }
+      termiteNextMonitoringVisit = toNextAppointment(baitRow);
+    }
   } catch { /* best-effort */ }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
@@ -4491,7 +4567,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // cached PDF goes stale across a renewal (same rule as nextAppointment).
   // Fail-soft like the portal endpoint: any error just omits the line.
   let termiteBonds = null;
-  if (serviceLine === 'termite' && opts.mode === 'live') {
+  // Termite line, OR any live report carrying a customer-visible bait-
+  // station snapshot (combined pest + termite visits keep serviceLine
+  // 'pest' while the companion dashboard renders the warranty card —
+  // codex P2 #3600 r14).
+  if (opts.mode === 'live' && (serviceLine === 'termite' || termiteBaitSnapshotOf(service))) {
     try {
       // Shared with /api/property/termite-bond so the hero cell and the
       // My Plan card it links to can never disagree (codex inline). EVERY
@@ -4956,6 +5036,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    termiteNextMonitoringVisit,
+    // Visit stage for a bait-station snapshot, from the completion profile
+    // (termite_installation_setup also freezes termite_bait_station):
+    // 'installation' keeps the typed record; 'monitoring' may render the
+    // dashboard. Consumed and removed by attachTermiteReportV2. Name tokens
+    // decide only when no profile resolved (fail toward the typed record).
+    // 'detection' = the seeded termite_monitoring program (in-ground
+    // monitoring stations, NO active bait) — its completion profile freezes
+    // the same typed type, but bait-deployed copy would misstate it
+    // (codex P1 #3600 r18); it keeps the typed record too.
+    // Identity order (codex P1 #3600 r19): the completion-FROZEN service key
+    // (service_data.completedServiceKey — a permanent report must not
+    // change stage when an admin repoints the schedule row or a legacy
+    // record loses its link), then the live profile, then name tokens.
+    // ONE stage resolver for the render path AND the PDF cache signature
+    // (recordStage): frozen completedServiceKey, else the applicable typed
+    // snapshot's own serviceKey, else the record's frozen service_type name
+    // for legacy records that froze neither. Never the live linked profile
+    // — a later reclassification must not change a permanent report token
+    // on one path and not the other (codex P2 #3600 r33 / P0 r21).
+    termiteBaitStage: termiteBaitSnapshotOf(service) ? recordStage(service) : null,
     termiteBonds,
     relatedDocuments,
     visitTimeline,

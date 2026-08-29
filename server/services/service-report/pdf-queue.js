@@ -17,6 +17,7 @@ const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-p
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
+const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -135,6 +136,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same for PEST_REPORT_V2 — the pest gate predates this key component, so
   // pest PDFs cached pre-dashboard re-render once on next view.
   const pestV2Signature = pestReportV2PdfSignature(service);
+  // Same for TERMITE_REPORT_V2 (termite-report-v2.js) — env + service type
+  // only, immutable per render.
+  const termiteV2Signature = termiteReportV2PdfSignature(service);
   // Treatment-zone key component: the traced satellite map bakes into the
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
@@ -192,6 +196,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // direct route would then serve that stale render as current (codex P2
     // #3197 r6).
     applyLawnReportReconciliation(data, data.dynamicContext);
+    // Termite V2 rides the SAME composer the public route uses — this key
+    // carries termiteReportV2PdfSignature, so the render must carry the
+    // dashboard or the direct route would serve a legacy PDF as current
+    // (codex P1 #3600 r11).
+    attachTermiteReportV2(data, service);
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -318,7 +327,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -454,7 +463,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

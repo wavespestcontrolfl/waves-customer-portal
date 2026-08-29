@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
+import { epaReg, isProductApplication } from '../lib/product-application';
+import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
@@ -126,15 +128,6 @@ function fmtTime(value) {
 
 // "10.000" -> "10", "0.49" -> "0.49"; units come through as snake_case
 // ("fl_oz") from the application record.
-// Catalog rows for unregistered products (fertilizers, wetting agents,
-// mechanical devices) store the literal "N/A" — printing it under EPA Reg.
-// No. reads like missing paperwork. Mirrors applicationEpaReg.
-function epaReg(app) {
-  const raw = String(app.product?.epa_reg || app.epaReg || '').trim();
-  if (/^n\/?a$/i.test(raw) || /^none$/i.test(raw)) return '';
-  return raw;
-}
-
 function fmtAmount(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value || '').trim();
@@ -365,7 +358,13 @@ export default function ServiceReportDocument({ data, token }) {
   }, [failedImages, payloadDroppedImages]);
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
-  const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];
+  const findings = (Array.isArray(typed?.findings) ? typed.findings : [])
+    .filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '')
+    // Termite V2 owns the count/status/bait-condition tiles (visit-backed
+    // map counts may override hand-edited typed counts) — same filter as the
+    // live report, so the PDF never prints two inspected totals (codex P2
+    // #3600 r7).
+    .filter((f) => !(Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
   // Older records store the aliases the web report's conditionRows accepts
@@ -400,35 +399,9 @@ export default function ServiceReportDocument({ data, token }) {
     && (Object.values(normalizedConditions).some((value) => value != null && value !== '') || usingWeeklyRain)
     ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
-  // A station check is a device inspection, not an application. But `method`
-  // can't be trusted alone: methodFromProduct INFERS 'station_check' for any
-  // termite or rodent product with a null application_method (a supported
-  // state — the column was added nullable), so a historical liquid or
-  // pre-treatment termiticide is classified as a device check. Filtering on
-  // method alone therefore deleted the actual pesticide from the record and
-  // suppressed its precautions.
-  //
-  // Identity decides, and the signal is PESTICIDE identity — an EPA
-  // registration or a pesticide product type. Not the recorded amount: a
-  // snap trap check legitimately records "1 ea" and still isn't a product
-  // application, which is the case that made this filter necessary.
-  const isProductApplication = (app) => {
-    if ((app.method || 'perimeter_spray') !== 'station_check') return true;
-    // Checking a station baited with a registered rodenticide/termiticide
-    // cartridge applies nothing — bait / station / cartridge / monitor
-    // product FAMILIES are never applications, whatever their EPA number
-    // (codex P1 r19, generalized). Beyond that, product identity decides
-    // regardless of methodInferred: the completion panel DEFAULTS methodless
-    // termite products to station_check and persists it (methodInferred
-    // false), so a freshly recorded Termidor Foam row would otherwise vanish
-    // from the PDF while the advisory says treatment occurred — this
-    // mirrors the server's isNonBaitPesticideProduct (#3516 r11).
-    const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
-    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
-    if (epaReg(app)) return true;
-    const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
-    return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);
-  };
+  // "Did a product get applied?" — the shared identity rule
+  // (lib/product-application.js) the live report uses too, so the PDF and
+  // the web report never disagree about a station-check-only visit.
   const appliedProducts = applications.filter(isProductApplication);
   // Lawn-assessment photos fall back to raw per-photo vision `observations`
   // as their caption (report-data.js). The lawn V2 path deliberately drops
@@ -512,19 +485,42 @@ export default function ServiceReportDocument({ data, token }) {
   // silently stripped watering and re-entry instructions from those visits.
   const hasActualTreatment = applications.some(isProductApplication);
 
+  // …and the schematic additionally requires a REAL product application: a
+  // bait cartridge placed under bait_placement with zone IDs is a monitoring
+  // device, so it must never head a "Where we treated" map (codex P1 #3600
+  // r9) — same identity rule as the products list.
   const hasRenderableTreatment = applications.some((app) => {
     const method = app.method || 'perimeter_spray';
     const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
-    return method !== 'station_check' && zoneIds.length > 0;
+    return method !== 'station_check' && zoneIds.length > 0 && isProductApplication(app);
   });
 
+  // A partial station sync (termite V2 flag) means the placement section
+  // would draw the synced subset beside the dashboard's frozen counts —
+  // suppressed, same as the live report (codex P2 #3600 r28).
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length
+    && !data.termiteReportV2?.stationSyncPartial
     ? data.stationMap : null;
   const reportUrl = `${portalBase(data.publicOrigin)}/report/${encodeURIComponent(token)}`;
   const reportNumber = String(data.serviceRecordId || token || '').replace(/-/g, '').slice(0, 10).toUpperCase();
 
+  // Termite V2 is the PDF's SOLE result summary, as on the live report: the
+  // builder gives visit-backed station-map counts precedence over hand-
+  // edited typed counts, so printing the typed headline/body too could state
+  // two different inspected/activity totals (codex P2 #3600 r5).
+  // Primary-source only: a companion dashboard (combined visit) never
+  // replaces the PRIMARY service's summary — it replaces the bait companion
+  // block below instead.
+  const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
+  const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   const summaryParagraphs = [];
-  if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
+  if (termiteV2Summary) {
+    summaryParagraphs.push(String(termiteV2Summary.status.label).replace(/\.$/, '') + '.');
+    if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
+    const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
+    if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
+  } else if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
@@ -533,8 +529,8 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = reconciledResult
-    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '';
+  const summaryBody = termiteV2Summary ? '' : (reconciledResult
+    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
@@ -543,6 +539,9 @@ export default function ServiceReportDocument({ data, token }) {
   // confidence-gated customer fields, so the document renders their text.
   const pestV2 = data.pestReportV2 || null;
   const mosquitoV2 = data.mosquitoReportV2 || null;
+  // termite bait-station dashboard (termite-report-v2.js) — same status /
+  // defense / primaryMove contract as pest and mosquito.
+  const termiteV2 = data.termiteReportV2 || null;
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
 
@@ -585,10 +584,29 @@ export default function ServiceReportDocument({ data, token }) {
   // (pest-report-v2.js / mosquito-report-v2.js) — an earlier customerText/text
   // lookup here silently always resolved to null (codex P1 r2).
   const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || null;
-  const v2NextMove = primaryMove?.title
-    ? [primaryMove.title, primaryMove.why, primaryMove.impact].filter(Boolean).join(' ')
-      + (primaryMove.dueLabel ? ` (${primaryMove.dueLabel})` : '')
+  const moveText = (move) => (move?.title
+    ? [move.title, move.why, move.impact].filter(Boolean).join(' ')
+      + (move.dueLabel ? ` (${move.dueLabel})` : '')
+    : null);
+  const v2NextMove = moveText(primaryMove);
+  // Termite V2 rows render INDEPENDENTLY of the pest/mosquito/lawn chain —
+  // a combined pest + termite visit carries BOTH pestReportV2 and a
+  // companion termiteReportV2, and the permanent PDF must print both
+  // (codex P1 #3600 r14). Status detail: the summary paragraphs already
+  // carry statusSummary for a primary dashboard (sole-summary rule); a
+  // companion dashboard's row carries it itself.
+  const termiteStatusLine = termiteV2?.status?.label
+    ? { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2Companion ? termiteV2.statusSummary : null }
     : null;
+  const termiteDefenseBlock = termiteV2?.defense || null;
+  const termiteDefenseItems = (Array.isArray(termiteDefenseBlock?.items) ? termiteDefenseBlock.items : [])
+    .filter((item) => item && (item.label || item.detail));
+  // The serviced count lives only in the hero metrics (the network block
+  // carries inspected / activity / bait / access) and static PDFs draw no
+  // map — print it so the documented servicing survives (codex P2 #3600 r18).
+  const termiteServicedMetric = (Array.isArray(termiteV2?.metrics) ? termiteV2.metrics : [])
+    .find((m) => m && m.label === 'Stations serviced' && m.value && m.value !== '0') || null;
+  const termiteNextMove = moveText(termiteV2?.primaryMove);
 
 
   const recommendations = [];
@@ -596,7 +614,12 @@ export default function ServiceReportDocument({ data, token }) {
     const t = String(text || '').trim();
     if (t && !recommendations.includes(t)) recommendations.push(t);
   };
-  pushRec(result?.nextStep);
+  // A primary termite dashboard owns the next-step commitment: the builder
+  // reconciles a frozen "No action needed" against escalating station pins
+  // (codex P2 #3600 r24) — the raw typed step never prints beside it.
+  // (falls back to the typed step only when the payload carries none — an
+  // escalated visit always carries the builder's replacement)
+  pushRec(termiteV2Primary ? (termiteV2?.nextStep || result?.nextStep) : result?.nextStep);
   (typed?.nextStepChips || []).forEach((chip) => {
     // chips restate nextStep in shorthand — only add ones that say something new
     if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
@@ -633,6 +656,7 @@ export default function ServiceReportDocument({ data, token }) {
   // variant of this class: defaults read as evidence).
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
   pushRec(v2NextMove);
+  pushRec(termiteNextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
@@ -712,8 +736,15 @@ export default function ServiceReportDocument({ data, token }) {
   // cross-visit history the old PDF rendered: buildTypedVisitTimeline returns
   // { indicatorKey, label, visits:[{serviceDate, headline, levelWord,
   // isCurrent}] } and only exists once there are 2+ visits.
+  // Termite V2 (primary): the current row restates the reconciled dashboard
+  // headline — visit-backed pins may escalate a frozen "None observed" —
+  // the same rewrite the live report applies (codex P2 #3600 r14).
+  const reconcileTermiteVisit = (visit) => (visit?.isCurrent && termiteV2?.status?.label
+    ? { ...visit, headline: termiteV2.status.label }
+    : visit);
   const visitHistory = (Array.isArray(data.typedVisitTimeline?.visits) ? data.typedVisitTimeline.visits : [])
-    .filter((visit) => visit && (visit.serviceDate || visit.headline));
+    .filter((visit) => visit && (visit.serviceDate || visit.headline))
+    .map((visit) => (termiteV2Primary ? reconcileTermiteVisit(visit) : visit));
 
   // When reportV2 exists the live report renders LawnReportV2Section INSTEAD of
   // LawnAssessmentCard, so the raw assessment paragraph would duplicate the
@@ -883,7 +914,7 @@ export default function ServiceReportDocument({ data, token }) {
         {/* Findings */}
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
           || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
-          || defenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
+          || defenseItems.length > 0 || termiteStatusLine || termiteDefenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
             {pressure && (
@@ -916,6 +947,21 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
               </Bullet>
             ))}
+            {termiteStatusLine && (
+              <Bullet>
+                <strong>{termiteStatusLine.label}:</strong> {termiteStatusLine.value}
+                {termiteStatusLine.detail ? ` — ${termiteStatusLine.detail}` : ''}
+              </Bullet>
+            )}
+            {termiteDefenseBlock?.summary && <Bullet>{termiteDefenseBlock.summary}</Bullet>}
+            {termiteDefenseItems.map((item) => (
+              <Bullet key={`termite-${item.key || item.label}`}>
+                <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
+              </Bullet>
+            ))}
+            {termiteServicedMetric && (
+              <Bullet><strong>Stations serviced:</strong> {termiteServicedMetric.value}</Bullet>
+            )}
             {pestBugFiles.map((bug, i) => (
               <Bullet key={bug.pestKey || i}>
                 <strong>{bug.suspectLabel}{bug.confirmedByTech === false ? ' (covered by today\u2019s treatment \u2014 not observed on this visit)' : ''}:</strong>{' '}
@@ -942,7 +988,10 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}
               </Bullet>
             ))}
-            {activity && activity.levelWord && (
+            {/* Termite V2 owns the reconciled activity reading (map pins may
+                escalate a frozen "None observed") — the frozen gauge bullet
+                would contradict it (codex P2 #3600 r10). */}
+            {activity && activity.levelWord && !termiteV2Primary && (
               <Bullet>
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>
@@ -1326,34 +1375,60 @@ export default function ServiceReportDocument({ data, token }) {
         {companions.map((companion) => (
           <div key={companion.type} className="doc-keep">
             <SectionHeader>{companion.reportTypeLabel || companion.typeLabel || 'Additional service'}</SectionHeader>
-            {companion.todaysResult?.headline && (
+            {/* Bait-station companion owned by the termite dashboard: its
+                result prints in the Station protection row above, so the
+                frozen headline/body stay out (sole-summary rule). */}
+            {!(termiteV2Companion && companion.type === 'termite_bait_station') && companion.todaysResult?.headline && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
                 {String(companion.todaysResult.headline).replace(/\.$/, '')}.
                 {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+              </p>
+            )}
+            {/* …but the companion's ACCEPTED narrative (the dashboard's
+                aiSummary) still prints here — the suppressed body was its
+                only PDF surface (codex P2 #3600 r28). */}
+            {termiteV2Companion && companion.type === 'termite_bait_station' && cleanVisitSummary(termiteV2?.aiSummary?.body || '') && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                {cleanVisitSummary(termiteV2.aiSummary.body)}
               </p>
             )}
             {/* Same containment rule TodaysResultCard uses: the snapshot
                 builder usually folds nextStep into the body, so only print it
                 when it adds something — but never drop the companion
                 service's instruction entirely. */}
-            {companion.todaysResult?.nextStep
-              && !String(companion.todaysResult.body || '').includes(companion.todaysResult.nextStep) && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {companion.todaysResult.nextStep}
-              </p>
-            )}
+            {/* A dashboard-owned bait companion has its body suppressed
+                above, so its required next step prints unconditionally
+                (the dashboard's reconciled nextStep first) — codex P2
+                #3600 r15. */}
+            {termiteV2Companion && companion.type === 'termite_bait_station'
+              ? ((termiteV2?.nextStep || companion.todaysResult?.nextStep) && (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {termiteV2?.nextStep || companion.todaysResult.nextStep}
+                </p>
+              ))
+              : (companion.todaysResult?.nextStep
+                && !String(companion.todaysResult.body || '').includes(companion.todaysResult.nextStep) && (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {companion.todaysResult.nextStep}
+                </p>
+              ))}
             {(companion.findings || [])
               .filter((finding) => String(finding?.customerValueLabel ?? finding?.value ?? '').trim())
+              .filter((finding) => !(termiteV2Companion && companion.type === 'termite_bait_station') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(finding?.fieldKey))
               .map((finding) => (
                 <Bullet key={finding.fieldKey || finding.customerLabel}>
                   <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}
                 </Bullet>
               ))}
-            {companion.activity?.levelWord && (
+            {/* owned by the termite dashboard: its reconciled status is the
+                one activity reading (frozen gauge bullet suppressed), and
+                the current history row restates that headline. */}
+            {companion.activity?.levelWord && !(termiteV2Companion && companion.type === 'termite_bait_station') && (
               <Bullet><strong>{companion.activity.label}:</strong> {companion.activity.levelWord}</Bullet>
             )}
             {(companion.visitTimeline?.visits || [])
               .filter((visit) => visit && (visit.serviceDate || visit.headline))
+              .map((visit) => (termiteV2Companion && companion.type === 'termite_bait_station' ? reconcileTermiteVisit(visit) : visit))
               .map((visit) => (
                 <Bullet key={visit.serviceRecordId || visit.serviceDate}>
                   <strong>{fmtServiceDate(visit.serviceDate)}{visit.isCurrent ? ' (today)' : ''}:</strong>{' '}

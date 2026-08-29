@@ -751,6 +751,93 @@ test('report context gates: wrong visit type, no stations, satellite down, env k
   }
 });
 
+test('the summary denominator is the visit-day network, not the submitted subset (12 checks on 14 stations = 12 of 14)', () => {
+  const rows = Array.from({ length: 14 }, (_, i) => stationRow(`st-${i + 1}`, i + 1, pin(0.1 + (i % 7) * 0.12, i < 7 ? 0.3 : 0.7), { created_at: '2026-01-01T00:00:00Z' }));
+  const context = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: rows.slice(0, 12).map((row) => ({ station_id: row.id, status: 'ok' })),
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-08-27',
+  });
+  expect(context.available).toBe(true);
+  expect(context.stations).toHaveLength(12);
+  expect(context.summary).toEqual({ total: 14, checked: 12, activity: 0, serviced: 0, inaccessible: 0 });
+});
+
+test('the denominator is frozen at the visit completion time — a station added later the same day never changes it', () => {
+  const rows = [
+    stationRow('st-1', 1, pin(0.2, 0.3), { created_at: '2026-01-01T00:00:00Z' }),
+    stationRow('st-2', 2, pin(0.5, 0.5), { created_at: '2026-01-01T00:00:00Z' }),
+    // created that afternoon, AFTER the 10:56 ET completion
+    stationRow('st-3', 3, pin(0.8, 0.6), { created_at: '2026-08-27T19:30:00Z' }),
+  ];
+  const checks = [{ station_id: 'st-1', status: 'ok' }, { station_id: 'st-2', status: 'ok' }];
+  const frozen = buildStationMapReportContext({
+    stationRows: rows, checkRows: checks, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27', visitCompletedAt: '2026-08-27T14:56:00Z',
+  });
+  expect(frozen.summary).toEqual({ total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 });
+  // without a completion timestamp the legacy end-of-day cutoff still applies
+  const legacy = buildStationMapReportContext({
+    stationRows: rows, checkRows: checks, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27',
+  });
+  expect(legacy.summary.total).toBe(3);
+});
+
+test('a retire-all completion (retired_at stamped after the completion instant) never resurrects the rows as on-file', () => {
+  const rows = [
+    stationRow('st-1', 1, pin(0.2, 0.3), { created_at: '2026-01-01T00:00:00Z', is_active: false, retired_at: '2026-08-27T14:56:30Z' }),
+    stationRow('st-2', 2, pin(0.5, 0.5), { created_at: '2026-01-01T00:00:00Z', is_active: false, retired_at: '2026-08-27T14:56:31Z' }),
+  ];
+  const context = buildStationMapReportContext({
+    stationRows: rows, checkRows: [], satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27', visitCompletedAt: '2026-08-27T14:56:00Z',
+  });
+  expect(context).toMatchObject({ available: false, reason: 'no_stations' });
+});
+
+test('a basemap outage keeps the visit-check evidence as checkSummary (status builders reconcile without a map)', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3)),
+      stationRow('st-2', 2, pin(0.5, 0.5)),
+      stationRow('st-3', 3, pin(0.8, 0.6)),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'ok' },
+      { station_id: 'st-2', status: 'activity' },
+      { station_id: 'st-3', status: 'serviced' },
+    ],
+    satelliteMap: { available: false, fallbackReason: 'provider_unavailable' },
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+  });
+  expect(context).toMatchObject({ available: false, reason: 'provider_unavailable', program: 'termite' });
+  expect(context.checkSummary).toEqual({ total: 3, checked: 3, activity: 1, serviced: 1, inaccessible: 0 });
+  expect(context.summary).toBeUndefined();
+});
+
+test('stale marks (a malformed stored pin) still carry checkSummary', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3)),
+      stationRow('st-2', 2, { type: 'circle', cx: 'nope', cy: 0.5 }),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'activity' },
+      { station_id: 'st-2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+  });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
+  expect(context.checkSummary).toEqual({ total: 2, checked: 2, activity: 1, serviced: 0, inaccessible: 0 });
+});
+
 test('a companion termite_bait_station type also renders (combined pest+termite visits)', () => {
   const context = buildStationMapReportContext({
     stationRows: [stationRow('st-1', 1, pin(0.2, 0.3))],
@@ -861,7 +948,7 @@ test('drift: a re-geocoded property far from the pin ref drops the mark; all dro
     imageContext: { center: { lat: REF.lat + 0.01, lng: REF.lng }, zoom: 20, width: 640, height: 340 },
     typedTypes: ['termite_bait_station'],
   });
-  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
 });
 
 test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed (no partial summaries)', () => {
@@ -883,7 +970,7 @@ test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed 
     typedTypes: ['termite_bait_station'],
     serviceDate: '2026-07-13',
   });
-  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale', program: 'termite' });
 });
 
 test('status vocabulary stays in lockstep with the DB CHECK', () => {
