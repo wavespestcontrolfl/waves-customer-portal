@@ -114,6 +114,31 @@ async function findExistingCustomerByContact(database, { contactPhone, contactEm
   return existingCust || null;
 }
 
+// Which one-time setup obligation a wizard estimate carries into its
+// persisted setupFeeQuote (codex #3591 r17 P1): the WaveGuard membership fee
+// (solo recurring pest/mosquito — the converter's own predicate) or the
+// engine-authorized rodent bait-station setup a non-member rodent plan
+// emitted. Mutually exclusive by construction (the membership-fee mix is a
+// single non-rodent family; the rodent setup fires only without another
+// qualifying family). Commercial / manual quotes never qualify.
+function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, quoteRequired = false } = {}) {
+  if (commercialDetected || quoteRequired) return { qualifies: false, kind: null, amount: 0 };
+  if (recurringMixHasMembershipFeeService(recurringQuoteLines(estimate))) {
+    return { qualifies: true, kind: 'waveguard_membership', amount: WAVEGUARD_SETUP_FEE };
+  }
+  const rodentSetup = (estimate?.lineItems || []).find((line) => line
+    && String(line.service || '').toLowerCase() === 'rodent_bait_setup'
+    && Number(line.priceAfterDiscount ?? line.price) > 0);
+  if (rodentSetup) {
+    return {
+      qualifies: true,
+      kind: 'rodent_bait_setup',
+      amount: Math.round(Number(rodentSetup.priceAfterDiscount ?? rodentSetup.price) * 100) / 100,
+    };
+  }
+  return { qualifies: false, kind: null, amount: 0 };
+}
+
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
   // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
@@ -1555,9 +1580,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // predicate (incl. this frozen disclosure's member waiver) applies.
     let setupFeeQuote = null;
     let setupFeeMixQualifies = false;
+    let setupFeeBasis = null;
     try {
-      setupFeeMixQualifies = !commercialDetected && !quoteRequired
-        && recurringMixHasMembershipFeeService(recurringQuoteLines(estimate));
+      setupFeeBasis = setupFeeQuoteBasisForEstimate(estimate, { commercialDetected, quoteRequired });
+      setupFeeMixQualifies = setupFeeBasis.qualifies;
     } catch (feeErr) {
       // Can't even establish the service mix — leave the quote ABSENT
       // (legacy behavior for this draft; nothing new disclosed or charged).
@@ -1638,9 +1664,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // amount 0, and shouldIncludeWaveGuardSetupFeeForRecurring consumes
         // it — so conversion of this same draft can never re-add a fee that
         // /calculate disclosed as absent.
+        // kind rides the decision: 'waveguard_membership' (solo pest/
+        // mosquito) or 'rodent_bait_setup' (a non-member rodent plan — the
+        // engine-authorized line amount, codex #3591 r17 P1). Either way
+        // booking.js stamps pending_setup_fee from `amount` when the
+        // self-booked series activates, so the obligation travels with the
+        // handoff instead of vanishing with the archived draft.
         return activeMember || feeAlreadyQueued
-          ? { amount: 0, waived: activeMember ? 'existing_member' : 'fee_already_queued' }
-          : { amount: WAVEGUARD_SETUP_FEE };
+          ? { amount: 0, waived: activeMember ? 'existing_member' : 'fee_already_queued', kind: setupFeeBasis.kind }
+          : { amount: setupFeeBasis.amount, kind: setupFeeBasis.kind };
       } catch (memberErr) {
         logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
         return { amount: 0, waived: 'membership_undetermined' };
@@ -2211,7 +2243,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // failed to mint (draftEstimateId null): with no persisted freeze there
     // is no billable handoff, and disclosing a fee the /book path could
     // never stamp would break disclosure↔billing agreement.
-    const hasSetupFee = Number(setupFeeQuote?.amount) > 0 && !!draftEstimateId;
+    // A rodent bait-station setup is ALREADY disclosed by the estimate's own
+    // one-time line (oneTimeTotal) — has_setup_fee is the membership fee's
+    // separate disclosure and must not double-show it.
+    const hasSetupFee = Number(setupFeeQuote?.amount) > 0 && !!draftEstimateId
+      && setupFeeQuote.kind !== 'rodent_bait_setup';
 
     // Confidence flag: when satellite enrichment came back empty (new construction,
     // missing imagery, AI couldn't classify), widen the customer-facing range from
@@ -2452,6 +2488,7 @@ module.exports._internals = {
   isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,
+  setupFeeQuoteBasisForEstimate,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,

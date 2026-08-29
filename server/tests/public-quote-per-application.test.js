@@ -423,6 +423,18 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(estimateBlocksBookingHandoff(rodentPlusWeed)).toBe(true);
   });
 
+  test('the persisted setupFeeQuote basis carries the rodent setup obligation into self-booking (codex #3591 r17 P1)', () => {
+    const { setupFeeQuoteBasisForEstimate } = _internals;
+    const rodentOnly = generateEstimate({ ...BASE_PROPERTY, services: { rodentBait: {} } });
+    expect(setupFeeQuoteBasisForEstimate(rodentOnly)).toEqual({ qualifies: true, kind: 'rodent_bait_setup', amount: 99 });
+    const pestOnly = generateEstimate({ ...BASE_PROPERTY, services: { pest: { frequency: 'quarterly' } } });
+    expect(setupFeeQuoteBasisForEstimate(pestOnly)).toEqual({ qualifies: true, kind: 'waveguard_membership', amount: 99 });
+    // pest + rodent: no membership-fee solo mix, and rodent's setup is waived by pest.
+    const pestRodent = generateEstimate({ ...BASE_PROPERTY, services: { pest: { frequency: 'quarterly' }, rodentBait: {} } });
+    expect(setupFeeQuoteBasisForEstimate(pestRodent)).toEqual({ qualifies: false, kind: null, amount: 0 });
+    expect(setupFeeQuoteBasisForEstimate(rodentOnly, { commercialDetected: true })).toEqual({ qualifies: false, kind: null, amount: 0 });
+  });
+
   test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
     const bedBug = generateEstimate({
       ...BASE_PROPERTY,

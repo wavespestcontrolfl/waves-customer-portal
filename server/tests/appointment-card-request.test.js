@@ -1199,6 +1199,32 @@ describe('loadSecureCardPageData — page state machine', () => {
     }
   });
 
+  test('the rodent setup disclosure freezes with a sticky ZERO sentinel (codex #3591 r15/r17 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const stampFor = async (ctx) => {
+      const spy = jest.spyOn(plans, 'deriveSecurePlanContext').mockResolvedValueOnce(ctx);
+      try {
+        await loadSecureCardPageData(REQUEST.token);
+        // Touches accumulate across renders in this file — take the LAST stamp.
+        return touches('appointment_card_requests')
+          .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+          .map(([, patch]) => patch)
+          .filter((p) => 'accepted_setup_fee' in p)
+          .pop();
+      } finally { spy.mockRestore(); }
+    };
+    // Unwaived setup displayed → monotonic-down with the zero sentinel guard.
+    const shown = await stampFor({ mode: 'recurring', perVisit: 89, visitsPerYear: 4, annualBase: 356, prepay: { total: 437.2, discount: 17.8, ratePctLabel: '5%' }, setupFee: { amount: 99, waivedWithPrepay: false }, selected: null });
+    expect(String(shown.accepted_setup_fee.__raw)).toContain('CASE WHEN accepted_setup_fee = 0 THEN 0 ELSE LEAST(COALESCE(accepted_setup_fee');
+    expect(shown.accepted_setup_fee.bindings).toContain(99);
+    // Recurring plan with NO unwaived setup (fee disabled / member) → sticky 0, never NULL.
+    const none = await stampFor({ mode: 'recurring', perVisit: 89, visitsPerYear: 4, annualBase: 356, prepay: { total: 338.2, discount: 17.8, ratePctLabel: '5%' }, setupFee: null, selected: null });
+    expect(none.accepted_setup_fee.bindings).toEqual([0, 0]);
+    // No plan displayed → nothing disclosed.
+    const oneTime = await stampFor({ mode: 'one_time', perVisit: 135, selected: null });
+    expect(oneTime.accepted_setup_fee).toBeNull();
+  });
+
   test('a plan-context derivation FAILURE renders unavailable and stamps NOTHING — a hiccup is never a no-price consent (#3175 hardening)', async () => {
     const plans = require('../services/secure-appointment-plans');
     const spy = jest.spyOn(plans, 'deriveSecurePlanContext')

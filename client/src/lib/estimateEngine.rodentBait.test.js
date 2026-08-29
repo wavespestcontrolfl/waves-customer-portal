@@ -135,3 +135,18 @@ describe("rodent bait — estimator policy note derives from the emitted result 
     expect(rodentBaitPolicyNote({})).toMatch(/priced separately/);
   });
 });
+
+describe("rodent bait — manual-discount base never subtracts an already-excluded rodent line (codex #3591 r17 P1)", () => {
+  const md = { type: "PERCENT", value: 10, label: "Ten off" };
+  it("the manual base is the same whether rodent is discountable (subtracted once) or excluded (never added)", () => {
+    // Same tier either way (rodent still counts), so the non-rodent manual
+    // base must be identical: D_rest − wd·D_rest. Before the fix the
+    // excluded case subtracted rodent's post-WaveGuard annual a second time.
+    const included = calculateEstimate(rodentInput({ svcPest: true, pestFrequency: "quarterly", manualDiscount: md }));
+    applyServerRodentWaveguardPricingConfig({ tier_qualifier: true, exclude_from_pct_discount: true });
+    const excluded = calculateEstimate(rodentInput({ svcPest: true, pestFrequency: "quarterly", manualDiscount: md }));
+    expect(excluded.recurring.waveGuardTier).toBe(included.recurring.waveGuardTier);
+    expect(Math.abs(excluded.manualDiscount.discountableBase - included.manualDiscount.discountableBase)).toBeLessThan(0.05);
+    expect(excluded.manualDiscount.amount).toBeGreaterThan(0);
+  });
+});

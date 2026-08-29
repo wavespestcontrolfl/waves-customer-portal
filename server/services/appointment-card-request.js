@@ -1758,11 +1758,21 @@ async function loadSecureCardPageData(token) {
     // monotonic-down, so a fee raised between render and selection can
     // never be stamped/invoiced above the disclosure. NULL clears when the
     // page shows no unwaived setup.
-    const displayedSetupFee = planContext?.setupFee && planContext.setupFee.waivedWithPrepay === false
-      && Number(planContext.setupFee.amount) > 0
-      ? Number(planContext.setupFee.amount) : null;
+    // A recurring plan page that shows NO unwaived setup (fee disabled at
+    // render, or waived) discloses ZERO — a sticky sentinel, exactly like
+    // accepted_amount (codex #3591 r17 P1): re-enabling the fee before the
+    // customer submits must not bill a setup the page never showed. NULL
+    // only when no plan was displayed at all.
+    const displayedSetupFee = planContext?.mode === 'recurring'
+      ? (planContext.setupFee && planContext.setupFee.waivedWithPrepay === false && Number(planContext.setupFee.amount) > 0
+        ? Number(planContext.setupFee.amount)
+        : 0)
+      : null;
     disclosure.accepted_setup_fee = displayedSetupFee != null
-      ? db.raw('LEAST(COALESCE(accepted_setup_fee, ?::numeric), ?::numeric)', [displayedSetupFee, displayedSetupFee])
+      ? db.raw(
+        'CASE WHEN accepted_setup_fee = 0 THEN 0 ELSE LEAST(COALESCE(accepted_setup_fee, ?::numeric), ?::numeric) END',
+        [displayedSetupFee, displayedSetupFee],
+      )
       : null;
     if (displayedPrice != null) {
       disclosure.accepted_amount = db.raw(

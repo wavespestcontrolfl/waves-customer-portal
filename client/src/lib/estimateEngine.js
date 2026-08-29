@@ -3640,7 +3640,13 @@ export function calculateEstimate(inputs) {
   // its post-WaveGuard annual leaves the manual base (codex #3591 r5 P1;
   // the server regression test asserts the manual amount stays zero on a
   // rodent-only estimate).
-  const rodentPostWgAnnual = R.rodBait
+  // Subtract the rodent share ONLY when it is inside
+  // waveGuardDiscountableAnnual — a rodent line the live flags marked
+  // discountable:false (exclude_from_pct_discount) was never added there,
+  // and subtracting it again would shrink the OTHER services' manual base
+  // (codex #3591 r17 P1).
+  const rodentLineForManualBase = lineItems.find((li) => li.service === 'rodent_bait');
+  const rodentPostWgAnnual = R.rodBait && rodentLineForManualBase && rodentLineForManualBase.discountable !== false
     ? Math.round(R.rodBait.annual * (1 - wd) * 100) / 100
     : 0;
   const manualDiscountableRecurringAnnual = Math.max(0, waveGuardDiscountableAnnual - da - rodentPostWgAnnual);
