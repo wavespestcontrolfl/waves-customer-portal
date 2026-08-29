@@ -20,6 +20,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   deleteFile: jest.fn(),
   closePr: jest.fn(),
   deleteRef: jest.fn(),
+  retireBranch: jest.fn().mockResolvedValue(true),
 }));
 // publishAstro's topic-targeting gate (owner rulings 2026-08-27) loads the
 // live blog corpus for NEW posts and fails closed without one — stub a
@@ -3247,6 +3248,21 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
         expect(r2).toMatchObject({ count: 1, retired: 1 });
         expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
       } finally { spy.mockRestore(); }
+    });
+
+    test('a closed PR whose branch is not verified deleted keeps the debt; settled once retireBranch confirms it (hook r28 P1)', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr.mockResolvedValue({ number: 43, state: 'closed', merged: false, head: { ref: 'content/blog-ant-trails' } });
+      gh.retireBranch.mockResolvedValueOnce(false);
+      const r1 = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(r1).toMatchObject({ count: 1, retired: 0 });
+      expect(gh.retireBranch).toHaveBeenCalledWith('content/blog-ant-trails');
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(false);
+      gh.retireBranch.mockResolvedValueOnce(true);
+      const r2 = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(r2).toMatchObject({ count: 1, retired: 1 });
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
     });
 
     test('a close GitHub rejects leaves the debt in place (nothing settled, retried next tick)', async () => {

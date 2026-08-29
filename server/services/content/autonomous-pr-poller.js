@@ -373,6 +373,13 @@ async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
       }
       logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} for topic-blocked run ${run.id}`);
     }
+    // Closed is not retired until the head branch is VERIFIED gone (a
+    // surviving branch lets the closed PR be reopened and merged); the run
+    // stays in the reconcile set until it is.
+    if (!current.merged && !(await gh.retireBranch(current.head?.ref))) {
+      logger.warn(`[autonomous-pr-poller] PR #${prNumber} for topic-blocked run ${run.id} is closed but its branch ${current.head?.ref} still exists (reconciled next tick)`);
+      return { retired: false, reason: 'branch_not_deleted' };
+    }
     if (!await stampTerminal(prNumber, current.merged ? 'merged' : 'closed', run)) return { retired: false, reason: 'terminal_stamp_failed' };
     return { retired: true };
   } catch (err) {
@@ -462,6 +469,9 @@ async function reconcileTopicBlockedPrs(gh) {
     // Closed (by the retire, or by a human): terminal bookkeeping — idempotent,
     // so a lost stamp converges; then the row leaves the reconcile set.
     try {
+      // A PR closed by a human (or a retire whose delete was lost) may still
+      // have its branch: verify it is gone before the run leaves the set.
+      if (!(await gh.retireBranch(pr.head?.ref))) { logger.warn(`[autonomous-pr-poller] closed topic-blocked PR #${prNumber} still has branch ${pr.head?.ref} (retried next tick)`); continue; }
       if (!await stampTerminal(prNumber, 'closed', run)) continue;
       await db('autonomous_runs')
         .where('id', run.id)

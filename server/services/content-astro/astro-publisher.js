@@ -942,6 +942,14 @@ async function retireTopicBlockedPostPr(post) {
       await settle();
       return { retired: false, merged: true };
     }
+    // Closed is not retired until its head branch is VERIFIED gone (a
+    // surviving branch lets the closed PR be reopened and merged); a
+    // failed delete keeps the debt for the next tick — also for PRs that
+    // were already closed when first seen.
+    if (!(await gh.retireBranch(pr.head?.ref))) {
+      logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is closed but its branch ${pr.head?.ref} still exists (retried next pages-poll tick)`);
+      return { retired: false, reason: 'branch_not_deleted' };
+    }
     if (!await terminal('closed')) return { retired: false, reason: 'terminal_stamp_failed' };
     await settle();
     logger.info(`[astro-publisher] retired topic-blocked PR #${prNumber} for post ${post.id}`);

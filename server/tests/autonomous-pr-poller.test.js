@@ -24,6 +24,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   getFile: jest.fn(),
   closePr: jest.fn().mockResolvedValue({}),
   deleteRef: jest.fn().mockResolvedValue({}),
+  retireBranch: jest.fn().mockResolvedValue(true),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -778,6 +779,26 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r3).toMatchObject({ count: 0 });
     expect(gh.getPr).not.toHaveBeenCalled();
+  });
+
+  test('reconcileTopicBlockedPrs: a closed PR whose branch is not verified deleted stays in the set (no terminal stamp, no marker) (hook r28 P1)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    let updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false, head: { ref: 'content/blog-old' } });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(gh.retireBranch).toHaveBeenCalledWith('content/blog-old');
+    expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
+    // Open PR: the retire closes it, but still is not retired until the branch is verified gone.
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/blog-old' } });
+    gh.retireBranch.mockResolvedValueOnce(false);
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(r).toMatchObject({ retired: 0 });
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
   });
 
   test('reconcileTopicBlockedPrs: a failed terminal stamp ({ error }, never a throw) keeps the run in the set — no retired marker, no supersede (hook r25 P1)', async () => {
