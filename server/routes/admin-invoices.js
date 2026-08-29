@@ -1981,6 +1981,15 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
           payment_reference: trimmedReference || null,
           payment_recorded_by: recordedBy,
           payment_recorded_at: trx.fn.now(),
+          // The pay-page PI was retired above (or never existed) and this
+          // invoice is settling OFF-gateway: drop the stamp and the stale
+          // 'stripe' processor tag (codex #3610 r3 P1) — otherwise the tax
+          // export's gap-revenue synthesis (admin-tax: paid + processor=stripe
+          // + PI with no payments row) double-counts it beside the manual
+          // ledger row inserted below. The ID was needed only for the locked
+          // seam comparison, which already ran.
+          stripe_payment_intent_id: null,
+          processor: null,
           notes: nextNotes,
           updated_at: trx.fn.now(),
         })

@@ -518,8 +518,41 @@ const PAY_ROW_GRID_NARROW = {
   rowGap: SP.xs,
 };
 
-function OtherWaysToPay({ options, invoiceNumber, amountDue }) {
+function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onInvoiceChanged }) {
   const [open, setOpen] = useState(false);
+  const [staleNotice, setStaleNotice] = useState('');
+  // Version-fenced open (codex #3610 r3 P1): a delivered invoice can be
+  // edited by an admin after this page loaded, and no PaymentIntent fence
+  // exists while Stripe is unavailable/pending. Open the tab synchronously
+  // (popup blockers), re-fetch the invoice, and only then point the tab at
+  // the pre-filled transfer — if the version or amount moved, close it and
+  // refresh the page data instead.
+  const openTransfer = async (row) => {
+    setStaleNotice('');
+    const tab = typeof window !== 'undefined' ? window.open('', '_blank', 'noopener,noreferrer') : null;
+    try {
+      const res = await fetch(`${API_BASE}/pay/${token}`);
+      const fresh = await res.json().catch(() => null);
+      const freshVersion = fresh?.manualPayOptions?.version ?? fresh?.invoice?.version ?? null;
+      const freshAmount = fresh?.manualPayOptions?.amountDue ?? fresh?.invoice?.amountDue;
+      const unchanged = res.ok
+        && !!fresh?.manualPayOptions
+        && (version == null || freshVersion === version)
+        && Number(freshAmount) === Number(amountDue);
+      if (!unchanged) {
+        if (tab) tab.close();
+        setStaleNotice('This invoice was just updated — the amounts above have been refreshed. Please try again.');
+        if (fresh?.invoice) onInvoiceChanged?.(fresh);
+        return;
+      }
+      const url = row.buildHref(Number(freshAmount));
+      if (tab) tab.location.href = url;
+      else if (typeof window !== 'undefined') window.location.assign(url);
+    } catch {
+      if (tab) tab.close();
+      setStaleNotice('Could not confirm the invoice amount — check your connection and try again.');
+    }
+  };
   const [narrow, setNarrow] = useState(() => (typeof window !== 'undefined' ? window.innerWidth < 560 : false));
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -549,13 +582,15 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue }) {
   if (options.venmo?.handle) {
     rows.push({
       key: 'venmo', name: 'Venmo', value: options.venmo.handle, copyValue: options.venmo.handle,
-      hint: 'Send to', href: venmoPayHref(options.venmo.handle, amountDue, memo), openLabel: 'Open Venmo',
+      hint: 'Send to', openLabel: 'Open Venmo',
+      buildHref: (amt) => venmoPayHref(options.venmo.handle, amt, memo),
     });
   }
   if (options.paypal?.handle) {
     rows.push({
       key: 'paypal', name: 'PayPal', value: `paypal.me/${options.paypal.handle}`, copyValue: `https://paypal.me/${options.paypal.handle}`,
-      hint: 'Send to', href: paypalMeHref(options.paypal.handle, amountDue), openLabel: 'Open PayPal',
+      hint: 'Send to', openLabel: 'Open PayPal',
+      buildHref: (amt) => paypalMeHref(options.paypal.handle, amt),
     });
   }
   const names = rows.map((r) => r.name);
@@ -647,7 +682,11 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue }) {
                   </div>
                 </div>
               </div>
-              {row.openLabel ? (
+              {row.buildHref ? (
+                <button type="button" data-glass-accent="" style={goldChipButton} onClick={() => openTransfer(row)}>
+                  {row.openLabel}
+                </button>
+              ) : row.href ? (
                 <a href={row.href} target="_blank" rel="noopener noreferrer" data-glass-accent="" style={goldChipButton}>
                   {row.openLabel}
                 </a>
@@ -657,6 +696,9 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue }) {
               <CopyValueButton value={row.copyValue} label={`${row.name} address`} />
             </div>
           ))}
+          {staleNotice && (
+            <p role="status" style={{ margin: `0 0 ${SP.sm}px`, fontSize: FS.caption, color: DOC.danger, lineHeight: LH.body }}>{staleNotice}</p>
+          )}
           <p style={{ margin: 0, paddingTop: SP.sm, borderTop: '1px solid rgba(4,57,94,0.12)', fontSize: FS.caption, color: DOC.muted, lineHeight: LH.body }}>
             Put invoice <span style={{ color: DOC.ink, fontWeight: FW.semibold }}>{invoiceNumber}</span> in the memo.
             We mark the invoice paid once the money reaches our account — until then it stays open here.
@@ -2888,11 +2930,17 @@ export default function PayPageV2() {
                 covers the setup verdict). Amount: /setup's post-credit
                 anchor amount once it answers, else the GET's projected
                 post-credit amount — never the raw pre-credit amountDue. */}
-            {!stripeSetup?.combined && (
+            {/* creditPending: account credit will apply at /setup, so until
+                /setup answers (post-credit baseAmount) no transfer is offered
+                at all — a projection is not a reservation (codex r3 P1). */}
+            {!stripeSetup?.combined && !(data.manualPayOptions?.creditPending && !stripeSetup) && (
               <OtherWaysToPay
                 options={data.manualPayOptions}
                 invoiceNumber={invoice.invoiceNumber}
                 amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
+                token={token}
+                version={data.manualPayOptions?.version ?? invoice.version ?? null}
+                onInvoiceChanged={(fresh) => setData(fresh)}
               />
             )}
             </div>

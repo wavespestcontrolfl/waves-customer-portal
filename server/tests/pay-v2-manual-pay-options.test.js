@@ -143,6 +143,7 @@ describe('GET /pay/:token manualPayOptions', () => {
       venmo: { handle: '@WavesPest' },
       paypal: { handle: 'WavesPest' },
       amountDue: 150,
+      version: null,
     });
   });
 
@@ -164,7 +165,7 @@ describe('GET /pay/:token manualPayOptions', () => {
       if (body.previousBalance) {
         expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
       } else {
-        expect(body.manualPayOptions).toEqual({ venmo: { handle: '@WavesPest' }, amountDue: 150 });
+        expect(body.manualPayOptions).toEqual({ venmo: { handle: '@WavesPest' }, amountDue: 150, version: null });
       }
     } finally {
       isEnabled.mockImplementation(() => false);
@@ -196,7 +197,10 @@ describe('GET /pay/:token manualPayOptions', () => {
       const partial = await getPayPage(invoiceData(), {
         customerRow: { billing_mode: null, monthly_rate: null, account_credits: 20, auto_apply_account_credit: true },
       });
-      expect(partial.body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' }, amountDue: 130 });
+      // Gross amount + creditPending: the client withholds the transfer
+      // links until /setup actually applies the credit (a projection is not
+      // a reservation — codex r3 P1).
+      expect(partial.body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' }, amountDue: 150, creditPending: true, version: null });
     } finally {
       gates.autoApplyAccountCredit = false;
     }

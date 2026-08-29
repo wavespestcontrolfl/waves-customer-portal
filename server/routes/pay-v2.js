@@ -385,16 +385,22 @@ router.get('/:token', async (req, res, next) => {
       ? manualPayOptionsFromEnv()
       : null;
     if (manualPayOptions) {
-      // Authoritative transfer amount (codex r2 P1): /setup applies partial
-      // account credit asynchronously and the client would otherwise
-      // pre-fill the Venmo/PayPal links with the PRE-credit amountDue during
-      // that window. Serialize the projected post-credit amount from the
-      // same customers row /setup reads.
+      // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
+      // Partial account credit is applied only when /setup mints (codex r2
+      // P1 → r3 P1: a projection is not a reservation — if /setup never runs,
+      // the gross is what's owed and what record-payment books). So when
+      // credit WILL apply at /setup, flag it: the client withholds the
+      // transfer links until /setup answers with the post-credit amount, and
+      // never pre-fills either the gross or a projected figure meanwhile.
       const projectedCredit = await invoiceProjectedCreditApplied(data).catch(() => 0);
       manualPayOptions = {
         ...manualPayOptions,
-        amountDue: Math.max(0, Math.round((invoiceAmountDue(data) - projectedCredit) * 100) / 100),
+        amountDue: invoiceAmountDue(data),
+        ...(projectedCredit > 0 ? { creditPending: true } : {}),
       };
+      // The same row the amount came from, so the client can fence a
+      // pre-filled transfer against a later admin edit (codex r3 P1).
+      manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
     }
 
     const getCaptureNeeded = getSaveRequired
