@@ -515,3 +515,39 @@ describe('attachFloodZoneToCachedLookup (#1698 backfill)', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe('sweepStalePendingAttempts', () => {
+  const { sweepStalePendingAttempts } = require('../services/property-lookup/lookup-cache');
+
+  test('stamps only stale pending rows as interrupted, preserving last_attempt_at', async () => {
+    const calls = { wheres: [], updates: [] };
+    mockDbHandler = (table) => {
+      expect(table).toBe('property_lookups');
+      return {
+        where(...args) { calls.wheres.push(args); return this; },
+        update: async (payload) => { calls.updates.push(payload); return 2; },
+      };
+    };
+
+    const stamped = await sweepStalePendingAttempts();
+
+    expect(stamped).toBe(2);
+    // Targets exactly: status 'pending' AND older than the in-flight ceiling.
+    expect(calls.wheres[0]).toEqual(['last_attempt_status', 'pending']);
+    expect(calls.wheres[1][0]).toBe('last_attempt_at');
+    expect(calls.wheres[1][1]).toBe('<');
+    expect(calls.wheres[1][2].__raw).toContain('interval');
+    // Terminal stamp only — last_attempt_at keeps recording when the dead
+    // attempt started, and attempt_count is not incremented (no new attempt).
+    expect(calls.updates).toHaveLength(1);
+    expect(calls.updates[0].last_attempt_status).toBe('interrupted');
+    expect(calls.updates[0].last_attempt_reason).toContain('process exited');
+    expect(calls.updates[0].last_attempt_at).toBeUndefined();
+    expect(calls.updates[0].attempt_count).toBeUndefined();
+  });
+
+  test('propagates db failure to the caller (the cron logs it)', async () => {
+    mockDbHandler = () => { throw new Error('db down'); };
+    await expect(sweepStalePendingAttempts()).rejects.toThrow('db down');
+  });
+});

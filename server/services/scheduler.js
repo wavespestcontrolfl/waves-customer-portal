@@ -1908,6 +1908,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Terminal-stamp property-lookup attempts orphaned by a
+  // process exit. A deploy landing mid-lookup kills the pipeline after the
+  // 'pending' attempt stamp but before any terminal stamp (the in-process
+  // throw-wrapper can't fire across a process boundary), leaving the row
+  // 'pending' forever — indistinguishable from a running lookup. The sweep
+  // converts anything pending past the in-flight ceiling to 'interrupted';
+  // the next lookup for that address re-stamps the row like any failure.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { sweepStalePendingAttempts } = require('./property-lookup/lookup-cache');
+      const stamped = await sweepStalePendingAttempts();
+      if (stamped > 0) {
+        logger.info(`[lookup-pending-sweep] stamped ${stamped} orphaned pending attempt(s) as interrupted`);
+      }
+    } catch (err) {
+      logger.error(`Lookup pending sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 4:20AM ET — Prune the inbound-webhook idempotency ledger. Twilio
   // never redelivers a webhook days later, so a 7-day horizon is ample; this
   // keeps inbound_webhook_events from growing unbounded.
