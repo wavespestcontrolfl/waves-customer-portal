@@ -132,7 +132,15 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
 // the partial-Charlotte / unknown-county handling by omission.
 function validCoverage(coverage) {
   if (coverage === 'all') return true;
-  return !!coverage && typeof coverage === 'object' && Array.isArray(coverage.counties) && coverage.counties.length > 0;
+  if (!coverage || typeof coverage !== 'object') return false;
+  const countyList = (list) => Array.isArray(list) && list.every((c) => typeof c === 'string' && c.trim() !== '');
+  if (!countyList(coverage.counties) || coverage.counties.length === 0) return false;
+  // `partial` is the fail-closed list: when present it MUST be an array of
+  // county names. A malformed value ("Charlotte" as a string) would read as
+  // an empty list in coversCounty and apply the whole-county policy to a
+  // partially covered county (codex gh-r35).
+  if (coverage.partial != null && !countyList(coverage.partial)) return false;
+  return true;
 }
 
 function coversCounty(policy, county) {

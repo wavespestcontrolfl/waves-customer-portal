@@ -742,9 +742,14 @@ function decideWeeklyEmail({
       // the same one the decision balanced from (codex gh-r34).
       const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
       const priorPlanSkipped = priorPlanIrrig != null && decisionInputs.priorWeekRainOverride === true;
+      // A multi-run plan skips ONE run after rain; the other run's depth is
+      // still counted (codex gh-r35).
+      const priorPlanPartlySkipped = priorPlanSkipped && priorPlanIrrig > 0;
       const priorPlanTotal = priorPlanIrrig != null ? roundHundredth(rainDisplayNum + priorPlanIrrig) : null;
       const lastWeekLine = scheduleUnconfirmed
         ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        : priorPlanPartlySkipped
+        ? `Last week brought ${rain}" of rain near your home — enough that last week's watering plan said to skip one run, so only the other run (${formatInches(priorPlanIrrig)}" of irrigation) is counted, about ${formatInches(priorPlanTotal)}" of water in all; your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanSkipped
         ? `Last week brought ${rain}" of rain near your home — enough that last week's watering plan said to skip the run, so no irrigation is counted; your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanIrrig != null
@@ -778,6 +783,7 @@ function decideWeeklyEmail({
           // so instead of quoting the former home's setting and a total that
           // mixes it with the new home's rain (codex gh-r23).
           irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move'
+            : priorPlanPartlySkipped ? `${formatInches(priorPlanIrrig)}" (last week's plan — one run skipped after rain)`
             : priorPlanSkipped ? '0" (last week\'s plan — skipped after rain)'
             : (priorPlanIrrig != null ? `${formatInches(priorPlanIrrig)}" (last week's plan)` : `${irrigationFmt}"`),
           total_inches: scheduleUnconfirmed ? `${rain}" (rain only)`
@@ -1379,10 +1385,13 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // the queue transition) collides as EMAIL_SEND_IN_PROGRESS for a
       // moment; this weekly send must not be lost to that window — retry a
       // few times before treating it as in flight (codex gh-r21).
-      let result;
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          result = await EmailTemplateLibrary.sendTemplate({
+      // `decision` / `snapshotArgs` are read at CALL time: the window-closed
+      // re-dispatch below swaps in the pre-plan decision with no snapshot
+      // (⇒ no onQueued renewal, no plan category).
+      const dispatch = async () => {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            return await EmailTemplateLibrary.sendTemplate({
         templateKey: decision.templateKey,
         to: String(customer.email).trim(),
         payload: decision.payload,
@@ -1414,12 +1423,36 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             return claimRenewal === true;
           }
           : null,
-          });
-          break;
-        } catch (err) {
-          if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
-          await new Promise((resolve) => setTimeout(resolve, inProgressRetryMs));
+            });
+          } catch (err) {
+            if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
+            await new Promise((resolve) => setTimeout(resolve, inProgressRetryMs));
+          }
         }
+      };
+      let result = await dispatch();
+
+      if (result.aborted && windowClosedAtQueue) {
+        // The cutoff passed while this send waited on the provider: the
+        // plan is withheld and its unsent snapshot discarded (this worker's
+        // claim). The week's check-in still goes out NOW on the safe
+        // pre-plan template — the Monday cron is the only scheduled run, so
+        // a "later run" would never come for a slow sweep's tail (codex
+        // gh-r35). The aborted row is a pre-provider failure the library
+        // retries under the same idempotency key.
+        summary.plan.window_closed += 1;
+        logger.warn(`[irrigation-weekly-email] plan window closed before dispatch for ${customer.id}/${weekEnding} — plan withheld, sending the pre-plan email`);
+        await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+        decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+        snapshotArgs = null;
+        windowClosedAtQueue = false;
+        if (!decision.shouldSend) {
+          summary.attempted -= 1; // the aborted attempt never reached the provider
+          if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+          else summary.skipped.unknown += 1;
+          continue;
+        }
+        result = await dispatch();
       }
 
       // Idempotency-dedupe and suppression short-circuit inside the library
@@ -1435,16 +1468,6 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // library aborted before dispatch — nothing to stamp, and the discard
       // is the new owner's to make (codex gh-r20).
       if (result.aborted) {
-        if (windowClosedAtQueue) {
-          // The cutoff passed while this send waited on the provider: the
-          // plan is withheld and its unsent snapshot discarded (this
-          // worker's claim), so a later run sends the pre-plan email
-          // instead of an out-of-window instruction.
-          summary.plan.window_closed += 1;
-          logger.warn(`[irrigation-weekly-email] plan window closed before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-          continue;
-        }
         if (claimRenewal === null) {
           // Unreadable renewal even after retries: NOT evidence of another
           // owner. Fail closed on the send, but say so — this customer's

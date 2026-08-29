@@ -185,11 +185,13 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/for \(const customer of candidates\) \{[\s\S]*?const planAsOf = tick\(\);\s*const isMondayET = planWindowOpen\(planAsOf\);\s*const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(sweep).not.toMatch(/const planAsOf = now;/);
     expect(sweep).toMatch(/const tick = clock \|\| \(now \? \(\) => now : \(\) => new Date\(\)\);/);
-    expect(sweep).toMatch(/if \(windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
+    // gh-r35: a plan that misses the cutoff at the queue transition is withheld AND the pre-plan
+    // check-in still goes out in THIS run (the Monday cron is the only scheduled run).
+    expect(sweep).toMatch(/let result = await dispatch\(\);\s*if \(result\.aborted && windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*decision = buildWeeklyEmailDecision\(\{ \.\.\.decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false \}\);\s*snapshotArgs = null;\s*windowClosedAtQueue = false;[\s\S]*?result = await dispatch\(\);\s*\}/);
     expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
-    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*if \(windowClosedAtQueue\) \{[\s\S]*?continue;\s*\}\s*if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
     // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
     expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);
@@ -286,6 +288,19 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(skipped.payload.summary_line).toMatch(/said to skip the run, so no irrigation is counted/);
     expect(skipped.payload.irrigation_inches).toBe('0" (last week\'s plan — skipped after rain)');
     expect(skipped.payload.total_inches).toBe('0.6"');
+    expect(skipped.decisionInputs.priorWeekSkippedRunInches).toBe(0.75); // unknown event count ⇒ nothing credited
+    // gh-r35: the rule skips ONE run — a two-run plan (2 × 0.5") after 0.6" of rain keeps the other run's 0.5".
+    const twoRun = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekEvents: 2, priorWeekPrescribedInches: 1, rainfallInches7d: 0.6 });
+    expect(twoRun.decisionInputs.priorWeekRainOverride).toBe(true);
+    expect(twoRun.decisionInputs.priorWeekSkippedRunInches).toBe(0.5);
+    expect(twoRun.decisionInputs.priorWeekCreditedInches).toBe(0.5);
+    expect(twoRun.decisionInputs.appliedInches).toBe(1.1);
+    expect(twoRun.payload.summary_line).toMatch(/said to skip one run, so only the other run \(0\.5" of irrigation\) is counted, about 1\.1" of water in all/);
+    expect(twoRun.payload.irrigation_inches).toBe('0.5" (last week\'s plan — one run skipped after rain)');
+    expect(twoRun.payload.total_inches).toBe('1.1"');
+    const oneRun = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekEvents: 1, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.6 });
+    expect(oneRun.decisionInputs.priorWeekCreditedInches).toBe(0);
+    expect(oneRun.payload.irrigation_inches).toBe('0" (last week\'s plan — skipped after rain)');
     const under = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.4 });
     expect(under.decisionInputs.priorWeekRainOverride).toBe(false);
     expect(under.decisionInputs.appliedInches).toBe(1.15);

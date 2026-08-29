@@ -133,14 +133,23 @@ function decideWeekPlan({
   const lastWeekRain = Number.isFinite(Number(lastWeekRainInches)) ? Number(lastWeekRainInches) : null;
   // Every unconditional run plan carries the one-soaking-skips-one-run rule
   // (≥ ½" before the run ⇒ skip it). With that much observed rain the
-  // customer was TOLD to skip, and whether the run happened cannot be
-  // established from weekly totals — so the plan's irrigation is credited
-  // as 0 (unknown = conservative, never a manufactured carryover), exactly
-  // as the cool-season cadence already reads the same rain (codex gh-r34).
+  // customer was TOLD to skip ONE run, and whether it happened cannot be
+  // established from weekly totals — so that run's depth is not credited
+  // (unknown = conservative, never a manufactured carryover), exactly as
+  // the cool-season cadence already reads the same rain (codex gh-r34).
+  // The rule skips one RUN, not the week: a two-run plan keeps its other
+  // run's depth (prescribed ÷ events); an unknown event count credits
+  // nothing (codex gh-r35).
   const priorWeekRainOverride = priorWeekPrescribedInches != null && Number(priorWeekPrescribedInches) > 0 && rainKnown
     && lastWeekRain != null && lastWeekRain >= WEEK_PLAN_CONSTANTS.RAIN_SKIP_INCHES; // a hold prescribed no run to skip
+  const priorEvents = Number.isInteger(Number(priorWeekEvents)) && Number(priorWeekEvents) > 0 ? Number(priorWeekEvents) : null;
+  const priorWeekSkippedRunInches = priorWeekRainOverride
+    ? (priorEvents ? Math.round((Number(priorWeekPrescribedInches) / priorEvents) * 100) / 100 : Number(priorWeekPrescribedInches))
+    : 0;
   const priorWeekCreditedInches = priorWeekPrescribedInches != null
-    ? (priorWeekRainOverride ? 0 : Number(priorWeekPrescribedInches))
+    ? (priorWeekRainOverride
+      ? Math.max(0, Math.round((Number(priorWeekPrescribedInches) - priorWeekSkippedRunInches) * 100) / 100)
+      : Number(priorWeekPrescribedInches))
     : null;
   const lastWeekAppliedInches = priorWeekCreditedInches != null
     ? Math.round((priorWeekCreditedInches + (rainKnown && lastWeekRain != null ? lastWeekRain : 0)) * 100) / 100
@@ -173,6 +182,7 @@ function decideWeekPlan({
     priorWeekPrescribedInches,
     priorWeekCreditedInches,
     priorWeekRainOverride,
+    priorWeekSkippedRunInches,
     rainOnlyCarryover: rainOnlyCarryover === true,
     lastWeekRainInches,
     rainKnown,

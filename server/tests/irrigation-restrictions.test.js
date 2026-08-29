@@ -82,6 +82,18 @@ describe('jurisdiction', () => {
     const listed = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: ['Manatee'], partial: ['Charlotte'] }, hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
     expect(currentRestrictionPolicy(IN_FORCE, { env: listed, county: 'Charlotte' })).toBeNull();
     expect(currentRestrictionPolicy(IN_FORCE, { env: listed, county: 'Manatee' })).toMatchObject({ maxDaysPerWeek: 2 });
+    // gh-r35: a malformed `partial` (a bare string, a number) must not read as "no partial counties" —
+    // the whole policy is invalid, for EVERY county, never a whole-county rule applied to Charlotte.
+    for (const partial of ['Charlotte', 7, { Charlotte: true }, ['Charlotte', 3]]) {
+      const bad = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: ['Manatee', 'Charlotte'], partial }, hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
+      expect(currentRestrictionPolicy(IN_FORCE, { env: bad, county: 'Charlotte' })).toBeNull();
+      expect(currentRestrictionPolicy(IN_FORCE, { env: bad, county: 'Manatee' })).toBeNull();
+    }
+    const badCounties = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: 'Manatee' }, hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
+    expect(currentRestrictionPolicy(IN_FORCE, { env: badCounties, county: 'Manatee' })).toBeNull();
+    // An absent / null partial list is fine (nothing partially covered).
+    const noPartial = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: ['Manatee'], partial: null }, hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
+    expect(currentRestrictionPolicy(IN_FORCE, { env: noPartial, county: 'Manatee' })).toMatchObject({ maxDaysPerWeek: 2 });
   });
 
   test('resolveRestrictionCounty: turf-profile county first, then whole-county service cities, else null', () => {
