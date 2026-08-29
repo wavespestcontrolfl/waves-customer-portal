@@ -804,6 +804,19 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(await poller._internals.queueRowStillParkedLocked(makeRun({ opportunity_id: null }), fakeTrx({ row: null }))).toBe(true);
   });
 
+  test('reconcileTopicBlockedPrs: a closed PR reopened and merged during branch retirement is UN-PARKED, not stamped closed (codex r32 P1)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    const updates = setupDb({ pending: [parked] });
+    gh.getPr
+      .mockResolvedValueOnce({ number: 42, state: 'closed', merged: false, head: { ref: 'content/blog-old' } })
+      .mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z', head: { ref: 'content/blog-old' } });
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r).toMatchObject({ count: 1, retired: 0, unparked: 1 });
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'astro_pr_pending_merge')).toBeDefined();
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeUndefined();
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.poll_pending_reason === 'topic_block_pr_retired')).toBeUndefined();
+  });
+
   test('reconcileTopicBlockedPrs: a closed PR whose branch is not verified deleted stays in the set (no terminal stamp, no marker) (hook r28 P1)', async () => {
     const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
     let updates = setupDb({ pending: [parked] });

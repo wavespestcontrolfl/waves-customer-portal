@@ -925,6 +925,21 @@ async function retireTopicBlockedPostPr(post) {
         return { retired: false, reason: 'still_open' };
       }
     }
+    if (!(pr.merged || pr.merged_at)) {
+      // Closed is not retired until its head branch is VERIFIED gone (a
+      // surviving branch lets the closed PR be reopened and merged); a
+      // failed delete keeps the debt for the next tick — also for PRs that
+      // were already closed when first seen.
+      if (!(await gh.retireBranch(pr.head?.ref))) {
+        logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is closed but its branch ${pr.head?.ref} still exists (retried next pages-poll tick)`);
+        return { retired: false, reason: 'branch_not_deleted' };
+      }
+      // Re-read AFTER the retirement: a PR reopened and merged between the
+      // read above and the delete must take the merged path, not be stamped
+      // closed with its debt cleared.
+      const after = await gh.getPr(prNumber);
+      if (after) pr = after;
+    }
     if (pr.merged || pr.merged_at) {
       logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} was MERGED before it could be retired — the row follows the merge`);
       // `post` is a snapshot: an operator may have republished the fixed row
@@ -942,14 +957,6 @@ async function retireTopicBlockedPostPr(post) {
       if (!await terminal('merged')) return { retired: false, merged: true, reason: 'terminal_stamp_failed' };
       await settle();
       return { retired: false, merged: true };
-    }
-    // Closed is not retired until its head branch is VERIFIED gone (a
-    // surviving branch lets the closed PR be reopened and merged); a
-    // failed delete keeps the debt for the next tick — also for PRs that
-    // were already closed when first seen.
-    if (!(await gh.retireBranch(pr.head?.ref))) {
-      logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is closed but its branch ${pr.head?.ref} still exists (retried next pages-poll tick)`);
-      return { retired: false, reason: 'branch_not_deleted' };
     }
     if (!await terminal('closed')) return { retired: false, reason: 'terminal_stamp_failed' };
     await settle();

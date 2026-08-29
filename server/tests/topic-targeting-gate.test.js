@@ -992,6 +992,14 @@ describe('PR codex r22 (b4db7a542)', () => {
     }
     expect(gate.classifyGeoScope('palm trees on a bradenton beach lot').out_of_area).toEqual([]);
   });
+  test('turf-cultivar shorthand in lawn context is the grass, not the city / country (r32)', () => {
+    for (const t of ['doveweed in st augustine', 'torpedograss in st augustine lawns', 'my palmetto lawn is bermuda', 'chinch bugs in St. Augustine', 'zoysia vs bermuda for a sarasota yard', 'fertilizing bahia in venice fl']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    for (const t of ['pest control in St. Augustine', 'Bermuda pest control', 'bahamas or bermuda termite bond', 'St. Augustine termite treatment']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

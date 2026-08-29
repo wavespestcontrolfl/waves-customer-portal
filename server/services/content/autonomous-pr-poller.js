@@ -436,29 +436,9 @@ async function reconcileTopicBlockedPrs(gh) {
     try { pr = await gh.getPr(prNumber); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile getPr #${prNumber} failed: ${err.message}`); continue; }
     if (!pr) continue;
     if (pr.merged || pr.merged_at) {
-      // A human merged it between the durable park and the retire: hand the
-      // run back to the pending lifecycle (live-deploy verification,
-      // IndexNow, link planning, social) instead of leaving it parked.
-      if (await unparkTopicBlockedRun(run, prNumber)) { unparked++; continue; }
-      // The un-park needs the opportunity still parked on THIS run. When the
-      // operator has since followed the park note (requeue / dismiss — a
-      // newer run owns the opportunity, or the queue row left the parked
-      // state), restoring that ownership would resurrect a decision a human
-      // overrode (supersedeRun's rule): the merged PR gets its terminal
-      // bookkeeping and the run leaves this set as superseded. A transient
-      // CAS loss (row still parked on this run) retries next tick.
-      let moved = null;
-      try { moved = await topicBlockedOpportunityMovedOn(run); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked run ${run.id}: could not verify whether its opportunity moved on: ${err.message} (retried next tick)`); continue; }
-      if (moved) {
-        // Terminal bookkeeping FIRST; a failed stamp keeps the run in this
-        // set (the supersede would otherwise hide it for good).
-        if (!await stampTerminal(prNumber, 'merged', run)) continue;
-        const res = await supersedeRun(run, moved.row, {
-          fromSkipReason: TOPIC_BLOCKED_SKIP_REASON,
-          note: `PR #${prNumber} was merged by a human after the topic-targeting park, but the opportunity has moved on (${moved.reason}) — run retired as superseded by autonomous-pr-poller; the newer lifecycle owns the opportunity.`,
-        });
-        if (res.annotated) superseded++;
-      }
+      const o = await settleMergedTopicBlockedRun(run, prNumber);
+      if (o === 'unparked') unparked++;
+      if (o === 'superseded') superseded++;
       continue;
     }
     if (pr.state === 'open') {
@@ -472,6 +452,15 @@ async function reconcileTopicBlockedPrs(gh) {
       // A PR closed by a human (or a retire whose delete was lost) may still
       // have its branch: verify it is gone before the run leaves the set.
       if (!(await gh.retireBranch(pr.head?.ref))) { logger.warn(`[autonomous-pr-poller] closed topic-blocked PR #${prNumber} still has branch ${pr.head?.ref} (retried next tick)`); continue; }
+      // Re-read AFTER the retirement: reopened and merged in the window →
+      // the merged path, never a closed stamp that hides a live post.
+      const after = await gh.getPr(prNumber);
+      if (after && (after.merged || after.merged_at)) {
+        const o = await settleMergedTopicBlockedRun(run, prNumber);
+        if (o === 'unparked') unparked++;
+        if (o === 'superseded') superseded++;
+        continue;
+      }
       if (!await stampTerminal(prNumber, 'closed', run)) continue;
       await db('autonomous_runs')
         .where('id', run.id)
@@ -480,6 +469,31 @@ async function reconcileTopicBlockedPrs(gh) {
     } catch (err) { logger.warn(`[autonomous-pr-poller] terminal bookkeeping for closed topic-blocked PR #${prNumber} failed: ${err.message} (retried next tick)`); }
   }
   return { count: rows.length, retired, unparked, superseded };
+}
+
+// A parked run whose PR a human merged: hand the run back to the pending
+// lifecycle (live-deploy verification, IndexNow, link planning, social)
+// → 'unparked'. The un-park needs the opportunity still parked on THIS run;
+// when the operator has since followed the park note (requeue / dismiss —
+// a newer run owns the opportunity, or the queue row left the parked
+// state), restoring that ownership would resurrect a decision a human
+// overrode (supersedeRun's rule): the merged PR gets its terminal
+// bookkeeping and the run leaves the set as superseded → 'superseded'.
+// A transient CAS loss (row still parked on this run) retries next tick
+// → null. Shared by the merged-on-read and merged-after-retire paths.
+async function settleMergedTopicBlockedRun(run, prNumber) {
+  if (await unparkTopicBlockedRun(run, prNumber)) return 'unparked';
+  let moved = null;
+  try { moved = await topicBlockedOpportunityMovedOn(run); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked run ${run.id}: could not verify whether its opportunity moved on: ${err.message} (retried next tick)`); return null; }
+  if (!moved) return null;
+  // Terminal bookkeeping FIRST; a failed stamp keeps the run in the set (the
+  // supersede would otherwise hide it for good).
+  if (!await stampTerminal(prNumber, 'merged', run)) return null;
+  const res = await supersedeRun(run, moved.row, {
+    fromSkipReason: TOPIC_BLOCKED_SKIP_REASON,
+    note: `PR #${prNumber} was merged by a human after the topic-targeting park, but the opportunity has moved on (${moved.reason}) — run retired as superseded by autonomous-pr-poller; the newer lifecycle owns the opportunity.`,
+  });
+  return res.annotated ? 'superseded' : null;
 }
 
 // → null while the opportunity is still parked on this run, else { reason,

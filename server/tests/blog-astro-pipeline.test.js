@@ -3265,6 +3265,18 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
       expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
     });
 
+    test('a PR reopened and merged between the read and the branch retirement takes the merged path (row follows the merge, never a closed stamp) (codex r32 P1)', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr
+        .mockResolvedValueOnce({ number: 43, state: 'closed', merged: false, head: { ref: 'content/blog-ant-trails' } })
+        .mockResolvedValue({ number: 43, state: 'closed', merged: true, merged_at: '2026-08-28T09:30:00Z', merge_commit_sha: 'm2', head: { ref: 'content/blog-ant-trails' } });
+      const r = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(r).toMatchObject({ count: 1, retired: 0, merged: 1 });
+      expect(stamps.find((p) => p.astro_status === 'merged')).toMatchObject({ status: 'published' });
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+    });
+
     test('a close GitHub rejects leaves the debt in place (nothing settled, retried next tick)', async () => {
       const stamps = [];
       reconcileDb([owedRow()], stamps);
