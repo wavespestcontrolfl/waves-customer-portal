@@ -166,12 +166,12 @@ service_visits                                  ← rev 5 shape
   created_by         converter | seeder | admin:<id> | dispatch
   created_at / updated_at
 
-  UNIQUE INDEX (stop_base_key, stop_seq) WHERE status = 'open'
+  UNIQUE INDEX (stop_base_key, stop_seq)            — across ALL lifecycle states, not partial
   — creation, auto-join and split all run under advisory lock `['visit.stop', stop_base_key]`:
-    auto-join looks up open visits for the base key and joins the lowest seq that satisfies
-    the join rules; a split atomically allocates `max(seq)+1` for the same base and moves the
-    child there in one transaction, so the original visit is preserved and no two writers can
-    mint the same seq. Nullable technician_id is NOT part of the identity (NULLs don't collide
+    auto-join looks up OPEN visits for the base key and joins the lowest seq that satisfies
+    the join rules; creation and split allocate `max(seq)+1` over every historical row for
+    that base, in one transaction, so `route_stop_key` is an immutable identity for the life
+    of the row and a late scheduler or retry can never re-mint a closed/dissolved visit's key. Nullable technician_id is NOT part of the identity (NULLs don't collide
     in a unique index).
 
 visit_effects                                   ← rev 5: ONE durable outbox for every external
@@ -241,11 +241,19 @@ Rules:
   preserved even when one child remains — it becomes a historical one-service visit with the
   same token, message and payment path. Cancel/split of a child is **rejected (409)** while a
   packet for the visit is `accepted`/`processing`.
+- **Membership freeze (rev 5d).** Split and Separate are allowed only while the visit is
+  `open` AND no child has a service record, invoice, report, or payment attempt AND no
+  summary link has been issued AND no packet is accepted/processing. Reminder/tracker effects
+  having been sent do NOT block a split (both resulting visits are preserved, each keeps its
+  own history and the customer simply gets the later messages per visit). After any record /
+  invoice / link / payment, membership is **frozen**: a child can be cancelled or marked
+  `cancelled_by_office` in place (row leaves the group logically, visit preserved) but never
+  moved to another visit — there is no transfer protocol in this lane.
 - **Technician (rev 5, item 6).** The visit owns `technician_id`; child rows inherit it on
   dispatch and on every row-level edit. Changing the tech on ONE row is not allowed silently —
   the admin gets *Split this service into a separate visit and assign another technician*,
-  an explicit action that creates a second visit (and, if the first had already sent
-  effects, leaves both preserved). Auto-dispatch assigns at the visit level.
+  an explicit action subject to the membership freeze above. Auto-dispatch assigns at the
+  visit level.
 - Reschedule (R3, **ruled rev 5**): moving one grouped row moves the group through the #3562
   collective-move choke point (`series_moves` with a `visit_group` scope); "just this
   service" is the explicit split action above. Auto-dispatch / route-tier moves treat the
