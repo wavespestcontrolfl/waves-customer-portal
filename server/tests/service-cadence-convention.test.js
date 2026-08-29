@@ -466,7 +466,7 @@ describe('completion-defaults resolver bridges both spellings (survives the migr
         join() { return q; },
         whereIn(col, vals) { q._rows = q._rows.filter((r) => vals.includes(r[col.replace(/^pst\./, '')] ?? r.service_type)); return q; },
         andWhere() { return q; },
-        where(cond) { if (cond && typeof cond === 'object') q._rows = q._rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+        where(cond, val) { if (typeof cond === 'string') q._rows = q._rows.filter((r) => (r[cond.replace(/^pst\./, '')] ?? r.service_type) === val); else if (cond && typeof cond === 'object') q._rows = q._rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
         orderBy() { return q; },
         async first() { return q._rows[0] || null; },
       };

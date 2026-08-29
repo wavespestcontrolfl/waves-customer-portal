@@ -99,13 +99,23 @@ async function loadActiveTemplate(serviceType, knex) {
   const candidates = [serviceType];
   const counterpart = counterpartServiceName(serviceType);
   if (counterpart) candidates.push(counterpart);
-  const aliased = await knex('protocol_template_service_types as pst')
-    .join('protocol_templates as pt', 'pt.id', 'pst.protocol_template_id')
-    .whereIn('pst.service_type', candidates)
+  // Exact-match query shape is preserved for un-renamed names (single
+  // candidate) so the lookup contract is unchanged outside the rename set.
+  const byLabel = (q, col) => (candidates.length === 1 ? q.where(col, candidates[0]) : q.whereIn(col, candidates));
+  const aliased = await byLabel(
+    knex('protocol_template_service_types as pst')
+      .join('protocol_templates as pt', 'pt.id', 'pst.protocol_template_id'),
+    'pst.service_type',
+  )
     .andWhere('pt.status', 'active')
     .orderBy('pt.activated_at', 'desc')   // newest active wins on duplicate alias
     .first('pt.*');
   if (aliased) return aliased;
+  if (candidates.length === 1) {
+    return knex('protocol_templates')
+      .where({ service_type: serviceType, status: 'active' })
+      .first();
+  }
   return knex('protocol_templates')
     .whereIn('service_type', candidates)
     .andWhere({ status: 'active' })
