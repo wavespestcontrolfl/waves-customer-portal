@@ -74,6 +74,12 @@ describe('composeLeadAddress', () => {
     expect(analyzeLeadAddress('123 State Road #64 Bradenton FL 34208', 'Apt 4')).toEqual({ address: '123 State Road #64 Bradenton FL 34208, Apt 4', unitConflict: false });
     expect(analyzeLeadAddress('500 Hwy #41 Venice FL 34285', 'Unit 2')).toEqual({ address: '500 Hwy #41 Venice FL 34285, Unit 2', unitConflict: false });
     expect(analyzeLeadAddress('100 Main Rd #4 Sarasota FL 34236', 'Apt 5').unitConflict).toBe(true);
+    // TERMINAL route numbers too — the shared parser peels "#64" as a unit; the lead path puts it back.
+    expect(analyzeLeadAddress('123 State Road #64', 'Apt 4')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: false });
+    expect(analyzeLeadAddress('500 Hwy #41, Venice, FL 34285', 'Apt 4')).toEqual({ address: '500 Hwy #41, Apt 4, Venice, FL 34285', unitConflict: false });
+    expect(composeLeadAddress('123 State Road #64', '')).toBe('123 State Road #64');
+    expect(leadAddressCompareKey('123 State Road #64, Apt 4')).toBe(leadAddressCompareKey('123 State Road #64 Apt 4'));
+    expect(analyzeLeadAddress('100 Main Rd #4', 'Apt 5')).toEqual({ address: '100 Main Rd, #4', unitConflict: true });
     // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed into one, never stored as two.
     expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toEqual({ address: '100 Main St, Bldg 2 Apt 4', unitConflict: true });
     // Designator words inside a street name are not a unit.

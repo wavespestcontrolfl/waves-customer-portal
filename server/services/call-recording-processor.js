@@ -2707,6 +2707,14 @@ function leadAddressCompareKey(v) {
 // composer's dedupe) while Apt / Unit / Suite / hash spellings do
 // (#3608 codex r5 + r6).
 const ROUTE_WORDS = new Set(['route', 'rte', 'highway', 'hwy', 'sr', 'cr', 'us', 'interstate']);
+// A hash right after a numbered-route word is the road's number, not a
+// unit: "State Road #64", "County Road #675", "Hwy #41", "US #301" (codex
+// r7 P2). "Main Rd #4" keeps its unit — only State/County Road qualify.
+// `prev`/`prev2` are the lower-cased, punctuation-free tokens before the hash.
+function isRouteNumberContext(prev, prev2) {
+  if (ROUTE_WORDS.has(prev)) return true;
+  return (prev === 'road' || prev === 'rd') && (prev2 === 'state' || prev2 === 'county');
+}
 function canonicalizeInlineUnits(streetKey) {
   const {
     normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair, STREET_SUFFIX_ALIASES,
@@ -2724,15 +2732,7 @@ function canonicalizeInlineUnits(streetKey) {
   // branch — "#A" / "#PH" are units there, so they must be units here too or
   // the whole-line key drifts from the comma form's (#3608 pre-push audit).
   const isHashValue = (t) => /^#\S+$/.test(t);
-  // A hash right after a numbered-route word is the road's number, not a
-  // unit: "State Road #64", "County Road #675", "Hwy #41", "US #301" (codex
-  // r7 P2). "Main Rd #4" keeps its unit — only State/County Road qualify.
-  const isRouteHash = (idx) => {
-    const prev = tokens[idx - 1] || '';
-    const prev2 = tokens[idx - 2] || '';
-    if (ROUTE_WORDS.has(prev)) return true;
-    return (prev === 'road' || prev === 'rd') && (prev2 === 'state' || prev2 === 'county');
-  };
+  const isRouteHash = (idx) => isRouteNumberContext(tokens[idx - 1] || '', tokens[idx - 2] || '');
   const hashAt = (idx) => !isRouteHash(idx) && (isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1])));
   const out = [];
   const unitKeys = [];
@@ -14800,9 +14800,21 @@ function composeLeadAddress(line1, line2) {
 function splitLeadStreetParts(street) {
   const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
   const parts = splitStreetLineUnitParts(street);
+  let { street: streetPart, unit } = parts;
+  // The shared parser peels a TERMINAL "#64" as a unit; after a numbered-
+  // route word it is the road's number ("123 State Road #64", "500 Hwy
+  // #41") — put it back on the street so a real "Apt 4" is not a conflict
+  // and the road is not rewritten as "State Road, #64" (pre-push audit P1).
+  if (/^#\s*\S+$/.test(unit || '')) {
+    const streetTokens = String(streetPart || '').replace(/[.,]/g, '').toLowerCase().split(/\s+/).filter(Boolean);
+    if (isRouteNumberContext(streetTokens[streetTokens.length - 1] || '', streetTokens[streetTokens.length - 2] || '')) {
+      streetPart = `${streetPart} ${unit}`.trim();
+      unit = '';
+    }
+  }
   return {
-    street: parts.street,
-    unit: parts.unit,
+    street: streetPart,
+    unit,
     tail: String(parts.tail || '').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
   };
 }
