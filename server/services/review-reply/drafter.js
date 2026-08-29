@@ -311,9 +311,11 @@ const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
 // Abstract mass nouns on the opener list — none a surname — take their normal
 // singular predicate ("Communication matters", "Reliability is what we aim
-// for"; codex #3580 r5 P2). Bounded on purpose: no pest / lawn noun here.
+// for"; codex #3580 r5 P2). Bounded on purpose: no pest / lawn noun here, and
+// no person-like predicate (says, speaks, shows, comes …) — "Service says
+// thanks" would read as a speaker (r6).
 const MASS_NOUN_OPENERS = new Set(['dependability', 'reliability', 'consistency', 'communication', 'service', 'treatment', 'protection', 'prevention', 'nothing', 'something', 'everything', 'anything']);
-const SINGULAR_PREDICATE_RE = /^\s*(?:is|isn't|was|wasn't|has|hasn't|does|doesn't|will|won't|can|can't|should|matters|means|goes|makes|helps|keeps|counts|starts|comes|takes|shows|speaks|says|'s)\b/u;
+const SINGULAR_PREDICATE_RE = /^\s*(?:is|isn't|was|wasn't|has|hasn't|does|doesn't|will|won't|can|can't|should|matters|means|counts|starts|makes|'s)\b/u;
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
   if (MASS_NOUN_OPENERS.has(w) && SINGULAR_PREDICATE_RE.test(rest)) return true;
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {

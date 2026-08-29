@@ -474,6 +474,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nCommunication matters, and we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nReliability is what we aim for, so we are glad Marcus could help.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nAnts as well as roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
+    // codex #3580 r6: a mass-noun opener with a person-like predicate is a speaker, not a noun.
+    expect(verify(good('Hi Dana,\n\nTreatment says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nPrevention shows up on time, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
