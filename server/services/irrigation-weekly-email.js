@@ -1163,7 +1163,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     sent: 0,
     deduped: 0,
     blocked: 0,
-    skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, no_longer_eligible: 0 },
+    skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, no_longer_eligible: 0, home_moved_mid_sweep: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
     plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0, window_closed: 0, home_moved: 0 },
@@ -1199,6 +1199,19 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     try {
       const fresh = await findEligibleCustomers({ now: startedAt, customerId: customer.id });
       if (!fresh.length) { summary.skipped.no_longer_eligible += 1; continue; }
+      // A move stamp that CHANGED since the audience load means this row is
+      // mid-transition: the address paths clear and re-geocode coordinates
+      // asynchronously AFTER the stamping transaction, so the re-read can
+      // carry the new address with the former home's lat/lng — weather for
+      // the old premise under the new address (codex gh-r45). Skip the
+      // customer this run; a long-settled move (same stamp in both reads)
+      // has settled coordinates too.
+      const stampMsAt = (v) => (v ? new Date(v).getTime() : null);
+      if (stampMsAt(fresh[0].irrigation_home_changed_at) !== stampMsAt(customer.irrigation_home_changed_at)) {
+        summary.skipped.home_moved_mid_sweep += 1;
+        logger.warn(`[irrigation-weekly-email] home moved mid-sweep for ${customer.id} — skipped this run`);
+        continue;
+      }
       customer = fresh[0];
     } catch (err) {
       logger.warn(`[irrigation-weekly-email] candidate re-read failed for ${customer.id}: ${err.message}`);

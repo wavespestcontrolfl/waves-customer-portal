@@ -466,7 +466,13 @@ function answerServiceReportQuestion({
     // prescribes a run (codex gh-r31).
     const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
     const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : null].filter(Boolean).join(' ');
+    // A HOLD plan beside a required watering-in: the answer must carry the
+    // plan's no-extra-runs guidance too — the label instruction alone reads
+    // as permission to resume the normal schedule (codex gh-r45).
+    const holdBeside = !reduced && aftercare.waterInRequired === true
+      && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+      ? weekPlan : null;
+    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
   }
   if (weekPlan?.title && wateringIntent) {
     return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');

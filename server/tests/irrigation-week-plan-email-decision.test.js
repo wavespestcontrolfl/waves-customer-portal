@@ -192,7 +192,10 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     // gh-r38: the move stamp is re-read at the queue transition; a changed stamp withholds the plan and sends nothing.
     expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
     // gh-r38: each candidate is re-read through the SAME audience query at their turn.
-    expect(sweep).toMatch(/const fresh = await findEligibleCustomers\(\{ now: startedAt, customerId: customer\.id \}\);\s*if \(!fresh\.length\) \{ summary\.skipped\.no_longer_eligible \+= 1; continue; \}\s*customer = fresh\[0\];/);
+    expect(sweep).toMatch(/const fresh = await findEligibleCustomers\(\{ now: startedAt, customerId: customer\.id \}\);\s*if \(!fresh\.length\) \{ summary\.skipped\.no_longer_eligible \+= 1; continue; \}/);
+    // gh-r45: a move stamp that changed since the audience load = mid-transition row (coords may still be the
+    // former home's — the address paths clear/re-geocode asynchronously) — the customer is skipped this run.
+    expect(sweep).toMatch(/if \(stampMsAt\(fresh\[0\]\.irrigation_home_changed_at\) !== stampMsAt\(customer\.irrigation_home_changed_at\)\) \{\s*summary\.skipped\.home_moved_mid_sweep \+= 1;[\s\S]*?continue;\s*\}\s*customer = fresh\[0\];/);
     // gh-r33: the plan window is judged PER CUSTOMER from the live clock, never once at sweep start.
     expect(sweep).toMatch(/for \(let customer of candidates\) \{[\s\S]*?const planAsOf = tick\(\);\s*const isMondayET = planWindowOpen\(planAsOf\);\s*const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(sweep).not.toMatch(/const planAsOf = now;/);

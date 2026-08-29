@@ -372,6 +372,26 @@ router.post('/assess', async (req, res, next) => {
       scheduledService = svc;
     }
 
+    // Grass-confirmation freshness (codex #3565 gh-r45): the photos being
+    // analyzed describe a premise — capture the move stamp BEFORE the
+    // long-running analysis (a move committing mid-analysis must void the
+    // confirmation), and note when the linked visit was stamped for a
+    // DIFFERENT premise than the current home (a backfilled prior-address
+    // assessment must never confirm the new home's grass).
+    const preAnalysisMoveStamp = (await db('property_preferences')
+      .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+    const fanoutPremise = require('../services/customer-address-fanout');
+    const svcPremise = scheduledService ? {
+      address_line1: scheduledService.service_address_line1,
+      address_line2: scheduledService.service_address_line2,
+      city: scheduledService.service_address_city,
+      zip: scheduledService.service_address_zip,
+    } : null;
+    const assessedElsewhere = !!(svcPremise
+      && fanoutPremise.addressMatchKey(svcPremise.address_line1)
+      && fanoutPremise.addressMatchKey(customer.address_line1)
+      && fanoutPremise.homesDiffer(svcPremise, { address_line1: customer.address_line1, address_line2: customer.address_line2, city: customer.city, zip: customer.zip }));
+
     // Photo quality gating — runs in parallel with a small cap so a
     // 3-photo upload doesn't pay 3× the latency of a 1-photo upload.
     const qualityResults = await withConcurrency(photos, 3, (photo) =>
@@ -668,11 +688,19 @@ router.post('/assess', async (req, res, next) => {
               grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
               updated_at: new Date(),
             });
-          // The AI read observed the CURRENT lawn: when it actually set the
-          // grass (blank before), that re-establishes it for the weekly plan
-          // after a move (codex #3565 gh-r41). A kept existing value (the
-          // COALESCE branch) proves nothing about the new home.
-          if (!prior?.grass_type) {
+          // The AI read observed a lawn: when it actually set the grass
+          // (blank before), that re-establishes it for the weekly plan
+          // after a move (codex #3565 gh-r41) — but only when the photos
+          // describe the CURRENT home: the linked visit must not be stamped
+          // for another premise, and no move may have committed since the
+          // analysis began (stamp compared under the fence's prefs advisory
+          // lock — gh-r45). The grass VALUE still fills either way; only
+          // the ledger entry is withheld.
+          const stampNow = (await trx('property_preferences')
+            .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+          const stampMs = (v) => (v ? new Date(v).getTime() : null);
+          const grassFresh = !assessedElsewhere && stampMs(stampNow) === stampMs(preAnalysisMoveStamp);
+          if (!prior?.grass_type && grassFresh) {
             const { GRASS_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
             await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
           }

@@ -174,6 +174,12 @@ describe('watering questions answer with the weekly plan when the report carries
     expect(after).toMatch(/^Water in today’s application/);
     expect(after).toMatch(/covered by today’s treatment watering-in\. No further turf runs this week\./);
     expect(answerServiceReportQuestion({ question: 'How should I water this week?', data })).toBe(`${plan.title} ${plan.detail}`);
+    // gh-r45: a HOLD plan beside a required watering-in — the answer carries the plan's
+    // no-extra-runs guidance, never the label instruction alone.
+    const holdData = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs for the week.', visitInPlanWeek: true, prescribesRun: false } } } };
+    const holdAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: holdData });
+    expect(holdAnswer).toMatch(/^Water in today’s application/);
+    expect(holdAnswer).toMatch(/skip your turf watering\. Your lawn has what it needs for the week\./);
     // gh-r31: a reopened HISTORICAL report (visit outside the plan week) never answers with the reduced plan.
     const old = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { ...data.reportV2.water.weekPlan, visitInPlanWeek: false } } } };
     const oldAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: old });
