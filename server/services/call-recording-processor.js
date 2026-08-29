@@ -14926,7 +14926,9 @@ function wholeLineProtectedParts(street) {
   const endRaw = last.end < rawIndex.length ? rawIndex[last.end] : rawTokens.length;
   return {
     line1: rawTokens.slice(0, startRaw).join(' '),
-    line2: rawTokens.slice(startRaw, endRaw).join(' ') || null,
+    // Same 100-char unit clamp as the dedicated / terminal unit paths — an
+    // oversized inline run must not take the whole budget either (codex r10).
+    line2: rawTokens.slice(startRaw, endRaw).join(' ').slice(0, LEAD_UNIT_MAX_LENGTH).trim() || null,
     // Same write-time clamp as splitLeadStreetParts' tail: a runaway
     // locality must never take the whole budget and drop the street
     // (codex r9 P2).

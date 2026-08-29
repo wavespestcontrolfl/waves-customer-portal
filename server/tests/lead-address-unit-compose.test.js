@@ -359,6 +359,12 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(noConflict).toBe(false);
     expect(clamped.length).toBeLessThanOrEqual(255);
     expect(clamped.startsWith('100 Main St, Apt 4, Somewhereville')).toBe(true);
+    // An oversized inline unit run is clamped like the dedicated/terminal unit paths — street and place survive.
+    const hugeUnit = `Suite ${'A1-'.repeat(100)}Z`;
+    const { address: unitClamped } = analyzeLeadAddress(`100 Main St ${hugeUnit} Sarasota FL 34236`, hugeUnit);
+    expect(unitClamped.length).toBeLessThanOrEqual(255);
+    expect(unitClamped.startsWith('100 Main St, Suite A1-')).toBe(true);
+    expect(unitClamped).toMatch(/, Sarasota FL 34236$/);
     // Fits → kept verbatim (no reshaping of a comma-free legacy value that is within the bound).
     expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4').address).toBe('100 Main St Apt 4 Sarasota FL 34236');
   });
