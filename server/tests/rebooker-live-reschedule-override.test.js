@@ -112,6 +112,7 @@ function wireRescheduleMocks(service) {
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     if (table === 'scheduled_services') return updateQuery;
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
@@ -360,6 +361,9 @@ describe('live-status reschedule override (allowLive)', () => {
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, ...updates];
     const trx = jest.fn((table) => {
+      // The locked (FOR SHARE) re-read of the preference answers the same
+      // verdict the pre-trx read did.
+      if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -717,6 +721,7 @@ describe('live-status reschedule override (allowLive)', () => {
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -788,6 +793,7 @@ describe('live-status reschedule override (allowLive)', () => {
       ? [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, techOverlapProbe, anchorUpdate]
       : [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;

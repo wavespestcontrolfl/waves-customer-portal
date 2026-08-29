@@ -14044,8 +14044,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // `notify` is explicit and suppresses ONLY the immediate customer text —
 // reminder re-sync, tracker refresh and board broadcasts always run.
 const SERIES_EFFECTS_LEASE_MS = 5 * 60 * 1000;
-async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify, actorId, reasonText }) {
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+  // The text is driven by the intent the OPERATION was recorded with
+  // (result.notifyRequested — set by the move, carried by a replay, read
+  // from the row by the reconciler); the caller's flag only applies to a
+  // result that carries none (codex r13 P2: a retry with a different
+  // notifyCustomer must not send a text the original move did not ask
+  // for, or drop one it did).
+  const notify = typeof result.notifyRequested === 'boolean' ? result.notifyRequested : notifyArg;
   const seriesMoveId = result.seriesMoveId || null;
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)

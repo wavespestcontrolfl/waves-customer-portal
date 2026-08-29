@@ -1741,6 +1741,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
     let shiftedOccurrences = null;
+    // An operation_key REPLAY (a concurrent identical Quick Move lost the
+    // unique-index race, or a retry) hands back the ORIGINAL move's
+    // occurrences: the scheduling write is deduplicated, and so must these
+    // in-memory effects be — the winner already ran (or is running) the
+    // reminder sync, cards, board emits and the moved-SMS (codex r13 P1).
+    let seriesReplayed = false;
     // Staff surface (Quick Move / storm re-route): an occupancy clash COMMITS
     // with a warning instead of 409ing (owner ruling 2026-08-27, extending
     // the 2026-08-25 dispatch ruling — see rebooker.overlapAdvisory). The
@@ -1762,6 +1768,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
             : null;
+          seriesReplayed = seriesResult?.replayed === true;
+          if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
             memberWarnings.push(...seriesResult.warnings);
             // A series shift that COMMITTED onto occupied windows on other
@@ -1872,7 +1880,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // the customer with no message at all (codex P1 — coverDueWindows is
     // reserved for callers that send their own notice). The anchor's
     // re-arm stays with the calling route.
-    if (shiftedOccurrences) {
+    if (shiftedOccurrences && !seriesReplayed) {
       const AppointmentReminders = require('./appointment-reminders');
       for (const occ of shiftedOccurrences) {
         if (String(occ.id) === String(job.id)) continue;
@@ -1957,8 +1965,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
 
     const chosen = { date: target.date, window: newWindow };
-    let sms = { sent: false, reason: 'not_requested' };
-    if (notifyCustomer) {
+    let sms = { sent: false, reason: seriesReplayed ? 'replayed' : 'not_requested' };
+    if (notifyCustomer && !seriesReplayed) {
       try {
         const customer = job.id === serviceId
           ? {

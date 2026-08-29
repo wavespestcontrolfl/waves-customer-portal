@@ -109,6 +109,7 @@ function wireRescheduleMocks(svc) {
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     if (table === 'scheduled_services') return trxScheduled;
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
@@ -437,6 +438,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -498,6 +500,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -565,6 +568,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const reminderQueue = [reminderRead, reminderUpdate];
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -645,6 +649,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
 
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
@@ -702,6 +707,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     // anchor UPDATE.
     const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, parentUpdate, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return chain();
       if (table === 'reschedule_log') return logInsert;

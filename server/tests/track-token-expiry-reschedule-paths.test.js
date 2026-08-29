@@ -83,6 +83,7 @@ describe('track token expiry on reschedule paths', () => {
     });
 
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return updateQuery;
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
@@ -168,6 +169,7 @@ describe('track token expiry on reschedule paths', () => {
 
     const scheduledQueries = [siblingsQuery, siblingsQuery, parentLookup, collisionProbe, firstUpdate, secondUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;
       if (table === 'series_moves') return chain();
@@ -241,6 +243,7 @@ describe('track token expiry on reschedule paths', () => {
     // tech-day advisory fence (tech-day-lock.js) — model that real surface:
     // the CAS update runs on the trx, the fence probes go through trx.raw.
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueries.shift();
       throw new Error(`Unexpected trx table ${table}`);
     });

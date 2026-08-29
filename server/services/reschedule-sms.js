@@ -171,7 +171,11 @@ class RescheduleSMS {
       // widened/edited off the reply option still re-books to the tight target
       // instead of being silently confirmed as-is. Exclude every non-live status
       // (completed/cancelled/skipped) so a reply can't "confirm" a dead visit.
-      observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null } : null;
+      // Date, start AND end: alreadyOnSlot treats an edited end as a real
+      // change, so the pin must too — an end edited after this read fails
+      // the move's CAS/fence and the reply takes the office-follow-up path
+      // instead of overwriting the newer end (codex r13 P2).
+      observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null, window_end: svc.window_end ?? null } : null;
       alreadyOnSlot = !!svc
         && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
         && normTime(svc.window_start) === normTime(selectedOption.window?.start)

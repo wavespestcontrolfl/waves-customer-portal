@@ -54,7 +54,7 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
 
 // Series sibling-projection clash horizon (rescheduleSeries): a shifted
 // FUTURE occurrence only hard-aborts the sweep when its recomputed date
@@ -396,7 +396,10 @@ function replaySeriesMoveResult(prior, requestedDate) {
         exceptionCount: prior.exception_count,
       };
     })();
-  return { ...base, seriesMoveId: prior.id, replayed: true };
+  // A replay carries the ORIGINAL operation's notification intent — the
+  // retry's own notifyCustomer is not what this move was recorded with
+  // (codex r13 P2).
+  return { ...base, seriesMoveId: prior.id, replayed: true, notifyRequested: prior.notify_requested === true };
 }
 
 // Telemetry + audit for a series shift that did NOT commit (written outside
@@ -1691,8 +1694,17 @@ class SmartRebooker {
           // set or cleared while this move waited must not commit weekend
           // siblings (or needlessly shifted ones) from the stale verdict
           // (codex r12 P2).
+          // The preference row is read FOR SHARE inside THIS trx: property.js
+          // writes preferred_day under no advisory lock, so only a row lock
+          // held through commit keeps the verdict the projection used from
+          // changing underneath it (codex r13 P2). A missing row locks
+          // nothing (no preference → weekends allowed, as projected).
+          const lockedPreference = await trx('property_preferences')
+            .where({ customer_id: service.customer_id })
+            .forShare()
+            .first('preferred_day');
           const lockedSkipWeekends = !!(lockedParent && lockedParent.skip_weekends)
-            || await customerPrefersNoWeekends(db, service.customer_id);
+            || preferenceRowBlocksWeekends(lockedPreference);
           if (!lockedParent || cadenceConfig(lockedParent) !== cadenceConfig(parent) || lockedSkipWeekends !== seriesSkipWeekends) {
             throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
               statusCode: 409,
@@ -1786,6 +1798,10 @@ class SmartRebooker {
         // named so the operator fixes that visit's time first instead of the
         // series silently carrying an off-hour start forward.
         let occurrenceWindow;
+        // A customer-path normalization (below) rewrites the sibling's
+        // bounds — the legacy presentation fields must not keep showing
+        // the old ones (codex r13 P2).
+        let sibWindowNormalized = false;
         // options.clearAnchorWindow: the caller's explicit "clear both bounds"
         // rides IN this transaction with the date move (the Edit appointment
         // modal) — the anchor lands windowless, never half-applied across
@@ -1816,6 +1832,7 @@ class SmartRebooker {
             const flooredStart = `${String(hh).padStart(2, '0')}:00`;
             const sibDuration = windowDurationMinutes(sib.window_start, sib.window_end, sib.estimated_duration_minutes);
             occurrenceWindow = { start: flooredStart, end: deriveWindowEnd(flooredStart, sibDuration) };
+            sibWindowNormalized = true;
             logger.warn(`[rebooker] series sibling ${sib.id} kept an off-hour start ${sib.window_start} — normalized to ${flooredStart} on its new date (${err.message})`);
           }
         }
@@ -1838,6 +1855,10 @@ class SmartRebooker {
           window_end: occurrenceWindow.end,
           status: isAnchor ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
+          // Consumers prefer window_display / time_window over the bounds
+          // (admin-schedule, appointment cards) — a normalized window must
+          // not leave them promising the former off-hour time.
+          ...(sibWindowNormalized ? { time_window: null, window_display: null } : {}),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
           // Day change invalidates the row's route sequence — clear it so the
@@ -2220,6 +2241,9 @@ class SmartRebooker {
         deltaDays,
         skippedCount,
         exceptionCount,
+        // The notification intent this operation was recorded with — every
+        // effects pass (live, replay, reconciler) drives its text from it.
+        notifyRequested: options.notifyRequested === true,
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
         rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],

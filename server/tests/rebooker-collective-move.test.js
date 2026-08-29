@@ -121,6 +121,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
 
   const scheduledQueue = [siblingsQuery, siblingsReread, parentReread, seriesClashProbe, ...updates];
   const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     if (table === 'scheduled_services') return scheduledQueue.shift();
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
@@ -308,6 +309,7 @@ describe('single-path date exceptions', () => {
   function wireSingleMocks(svc) {
     const trxScheduled = chain({ update: jest.fn().mockResolvedValue(1) });
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return trxScheduled;
       if (table === 'job_status_history') return chain();
       if (table === 'reschedule_log') return chain();
@@ -941,7 +943,7 @@ describe('caller wiring (source)', () => {
 
   test('an SMS reply pins the schedule it observed on the move (the series path tells a return move from a stale retry by it)', () => {
     const sms = read('../services/reschedule-sms.js');
-    expect(sms).toContain("observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null } : null;");
+    expect(sms).toContain("observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null, window_end: svc.window_end ?? null } : null;");
     expect(sms).toContain('...(observedSchedule ? { expect: observedSchedule } : {}),');
   });
 
@@ -996,6 +998,18 @@ describe('caller wiring (source)', () => {
     expect(reb).toContain('rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],');
     // The live weekend-preference verdict is re-judged under the lock alongside the recurrence config.
     expect(reb).toContain('|| lockedSkipWeekends !== seriesSkipWeekends) {');
+    // …with the preference row read FOR SHARE inside the trx (held through commit), a normalized sibling window clears the legacy presentation fields, and the notification intent is recorded with the operation and driven from it on every effects pass.
+    expect(reb).toContain(".forShare()\n            .first('preferred_day');");
+    expect(reb).toContain("...(sibWindowNormalized ? { time_window: null, window_display: null } : {}),");
+    expect(reb).toContain('notifyRequested: options.notifyRequested === true,');
+    expect(reb).toContain("replayed: true, notifyRequested: prior.notify_requested === true };");
+    const dispSrc = read('../routes/admin-dispatch.js');
+    expect(dispSrc).toContain("const notify = typeof result.notifyRequested === 'boolean' ? result.notifyRequested : notifyArg;");
+    // Quick Move: a replayed series result runs NONE of the in-memory effects again (reminders, cards, board, moved-SMS).
+    const rainOut = read('../services/rain-out.js');
+    expect(rainOut).toContain('seriesReplayed = seriesResult?.replayed === true;');
+    expect(rainOut).toContain('if (shiftedOccurrences && !seriesReplayed) {');
+    expect(rainOut).toContain('if (notifyCustomer && !seriesReplayed) {');
   });
 
   test('the dispatch explicit series path fences on the FULL pin the resolution read; a retryable provider failure keeps the series text pending; a partial guard map never closes an uncovered id', () => {
