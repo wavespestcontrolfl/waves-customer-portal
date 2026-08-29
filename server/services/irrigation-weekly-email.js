@@ -748,10 +748,14 @@ function decideWeeklyEmail({
       const priorPlanTotal = priorPlanIrrig != null ? roundHundredth(rainDisplayNum + priorPlanIrrig) : null;
       const lastWeekLine = scheduleUnconfirmed
         ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        // Whether the run actually went ahead is unknowable from a weekly
+        // total (the rain may have come after it) — the copy states the rule
+        // and the accounting, never that the run was skipped (hook P1 on
+        // 16f0946f2).
         : priorPlanPartlySkipped
-        ? `Last week brought ${rain}" of rain near your home — enough that last week's watering plan said to skip one run, so only the other run (${formatInches(priorPlanIrrig)}" of irrigation) is counted, about ${formatInches(priorPlanTotal)}" of water in all; your ${grassLabel} needs about ${target}" this time of year.`
+        ? `Last week brought ${rain}" of rain near your home — enough to trigger last week's plan's skip-one-run rule, so the rain plus one run (${formatInches(priorPlanIrrig)}" of irrigation) is counted, about ${formatInches(priorPlanTotal)}" of water in all (if both runs went ahead, your lawn is a little ahead, not behind); your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanSkipped
-        ? `Last week brought ${rain}" of rain near your home — enough that last week's watering plan said to skip the run, so no irrigation is counted; your ${grassLabel} needs about ${target}" this time of year.`
+        ? `Last week brought ${rain}" of rain near your home — enough to trigger last week's plan's skip-the-run rule, so only the rain is counted (if the run went ahead anyway, your lawn is a little ahead, not behind); your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanIrrig != null
         ? `Between last week's rain (${rain}") and last week's watering plan (${formatInches(priorPlanIrrig)}" of irrigation), your lawn got about ${formatInches(priorPlanTotal)}" of water; your ${grassLabel} needs about ${target}" this time of year.`
         : advice.status === 'surplus'
@@ -783,8 +787,8 @@ function decideWeeklyEmail({
           // so instead of quoting the former home's setting and a total that
           // mixes it with the new home's rain (codex gh-r23).
           irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move'
-            : priorPlanPartlySkipped ? `${formatInches(priorPlanIrrig)}" (last week's plan — one run skipped after rain)`
-            : priorPlanSkipped ? '0" (last week\'s plan — skipped after rain)'
+            : priorPlanPartlySkipped ? `${formatInches(priorPlanIrrig)}" (last week's plan — one run under the rain-skip rule)`
+            : priorPlanSkipped ? '0" (last week\'s plan — rain-skip rule)'
             : (priorPlanIrrig != null ? `${formatInches(priorPlanIrrig)}" (last week's plan)` : `${irrigationFmt}"`),
           total_inches: scheduleUnconfirmed ? `${rain}" (rain only)`
             : (priorPlanIrrig != null ? `${formatInches(priorPlanTotal)}"` : `${total}"`),

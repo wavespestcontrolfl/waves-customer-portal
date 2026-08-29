@@ -139,7 +139,11 @@ function decideWeekPlan({
   // the cool-season cadence already reads the same rain (codex gh-r34).
   // The rule skips one RUN, not the week: a two-run plan keeps its other
   // run's depth (prescribed ÷ events); an unknown event count credits
-  // nothing (codex gh-r35).
+  // nothing (codex gh-r35). Whether the run went ahead (rain after it) is
+  // unknowable from a weekly total and the permitted day is not known per
+  // address — so this is the runtime's own rule for unknowable irrigation:
+  // only observed rain proves a surplus (carryover is bounded at root-zone
+  // storage either way); the renderers state the rule, never the skip.
   const priorWeekRainOverride = priorWeekPrescribedInches != null && Number(priorWeekPrescribedInches) > 0 && rainKnown
     && lastWeekRain != null && lastWeekRain >= WEEK_PLAN_CONSTANTS.RAIN_SKIP_INCHES; // a hold prescribed no run to skip
   const priorEvents = Number.isInteger(Number(priorWeekEvents)) && Number(priorWeekEvents) > 0 ? Number(priorWeekEvents) : null;

@@ -285,8 +285,10 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(skipped.decisionInputs.priorWeekCreditedInches).toBe(0);
     expect(skipped.decisionInputs.appliedInches).toBe(0.6);
     expect(skipped.weekPlan.carryoverInches).toBe(0); // 0.6" against a peak target: no manufactured surplus
-    expect(skipped.payload.summary_line).toMatch(/said to skip the run, so no irrigation is counted/);
-    expect(skipped.payload.irrigation_inches).toBe('0" (last week\'s plan — skipped after rain)');
+    // The copy states the rule + accounting, never that the run was skipped (unknowable from a weekly total).
+    expect(skipped.payload.summary_line).toMatch(/enough to trigger last week's plan's skip-the-run rule, so only the rain is counted \(if the run went ahead anyway, your lawn is a little ahead, not behind\)/);
+    expect(skipped.payload.summary_line).not.toMatch(/said to skip|was skipped/);
+    expect(skipped.payload.irrigation_inches).toBe('0" (last week\'s plan — rain-skip rule)');
     expect(skipped.payload.total_inches).toBe('0.6"');
     expect(skipped.decisionInputs.priorWeekSkippedRunInches).toBe(0.75); // unknown event count ⇒ nothing credited
     // gh-r35: the rule skips ONE run — a two-run plan (2 × 0.5") after 0.6" of rain keeps the other run's 0.5".
@@ -295,12 +297,12 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(twoRun.decisionInputs.priorWeekSkippedRunInches).toBe(0.5);
     expect(twoRun.decisionInputs.priorWeekCreditedInches).toBe(0.5);
     expect(twoRun.decisionInputs.appliedInches).toBe(1.1);
-    expect(twoRun.payload.summary_line).toMatch(/said to skip one run, so only the other run \(0\.5" of irrigation\) is counted, about 1\.1" of water in all/);
-    expect(twoRun.payload.irrigation_inches).toBe('0.5" (last week\'s plan — one run skipped after rain)');
+    expect(twoRun.payload.summary_line).toMatch(/skip-one-run rule, so the rain plus one run \(0\.5" of irrigation\) is counted, about 1\.1" of water in all \(if both runs went ahead/);
+    expect(twoRun.payload.irrigation_inches).toBe('0.5" (last week\'s plan — one run under the rain-skip rule)');
     expect(twoRun.payload.total_inches).toBe('1.1"');
     const oneRun = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekEvents: 1, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.6 });
     expect(oneRun.decisionInputs.priorWeekCreditedInches).toBe(0);
-    expect(oneRun.payload.irrigation_inches).toBe('0" (last week\'s plan — skipped after rain)');
+    expect(oneRun.payload.irrigation_inches).toBe('0" (last week\'s plan — rain-skip rule)');
     const under = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.4 });
     expect(under.decisionInputs.priorWeekRainOverride).toBe(false);
     expect(under.decisionInputs.appliedInches).toBe(1.15);
