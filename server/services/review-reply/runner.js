@@ -157,6 +157,12 @@ function lowRatingExitFields(reason) {
 // compare-and-set, so the sweep never clears a claim it does not own.
 // low_rating_requested / unrated_requested is not a legacy park and is
 // never selected.
+// A pre-rule under-4★ claim could also park as provider_down / verifier_reject
+// BEFORE the old code stamped low_rating / unrated (those are terminal failure
+// parks: no reply is live, nothing is mid-flight), so they leave the lane too
+// when the persisted rating is under 4 (codex #3587 r5). Reconciliation parks
+// (google_uncertain / persist_failed: a PUT may be live) never do.
+const LEGACY_PARK_REASON_SQL = "(auto_reply_reason IN ('low_rating', 'unrated') OR (auto_reply_reason IN ('provider_down', 'verifier_reject') AND COALESCE(star_rating, 0) < 4))";
 const LEGACY_RELEASE_FIELDS = { auto_reply_status: null, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0, auto_reply_claimed_until: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null, auto_reply_grounding: null };
 function legacyLowRatingQuery(qb, nowIso) {
   return qb
@@ -168,7 +174,7 @@ async function sweepLowRatingParks({ limit = 50 } = {}) {
   const nowIso = new Date().toISOString();
   const parks = await legacyLowRatingQuery(db('google_reviews'), nowIso)
     .where('auto_reply_status', STATUS.PARKED)
-    .whereIn('auto_reply_reason', ['low_rating', 'unrated'])
+    .whereRaw(LEGACY_PARK_REASON_SQL)
     .limit(limit)
     .select('id', 'auto_reply_status', 'auto_reply_reason', 'star_rating');
   const pending = await legacyLowRatingQuery(db('google_reviews'), nowIso)
@@ -182,10 +188,13 @@ async function sweepLowRatingParks({ limit = 50 } = {}) {
     // reason, version, both claims (and the rating for pending rows) — so a
     // concurrent Skip / sync / Post now / publisher transition wins.
     const casIso = new Date().toISOString();
-    const reason = r.auto_reply_status === STATUS.PARKED ? r.auto_reply_reason : ((Number(r.star_rating) || 0) === 0 ? 'unrated' : 'low_rating');
+    const ratingReason = (Number(r.star_rating) || 0) === 0 ? 'unrated' : 'low_rating';
+    const ratedPark = r.auto_reply_status === STATUS.PARKED && ['low_rating', 'unrated'].includes(r.auto_reply_reason);
+    const reason = ratedPark ? r.auto_reply_reason : ratingReason;
     const updated = await legacyLowRatingQuery(db('google_reviews'), casIso)
       .where({ id: r.id, auto_reply_status: r.auto_reply_status, auto_reply_reason: r.auto_reply_reason })
-      .modify((qb) => { if (r.auto_reply_status !== STATUS.PARKED) qb.where('star_rating', r.star_rating); })
+      // Eligibility that depended on the persisted rating is re-checked too.
+      .modify((qb) => { if (!ratedPark) qb.where('star_rating', r.star_rating); })
       .update({ ...LEGACY_RELEASE_FIELDS, auto_reply_reason: reason });
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
@@ -666,16 +675,21 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   }
 
   if (!draft.ok) {
+    // A person asked for an under-4★ draft (Post now) and it could not be
+    // made — providers down, or no candidate passed the verifier. The cron
+    // lane never drafts such a row, so a scheduled retry would only be
+    // released unfinished by the exit above, and a provider_down /
+    // verifier_reject park would be swept out of the lane on the next tick
+    // as a legacy under-4★ park. Leave the row out of the lane the same way
+    // that exit does (retry counter reset, nothing pending — codex #3587
+    // r4/r5) with the requested reason and the error on it; the route
+    // answers 409 and the person tries again. No bell: they are looking at it.
+    if (intent === 'post_now' && (rating === 0 || rating <= 3)) {
+      const error = draft.reason === 'provider_unavailable' ? String(draft.error || '') : `verifier_reject: ${(draft.rejections || []).join(', ')}`;
+      await releaseClaim(row, { ...lowRatingExitFields(rating === 0 ? 'unrated_requested' : 'low_rating_requested'), auto_reply_error: error });
+      return { outcome: 'failed', reason: draft.reason === 'provider_unavailable' ? 'provider_unavailable' : 'verifier_reject' };
+    }
     if (draft.reason === 'provider_unavailable') {
-      // A person asked for an under-4★ draft (Post now) and the providers
-      // were down: the cron lane never drafts such a row, so a scheduled
-      // retry would only be released unfinished by the exit above. Leave the
-      // row out of the lane with the error on it; the person tries again
-      // (codex #3587 r4).
-      if (intent === 'post_now' && (rating === 0 || rating <= 3)) {
-        await releaseClaim(row, { auto_reply_status: null, auto_reply_reason: rating === 0 ? 'unrated_requested' : 'low_rating_requested', auto_reply_due_at: null, auto_reply_error: String(draft.error || '') });
-        return { outcome: 'failed', reason: 'provider_unavailable' };
-      }
       const attempts = (merged.auto_reply_attempts || 0) + 1;
       if (attempts < MAX_ATTEMPTS) {
         const due = new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString();

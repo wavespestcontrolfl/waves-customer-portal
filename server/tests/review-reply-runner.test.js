@@ -74,7 +74,8 @@ jest.mock('../models/db', () => {
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
-        if (/COALESCE\(star_rating, 0\) < 4/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
+        if (/^COALESCE\(star_rating, 0\) < 4$/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
+        if (/auto_reply_reason IN \('low_rating', 'unrated'\) OR/.test(sql)) filters.push((r) => ['low_rating', 'unrated'].includes(r.auto_reply_reason) || (['provider_down', 'verifier_reject'].includes(r.auto_reply_reason) && (Number(r.star_rating) || 0) < 4));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
         if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
@@ -355,12 +356,25 @@ describe('processDueAutoReplies — state machine', () => {
   test('Post now on an under-4★ review with the providers down never enters the cron retry lane (codex #3587 r4)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
-    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: null, auto_reply_reason: null })];
+    // Earlier failures on the row (a legacy provider_down park, say) do not carry into a later re-entry (r5).
+    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: null, auto_reply_reason: null, auto_reply_attempts: 2 })];
     const r = await Runner.postNow('pn', { type: 'admin' });
     expect(r).toEqual({ outcome: 'failed', reason: 'provider_unavailable' });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: 'all providers down' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0, auto_reply_draft: null, auto_reply_error: 'all providers down' });
     expect(mockNotify).not.toHaveBeenCalled();
     // Nothing for the tick to pick up or release.
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
+  });
+
+  test('Post now on an under-4★ review whose drafts all fail the verifier leaves the lane the same way — never a verifier_reject park the legacy sweep would release (codex #3587 r5)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url', 'banned_phrase'], mode: 'service_quality', version: 'reply-v1' });
+    state.rows = [row({ id: 'pn', star_rating: 0, auto_reply_status: null, auto_reply_reason: null, auto_reply_attempts: 1 })];
+    const r = await Runner.postNow('pn', { type: 'admin' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'verifier_reject' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0, auto_reply_draft: null, auto_reply_error: 'verifier_reject: url, banned_phrase' });
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(mockNotify).not.toHaveBeenCalled();
     expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
   });
 
@@ -405,8 +419,16 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'q-low', star_rating: 3, auto_reply_status: 'queued', auto_reply_reason: null, auto_reply_due_at: '2099-01-01T00:00:00Z' }),
       row({ id: 'f-unrated', star_rating: 0, auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: 2, auto_reply_due_at: '2099-01-01T00:00:00Z', auto_reply_error: 'down' }),
       row({ id: 'q-ok', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: '2099-01-01T00:00:00Z' }),
+      // Pre-rule under-4★ claims that parked as a terminal FAILURE before the old code stamped
+      // low_rating / unrated leave too; the same reasons on a 4-5★ row are live parks (r5).
+      row({ id: 'pd-low', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_attempts: 3, auto_reply_error: 'down', auto_reply_version: 'reply-v1' }),
+      row({ id: 'vr-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_grounding: { review: { rating: 0 } }, auto_reply_version: 'reply-v1' }),
+      row({ id: 'vr-ok', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_version: 'reply-v1' }),
     ];
-    expect(await Runner.sweepLowRatingParks()).toBe(5);
+    expect(await Runner.sweepLowRatingParks()).toBe(7);
+    expect(state.rows[11]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_attempts: 0, auto_reply_error: null, auto_reply_version: null });
+    expect(state.rows[12]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_grounding: null });
+    expect(state.rows[13]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject' });
     expect(state.rows[4]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', review_reply: '[DRAFT] Asked for.' });
     expect(state.rows[5]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] y' });
     expect(state.rows[6]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] z', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
