@@ -2585,10 +2585,14 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
     const supplied = norm(f, suppliedValues[f]);
     if (!supplied) continue;
-    const same = supplied === norm(f, lockedVal)
-      || (f === 'address'
-        && leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal)
-        && leadAddressPlaceCorroborates(suppliedValues, lockedLead));
+    const literal = supplied === norm(f, lockedVal);
+    // EVERY address comparison requires the place check — an exact
+    // street/unit string in another city/ZIP is a different property just
+    // as much as a canonical-key match is (codex r5 P1).
+    const same = f === 'address'
+      ? (literal || leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal))
+        && leadAddressPlaceCorroborates(suppliedValues, lockedLead)
+      : literal;
     if (same) out[f] = lockedVal;
   }
   return out;

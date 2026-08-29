@@ -141,5 +141,15 @@ describe('reaffirmedFilledLeadFields — address', () => {
 
   test('exact case-insensitive match still reaffirms', () => {
     expect(reaffirmedFilledLeadFields({ address: '100 main st, apt 4' }, { address: '100 Main St, Apt 4' })).toEqual({ address: '100 Main St, Apt 4' });
+    expect(reaffirmedFilledLeadFields({ address: '100 main st, apt 4', city: 'Sarasota', zip: '34236' }, { address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34236' }).address).toBe('100 Main St, Apt 4');
+  });
+
+  test('an EXACT string in a different place claims nothing either', () => {
+    const locked = { address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34211' }, locked).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: null, zip: null }, locked).address).toBeUndefined();
+    // Non-address fields keep the plain literal compare.
+    expect(reaffirmedFilledLeadFields({ email: 'A@B.com', city: 'Bradenton' }, { email: 'a@b.com', city: 'Sarasota' })).toEqual({ email: 'a@b.com' });
   });
 });
