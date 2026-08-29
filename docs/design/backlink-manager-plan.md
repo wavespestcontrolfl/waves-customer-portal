@@ -45,7 +45,7 @@ Everything already shipped is a **dependency**, not work to redo (§1).
 | Gap feeder | `competitor-gap-miner.js`, `competitor-discovery.js` → `seo_competitor_backlinks` | 7,553 unreviewed rows = the largest raw inventory; v2 ingests it (§4) |
 | Local opportunity feed | `local-opportunity-prospector/promoter.js` | Stays; writes through the guard |
 | Scorer + lane classifier | `prospect-scorer.js` (relevance, lead value, contactability gate, `CLAIMABLE_LINK_TYPES`), `signup-classifier.js` | Quality score. v2 adds path + persistence terms (§8) |
-| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Route shape and report semantics kept; AUTHENTICATION IS REPLACED in step 1 — `hermes-auth.js` bearer + `HERMES_SERVICE_TOKEN` retired, per-provider HMAC request signing (§12) — and the repository-controlled Hermes callers are migrated IN THE SAME PR as the cutover: `docs/hermes/waves-outreach-drafter-skill.md` and the `waves-backlink-worker` signup skill drop the bearer-token file (`/data/workspace/.waves-portal-token`) for a shared signing helper (`docs/hermes/sign-request.py`: `LINK_WORKER_SECRET_HERMES` from a mounted secret file, canonical target + raw-body hash, timestamp + nonce) and their prerequisite lists name the new secret; the old bearer path is deleted, not dual-run, so no documented worker can still present `HERMES_SERVICE_TOKEN` after the cutover deploys — and v2 puts providers behind it (§7) |
+| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Route shape and report semantics kept; AUTHENTICATION IS REPLACED in step 1 — `hermes-auth.js` bearer + `HERMES_SERVICE_TOKEN` retired, per-provider HMAC request signing (§12) — with an ORDERED ROLLOUT because the callers are not all in this repo (`waves-outreach-drafter-skill.md` is; the `waves-backlink-worker` signup skill lives in the external Hostinger Hermes dashboard and cannot be changed atomically with a server deploy): (a) step 1 ships HMAC verification and ACCEPTS BOTH credentials for the `hermes` identity only — a bearer-authenticated request is capability-limited exactly like the HMAC `hermes` key (claim/report, no payment or credential capability) and every accepted request logs `auth_scheme` ('hmac' | 'bearer') on the attempt/claim audit row; (b) the same PR ships the signing helper (`docs/hermes/sign-request.py`: `LINK_WORKER_SECRET_HERMES` from a mounted secret file, canonical target + raw-body hash, timestamp + nonce) and updates the in-repo drafter skill; the dashboard signup skill is migrated by hand from the same helper and VERIFIED by the audit log showing its claims arriving as `auth_scheme='hmac'`; (c) bearer acceptance is removed by a follow-up PR (the `HERMES_SERVICE_TOKEN` env is unset in the same deploy) only after the log shows zero `bearer` requests for 7 consecutive days — a dated milestone in §14, never a same-PR delete — and v2 puts providers behind it (§7) |
 | Deterministic signup runner | `signup-runner.js`, `signup-evidence.js`, `GATE_SIGNUP_RUNNER`, `SIGNUP_RUNNER_ALLOWLIST`, `HERMES_SIGNUP_EMAIL` (chromium in the prod image) | First `BrowserAgentProvider` implementation (§7) |
 | Outreach drafter + sender | `backlink-outreach-drafter.js` (`GATE_OUTREACH_DRAFTER`), `link-prospect-outreach.js` (`GATE_LINK_OUTREACH`, `LINK_OUTREACH_DAILY_CAP`, Gmail `contact@`, idempotent send, `send_error` reconcile), `comms-lint.js` | The `OutreachProvider` (§7) under the bounded mandate (§6.4) |
 | Strategist | `backlink-strategy-agent*.js`, `create_link_prospects` / `list_prospects` | Stays on demand; becomes one more *source* into the registry |
@@ -550,8 +550,11 @@ the CHECK), `confidence=0.1`, `last_investigated_at=null`
   `findPlacementRow`/`path_key` for the placement and the UNIQUE `backlink_id` for the mapping (a re-run adds newly seen links to the mapping and never re-picks the representative while it is live; per-link verification and loss events read the mapping, and §8 D30 sampling is per placement following the representative); excluded from acquisition (nothing to acquire) and from the
   Source×funnel *acquired* counts (reported separately as "existing").
 - **Legacy signup queue** — the 12 pending `backlink_agent_queue` items (consumed today by
-  `backlink-agent/signup-worker.js`) are imported ONCE in step 1 by an idempotent
-  queue-to-registry intake (keyed by `legacy_queue_id`, ON CONFLICT DO NOTHING; `source` =
+  `backlink-agent/signup-worker.js`) are imported in step 1 by an idempotent
+  queue-to-registry intake that runs as the SAME recurring, gate-independent catch-up used for
+  legacy prospects/attempts (§3.4: at boot and every 6h under `runExclusive`, and before every
+  runner claim) rather than once — a rolling deploy can leave an old pod enqueueing a row after
+  the first import — (keyed by `legacy_queue_id`, ON CONFLICT DO NOTHING; `source` =
   the row's `backlink_agent_queue.source` mapped EXHAUSTIVELY to the §3.5 enum — `x_feed`
   (X poller) → `x`, `manual` (admin route) → `owner_seed`, `strategy_agent` → `strategy_agent`,
   `competitor_gap` → `competitor_gap`, `web_discovery` and any other/NULL value →
@@ -559,8 +562,11 @@ the CHECK), `confidence=0.1`, `last_investigated_at=null`
   and priority, automated discoveries keep their real source for §8 learning, and the verbatim
   value is kept as `source_detail=legacy_queue:<id>:<source>` (`legacy:<value>` form as in the
   prospect backfill), the row's
-  status/provenance kept in `investigation.legacy_queue`), and the legacy worker is retired
-  from the scheduler in the same PR so nothing is ever stranded in the old queue.
+  status/provenance kept in `investigation.legacy_queue`); the legacy worker's scheduler entry
+  is removed in the same PR (new pods stop consuming the queue), but the queue's writers drain
+  with the rolling deploy and the table is dropped only by the later cleanup migration, after
+  the catch-up has reported zero un-imported rows across a full deploy cycle — so nothing is ever
+  stranded in the old queue.
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
   registry row (`source='lost_recovery'`).
 - **Strategist / local opportunity** — unchanged writers; they additionally upsert the domain.
@@ -1547,7 +1553,7 @@ Link Building board and outreach approvals remain as shipped.
 ## 12. Gates, env, kill switches
 
 Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
-`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report — from step 1 `HERMES_SERVICE_TOKEN` is RETIRED from the worker mount; every provider, `hermes` included, authenticates with per-provider HMAC request signing `LINK_WORKER_SECRET_<PROVIDER>` (timestamp + nonce replay protection, capabilities derived only after signature verification), and only the `deterministic_runner` key carries payment/credential capability), `GATE_SIGNUP_RUNNER` +
+`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report — from step 1 every provider, `hermes` included, authenticates with per-provider HMAC request signing; `HERMES_SERVICE_TOKEN` stays accepted for the `hermes` identity only (same capability limits, `auth_scheme` logged) through the ordered rollout in §1 and is RETIRED — acceptance removed + env unset — by the §14 follow-up after 7 days of zero bearer requests `LINK_WORKER_SECRET_<PROVIDER>` (timestamp + nonce replay protection, capabilities derived only after signature verification), and only the `deterministic_runner` key carries payment/credential capability), `GATE_SIGNUP_RUNNER` +
 `SIGNUP_RUNNER_ALLOWLIST`, `GATE_OUTREACH_DRAFTER`, `GATE_LINK_OUTREACH` +
 `LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
@@ -1664,7 +1670,7 @@ unset its gate; budget kill = the issuer program's limit.
 ## 14. Build order (PR boundaries)
 
 1. **Registry + paths + provenance + statuses** — migrations for §3.1–3.5, `awaiting_owner`/
-   `watching`/`ready_for_credentials`/`ready_for_payment` (status enum/constraint, `PROSPECT_STATUSES`, domain-guard sets, board filters + guard regression tests — all four), `domain_id/path_id/authority` + claim-binding columns (`leased_provider`/`lease_mode`/`lease_action`/`handoff_lease_token`) on prospects, per-provider HMAC worker auth (§12) TOGETHER WITH the Hermes signing helper + both Hermes skill docs cut over from the bearer file (no worker keeps a documented `HERMES_SERVICE_TOKEN` path), intake SERVICE (`link-registry-intake.js`, called directly by jobs) + its thin admin endpoint
+   `watching`/`ready_for_credentials`/`ready_for_payment` (status enum/constraint, `PROSPECT_STATUSES`, domain-guard sets, board filters + guard regression tests — all four), `domain_id/path_id/authority` + claim-binding columns (`leased_provider`/`lease_mode`/`lease_action`/`handoff_lease_token`) on prospects, per-provider HMAC worker auth (§12) accepting bearer alongside for `hermes` only, TOGETHER WITH the Hermes signing helper + the in-repo drafter skill cut over (the external dashboard signup skill is migrated by hand and verified via `auth_scheme` — §1); **step 1b (follow-up, dated):** remove bearer acceptance + unset `HERMES_SERVICE_TOKEN` after 7 days of zero `bearer` requests; intake SERVICE (`link-registry-intake.js`, called directly by jobs) + its thin admin endpoint
    (normalize/dedupe/upsert only); `seo_signup_attempts` backfill + atomic `recordAttempt`
    cutover to `seo_link_attempts` (§3.4). Docs-tested with contract tests on the guard.
 2. **Bulk intake** — paste box + CSV import + competitor-gap ingestion job + existing-profile
