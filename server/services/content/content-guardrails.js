@@ -192,7 +192,11 @@ function attrValueAt(attrs, pos) {
     const end = a.indexOf(ch, pos + 1);
     return end === -1 ? a.slice(pos) : a.slice(pos, end + 1);
   }
-  return (a.slice(pos).match(/^[^\s>/]*/) || [''])[0];
+  // HTML permits `/` INSIDE an unquoted value (`url(/x);display:none`) —
+  // only the tag's trailing self-closing slash terminates it (#3595 r1).
+  let tok = (a.slice(pos).match(/^[^\s>]*/) || [''])[0];
+  if (pos + tok.length === a.length && tok.endsWith('/')) tok = tok.slice(0, -1);
+  return tok;
 }
 // A spread ({...props}) can carry `open`, so its presence makes the final
 // value unprovable — and the certainty walker must then treat the element
@@ -200,25 +204,49 @@ function attrValueAt(attrs, pos) {
 // attributes in order (last wins): only a spread AFTER the last literal
 // `open` can override it; a spread with no literal `open` at all is
 // unprovable likewise.
-const SPREAD_RE = /\{\s*\.\.\./;
+// An ATTRIBUTE spread is a `{...` opening at the TOP level of the attrs
+// string — a spread nested inside an ordinary attribute's expression
+// (`data-config={JSON.stringify({...defaults})}`) sets nothing on the
+// element (#3595 r1). Quote-aware, brace-depth-tracked walk from `from`.
+function hasAttrSpreadAfter(attrs, from = 0) {
+  const a = String(attrs || '');
+  for (let i = Math.max(0, from); i < a.length; i += 1) {
+    const c = a[i];
+    if (c === '"' || c === "'" || c === '`') { const q = c; i += 1; while (i < a.length && a[i] !== q) i += 1; continue; }
+    if (c === '{') {
+      const attrPos = i === 0 || /\s/.test(a[i - 1]);
+      let j = i;
+      let d = 0;
+      for (; j < a.length; j += 1) {
+        const ch = a[j];
+        if (ch === '"' || ch === "'" || ch === '`') { const q = ch; j += 1; while (j < a.length && a[j] !== q) j += a[j] === '\\' ? 2 : 1; continue; }
+        if (ch === '{') d += 1;
+        else if (ch === '}') { d -= 1; if (d === 0) break; }
+      }
+      if (attrPos && /^\{\s*\.\.\./.test(a.slice(i, i + 8))) return true;
+      i = j;
+      continue;
+    }
+  }
+  return false;
+}
 function hasTrueOpenAttr(attrs) {
   const a = String(attrs || '');
   // Attribute NAMES are located on a masked copy — `open` inside a quoted
   // value (`title="Click to open"`) or an expression is not an attribute
   // (#3593 r2); values are then read from the ORIGINAL at the same offsets.
   const masked = maskAttrRegions(a);
-  const spreadable = maskAttrRegions(a, { keepBraces: true }); // strings masked, braces kept
   // `open` either carries `=` (value follows — any delimiter) or the
   // attribute ends at whitespace / `>` / `/`.
   const re = /(?:^|\s)open(\s*=\s*|(?=[\s>/]|$))/gi;
   let m = null;
   let last = null;
   while ((m = re.exec(masked)) !== null) last = m;
-  if (!last) return SPREAD_RE.test(spreadable); // no literal `open`: a spread may add one
+  if (!last) return hasAttrSpreadAfter(a, 0); // no literal `open`: an attribute spread may add one
   const valueStart = /=/.test(last[1] || '') ? last.index + last[0].length : -1;
   const value = valueStart >= 0 ? attrValueAt(a, valueStart) : undefined;
   const afterEnd = valueStart >= 0 ? valueStart + (value ? value.length : 0) : last.index + last[0].length;
-  if (SPREAD_RE.test(spreadable.slice(afterEnd))) return true; // later spread may override
+  if (hasAttrSpreadAfter(a, afterEnd)) return true; // later attribute spread may override
   if (value === undefined) return true; // bare `open`
   return !FALSY_EXPR_RE.test(value.trim());
 }
@@ -254,11 +282,11 @@ function hiddenStyleValue(attrs) {
   if (!last) return false;
   const valueStart = last.index + last[0].length;
   const rawValue = attrValueAt(a, valueStart);
-  // A spread AFTER the literal style may override it (props.style =
-  // display:'block') — hidden is then unprovable and the certainty walker
-  // keeps the content (#3593 r2), mirroring the `open` handling.
-  const spreadable = maskAttrRegions(a, { keepBraces: true });
-  if (SPREAD_RE.test(spreadable.slice(valueStart + rawValue.length))) return false;
+  // An ATTRIBUTE spread after the literal style may override it
+  // (props.style = display:'block') — hidden is then unprovable and the
+  // certainty walker keeps the content (#3593 r2); a spread nested inside
+  // another attribute's expression does not (#3595 r1).
+  if (hasAttrSpreadAfter(a, valueStart + rawValue.length)) return false;
   const ch = rawValue[0];
   const val = (ch === '"' || ch === "'" || ch === '`' || ch === '{') ? rawValue.slice(1, -1) : rawValue;
   return HIDDEN_STYLE_KEYWORD_RE.test(val);

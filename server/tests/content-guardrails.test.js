@@ -4786,6 +4786,16 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
+  test('opensDefinitelyHidden: only a TOP-LEVEL attribute spread overrides; bare unquoted values keep interior slashes (#3595 r1)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // A spread nested inside another attribute's expression sets nothing — still hidden.
+    expect(keep(`<div style={{ display: 'none' }} data-config={JSON.stringify({...defaults})}>![h](/x.webp)</div>`)).not.toContain('![h]');
+    // …a real attribute spread still makes it unprovable.
+    expect(keep("<div style={{ display: 'none' }} {...props}>![v](/x.webp)</div>")).toContain('![v]');
+    // Unquoted value with interior slashes — the later display:none still hides.
+    expect(keep('<div style=background:url(/x);display:none>![h2](/x.webp)</div>')).not.toContain('![h2]');
+  });
+
   test('opensDefinitelyHidden: attribute scans are quote-aware; falsy literals are case-sensitive; a spread after a hidden style makes it unprovable (#3593 r2)', () => {
     const { blankDefinitelyHiddenContent: keep } = guardrails;
     // `open` inside ANOTHER attribute's quoted value is not an attribute — the element stays closed.
