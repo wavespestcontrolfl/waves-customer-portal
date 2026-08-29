@@ -675,7 +675,9 @@ export function visitWorkSummary(data = {}, fallback = '') {
   // says what was inspected/serviced, never "1 product applied" (owner
   // 2026-08-29). Counts come from the builder's metrics (documented station
   // counts) — same source the dashboard hero prints.
-  const termiteMetrics = Array.isArray(data.termiteReportV2?.metrics) ? data.termiteReportV2.metrics : null;
+  const termiteMetrics = data.termiteReportV2?.source !== 'companion' && Array.isArray(data.termiteReportV2?.metrics)
+    ? data.termiteReportV2.metrics
+    : null;
   if (termiteMetrics) {
     const inspected = termiteMetrics.find((m) => m?.label === 'Stations inspected')?.value;
     const serviced = Number(termiteMetrics.find((m) => m?.label === 'Stations serviced')?.value);
@@ -844,7 +846,9 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   // observed at 2 stations"); the full body lives in the dashboard hero
   // right below, so printing it here too read the same paragraph twice at
   // heading size (owner eyeball 2026-08-29).
-  if (data.termiteReportV2?.status?.label || data.termiteReportV2?.statusSummary) {
+  // Primary-source only: on a combined visit the bait dashboard is a
+  // companion and the header keeps the PRIMARY service's status.
+  if (data.termiteReportV2?.source !== 'companion' && (data.termiteReportV2?.status?.label || data.termiteReportV2?.statusSummary)) {
     return {
       heading: 'your service is complete!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -5532,15 +5536,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // spaced — see the recurring pest control report"). The two review
   // mounts are mutually exclusive on this flag.
   const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
-  // Termite V2: the visit-history card's CURRENT row carries the reconciled
-  // dashboard headline instead of the frozen snapshot headline.
-  const termiteReconciledTimeline = data.termiteReportV2?.status?.label && Array.isArray(data.typedVisitTimeline?.visits)
+  // Termite V2 replaces ONE typed section: the primary cards (source
+  // 'primary') or the bait-station companion block (source 'companion' —
+  // combined pest + termite visits). Every suppression below keys on the
+  // matching flag so a pest primary never loses its own cards to a
+  // companion dashboard (codex P1 #3600 r13).
+  const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
+  const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  const reconcileTermiteTimeline = (timeline) => (data.termiteReportV2?.status?.label && Array.isArray(timeline?.visits)
     ? {
-      ...data.typedVisitTimeline,
-      visits: data.typedVisitTimeline.visits.map((visit) => (visit?.isCurrent
+      ...timeline,
+      visits: timeline.visits.map((visit) => (visit?.isCurrent
         ? { ...visit, headline: data.termiteReportV2.status.label }
         : visit)),
     }
+    : null);
+  // Termite V2: the visit-history card's CURRENT row carries the reconciled
+  // dashboard headline instead of the frozen snapshot headline.
+  const termiteReconciledTimeline = termiteV2Primary && Array.isArray(data.typedVisitTimeline?.visits)
+    ? reconcileTermiteTimeline(data.typedVisitTimeline)
     : null;
   // Termite V2: only genuine product applications survive into Products
   // Applied (bait cartridge / station-check rows are monitoring).
@@ -8791,7 +8805,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Termite V2 owns the visit story (hero + station network) — the
             typed Today's Result card would restate it (same rationale as the
             pest V2 tile suppression, owner 2026-07-21). */}
-        {!data.termiteReportV2 && (
+        {!termiteV2Primary && (
           <TodaysResultCard
             typedReport={data.typedReport}
             bodyOverride={data.summarySource === 'typed_narrative'
@@ -8949,7 +8963,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Ask-Waves section that used to render into pdf/static documents was
             removed 2026-08-02 (dead chrome in a printed PDF — owner); live
             mode's ask surface is FloatingAskWaves. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && !data.termiteReportV2 && !typedNarrativeOwnsSummary && (
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
@@ -9063,7 +9077,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hero-owned counts/status tiles drop (codex P1 #3600 r1). */}
         {!data.pestReportV2 && (
           <TypedFindingsCard
-            typedReport={data.termiteReportV2 && data.typedReport
+            typedReport={termiteV2Primary && data.typedReport
               ? {
                 ...data.typedReport,
                 findings: (data.typedReport.findings || []).filter((f) => !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f?.fieldKey)),
@@ -9107,7 +9121,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Termite V2 renders the current reading in its hero/metrics AND
             carries the cross-visit trend line itself (activityTrend), so the
             standalone gauge would print the reading twice (codex P2 #3600 r5). */}
-        {!data.termiteReportV2 && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
+        {!termiteV2Primary && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : (
             <PestPressureCard
@@ -9143,32 +9157,43 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             companion-internal wrapper additionally excludes staff-only
             sections from PRINT (the print stylesheet hides the warning
             header, so a staff print must match the customer artifact). */}
-        {(data.companionReports || []).map((companion) => (
-          <div
-            key={companion.type}
-            className={companion.internalOnly ? 'companion-internal' : undefined}
-          >
-            <CompanionSectionHeader companion={companion} />
-            <TodaysResultCard
-              typedReport={companion}
-              sectionId={`companion-${companion.type}-todays-result`}
-            />
-            <TypedFindingsCard
-              typedReport={companion}
-              sectionId={`companion-${companion.type}-findings`}
-            />
-            {companion.activity && (
-              <ActivityCard
-                data={companion.activity}
-                sectionId={`companion-${companion.type}-activity`}
+        {(data.companionReports || []).map((companion) => {
+          // Combined visit with a bait-station companion: the dashboard
+          // above owns its result, reading, and hero-owned tiles — the
+          // companion block keeps its header and the typed fields the
+          // dashboard does not render (same filter as a primary bait visit).
+          const ownedByDashboard = termiteV2Companion && companion.type === 'termite_bait_station' && !companion.internalOnly;
+          return (
+            <div
+              key={companion.type}
+              className={companion.internalOnly ? 'companion-internal' : undefined}
+            >
+              <CompanionSectionHeader companion={companion} />
+              {!ownedByDashboard && (
+                <TodaysResultCard
+                  typedReport={companion}
+                  sectionId={`companion-${companion.type}-todays-result`}
+                />
+              )}
+              <TypedFindingsCard
+                typedReport={ownedByDashboard
+                  ? { ...companion, findings: (companion.findings || []).filter((f) => !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f?.fieldKey)) }
+                  : companion}
+                sectionId={`companion-${companion.type}-findings`}
               />
-            )}
-            <TypedVisitTimelineCard
-              timeline={companion.visitTimeline}
-              sectionId={`companion-${companion.type}-visit-timeline`}
-            />
-          </div>
-        ))}
+              {companion.activity && !ownedByDashboard && (
+                <ActivityCard
+                  data={companion.activity}
+                  sectionId={`companion-${companion.type}-activity`}
+                />
+              )}
+              <TypedVisitTimelineCard
+                timeline={ownedByDashboard ? (reconcileTermiteTimeline(companion.visitTimeline) || companion.visitTimeline) : companion.visitTimeline}
+                sectionId={`companion-${companion.type}-visit-timeline`}
+              />
+            </div>
+          );
+        })}
 
         {/* Treated-point marks on the tech's own photo (GATE_PHOTO_MARKS,
             dark — the server sends an empty list when off, so this renders

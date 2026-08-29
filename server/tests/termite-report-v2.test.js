@@ -8,6 +8,7 @@
 const {
   buildTermiteReportV2,
   attachTermiteReportV2,
+  termiteBaitSnapshotOf,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   resolveTermiteStatus,
@@ -56,6 +57,15 @@ describe('resolveTermiteStatus — honest status ladder', () => {
   it('previous feeding → evidence; feeding alone → monitoring', () => {
     expect(resolveTermiteStatus({ termiteActivity: 'Previous feeding noted', baitConsumption: null, checked: 12, inaccessible: 0 }).key).toBe('evidence');
     expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'Light feeding', checked: 12, inaccessible: 0 }).key).toBe('monitoring');
+  });
+
+  it('positive activity-sign chips override a legacy "None observed" select', () => {
+    expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Live termites in station' }).key).toBe('action');
+    expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Mud tubing in station, Favorable moisture / soil conditions' }).key).toBe('action');
+    expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Previous feeding evidence' }).key).toBe('evidence');
+    expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Bait feeding' }).key).toBe('monitoring');
+    // a moisture-only chip is not activity
+    expect(resolveTermiteStatus({ termiteActivity: 'None observed', baitConsumption: 'None — bait intact', checked: 12, inaccessible: 0, activitySigns: 'Favorable moisture / soil conditions' }).key).toBe('protected');
   });
 
   it('never claims protection without an inspected count', () => {
@@ -369,6 +379,15 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(kept.status.key).toBe('evidence');
   });
 
+  it('legacy "None observed" + "Live termites in station" chip never headlines a clean visit', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, activity_signs: 'Live termites in station' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status.key).toBe('action');
+    expect(out.status.label).toBe('Termite activity observed');
+  });
+
   it('legacy "None observed" + feeding → monitoring headline that keeps the feeding evidence', () => {
     const out = buildTermiteReportV2({
       typedSnapshotValues: { ...CLEAN_VALUES, bait_consumption: 'Light feeding' },
@@ -417,6 +436,60 @@ describe('attachTermiteReportV2 — the one composer shared by the route and the
     expect(attachTermiteReportV2({ ...payload(), serviceLine: 'pest' }, service).termiteReportV2.status.label).toBe('No termite activity observed');
     expect(attachTermiteReportV2({ ...payload(), typedReport: { type: 'termite_liquid' } }, service).termiteReportV2).toBeUndefined();
     expect(attachTermiteReportV2(null, service)).toBeNull();
+  });
+});
+
+describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => {
+  const original = process.env.TERMITE_REPORT_V2;
+  afterEach(() => {
+    if (original === undefined) delete process.env.TERMITE_REPORT_V2;
+    else process.env.TERMITE_REPORT_V2 = original;
+  });
+  const combined = { service_data: JSON.stringify({
+    typedReportSnapshot: { type: 'cockroach', values: {} },
+    companionReportSnapshots: [
+      { type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES },
+    ],
+  }) };
+  const internalOnly = { service_data: JSON.stringify({
+    typedReportSnapshot: { type: 'cockroach', values: {} },
+    companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'internal_only', values: CLEAN_VALUES }],
+  }) };
+
+  it('resolves the primary first, then an auto_send companion; internal_only companions never qualify', () => {
+    expect(termiteBaitSnapshotOf({ service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: {} } }) }).source).toBe('primary');
+    expect(termiteBaitSnapshotOf(combined).source).toBe('companion');
+    expect(termiteBaitSnapshotOf(internalOnly)).toBeNull();
+    expect(termiteBaitSnapshotOf({ service_data: '{}' })).toBeNull();
+    expect(termiteBaitSnapshotOf({})).toBeNull();
+  });
+
+  it('attaches the dashboard from the auto_send companion, keyed to the companion report entry, tagged source=companion', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const data = attachTermiteReportV2({
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', visitSequence: 1, todaysResult: { nextStep: 'Roach next step.' } },
+      companionReports: [{ type: 'termite_bait_station', visitSequence: 4, internalOnly: false, todaysResult: { nextStep: 'Recheck the bait ring.' } }],
+      summarySource: 'technician_report',
+      summary: 'Roach narrative.',
+    }, combined);
+    expect(data.termiteReportV2.source).toBe('companion');
+    expect(data.termiteReportV2.visitSequence).toBe(4);
+    expect(data.termiteReportV2.nextStep).toBe('Recheck the bait ring.');
+    // the primary's narrative never rides a companion dashboard
+    expect(data.termiteReportV2.aiSummary).toBeNull();
+  });
+
+  it('a companion the payload filtered out (internal_only) yields no dashboard', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    expect(attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [] }, internalOnly).termiteReportV2).toBeUndefined();
+    expect(attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [{ type: 'termite_bait_station', internalOnly: true }] }, combined).termiteReportV2).toBeUndefined();
+  });
+
+  it('the PDF signature keys on the companion snapshot too', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    expect(termiteReportV2PdfSignature(combined)).toBe('-termv2');
+    expect(termiteReportV2PdfSignature(internalOnly)).toBe('');
   });
 });
 

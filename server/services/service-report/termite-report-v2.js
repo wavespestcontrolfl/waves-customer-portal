@@ -58,11 +58,20 @@ function plural(n) { return n === 1 ? '' : 's'; }
  * red (owner 2026-08-29); the copy carries the urgency. Absence claims stay
  * scoped to what was inspected today.
  */
-function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inaccessible }) {
+function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inaccessible, activitySigns = '' }) {
   const feeding = FEEDING_VALUES.has(baitConsumption);
-  if (termiteActivity === ACTIVITY_VALUES.ACTIVE) return { key: 'action', tone: 'watch' };
-  if (termiteActivity === ACTIVITY_VALUES.PREVIOUS) return { key: 'evidence', tone: 'watch' };
-  if (feeding) return { key: 'monitoring', tone: 'watch' };
+  // Positive activity-sign chips are evidence in their own right: legacy
+  // snapshots can pair "None observed" with "Live termites in station" (the
+  // entry-time validator rejects that today, but the frozen record stands),
+  // and those chips still print in the findings card — the status must
+  // never contradict them (codex P2 #3600 r13).
+  const signs = String(activitySigns || '');
+  const liveSigns = /live termites|mud tubing/i.test(signs);
+  const priorSigns = /previous feeding/i.test(signs);
+  const feedingSigns = /\bbait feeding\b/i.test(signs);
+  if (termiteActivity === ACTIVITY_VALUES.ACTIVE || liveSigns) return { key: 'action', tone: 'watch' };
+  if (termiteActivity === ACTIVITY_VALUES.PREVIOUS || priorSigns) return { key: 'evidence', tone: 'watch' };
+  if (feeding || feedingSigns) return { key: 'monitoring', tone: 'watch' };
   if (termiteActivity === ACTIVITY_VALUES.NONE && (checked ?? 0) > 0) {
     return { key: 'protected', tone: 'good' };
   }
@@ -370,6 +379,7 @@ function buildTermiteReportV2({
     baitConsumption: values.bait_consumption || null,
     checked,
     inaccessible,
+    activitySigns: values.activity_signs || '',
   });
   // Visit-backed activity pins can ESCALATE the status, never downgrade it:
   // the form select and the per-station checks are entered separately and
@@ -392,7 +402,7 @@ function buildTermiteReportV2({
     servicedToday,
     inaccessible,
     activeLocation: values.active_station_location ? String(values.active_station_location).trim() : null,
-    baitFeeding: FEEDING_VALUES.has(values.bait_consumption),
+    baitFeeding: FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')),
   });
   const status = { ...statusBase, label: copy.headline };
   const statusSummary = copy.body;
@@ -430,18 +440,34 @@ function buildTermiteReportV2({
   };
 }
 
-function typedSnapshotOf(service = {}) {
+function serviceDataOf(service = {}) {
   const raw = service.service_data;
   let data = raw;
   if (typeof raw === 'string') {
     try { data = JSON.parse(raw); } catch { data = null; }
   }
-  const snapshot = data && typeof data === 'object' ? data.typedReportSnapshot : null;
-  return snapshot && typeof snapshot === 'object' ? snapshot : null;
+  return data && typeof data === 'object' ? data : null;
 }
 
-function typedSnapshotType(service = {}) {
-  return typedSnapshotOf(service)?.type || null;
+/**
+ * The bait-station snapshot this record carries, with where it came from:
+ * the PRIMARY typed snapshot, or — on a combined-service completion (e.g. a
+ * pest visit with a termite bait companion) — the customer-visible
+ * (auto_send) COMPANION snapshot (codex P1 #3600 r13). internal_only
+ * companions never qualify: the customer never receives them. Null when the
+ * record has no bait-station snapshot at all.
+ */
+function termiteBaitSnapshotOf(service = {}) {
+  const data = serviceDataOf(service);
+  if (!data) return null;
+  const primary = data.typedReportSnapshot;
+  if (primary && typeof primary === 'object' && primary.type === TERMITE_BAIT_TYPED_TYPE) {
+    return { snapshot: primary, source: 'primary' };
+  }
+  const companions = Array.isArray(data.companionReportSnapshots) ? data.companionReportSnapshots : [];
+  const companion = companions.find((snap) => snap && typeof snap === 'object'
+    && snap.type === TERMITE_BAIT_TYPED_TYPE && snap.delivery === 'auto_send');
+  return companion ? { snapshot: companion, source: 'companion' } : null;
 }
 
 /**
@@ -464,20 +490,27 @@ function attachTermiteReportV2(data, service = {}) {
   // the PDF signature). The name-derived serviceLine is not consulted: a
   // catalog short name such as "Bait Annual" detects as 'pest' while its
   // profile and snapshot are termite_bait_station (codex P1 #3600 r12).
-  if (
-    process.env.TERMITE_REPORT_V2 !== 'true'
-    || data.typedReport?.type !== TERMITE_BAIT_TYPED_TYPE
-  ) return data;
+  if (process.env.TERMITE_REPORT_V2 !== 'true') return data;
+  const resolved = termiteBaitSnapshotOf(service);
+  if (!resolved) return data;
+  // The customer-visible report entry that matches the snapshot: the
+  // primary typedReport, or the auto_send companion entry. A companion the
+  // payload filtered out (internal_only, or a delivery posture this viewer
+  // can't see) yields no entry → no dashboard.
+  const report = resolved.source === 'primary'
+    ? (data.typedReport?.type === TERMITE_BAIT_TYPED_TYPE ? data.typedReport : null)
+    : (Array.isArray(data.companionReports) ? data.companionReports : [])
+      .find((c) => c && c.type === TERMITE_BAIT_TYPED_TYPE && !c.internalOnly) || null;
+  if (!report) return data;
   try {
-    const typedSnapshot = typedSnapshotOf(service);
     const termiteReportV2 = buildTermiteReportV2({
-      typedSnapshotValues: typedSnapshot?.values || null,
-      typedReportType: data.typedReport.type,
+      typedSnapshotValues: resolved.snapshot.values || null,
+      typedReportType: TERMITE_BAIT_TYPED_TYPE,
       stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
-      visitSequence: data.typedReport.visitSequence || 1,
+      visitSequence: report.visitSequence || 1,
       // The dashboard replaces the typed Today's Result card, so it must
       // carry the tech's required next-step commitment itself.
-      nextStep: data.typedReport.todaysResult?.nextStep || null,
+      nextStep: report.todaysResult?.nextStep || null,
       // First upcoming BAIT-STATION appointment, selected by report-data
       // over the full candidate window; null in pdf/static builds.
       nextVisit,
@@ -485,12 +518,17 @@ function attachTermiteReportV2(data, service = {}) {
       // Summary + typed Today's Result), so the approved narrative rides
       // the hero: the accepted technician-report body or the live typed
       // narrative (report-data sets summarySource for each).
-      technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
+      // The narrative is the PRIMARY story's summary — a companion
+      // dashboard never borrows the primary service's narrative.
+      technicianReport: resolved.source === 'primary'
+        && (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
         && typeof data.summary === 'string'
         ? data.summary
         : null,
     });
-    if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
+    // `source` tells the client which typed section the dashboard replaces:
+    // the primary cards, or the bait-station companion block.
+    if (termiteReportV2) data.termiteReportV2 = { ...termiteReportV2, source: resolved.source };
   } catch { /* best-effort — never block the report */ }
   return data;
 }
@@ -499,20 +537,21 @@ function attachTermiteReportV2(data, service = {}) {
  * PDF cache-key component. Same contract as mosquitoReportV2PdfSignature:
  * empty string when the gate is off or the record does not apply, so a gate
  * flip never mass-invalidates cached PDFs for other lines. Keyed on the SAME
- * predicate as the render gate — the frozen typed snapshot type — never the
- * service display name (a renamed termite service still completes on the
+ * predicate as the render gate — the frozen bait-station snapshot, primary
+ * or auto_send companion — never the service display name (a renamed termite service still completes on the
  * bait-station profile; codex P2 #3600 r1). Bump the suffix whenever the
  * termite-line report COMPOSITION changes.
  */
 function termiteReportV2PdfSignature(service = {}) {
   if (process.env.TERMITE_REPORT_V2 !== 'true') return '';
-  return typedSnapshotType(service) === TERMITE_BAIT_TYPED_TYPE ? '-termv2' : '';
+  return termiteBaitSnapshotOf(service) ? '-termv2' : '';
 }
 
 module.exports = {
   TERMITE_BAIT_TYPED_TYPE,
   buildTermiteReportV2,
   attachTermiteReportV2,
+  termiteBaitSnapshotOf,
   termiteReportV2PdfSignature,
   isTermiteBaitServiceName,
   // exported for tests

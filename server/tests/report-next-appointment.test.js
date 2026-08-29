@@ -428,6 +428,25 @@ test('a "Bait Annual" report (name detects as pest, snapshot is bait-station) st
   expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-04-03');
 });
 
+test('a combined visit whose bait-station snapshot is an auto_send COMPANION still gets its next monitoring visit', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
+    ],
+  });
+  const combined = {
+    ...BASE_SERVICE,
+    id: 'service-combined',
+    service_data: JSON.stringify({
+      typedReportSnapshot: { type: 'cockroach', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: { stations_checked: 12 } }],
+    }),
+  };
+  const data = await buildReportV1Data(combined, 'token-combined', knex, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-04-03');
+});
+
 test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,

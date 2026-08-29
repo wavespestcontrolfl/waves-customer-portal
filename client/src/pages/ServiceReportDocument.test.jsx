@@ -410,6 +410,38 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.match(/2 of the 12 stations inspected/g)).toHaveLength(1);
   });
 
+  it('companion-source termite V2 keeps the primary summary and replaces only the bait companion result', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.', body: 'We treated the kitchen.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body.', nextStep: 'Recheck active stations sooner.' },
+        findings: [
+          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
+          { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+        ],
+      }],
+      termiteReportV2: {
+        source: 'companion',
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text).toMatch(/Roach activity was light today/);
+    expect(text).toMatch(/We treated the kitchen/);
+    expect(text).toMatch(/Station protection/);
+    expect(text).toMatch(/2 of the 12 stations inspected/);
+    expect(text).not.toMatch(/Termite activity was high today/);
+    expect(text).not.toMatch(/Companion typed body/);
+    expect(text).toMatch(/Recheck active stations sooner/);
+    expect(text).toMatch(/Station condition issues: Station obstructed/);
+    expect(text).not.toMatch(/Stations checked: 12/);
+  });
+
   it('termite V2 suppresses the frozen activity-gauge bullet that could contradict the reconciled status', () => {
     const data = {
       ...BASE_DATA,

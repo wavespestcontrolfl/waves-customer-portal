@@ -364,7 +364,7 @@ export default function ServiceReportDocument({ data, token }) {
     // map counts may override hand-edited typed counts) — same filter as the
     // live report, so the PDF never prints two inspected totals (codex P2
     // #3600 r7).
-    .filter((f) => !data.termiteReportV2 || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
+    .filter((f) => !(Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
   // Older records store the aliases the web report's conditionRows accepts
@@ -504,7 +504,12 @@ export default function ServiceReportDocument({ data, token }) {
   // builder gives visit-backed station-map counts precedence over hand-
   // edited typed counts, so printing the typed headline/body too could state
   // two different inspected/activity totals (codex P2 #3600 r5).
-  const termiteV2Summary = data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
+  // Primary-source only: a companion dashboard (combined visit) never
+  // replaces the PRIMARY service's summary — it replaces the bait companion
+  // block below instead.
+  const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
+  const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   const summaryParagraphs = [];
   if (termiteV2Summary) {
     summaryParagraphs.push(String(termiteV2Summary.status.label).replace(/\.$/, '') + '.');
@@ -541,7 +546,9 @@ export default function ServiceReportDocument({ data, token }) {
     if (mosquitoV2?.status?.label) return { label: 'Yard usability', value: mosquitoV2.status.label, detail: mosquitoV2.statusSummary };
     // detail deliberately omitted — the summary paragraphs above already
     // print statusSummary (sole-summary rule).
-    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: null };
+    // (companion source: the summary paragraphs are the primary's, so the
+    // row carries the bait statusSummary itself)
+    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2Companion ? termiteV2.statusSummary : null };
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
@@ -938,7 +945,7 @@ export default function ServiceReportDocument({ data, token }) {
             {/* Termite V2 owns the reconciled activity reading (map pins may
                 escalate a frozen "None observed") — the frozen gauge bullet
                 would contradict it (codex P2 #3600 r10). */}
-            {activity && activity.levelWord && !termiteV2 && (
+            {activity && activity.levelWord && !termiteV2Primary && (
               <Bullet>
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>
@@ -1322,7 +1329,10 @@ export default function ServiceReportDocument({ data, token }) {
         {companions.map((companion) => (
           <div key={companion.type} className="doc-keep">
             <SectionHeader>{companion.reportTypeLabel || companion.typeLabel || 'Additional service'}</SectionHeader>
-            {companion.todaysResult?.headline && (
+            {/* Bait-station companion owned by the termite dashboard: its
+                result prints in the Station protection row above, so the
+                frozen headline/body stay out (sole-summary rule). */}
+            {!(termiteV2Companion && companion.type === 'termite_bait_station') && companion.todaysResult?.headline && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
                 {String(companion.todaysResult.headline).replace(/\.$/, '')}.
                 {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
@@ -1340,6 +1350,7 @@ export default function ServiceReportDocument({ data, token }) {
             )}
             {(companion.findings || [])
               .filter((finding) => String(finding?.customerValueLabel ?? finding?.value ?? '').trim())
+              .filter((finding) => !(termiteV2Companion && companion.type === 'termite_bait_station') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(finding?.fieldKey))
               .map((finding) => (
                 <Bullet key={finding.fieldKey || finding.customerLabel}>
                   <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}

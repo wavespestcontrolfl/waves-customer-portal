@@ -235,6 +235,39 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(card).getAllByText('No termite activity observed')).toHaveLength(1);
   });
 
+  it('companion source (combined pest + termite visit): the primary keeps its cards, the bait companion block is owned by the dashboard', async () => {
+    const combined = JSON.parse(JSON.stringify(termiteReportV2));
+    combined.serviceLine = 'pest';
+    combined.termiteReportV2.source = 'companion';
+    combined.typedReport = {
+      type: 'cockroach', reportTypeLabel: 'Cockroach Service', visitSequence: 1,
+      todaysResult: { headline: 'Roach activity was light today.', body: 'We treated the kitchen and baths.', nextStep: 'Keep counters dry overnight.' },
+      findings: [{ fieldKey: 'rooms_treated', customerLabel: 'Rooms treated', customerValueLabel: 'Kitchen, baths' }],
+    };
+    combined.companionReports = [{
+      type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', visitSequence: 3, internalOnly: false,
+      todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body.', nextStep: 'Recheck active stations sooner.' },
+      findings: [
+        { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
+        { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+      ],
+    }];
+    const { container } = renderReport(combined);
+    // dashboard mounts once
+    await screen.findByText('Termite activity observed at 2 stations', { selector: 'h2' });
+    // the PRIMARY (roach) Today's Result and header status stay
+    expect(container.querySelector('#todays-result')).not.toBeNull();
+    expect(screen.getByText('Roach activity was light today')).toBeInTheDocument();
+    expect(container.querySelector('.smart-status-result').textContent).not.toMatch(/Termite activity observed/);
+    // the bait companion's typed Today's Result is replaced; its
+    // non-dashboard fields still print, the hero-owned count tile does not
+    expect(container.querySelector('#companion-termite_bait_station-todays-result')).toBeNull();
+    expect(screen.queryByText('Termite activity was high today')).toBeNull();
+    const companionFindings = container.querySelector('#companion-termite_bait_station-findings');
+    expect(within(companionFindings).getByText('Station condition issues')).toBeInTheDocument();
+    expect(within(companionFindings).queryByText('Stations checked')).toBeNull();
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);

@@ -4,7 +4,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
-const { isTermiteBaitServiceName, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { isTermiteBaitServiceName, termiteBaitSnapshotOf, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -4377,10 +4377,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // a "Bait Annual" short name detects as 'pest' while its snapshot is
     // termite_bait_station (codex P1 #3600 r12) — same predicate as
     // attachTermiteReportV2 and the PDF signature.
+    // Primary OR auto_send companion bait snapshot (combined visits) —
+    // the same resolver attachTermiteReportV2 and the PDF signature use.
     if (
       opts.mode === 'live'
       && process.env.TERMITE_REPORT_V2 === 'true'
-      && typedSnapshot?.type === TERMITE_BAIT_TYPED_TYPE
+      && termiteBaitSnapshotOf(service)
     ) {
       const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
