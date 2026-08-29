@@ -1155,11 +1155,17 @@ async function publishAstro(postId) {
     // auto-merges unattended once the build is green and Codex is clean, so
     // it must not ship a hero-only post either. Their alts get the same
     // narrow compliance pass as the hero alt.
+    const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
+    // A republish of a merged post finds its pictures only in the LIVE
+    // Markdown (blog_posts.content never receives the inserted references),
+    // so the live file is what lets the resolver REUSE body-N instead of
+    // generating (and paying for) higher-numbered replacements.
+    const liveFile = await gh.getFile(filePath);
     const bodyImages = await resolveBodyImages({
       frontmatter: data,
       slug,
       body,
-      existingFile: null,
+      existingFile: liveFile ? { path: filePath, file: liveFile } : null,
       brief: {},
       // Fresh hero bytes, or the committed hero's repo path when reused.
       siblings: [{ label: 'hero', buffer: heroImage?.buffer || null, repoPath: heroImage?.buffer ? null : (String(heroPublicRef || '').startsWith('/') ? `public${heroPublicRef}` : null) }],
@@ -1169,7 +1175,6 @@ async function publishAstro(postId) {
     }
     const finalBody = bodyImages.body;
     const markdown = fm.stringify(data, finalBody + '\n');
-    const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
     await gh.createBranch(branch);
     branchCreated = true;
@@ -1802,6 +1807,10 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
     if (live?.file?.content) {
       try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { legacyHeroSrcs = []; }
     }
+  } else if (filePath) {
+    // Scheduler lane: publishAstro writes a known flat path.
+    found = await resolveExistingAstroFile(filePath, { ref: branch });
+    label = filePath;
   } else {
     // EXACTLY the file publishOrUpdatePage wrote: the route-matched existing
     // file (category or flat path, .mdx or legacy .md), else the new
@@ -2261,9 +2270,17 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // Fail closed: a picture whose bytes cannot be read cannot be proven
   // distinct, so it parks rather than slipping past the check.
   const seen = [];
+  // Every committed picture this run's verdicts depend on is pinned to the
+  // blob it was judged on (re-checked on the fresh branch before the commit):
+  // a REUSED hero sibling here, the draft-authored pictures below.
+  const pinned = [];
   for (const sib of siblings) {
     let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
-    if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
+    if (!buf && sib?.repoPath) {
+      const file = await gh.getFile(sib.repoPath);
+      buf = await committedImageBuffer(sib.repoPath, async () => file);
+      pinned.push({ repoPath: sib.repoPath, sha: file?.sha || null });
+    }
     if (!buf && (sib?.repoPath || sib?.buffer)) {
       const err = new Error(`autonomous blog body images: ${sib.label || 'hero'} bytes unavailable for ${slug} (${sib.repoPath || 'buffer'}) — cannot verify body images differ from it`);
       err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2271,10 +2288,8 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     }
     if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
   }
-  // Every draft-authored picture is pinned to the blob it was judged on
-  // (its alt is the draft's, so the bytes must be the ones the alt
-  // describes) — re-checked on the fresh branch before the commit.
-  const pinned = [];
+  // Every draft-authored picture is pinned too (its alt is the draft's, so
+  // the bytes must be the ones the alt describes).
   for (const src of draftSrcs) {
     const repoPath = `public${src}`;
     const file = await gh.getFile(repoPath);
@@ -2442,7 +2457,7 @@ async function bodyImageCommitConflicts(bodyImages, branch) {
   }
   for (const pin of bodyImages.pinned || []) {
     const onBranch = await gh.getFile(pin.repoPath, branch);
-    if (!onBranch || (pin.sha && onBranch.sha !== pin.sha)) conflicts.push(`${pin.repoPath} (authored picture changed: expected ${pin.sha}, found ${onBranch?.sha || 'missing'})`);
+    if (!onBranch || (pin.sha && onBranch.sha !== pin.sha)) conflicts.push(`${pin.repoPath} (pinned picture changed: expected ${pin.sha}, found ${onBranch?.sha || 'missing'})`);
   }
   return conflicts;
 }
@@ -3548,11 +3563,28 @@ async function unpublishAstro(postId) {
         });
       }
     }
+    // Generated in-article pictures (body-N.webp) live beside the hero and
+    // would otherwise stay publicly addressable — and hold their names, so
+    // a later republish would pay for higher-numbered replacements.
+    let bodyAssets = [];
+    try {
+      bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
+    } catch (listErr) {
+      logger.warn(`[astro-publisher] could not list body images for ${slug}: ${listErr.message}`);
+    }
+    for (const asset of bodyAssets) {
+      await gh.deleteFile({
+        path: asset.path || `${ASTRO_HERO_DIR}/${slug}/${asset.name}`,
+        message: `chore(blog): remove body image ${asset.name} for ${slug}`,
+        branch,
+        sha: asset.sha,
+      });
+    }
 
     const prBody = [
       `**Unpublish from admin portal**`,
       ``,
-      `Removes \`${mdPath}\`${heroFile ? ' and committed hero image assets' : ''} from main.`,
+      `Removes \`${mdPath}\`${heroFile ? ' and committed hero image assets' : ''}${bodyAssets.length ? ` and ${bodyAssets.length} generated body image(s)` : ''} from main.`,
       ``,
       `Merge to take the post offline. After merge the post returns to \`draft\` state in the portal and can be republished later.`,
       ``,
@@ -4148,6 +4180,12 @@ function isCodexAuthor(login) {
   return value === 'chatgpt-codex-connector' || value === 'chatgpt-codex-connector[bot]';
 }
 
+// The flat path the calendar/scheduler lane (publishAstro) writes for a slug —
+// the path pages-poll re-validates at the HEAD before its unattended merge.
+function scheduledBlogFilePath(slug) {
+  return `${ASTRO_BLOG_DIR}/${slug}.md`;
+}
+
 module.exports = {
   publishAstro,
   publishOrUpdatePage,
@@ -4171,6 +4209,7 @@ module.exports = {
   assertCodexReviewClear,
   // Merge-time body-image contract for the autonomous PR poller.
   assertBodyImagesAtHead,
+  scheduledBlogFilePath,
   // Length clamps reused by the autonomous runner to normalize a draft's
   // title/meta BEFORE the quality gate (the gate runs before publish, so the
   // in-publisher normalization above is too late to salvage a length overshoot).

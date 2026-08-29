@@ -237,6 +237,28 @@ async function pollPost(post, { allowMerge = true } = {}) {
           logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} (per-poll cap reached); retries next tick`);
           return { ok: true, url, mergeDeferred: true };
         }
+        // Body-image contract at the HEAD (owner rule: ≥3 images per post).
+        // publishAstro enforced it when the PR opened — only if the gate was
+        // on THEN; a PR opened under the old setting must not auto-merge
+        // hero-only once the gate flips. Same posture as the human-merge
+        // withhold above: park the claim at pending_review for an admin.
+        {
+          const pub = require('./astro-publisher');
+          if (typeof pub.assertBodyImagesAtHead === 'function' && post.astro_branch_name) {
+            let check;
+            try {
+              check = await pub.assertBodyImagesAtHead({ frontmatter: {}, branch: post.astro_branch_name, filePath: pub.scheduledBlogFilePath(post.slug) });
+            } catch (checkErr) {
+              check = { ok: false, reason: `body-image check failed: ${checkErr.message}` };
+            }
+            if (!check.ok) {
+              await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
+                .update({ publish_status: 'pending_review', astro_publish_error: `body images: ${check.reason}`.slice(0, 1000), updated_at: new Date() });
+              logger.warn(`[pages-poll] auto-merge WITHHELD for ${post.slug || post.id} — body images: ${check.reason}; PR left open for admin merge`);
+              return { ok: true, url, bodyImagesWithheld: true };
+            }
+          }
+        }
         try {
           const { mergeAstro } = require('./astro-publisher');
           // Pin the merge to the commit this GREEN deploy was built from:

@@ -182,3 +182,35 @@ describe('pollLivePost live-flip auto-share', () => {
     expect(updates.find((u) => u.updates.astro_status === 'live')).toBeDefined();
   });
 });
+
+
+describe('pollPost scheduler auto-merge: body-image contract at the HEAD (GH r19)', () => {
+  const publisher = require('../services/content-astro/astro-publisher');
+  function mockBranchDeploy() {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('api.cloudflare.com')) {
+        return { ok: true, json: async () => ({ result: [{ id: 'dep-b', environment: 'preview', url: 'https://preview.example', deployment_trigger: { metadata: { branch: 'content/blog-x', commit_hash: 'abc' } }, latest_stage: { name: 'deploy', status: 'success' } }] }) };
+      }
+      return { ok: true, status: 200 };
+    });
+  }
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  test('a hero-only PR is WITHHELD (claim parked at pending_review), a compliant one merges', async () => {
+    mockBranchDeploy();
+    const updates = setupDb();
+    const merge = jest.spyOn(publisher, 'mergeAstro').mockResolvedValue({});
+    const check = jest.spyOn(publisher, 'assertBodyImagesAtHead').mockResolvedValue({ ok: false, reason: '0 distinct in-article image(s) on content/blog-x, minimum 2' });
+    const post = makePost({ astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'content/blog-x', slug: 'test-post', astro_requires_human_merge: false });
+    const r = await pagesPoll.pollPost(post);
+    expect(r).toMatchObject({ ok: true, bodyImagesWithheld: true });
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ branch: 'content/blog-x', filePath: 'src/content/blog/test-post.md' }));
+    expect(merge).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.updates.publish_status === 'pending_review')).toBeDefined();
+
+    check.mockResolvedValue({ ok: true, reason: null });
+    const r2 = await pagesPoll.pollPost(post);
+    expect(r2).toMatchObject({ ok: true, autoMerged: true });
+    expect(merge).toHaveBeenCalledWith('post-1', expect.objectContaining({ expectHeadSha: 'abc' }));
+  });
+});

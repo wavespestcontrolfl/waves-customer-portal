@@ -21,6 +21,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   closePr: jest.fn(),
   deleteRef: jest.fn(),
   getBlob: jest.fn(),
+  listDir: jest.fn(),
   compareFiles: jest.fn(),
   getBranchSha: jest.fn(),
   env: jest.fn(() => ({ defaultBranch: 'main' })),
@@ -4170,7 +4171,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`), { action_type: 'new_supporting_blog' });
     } catch (err) { thrown = err; }
     expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
-    expect(thrown?.message).toMatch(/body-1\.webp \(authored picture changed: expected body-1-orig, found body-1-replaced\)/);
+    expect(thrown?.message).toMatch(/body-1\.webp \(pinned picture changed: expected body-1-orig, found body-1-replaced\)/);
     expect(thrown?.code).toBeUndefined();
     expect(gh.commitFiles).not.toHaveBeenCalled();
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
@@ -4303,6 +4304,94 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     ]);
     const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[3].content).content;
     expect(AstroPublisher._internals.countBodyImages(written)).toBe(2);
+  });
+
+  test('publishAstro republish: the live post\'s body pictures are REUSED (no generation, no body-3/4) (GH r19)', async () => {
+    const post = {
+      id: 'post-re', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const liveBody = '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n![Live alt one](/images/blog/ant-trails-bradenton/body-1.webp)\n\n## What to do first\n\nWipe the trail and seal the entry point.\n\n![Live alt two](/images/blog/ant-trails-bradenton/body-2.webp)\n';
+    const liveMd = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: post.title, hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), liveBody);
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { 'body-1': await webp(1), 'body-2': await webp(2) };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md') return { content: liveMd, sha: 'live' };
+      const m = path.match(/ant-trails-bradenton\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 78, html_url: 'https://github.com/x/pull/78', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-re');
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual(['public/images/blog/ant-trails-bradenton/hero.webp', 'src/content/blog/ant-trails-bradenton.md']);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[1].content).content;
+    expect(written).toContain('![Live alt one](/images/blog/ant-trails-bradenton/body-1.webp)');
+    expect(written).toContain('![Live alt two](/images/blog/ant-trails-bradenton/body-2.webp)');
+  });
+
+  test('unpublishAstro removes the generated body-N.webp assets with the hero (GH r19)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md') return { content: '---\ntitle: x\n---\nbody', sha: 'md' };
+      if (path === 'public/images/blog/ant-trails-bradenton/hero.webp') return { content: '', sha: 'h' };
+      return null;
+    });
+    gh.listDir.mockResolvedValue([
+      { type: 'file', name: 'hero.webp', path: 'public/images/blog/ant-trails-bradenton/hero.webp', sha: 'h' },
+      { type: 'file', name: 'body-1.webp', path: 'public/images/blog/ant-trails-bradenton/body-1.webp', sha: 'b1' },
+      { type: 'file', name: 'body-2.webp', path: 'public/images/blog/ant-trails-bradenton/body-2.webp', sha: 'b2' },
+      { type: 'file', name: 'notes.txt', path: 'public/images/blog/ant-trails-bradenton/notes.txt', sha: 'n' },
+    ]);
+    gh.deleteFile.mockResolvedValue({});
+    gh.createPr.mockResolvedValue({ number: 79, html_url: 'https://github.com/x/pull/79', head: { sha: 'u' } });
+
+    await AstroPublisher.unpublishAstro('post-un');
+
+    const deleted = gh.deleteFile.mock.calls.map(([a]) => a.path);
+    expect(deleted).toEqual(expect.arrayContaining(['src/content/blog/ant-trails-bradenton.md', 'public/images/blog/ant-trails-bradenton/hero.webp', 'public/images/blog/ant-trails-bradenton/body-1.webp', 'public/images/blog/ant-trails-bradenton/body-2.webp']));
+    expect(deleted).not.toContain('public/images/blog/ant-trails-bradenton/notes.txt');
+    expect(gh.createPr.mock.calls[0][0].body).toContain('2 generated body image(s)');
+  });
+
+  test('refresh lane: a REUSED committed hero sibling is pinned — a hero replaced on main by commit time throws transient (GH r19)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: ref ? 'hero-replaced' : 'hero-orig', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/shrub-diseases\.webp \(pinned picture changed: expected hero-orig, found hero-replaced\)/);
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('assertBodyImagesAtHead: an explicit filePath (scheduler lane) is validated on the PR branch (GH r19)', async () => {
+    const { assertBodyImagesAtHead } = AstroPublisher._internals;
+    const md = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: 'T', hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## A\n\nProse only.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/blog-x' && path === 'src/content/blog/ant-trails-bradenton.md' ? { content: md, sha: 'm' } : null));
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: AstroPublisher.scheduledBlogFilePath('ant-trails-bradenton') });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image/);
+    expect((await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-y', filePath: 'src/content/blog/ant-trails-bradenton.md' })).reason).toMatch(/not found on content\/blog-y/);
   });
 
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {

@@ -207,6 +207,35 @@ describe('helpers', () => {
   test('atRoundLimit respects MAX_ROUNDS', () => { expect(atRoundLimit(MAX_ROUNDS)).toBe(true); expect(atRoundLimit(MAX_ROUNDS - 1)).toBe(false); });
 });
 
+describe('scheduler-lane body-image revalidation (GH r19 P1)', () => {
+  const { revalidateBodyImagesForMarkdown } = require('../services/content/codex-remediation');
+  const internals = require('../services/content-astro/astro-publisher')._internals;
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  test('gate off → ok; gate on → a hero-only fixed body fails, a body with two committed distinct pictures passes', async () => {
+    const md = (body) => `---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n${body}`;
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => false);
+    expect(await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, {})).toEqual({ ok: true });
+    spy.mockImplementation((k) => k === 'blogBodyImages');
+    const gh = { getFile: jest.fn(async () => null) };
+    const r = await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/0 distinct in-article image/);
+    expect((await revalidateBodyImagesForMarkdown(md('## A'), {}, { gh, astroPublisherInternals: internals })).reason).toMatch(/PR head ref unavailable/);
+  });
+
+  test('runRemediationForPr parks when the revalidateBodyImages hook fails', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    let parked = false;
+    const r = await runRemediationForPr({ ...CTX, revalidateBodyImages: async () => ({ ok: false, reason: 'body images: fix leaves 1 distinct' }), onPark: async () => { parked = true; } }, { db, gh, callAnthropic: makeCall('FIXED BODY'), validateFixedBlogFile: PASS });
+    expect(r.remediated).not.toBe(true);
+    expect(parked).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+});
+
 describe('runRemediationForPr', () => {
   test('fresh findings under limit → push fix, persist state, re-request review', async () => {
     const db = makeDb();

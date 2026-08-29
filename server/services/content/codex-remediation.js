@@ -1070,6 +1070,41 @@ function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
  *
  * Returns { ok } or { ok:false, reason }. Every failure path is a park.
  */
+// Body-image contract on a REMEDIATED body, shared by both lanes: the
+// publisher inserted the in-article images before the PR opened; a fix that
+// rewrites a nearby section can drop one, and nothing else recounts. Same
+// validity contract as the publisher, checked against the PR BRANCH (where
+// the generated body-N.webp files live until merge): no hero in the body,
+// every ref committed, ≥ minimum distinct sources, distinct PICTURES (dHash).
+// Gate off → ok.
+async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null }, deps = {}) {
+  let bodyImagesOn = false;
+  try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
+  if (!bodyImagesOn) return { ok: true };
+  const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+  const gh = deps.gh || ghDefault;
+  if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
+  const getFile = (path) => gh.getFile(path, prHeadRef);
+  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile });
+  if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
+  if (valid.distinct < pub.BODY_IMAGE_MIN) {
+    return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
+  }
+  const srcs = [...new Set(pub.bodyImageRefs(body).map((r) => r.src))];
+  const pictures = await pub.assertDistinctPictures({ srcs, heroSrc, getFile });
+  if (!pictures.ok) return { ok: false, reason: `body images: ${pictures.reason}` };
+  return { ok: true };
+}
+// Scheduler-lane variant: the fixed MARKDOWN is all the lane has (no run /
+// draft payload) — hero src and body come from the fix itself.
+async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null } = {}, deps = {}) {
+  let parsed;
+  try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
+  const data = (parsed && parsed.data) || {};
+  const heroSrc = (data.hero_image && typeof data.hero_image === 'object' && data.hero_image.src) || '';
+  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef }, deps);
+}
+
 async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
   try {
     if (!run || !run.id) return { ok: false, reason: 'autonomous run row unavailable' };
@@ -1274,28 +1309,11 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // 5. Body-image minimum (owner rule: ≥3 images per post). The publisher
     //    inserted the in-article images before the PR opened; a fix that
     //    rewrites a nearby section can drop one, and nothing else recounts.
-    let bodyImagesOn = false;
-    try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
-    if (bodyImagesOn) {
-      // Same validity contract as the publisher, checked against the PR
-      // BRANCH (that is where the generated body-N.webp files live until
-      // merge): no hero in the body, every ref committed, ≥ minimum distinct.
-      const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
-      const gh = deps.gh || ghDefault;
-      const prHeadRef = deps.prHeadRef || null;
-      if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
+    {
       const heroSrc = (fixedData.hero_image && typeof fixedData.hero_image === 'object' && fixedData.hero_image.src)
         || (draft.frontmatter && draft.frontmatter.hero_image && draft.frontmatter.hero_image.src) || '';
-      const valid = await pub.validateBodyImageRefs({ body: draft.body, heroSrc, getFile: (path) => gh.getFile(path, prHeadRef) });
-      if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
-      if (valid.distinct < pub.BODY_IMAGE_MIN) {
-        return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
-      }
-      // Distinct PICTURES, not just distinct paths — the same dHash contract
-      // the publisher applied, re-run over the branch's bytes.
-      const srcs = [...new Set(pub.bodyImageRefs(draft.body).map((r) => r.src))];
-      const pictures = await pub.assertDistinctPictures({ srcs, heroSrc, getFile: (path) => gh.getFile(path, prHeadRef) });
-      if (!pictures.ok) return { ok: false, reason: `body images: ${pictures.reason}` };
+      const bodyImages = await revalidateBodyImagesForFix({ body: draft.body, heroSrc, prHeadRef: deps.prHeadRef || null }, deps);
+      if (!bodyImages.ok) return bodyImages;
     }
 
     return { ok: true, comparisonResult };
@@ -1549,7 +1567,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the caller's parent check must not have its unrelated changes blessed
     // by the post-fix re-pin (PR r16 P1).
     expectedParentSha = null,
-    onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
+    onPark = null, revalidateFix = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
@@ -1847,6 +1865,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
+  // Body-image contract on the fixed body (scheduler lane — the autonomous
+  // lane covers it inside revalidateFix). Fail or throw → park.
+  if (typeof revalidateBodyImages === 'function') {
+    let recheck;
+    try { recheck = await revalidateBodyImages(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    if (!recheck || recheck.ok !== true) {
+      return park(db, prNumber, `fix failed body-image contract: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
+    }
+  }
 
   // Last-instant pre-push guard, mirroring the merge path's: the LLM call and
   // gate re-runs above take real time, and the lane's claim (queue row /
@@ -2111,6 +2138,10 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // Last-instant claim check before the branch push (the CAS below guards
     // the row write; this guards the BRANCH write): skip the push entirely
     // when the row left the publishing claim or was repointed mid-flight.
+    // The fixed body must still carry its ≥ minimum distinct, committed body
+    // pictures (gate on) — checked against the PR branch, like the
+    // autonomous lane's validateAutonomousRunGates step 5.
+    revalidateBodyImages: async (fixedMarkdown) => revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef: row.astro_branch_name }, deps),
     prePushCheck: async () => {
       const fresh = await db('blog_posts').where({ id: row.id }).first();
       return !!fresh && fresh.publish_status === 'publishing'
@@ -2424,6 +2455,8 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
 }
 
 module.exports = {
+  revalidateBodyImagesForFix,
+  revalidateBodyImagesForMarkdown,
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,
