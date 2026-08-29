@@ -5277,10 +5277,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const rawIdempotencyKey = req.get('Idempotency-Key') || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     const idempotencyKey = String(rawIdempotencyKey).trim().slice(0, 120);
-    const claim = await CompletionAttempts.claimCompletionAttempt({
-      serviceId: svc.id,
-      idempotencyKey,
-      requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+    // The claim commits while THIS request holds the row's stop advisory
+    // lock (codex #3590 r12 P1): stamping (visit-groups.createOrJoinVisit)
+    // checks for live claims and stamps under the same lock, so the claim
+    // can no longer land between stamping's READ COMMITTED snapshot and its
+    // commit. The lock lives in its own short transaction; the claim itself
+    // keeps running on the root connection (autocommit) because its
+    // unique-violation recovery path issues follow-up queries that a
+    // failed INSERT would poison inside a transaction. Either order is now
+    // honest: stamping first ⇒ the recheck below sees the stamp; claim
+    // first ⇒ stamping sees the committed claim and refuses.
+    const claim = await db.transaction(async (lockTrx) => {
+      await require('../services/visit-groups').lockStopForRow(lockTrx, svc.id);
+      return CompletionAttempts.claimCompletionAttempt({
+        serviceId: svc.id,
+        idempotencyKey,
+        requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+      });
     });
     if (claim.action === 'replay') {
       // A prior success whose fire-and-forget dissolve failed transiently

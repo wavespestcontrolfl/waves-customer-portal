@@ -169,6 +169,46 @@ async function lockStop(trx, baseKey) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
 }
 
+/**
+ * Take the stop advisory lock for the stop a scheduled_services row sits
+ * on (peek → key → lock). Returns the key, or null when the row is gone.
+ * Used by the legacy /complete handler to serialize its completion CLAIM
+ * with stamping (codex #3590 r12): stamping checks for live claims and
+ * stamps under this lock, so a claim that also commits under it can never
+ * slip between stamping's snapshot and its commit.
+ */
+async function lockStopForRow(trx, serviceId) {
+  const peek = await trx('scheduled_services').where({ id: serviceId })
+    .first('property_id', 'customer_id', 'scheduled_date');
+  if (!peek) return null;
+  const baseKey = stopBaseKey({
+    propertyId: peek.property_id,
+    customerId: peek.customer_id,
+    scheduledDate: peek.scheduled_date,
+  });
+  await lockStop(trx, baseKey);
+  return baseKey;
+}
+
+/**
+ * Do the WINDOWED members of a set form ONE transitively-overlapping chain
+ * (09-10 · 10-11 · 11-12 is one stop; 09-10 · 11-12 is two)? Windowless
+ * members join anything and are ignored here. Shared by creation
+ * (codex r12 P2: an arbitrary anchor row rejected valid chains) and by
+ * post-removal recompute (codex r8).
+ */
+function windowedMembersConnected(members) {
+  const windowed = (members || []).filter((m) => m && m.window_start)
+    .sort((a, b) => String(a.window_start).localeCompare(String(b.window_start)));
+  for (let i = 1; i < windowed.length; i += 1) {
+    const prevHi = windowed.slice(0, i)
+      .map((m) => toMinutes(m.window_end) ?? toMinutes(m.window_start))
+      .reduce((a, b) => Math.max(a, b), -1);
+    if (toMinutes(windowed[i].window_start) > prevHi) return false;
+  }
+  return true;
+}
+
 async function visitActivity(visitId, trx = db) {
   const visit = await trx('service_visits').where({ id: visitId }).first();
   if (!visit) return null;
@@ -218,16 +258,7 @@ async function recomputeVisitWindow(t, visitId) {
   // and the visit is still dissolvable, it dissolves — otherwise
   // membership is preserved and logged (frozen visits never got here;
   // effects-sent visits log for the office).
-  const windowed = members.filter((m) => m.window_start)
-    .sort((a, b) => String(a.window_start).localeCompare(String(b.window_start)));
-  let disconnected = false;
-  for (let i = 1; i < windowed.length; i += 1) {
-    const prevHi = windowed.slice(0, i)
-      .map((m) => toMinutes(m.window_end) ?? toMinutes(m.window_start))
-      .reduce((a, b) => Math.max(a, b), -1);
-    if (toMinutes(windowed[i].window_start) > prevHi) { disconnected = true; break; }
-  }
-  if (disconnected) {
+  if (!windowedMembersConnected(members)) {
     const activity = await visitActivity(visitId, t);
     if (canDissolve(activity).ok) {
       await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
@@ -325,9 +356,19 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // assignments across the input rows must agree.
     const rowTechs = [...new Set(fresh.map((r) => r.technician_id).filter(Boolean).map(String))];
     if (rowTechs.length > 1) throw new Error('rows not mutually groupable: technician');
+    // Non-window compatibility against the first row (customer, property,
+    // date, family, tech, status) — the anchor is WINDOWLESS here so the
+    // window rule is judged over the whole set below, not against whichever
+    // row the unordered query returned first (codex #3590 r12 P2: a valid
+    // 09-10 · 10-11 · 11-12 chain was rejected whenever an endpoint
+    // happened to be the anchor).
+    const anchor = { ...first, status: 'open', window_start: null, window_end: null };
     for (const r of fresh.slice(1)) {
-      const probe = canJoin(r, { ...first, status: 'open' });
+      const probe = canJoin(r, anchor);
       if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
+    }
+    if (!windowedMembersConnected(fresh)) {
+      throw new Error('rows not mutually groupable: window');
     }
 
     let visit = null;
@@ -788,7 +829,11 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
       'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
       'svc.groupable', 'svc.group_family');
-    const partners = await partnersQ.limit(10);
+    // Every same-stop candidate, deterministically ordered — a cap made
+    // grouping depend on heap order once a customer had more rows than
+    // the cap (codex #3590 r12 P2). The set is bounded by one customer's
+    // one-day, one-property, one-family rows.
+    const partners = await partnersQ.orderBy('ss.window_start', 'asc').orderBy('ss.id', 'asc');
     if (!partners.length) return null;
     // Mutually compatible subset (codex r1 P1): one incompatible same-day
     // row must not poison the whole grouping. Treat the new row as a
@@ -843,8 +888,10 @@ module.exports = {
   ensureLegacyCompletable,
   dissolveForLegacyCompletion,
   stopBaseKey,
+  lockStopForRow,
   visitActivity,
   _test: {
+    windowedMembersConnected,
     stopBaseKey,
     windowsOverlap,
     familiesCompatible,

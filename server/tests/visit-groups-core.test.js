@@ -7,7 +7,7 @@
 const {
   _test: {
     stopBaseKey, windowsOverlap, familiesCompatible, canJoin, canDissolve,
-    canSplit, isRowVisitBlocked, toMinutes,
+    canSplit, isRowVisitBlocked, toMinutes, windowedMembersConnected,
   },
 } = require('../services/visit-groups');
 
@@ -160,5 +160,24 @@ describe('isRowVisitBlocked (legacy /complete guard, rev 5c)', () => {
   });
   test('orphaned pointer fails CLOSED (never risk a duplicate completion)', () => {
     expect(isRowVisitBlocked({ visit_id: 'v1' }, null)).toBe(true);
+  });
+});
+
+describe('windowedMembersConnected (codex #3590 r8/r12: one transitive chain = one stop)', () => {
+  const w = (a, b) => ({ window_start: a, window_end: b });
+  test('a transitive chain is connected regardless of input order', () => {
+    const chain = [w('11:00', '12:00'), w('09:00', '10:00'), w('10:00', '11:00')];
+    expect(windowedMembersConnected(chain)).toBe(true);
+    expect(windowedMembersConnected(chain.reverse())).toBe(true);
+  });
+  test('a gap splits the stop; windowless members never break a chain', () => {
+    expect(windowedMembersConnected([w('09:00', '10:00'), w('11:00', '12:00')])).toBe(false);
+    expect(windowedMembersConnected([w('09:00', '10:00'), w(null, null), w('10:00', '11:00')])).toBe(true);
+    expect(windowedMembersConnected([w(null, null), w(null, null)])).toBe(true);
+    expect(windowedMembersConnected([])).toBe(true);
+  });
+  test('point windows (no end) chain by start', () => {
+    expect(windowedMembersConnected([w('09:00', null), w('09:00', '10:00')])).toBe(true);
+    expect(windowedMembersConnected([w('09:00', null), w('09:30', '10:00')])).toBe(false);
   });
 });
