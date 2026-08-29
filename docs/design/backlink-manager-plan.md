@@ -163,7 +163,7 @@ t.timestamp('superseded_at');
 // Supersession happens ONLY when the investigator explicitly matches a predecessor (`replaces_path_id`: it observed the
 // old submission_url gone/redirected/renamed to the new one, or the same form under a new URL). In that case it inserts
 // the new path and, in the SAME transaction, marks the matched old one superseded_by it, invalidates every OPEN approval on the old path (reason 'path_superseded') — a SATISFIED instance and its consumed approval are NOT invalidated: they are carried across (the instance row is re-linked to the new path with `carried_from_path_id` kept for audit, and the §3.6b current-path check applies only to open, unsatisfied instances), so an already-sent pitch still satisfies the later paid checkout/follow-up prerequisite and a `contacted` placement never needs to re-enter the initial send flow —
-// repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
+// repoints its placements (path_id → new; every OPEN, UNSATISFIED authority instance on the old path is ENDED (`end_outcome='path_superseded'`) and a NEW generation of the same kind opened atomically — so mutation idempotency keys (`…:create_account:${instance_key}`) rotate with the path and path B never mistakes A's `account_created` row for its own; satisfied instances are carried, see below → the bridge job re-decides the new generation), and voids any `reserved`
 // purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`) OR ANY attempt in `submitting`/`sending`/`mutating`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` that is not yet reconciled — lease state is irrelevant (the shipped sender clears `claimed_at` before calling Gmail, so post-report ambiguity has no lease; the unresolved external action is what pins):
 // that placement stays PINNED to the old path: the old path is marked `superseded_by` = new path immediately (so no
 // NEW work can start on it), and the placement records `pending_path_id` = new path (durable FK on seo_link_prospects,
@@ -544,6 +544,12 @@ the CHECK), `confidence=0.1`, `last_investigated_at=null`
   investigator replaces it with a real path on the first pass). Idempotent via
   `findPlacementRow`/`path_key` for the placement and the UNIQUE `backlink_id` for the mapping (a re-run adds newly seen links to the mapping and never re-picks the representative while it is live; per-link verification and loss events read the mapping, and §8 D30 sampling is per placement following the representative); excluded from acquisition (nothing to acquire) and from the
   Source×funnel *acquired* counts (reported separately as "existing").
+- **Legacy signup queue** — the 12 pending `backlink_agent_queue` items (consumed today by
+  `backlink-agent/signup-worker.js`) are imported ONCE in step 1 by an idempotent
+  queue-to-registry intake (keyed by `legacy_queue_id`, ON CONFLICT DO NOTHING; `source` =
+  `x` or `owner_seed` per the row's origin, `source_detail=legacy_queue:<id>`, the row's
+  status/provenance kept in `investigation.legacy_queue`), and the legacy worker is retired
+  from the scheduler in the same PR so nothing is ever stranded in the old queue.
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
   registry row (`source='lost_recovery'`).
 - **Strategist / local opportunity** — unchanged writers; they additionally upsert the domain.
@@ -815,7 +821,7 @@ revision — so approval never invalidates itself), and then **recomputes the re
 aggregate rules; `rejected` ONLY when no placement is authorized, pending, awaiting the owner
 or acquired (a single `DENY` beside an approved sibling never rejects the domain); `INVALID`
 on every placement → back to `investigating`. Per-placement outcomes are stored on the
-placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a communication dimension decided
+placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a RENEWAL payment dimension: a `placed`/`live`/`indexed` placement keeps its Judge-owned status untouched while the renewal card is pending — the pending approval is attached to the renewal authority instance/reservation, the verifier keeps monitoring it and the renewal claim stays eligible — and EXCEPT a communication dimension decided
 to ANY unsatisfied owner-gated level (`OWNER_OUTREACH` or `OWNER_LEGAL` on the communication
 dimension) while no draft exists yet: that placement stays `prospect` with no card so the
 draft-only claim (`mode=draft`, which leases `prospect` rows regardless of authority) can
