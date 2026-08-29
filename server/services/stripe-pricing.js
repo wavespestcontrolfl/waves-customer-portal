@@ -32,11 +32,20 @@ const SURCHARGE_API_VERSION = '2026-03-25.preview';
 const CARD_SURCHARGE_RATE = CONFIGURED_COST_BPS / 10_000;  // 0.029
 
 // ── ACH / bank detection ─────────────────────────────────────
+// Everything that is positively NOT card-family: bank rails, plus the
+// off-gateway tenders the operator records by hand (admin-invoices
+// record-payment / prepaid stamps / Customer 360 credits). Unknown strings
+// still classify as card so a new Stripe wallet type is surcharged
+// conservatively — but a manual tender must never enter card-only or
+// surcharge logic (codex #3610 P0).
+const NON_CARD_METHOD_TYPES = new Set([
+  'ach', 'us_bank_account', 'bank', 'bank_account',
+  'cash', 'check', 'zelle', 'venmo', 'paypal', 'other',
+]);
+
 function isCardMethodType(methodType) {
   if (!methodType) return false;
-  const m = String(methodType).toLowerCase();
-  if (m === 'ach' || m === 'us_bank_account' || m === 'bank' || m === 'bank_account') return false;
-  return true;
+  return !NON_CARD_METHOD_TYPES.has(String(methodType).toLowerCase());
 }
 
 // ── Surcharge eligibility ────────────────────────────────────

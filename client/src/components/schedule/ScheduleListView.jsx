@@ -376,6 +376,8 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
                 className="text-12 px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600">
                 <option value="cash">Cash</option>
                 <option value="zelle">Zelle</option>
+                <option value="venmo">Venmo</option>
+                <option value="paypal">PayPal</option>
                 <option value="check">Check</option>
                 <option value="card_over_phone">Card</option>
               </select>

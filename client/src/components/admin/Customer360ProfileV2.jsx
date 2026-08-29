@@ -3519,6 +3519,8 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
                       <option value="cash">Cash</option>
                       <option value="check">Check</option>
                       <option value="zelle">Zelle</option>
+                      <option value="venmo">Venmo</option>
+                      <option value="paypal">PayPal</option>
                       <option value="other">Other</option>
                     </select>
                   </label>
@@ -3759,6 +3761,8 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     ["cash", "Cash"],
     ["check", "Check"],
     ["zelle", "Zelle"],
+    ["venmo", "Venmo"],
+    ["paypal", "PayPal"],
     ["other", "Other"],
   ];
 
