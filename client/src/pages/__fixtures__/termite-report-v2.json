@@ -180,7 +180,7 @@
     "exitedAt": "2026-06-25T14:56:39.602Z",
     "onSiteMinutes": 48
   },
-  "summary": "We inspected 12 termite bait stations around the exterior perimeter today. Two stations showed live termite activity with moderate bait feeding \u2014 bait was replaced and monitor cartridges refreshed so the colony keeps taking bait.",
+  "summary": "We inspected 12 termite bait stations around the exterior perimeter today. Two stations showed live termite activity with moderate bait feeding — bait was replaced and monitor cartridges refreshed so the colony keeps taking bait.",
   "scheduledService": {
     "arrived_at": "2026-06-25T14:08:12.087Z",
     "actual_start_time": "2026-06-25T14:08:12.087Z",
@@ -212,13 +212,13 @@
   "typedReport": {
     "type": "termite_bait_station",
     "typeLabel": "Termite Bait Station Inspection",
-    "reportTypeLabel": "Termite Program \u2014 Progress Visit",
+    "reportTypeLabel": "Termite Program — Progress Visit",
     "visitSequence": 3,
     "isProgressVisit": true,
     "todaysResult": {
       "headline": "Termite activity was high today.",
       "body": "We inspected 12 termite bait stations around the exterior perimeter today. 2 stations were not accessible and will be checked when access is available. Contact us if you have any questions.",
-      "nextStep": "Contact us if you have any questions."
+      "nextStep": "Recheck active stations sooner — we will return in 30 days to re-inspect Stations 6 and 10."
     },
     "findings": [
       {
@@ -254,7 +254,7 @@
         "technicianLabel": "Termite activity",
         "customerLabel": "Termite activity",
         "value": "Active termites present",
-        "customerValueLabel": "Active termite feeding was observed \u2014 see the station details below"
+        "customerValueLabel": "Active termite feeding was observed — see the station details below"
       },
       {
         "fieldKey": "activity_signs",
@@ -313,6 +313,22 @@
           "Pull mulch back from foundation",
           "Correct irrigation spraying the structure"
         ]
+      },
+      {
+        "fieldKey": "station_issues",
+        "customerLabel": "Station condition issues",
+        "customerValueLabel": "Station obstructed",
+        "customerValueParts": [
+          "Station obstructed"
+        ]
+      },
+      {
+        "fieldKey": "station_actions",
+        "customerLabel": "Station service performed",
+        "customerValueLabel": "Obstruction removed",
+        "customerValueParts": [
+          "Obstruction removed"
+        ]
       }
     ],
     "nextStepChips": [
@@ -328,7 +344,7 @@
       "tone": "watch",
       "label": "Termite activity observed at 2 stations"
     },
-    "statusSummary": "Termite activity was observed at Stations 6 and 10 on the north side of the home. Both stations were serviced today and will continue to be monitored. 2 stations could not be accessed today and will be checked next visit.",
+    "statusSummary": "Termite activity was observed at Stations 6 and 10 on the north side of the home. Bait was serviced at 3 stations today, and the active stations will continue to be monitored. 2 stations could not be accessed today and will be checked next visit.",
     "metrics": [
       {
         "label": "Stations inspected",
@@ -348,7 +364,7 @@
       "value": "12 of 14"
     },
     "defense": {
-      "summary": "Your protective ring: 12 inspected \u00b7 2 with activity \u00b7 2 inaccessible.",
+      "summary": "Your protective ring: 12 inspected · 2 with activity · 2 inaccessible.",
       "items": [
         {
           "key": "inspected",
@@ -360,23 +376,28 @@
           "key": "activity",
           "label": "Stations with termite activity",
           "status": "active",
-          "detail": "2 stations \u2014 bait engaged"
+          "detail": "2 stations — bait engaged"
         },
         {
           "key": "bait",
           "label": "Bait condition",
           "status": "watched",
-          "detail": "Moderate bait feeding \u2014 the colony is actively taking bait."
+          "detail": "Moderate bait feeding — the colony is actively taking bait."
         },
         {
           "key": "access",
           "label": "Not accessible this visit",
           "status": "watched",
-          "detail": "2 stations \u2014 we will re-check next visit"
+          "detail": "2 stations — we will re-check next visit"
         }
       ]
     },
-    "servicedToday": true,
+    "nextStep": "Recheck active stations sooner — we will return in 30 days to re-inspect Stations 6 and 10.",
+    "nextVisit": {
+      "scheduledDate": "2026-11-16",
+      "windowStart": "09:00",
+      "serviceType": "Termite Bait Station Service"
+    },
     "primaryMove": {
       "title": "Pull mulch back from foundation",
       "why": "We noted: mulch against foundation. This keeps the station ring working at full strength.",
@@ -394,7 +415,7 @@
       "width": 640,
       "height": 340
     },
-    "attributionText": "Map data \u00a9 Google",
+    "attributionText": "Map data © Google",
     "stations": [
       {
         "id": "st-1",

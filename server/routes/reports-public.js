@@ -164,7 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
-const { buildTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
+const { buildTermiteReportV2, termiteReportV2PdfSignature, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -546,19 +546,29 @@ async function buildServiceReportV1ResponseData(service, token, {
   if (
     process.env.TERMITE_REPORT_V2 === 'true'
     && data.serviceLine === 'termite'
-    && data.typedReport?.type === 'termite_bait_station'
+    && data.typedReport?.type === TERMITE_BAIT_TYPED_TYPE
   ) {
     try {
       const serviceData = parseJsonObject(service.service_data);
       const typedSnapshot = serviceData?.typedReportSnapshot;
+      // Same-line only: the top-level nextAppointment falls back to the
+      // customer's next visit of ANY line (report-data.js), which must not
+      // render as the next termite monitoring visit. Already null in
+      // pdf/static modes (stripLiveOnlyScheduleFields ran above).
+      const nextVisit = data.nextAppointment
+        && detectServiceLine(data.nextAppointment.serviceType) === 'termite'
+        ? data.nextAppointment
+        : null;
       const termiteReportV2 = buildTermiteReportV2({
         typedSnapshotValues: typedSnapshot?.values || null,
         typedReportType: data.typedReport.type,
         stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
         visitSequence: data.typedReport.visitSequence || 1,
-        // Same typed-report double-print guard as the pest/mosquito heroes:
-        // typed visits render the tech-reviewed copy via Today's Result, so
-        // the dashboard never carries it a second time.
+        // The dashboard replaces the typed Today's Result card, so it must
+        // carry the tech's required next-step commitment itself.
+        nextStep: data.typedReport.todaysResult?.nextStep || null,
+        nextVisit,
+        // Same typed-report double-print guard as the pest/mosquito heroes.
         technicianReport: null,
       });
       if (termiteReportV2) data.termiteReportV2 = termiteReportV2;

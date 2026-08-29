@@ -123,7 +123,7 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
 });
 
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
-  it('renders the station dashboard and suppresses the generic summary, tiles, products, and standalone map', async () => {
+  it('renders the station dashboard and suppresses the generic summary, hero-owned tiles, products, and standalone map', async () => {
     const { container } = renderReport(termiteReportV2);
     // Headline from the termiteReportV2 payload — in the header status cell
     // AND the dashboard hero (the header prints the short label, never the
@@ -137,27 +137,70 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(screen.queryByText(/product applied/)).toBeNull();
 
     // The dashboard owns the summary slot — no legacy Visit Summary, no
-    // typed Today's Result / What-we-found tiles restating the same record.
+    // typed Today's Result card (its required next step moves into the
+    // dashboard below).
     expect(screen.queryByText('Visit Summary')).toBeNull();
     expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
-    expect(screen.queryByText(/What we found/i)).toBeNull();
+    expect(container.querySelector('#todays-result')).toBeNull();
     // Station checks are monitoring, not application (owner 2026-08-29).
     expect(container.querySelector('#products-applied')).toBeNull();
     expect(screen.queryByText('Products Applied')).toBeNull();
-    // Exceptions first: the activity + inaccessible stations, nothing else.
+    // Exceptions first: the activity + inaccessible stations, nothing else,
+    // and no per-station "serviced" claim (servicing is a visit-level fact).
     const needsAttention = (await screen.findByText('Needs attention')).closest('section');
     // (the map legend also says "Termite activity observed" once — scope to the card)
     expect(within(needsAttention).getAllByText('Termite activity observed')).toHaveLength(2);
     expect(within(needsAttention).getAllByText('Could not be accessed this visit')).toHaveLength(2);
+    expect(within(needsAttention).queryByText(/serviced today/i)).toBeNull();
+    expect(within(needsAttention).getByText('10 other stations checked — no activity observed')).toBeInTheDocument();
     // Station map rides inside the dashboard exactly once.
     expect(container.querySelectorAll('#station-map')).toHaveLength(1);
-    // Program card: next monitoring visit + warranty line.
-    await screen.findByText('Your termite protection');
+    // The tech's required next-step commitment survives the typed card swap.
+    const whatsNext = (await screen.findByText('What happens next')).closest('section');
+    expect(within(whatsNext).getByText(/Recheck active stations sooner/)).toBeInTheDocument();
+    // Typed findings the dashboard does not render still print; the
+    // hero-owned count/status tiles do not.
+    const typed = container.querySelector('#typed-findings');
+    expect(typed).not.toBeNull();
+    expect(within(typed).getByText('Station condition issues')).toBeInTheDocument();
+    expect(within(typed).getByText('Activity signs observed')).toBeInTheDocument();
+    expect(within(typed).queryByText('Stations checked')).toBeNull();
+    expect(within(typed).queryByText('Bait consumption')).toBeNull();
+    // Program card: SAME-LINE next monitoring visit + warranty line; ACTIVE
+    // badge rides the bond; CTA lands on My Plan (where the bond card lives).
     const nextVisit = (await screen.findByText('Next monitoring visit')).closest('section');
     expect(within(nextVisit).getByText(/Termite Bait Station Service · Mon, Nov 16/)).toBeInTheDocument();
     expect(within(nextVisit).getByText(/Renews Mar 14, 2027/)).toBeInTheDocument();
-    // Tech's top recommendation.
-    await screen.findByText('Pull mulch back from foundation');
+    expect(within(nextVisit).getByText('ACTIVE')).toBeInTheDocument();
+    expect(within(nextVisit).getByRole('link', { name: /View termite protection plan/ })).toHaveAttribute('href', '/?tab=plan');
+    // Tech's top recommendation is highlighted in "Your one move" and still
+    // listed in full (as a chip) in the typed record.
+    const oneMove = (await screen.findByText('Your one move')).closest('section');
+    expect(within(oneMove).getByText('Pull mulch back from foundation')).toBeInTheDocument();
+    expect(within(typed).getByText('Pull mulch back from foundation')).toBeInTheDocument();
+  });
+
+  it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
+    const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
+    // Builder scoped nextVisit to null (next appointment was another line);
+    // the top-level fallback still carries the pest visit.
+    crossLine.termiteReportV2.nextVisit = null;
+    crossLine.nextAppointment = { scheduledDate: '2026-09-02', windowStart: '09:00', serviceType: 'Pest Control (Quarterly)' };
+    crossLine.termiteBonds = [];
+    renderReport(crossLine);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.queryByText('Next monitoring visit')).toBeNull();
+    expect(screen.queryByText('Your termite protection')).toBeNull();
+    expect(screen.queryByText('ACTIVE')).toBeNull();
+  });
+
+  it('on-file pins (no status) read as not checked, never as "checked — no activity"', async () => {
+    const onFile = JSON.parse(JSON.stringify(termiteReportV2));
+    onFile.stationMap.stations = onFile.stationMap.stations.map((st) => ({ ...st, status: null }));
+    renderReport(onFile);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('14 stations on file — not checked this visit')).toBeInTheDocument();
+    expect(screen.queryByText(/checked — no activity observed/)).toBeNull();
   });
 
   it('hides Needs attention on a clean visit', async () => {

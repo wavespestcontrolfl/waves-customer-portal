@@ -11,21 +11,12 @@
  *
  * Wording rule (see project-types.js termite_bait_station header): absence
  * claims are scoped to the ACCESSIBLE stations inspected today — never "no
- * termites on the property".
+ * termites on the property". Counts are never invented: an undocumented
+ * activity-station count renders as "observed", not as "1 station"
+ * (codex P1 #3600 r1).
  */
 
-const { detectServiceLine } = require('./service-line-configs');
-
-// Station-based termite service names. Liquid / trench / spot treatments and
-// inspections keep their existing render (typed cards) — this dashboard only
-// speaks bait-station language.
-const TERMITE_BAIT_NAME_RE = /termite/i;
-const STATION_TOKEN_RE = /\b(bait|station|monitor|monitoring|cartridge)\b/i;
-
-function isTermiteBaitServiceType(serviceType) {
-  const name = String(serviceType || '');
-  return TERMITE_BAIT_NAME_RE.test(name) && STATION_TOKEN_RE.test(name);
-}
+const TERMITE_BAIT_TYPED_TYPE = 'termite_bait_station';
 
 const ACTIVITY_VALUES = {
   NONE: 'None observed',
@@ -47,6 +38,8 @@ function toCount(value) {
   return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
 }
 
+function plural(n) { return n === 1 ? '' : 's'; }
+
 /**
  * Honest status ladder (tones only — the headline is plain language from
  * buildTodaysResultCopy). Bait-system truth: termites feeding on a station
@@ -67,13 +60,31 @@ function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inacc
 }
 
 /**
+ * Visit-scoped "what we did" sentence. Servicing evidence is a VISIT fact
+ * (serviced pins, bait/station actions on the form) — a pin is either
+ * 'activity' or 'serviced', never both, so the copy must not attach
+ * "serviced" to the activity stations themselves (codex P2 #3600 r1).
+ */
+function servicedSentence({ servicedCount, servicedToday }) {
+  if (servicedCount > 0) {
+    return ` Bait was serviced at ${servicedCount} station${plural(servicedCount)} today, and the active stations will continue to be monitored.`;
+  }
+  if (servicedToday) return ' Bait service was performed today, and the active stations will continue to be monitored.';
+  return ' They will continue to be monitored closely.';
+}
+
+/**
  * Today's-result copy — the customer answers four questions immediately
  * (owner 2026-08-29): Did you inspect my whole system? Did you find
  * activity? What did you do about it? What happens next?
  * Three shapes: clean full inspection, activity observed, partial access.
+ * `activityCount` is null when the tech recorded activity without a station
+ * count (the count field is optional) — the copy then says "observed"
+ * without a number.
  */
 function buildTodaysResultCopy({
-  statusKey, checked, total, activityCount, servicedToday, inaccessible, activeLocation,
+  statusKey, checked, total, activityCount = null, servicedCount = 0, servicedToday = false,
+  inaccessible = 0, activeLocation = null,
 }) {
   if (checked == null || checked <= 0) {
     return {
@@ -81,45 +92,50 @@ function buildTodaysResultCopy({
       body: 'Your bait station network is in place and being monitored on schedule.',
     };
   }
-  const s = (n) => (n === 1 ? '' : 's');
   const accessNote = inaccessible
-    ? ` ${inaccessible} station${s(inaccessible)} could not be accessed today and will be checked next visit.`
+    ? ` ${inaccessible} station${plural(inaccessible)} could not be accessed today and will be checked next visit.`
     : '';
   if (statusKey === 'action' || statusKey === 'evidence') {
-    const n = activityCount || 1;
     // Three customer-safe levels (owner 2026-08-29): active termites
     // observed vs evidence of activity (previous feeding) — bait consumption
     // alone never escalates to an "active termites" claim.
     const noun = statusKey === 'evidence' ? 'Evidence of termite activity' : 'Termite activity';
-    const where = activeLocation
-      ? `${noun} was observed at ${activeLocation}.`
-      : `${noun} was observed at ${n} of the ${checked} stations inspected.`;
-    const servicedSentence = servicedToday
-      ? ` ${n === 1 ? 'The station was' : n === 2 ? 'Both stations were' : 'These stations were'} serviced today and will continue to be monitored.`
-      : ' They will continue to be monitored closely.';
+    const counted = activityCount != null && activityCount > 0;
+    let where;
+    if (activeLocation) where = `${noun} was observed at ${activeLocation}.`;
+    else if (counted) where = `${noun} was observed at ${activityCount} of the ${checked} stations inspected.`;
+    else where = `${noun} was observed at the stations inspected today.`;
     return {
-      headline: `${noun} observed at ${n} station${s(n)}`,
-      body: `${where}${servicedSentence}${accessNote}`,
+      headline: counted ? `${noun} observed at ${activityCount} station${plural(activityCount)}` : `${noun} observed`,
+      body: `${where}${servicedSentence({ servicedCount, servicedToday })}${accessNote}`,
     };
   }
   if (inaccessible > 0 && total) {
     return {
       headline: `${checked} of ${total} stations inspected`,
-      body: `No termite activity was observed in the ${checked} station${s(checked)} we were able to inspect.${accessNote}`,
+      body: `No termite activity was observed in the ${checked} station${plural(checked)} we were able to inspect.${accessNote}`,
     };
   }
   return {
     headline: 'No termite activity observed',
-    body: `We inspected all ${checked} bait station${s(checked)} around your home today. No termite activity was observed at the stations inspected.`,
+    body: `We inspected all ${checked} bait station${plural(checked)} around your home today. No termite activity was observed at the stations inspected.`,
   };
 }
 
-/** The three metrics under the headline: inspected / activity / serviced. */
-function buildTodaysMetrics({ checked, total, activityCount, servicedCount }) {
+/**
+ * The three metrics under the headline: inspected / activity / serviced.
+ * `activityObserved` covers the uncounted case: activity recorded on the
+ * form with no station count renders "Observed", never "None observed"
+ * beside a headline that says otherwise.
+ */
+function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0 }) {
   if (checked == null) return null;
+  let activityValue = 'None observed';
+  if (activityCount != null && activityCount > 0) activityValue = `${activityCount} station${plural(activityCount)}`;
+  else if (activityObserved) activityValue = 'Observed';
   return [
     { label: 'Stations inspected', value: total && total !== checked ? `${checked} of ${total}` : `${checked} of ${checked}` },
-    { label: 'Termite activity', value: activityCount > 0 ? `${activityCount} station${activityCount === 1 ? '' : 's'}` : 'None observed' },
+    { label: 'Termite activity', value: activityValue },
     { label: 'Stations serviced', value: String(servicedCount || 0) },
   ];
 }
@@ -127,7 +143,8 @@ function buildTodaysMetrics({ checked, total, activityCount, servicedCount }) {
 /**
  * Station-network card. Shape matches pestV2.defense / mosquitoV2.habitat —
  * { summary, items: [{ key, label, status, detail }] } — so the PDF
- * defenseBlock chain renders it without a new branch shape.
+ * defenseBlock chain renders it without a new branch shape. `counts.activity`
+ * stays null when neither the map nor the form documents a count.
  */
 function buildStationNetwork({ values = {}, stationSummary = null }) {
   const total = stationSummary?.total ?? toCount(values.total_stations);
@@ -141,14 +158,14 @@ function buildStationNetwork({ values = {}, stationSummary = null }) {
     key: 'inspected',
     label: 'Stations inspected',
     status: 'clear',
-    detail: total && total > checked ? `${checked} of ${total} stations` : `${checked} station${checked === 1 ? '' : 's'}`,
+    detail: total && total > checked ? `${checked} of ${total} stations` : `${checked} station${plural(checked)}`,
   });
   if (activityCount != null && activityCount > 0) {
     items.push({
       key: 'activity',
       label: 'Stations with termite activity',
       status: 'active',
-      detail: `${activityCount} station${activityCount === 1 ? '' : 's'} — bait engaged`,
+      detail: `${activityCount} station${plural(activityCount)} — bait engaged`,
     });
   }
   const consumptionDetail = CONSUMPTION_DETAIL[values.bait_consumption];
@@ -165,7 +182,7 @@ function buildStationNetwork({ values = {}, stationSummary = null }) {
       key: 'access',
       label: 'Not accessible this visit',
       status: 'watched',
-      detail: `${inaccessible} station${inaccessible === 1 ? '' : 's'} — we will re-check next visit`,
+      detail: `${inaccessible} station${plural(inaccessible)} — we will re-check next visit`,
     });
   }
   const summaryParts = [`${checked} inspected`];
@@ -174,14 +191,15 @@ function buildStationNetwork({ values = {}, stationSummary = null }) {
   return {
     summary: `Your protective ring: ${summaryParts.join(' · ')}.`,
     items,
-    counts: { total, checked, activity: activityCount || 0, inaccessible: inaccessible || 0 },
+    counts: { total, checked, activity: activityCount ?? null, inaccessible: inaccessible || 0 },
   };
 }
 
 /**
  * Primary move: the single most useful thing the customer can do, drawn from
  * the tech's conducive-condition and recommendation chips (first chip wins —
- * the completion form orders them by importance as entered).
+ * the completion form orders them by importance as entered). The full chip
+ * lists still render in the typed findings card; this card is the highlight.
  */
 function buildPrimaryMove({ values = {} }) {
   const firstChip = (raw) => String(raw || '').split(',').map((s) => s.trim()).filter(Boolean)[0] || null;
@@ -212,18 +230,27 @@ function buildTermiteReportV2({
   stationSummary = null,
   visitSequence = 1,
   technicianReport = null,
+  // The tech's REQUIRED next-step commitment for this typed type
+  // (todaysResult.nextStep) — carried into the dashboard because it replaces
+  // the typed Today's Result card that used to print it (codex P1 #3600 r1).
+  nextStep = null,
+  // Same-LINE next appointment only. The report's top-level nextAppointment
+  // falls back to the customer's next visit of ANY line, which must never
+  // render as the next termite monitoring visit (codex P2 #3600 r1).
+  nextVisit = null,
 } = {}) {
-  if (typedReportType !== 'termite_bait_station') return null;
+  if (typedReportType !== TERMITE_BAIT_TYPED_TYPE) return null;
   const values = typedSnapshotValues && typeof typedSnapshotValues === 'object' ? typedSnapshotValues : {};
 
   const network = buildStationNetwork({ values, stationSummary });
   const checked = network?.counts?.checked ?? toCount(values.stations_checked);
   const total = network?.counts?.total ?? toCount(values.total_stations);
-  const activityCount = network?.counts?.activity || 0;
+  const activityCount = network?.counts?.activity ?? null;
   const inaccessible = network?.counts?.inaccessible || 0;
   const servicedCount = stationSummary?.serviced ?? 0;
-  // "Serviced today" is claimed only on documented evidence: serviced pins
-  // on the station map, or bait/station work recorded on the typed form.
+  // "Serviced today" is a VISIT fact claimed only on documented evidence:
+  // serviced pins on the station map, or bait/station work recorded on the
+  // typed form. Never attributed to individual activity stations.
   const servicedToday = servicedCount > 0
     || Boolean(String(values.bait_actions || '').trim())
     || Boolean(String(values.station_actions || '').trim());
@@ -233,11 +260,13 @@ function buildTermiteReportV2({
     checked,
     inaccessible,
   });
+  const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const copy = buildTodaysResultCopy({
     statusKey: statusBase.key,
     checked,
     total,
     activityCount,
+    servicedCount,
     servicedToday,
     inaccessible,
     activeLocation: values.active_station_location ? String(values.active_station_location).trim() : null,
@@ -256,36 +285,50 @@ function buildTermiteReportV2({
     }
     : null;
 
+  const nextStepText = typeof nextStep === 'string' && nextStep.trim() ? nextStep.trim() : null;
+
   return {
     status,
     statusSummary,
-    metrics: buildTodaysMetrics({ checked, total, activityCount, servicedCount }),
+    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount }),
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
-    servicedToday,
+    nextStep: nextStepText,
+    nextVisit: nextVisit && nextVisit.scheduledDate ? nextVisit : null,
     primaryMove: buildPrimaryMove({ values }),
     visitSequence: visitSequence || 1,
     aiSummary: technicianReport || null,
   };
 }
 
+function typedSnapshotType(service = {}) {
+  const raw = service.service_data;
+  let data = raw;
+  if (typeof raw === 'string') {
+    try { data = JSON.parse(raw); } catch { data = null; }
+  }
+  const snapshot = data && typeof data === 'object' ? data.typedReportSnapshot : null;
+  return snapshot && typeof snapshot === 'object' ? snapshot.type || null : null;
+}
+
 /**
  * PDF cache-key component. Same contract as mosquitoReportV2PdfSignature:
- * empty string when the gate is off or the line does not apply, so a gate
- * flip never mass-invalidates cached PDFs for other lines. Bump the suffix
- * whenever the termite-line report COMPOSITION changes.
+ * empty string when the gate is off or the record does not apply, so a gate
+ * flip never mass-invalidates cached PDFs for other lines. Keyed on the SAME
+ * predicate as the render gate — the frozen typed snapshot type — never the
+ * service display name (a renamed termite service still completes on the
+ * bait-station profile; codex P2 #3600 r1). Bump the suffix whenever the
+ * termite-line report COMPOSITION changes.
  */
 function termiteReportV2PdfSignature(service = {}) {
   if (process.env.TERMITE_REPORT_V2 !== 'true') return '';
-  const line = service.service_line || detectServiceLine(service.service_type);
-  if (line !== 'termite') return '';
-  return isTermiteBaitServiceType(service.service_type) ? '-termv2' : '';
+  return typedSnapshotType(service) === TERMITE_BAIT_TYPED_TYPE ? '-termv2' : '';
 }
 
 module.exports = {
+  TERMITE_BAIT_TYPED_TYPE,
   buildTermiteReportV2,
   termiteReportV2PdfSignature,
-  isTermiteBaitServiceType,
   // exported for tests
   resolveTermiteStatus,
   buildStationNetwork,

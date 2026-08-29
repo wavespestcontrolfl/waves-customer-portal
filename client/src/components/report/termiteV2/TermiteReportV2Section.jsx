@@ -5,12 +5,17 @@
 //   2. Bait station map (satellite, numbered navy pins, live web only)
 //   3. Station details — ONE card: exceptions ("Needs attention") first,
 //      normals collapsed behind "View all stations"
-//   4. Your one move (tech's top recommendation)
-//   5. Your termite protection (program · next visit · warranty)
+//   4. What happens next (the tech's required next-step commitment)
+//   5. Your one move (tech's top recommendation)
+//   6. Your termite protection (program · same-line next visit · warranty)
+// The typed findings card (activity signs, bait/station issues and actions,
+// conducive conditions, recommendations) still renders below the dashboard
+// from ReportViewPage, minus the fields the hero already carries.
 import { StationMapCard } from '../../StationMapCard';
 import {
   TermiteStatusHero,
   TermiteStationRecord,
+  TermiteWhatsNext,
   TermiteNextStep,
   TermiteProtection,
 } from './TermiteReportV2';
@@ -26,9 +31,6 @@ export default function TermiteReportV2Section({
   bondLines = [],
 }) {
   if (!data) return null;
-  // Builder-computed: true only on documented station work (serviced pins or
-  // bait/station actions on the typed form) — never inferred client-side.
-  const servicedToday = Boolean(data.servicedToday);
   return (
     <div style={{ marginTop: 20 }} data-print={print ? 'true' : undefined} data-mode={mode} data-token={token || undefined}>
       <TermiteStatusHero
@@ -47,7 +49,8 @@ export default function TermiteReportV2Section({
           <StationMapCard stationMap={stationMap} stationPins={stationPins} />
         </div>
       )}
-      <TermiteStationRecord stationMap={stationMap} servicedToday={servicedToday} />
+      <TermiteStationRecord stationMap={stationMap} />
+      <TermiteWhatsNext nextStep={data.nextStep} />
       <TermiteNextStep primaryMove={data.primaryMove} />
       <TermiteProtection nextVisitLabel={nextVisitLabel} bondLines={bondLines} />
     </div>

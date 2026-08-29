@@ -12,6 +12,7 @@ import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
+import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import useStickyStuck from '../hooks/useStickyStuck';
 import {
@@ -8888,7 +8889,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  below is suppressed for termite V2). */
               stationMap={data.stationMap}
               stationPins={Boolean(data.termiteStationPins)}
-              nextVisitLabel={formatNextAppointmentLabel(data.nextAppointment)}
+              /* Same-line next visit only — the builder scopes it; the
+                 top-level nextAppointment may be ANY service line. */
+              nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               bondLines={(data.termiteBonds || [])
                 .map((bond) => ({ serviceType: bond.serviceType || null, label: formatTermiteBondRenewalLabel(bond) }))
                 .filter((entry) => entry.label)}
@@ -9034,7 +9037,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             the tile card duplicated it ("What we found: German cockroaches")
             right below (owner 2026-07-21). Typed compliance reports (termite,
             WDO, rodent...) keep the card — those tiles ARE the record. */}
-        {!data.pestReportV2 && !data.termiteReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
+        {/* Termite V2 keeps the card for every typed field the dashboard
+            does not render (activity signs, bait/station issues and actions,
+            conducive conditions, the full recommendation list) — only the
+            hero-owned counts/status tiles drop (codex P1 #3600 r1). */}
+        {!data.pestReportV2 && (
+          <TypedFindingsCard
+            typedReport={data.termiteReportV2 && data.typedReport
+              ? {
+                ...data.typedReport,
+                findings: (data.typedReport.findings || []).filter((f) => !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f?.fieldKey)),
+              }
+              : data.typedReport}
+          />
+        )}
 
         {/* Seasonal-protocol card renders internal operating fields (production
             mode, carrier target, inventory deductions, compliance gate) that

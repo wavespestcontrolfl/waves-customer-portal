@@ -8,7 +8,6 @@
 const {
   buildTermiteReportV2,
   termiteReportV2PdfSignature,
-  isTermiteBaitServiceType,
   resolveTermiteStatus,
   buildStationNetwork,
   buildTodaysResultCopy,
@@ -24,21 +23,6 @@ const CLEAN_VALUES = {
   termite_activity: 'None observed',
   bait_consumption: 'None — bait intact',
 };
-
-describe('isTermiteBaitServiceType — bait-station names only', () => {
-  it('accepts station / bait / monitoring termite names', () => {
-    expect(isTermiteBaitServiceType('Termite Bait Station Service')).toBe(true);
-    expect(isTermiteBaitServiceType('Termite Monitoring (Quarterly)')).toBe(true);
-    expect(isTermiteBaitServiceType('Termite Bait Cartridge Replacement')).toBe(true);
-  });
-
-  it('rejects liquid / trench / inspection termite services and non-termite names', () => {
-    expect(isTermiteBaitServiceType('Termite Liquid Treatment')).toBe(false);
-    expect(isTermiteBaitServiceType('Pre-Slab Termite Treatment')).toBe(false);
-    expect(isTermiteBaitServiceType('Rodent Bait Station Service')).toBe(false);
-    expect(isTermiteBaitServiceType(null)).toBe(false);
-  });
-});
 
 describe('resolveTermiteStatus — honest status ladder', () => {
   it('clean full inspection → protected (good)', () => {
@@ -79,17 +63,30 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
     expect(copy.body).toMatch(/2 stations could not be accessed today and will be checked next visit/);
   });
 
-  it('activity: says where, claims "serviced today" only when documented', () => {
-    const serviced = buildTodaysResultCopy({ statusKey: 'action', checked: 12, total: 12, activityCount: 2, servicedToday: true, inaccessible: 0, activeLocation: 'Stations 6 and 10 on the north side' });
+  it('activity: says where; servicing is VISIT-scoped, never attributed to the activity stations', () => {
+    // Pins are activity OR serviced — the copy counts serviced stations, it
+    // never says the active stations themselves were serviced.
+    const serviced = buildTodaysResultCopy({ statusKey: 'action', checked: 12, total: 12, activityCount: 2, servicedCount: 3, servicedToday: true, inaccessible: 0, activeLocation: 'Stations 6 and 10 on the north side' });
     expect(serviced.headline).toBe('Termite activity observed at 2 stations');
     expect(serviced.body).toMatch(/Stations 6 and 10 on the north side/);
-    expect(serviced.body).toMatch(/Both stations were serviced today/);
+    expect(serviced.body).toMatch(/Bait was serviced at 3 stations today/);
+    expect(serviced.body).not.toMatch(/Both stations were serviced/);
+
+    const formOnly = buildTodaysResultCopy({ statusKey: 'action', checked: 12, total: 12, activityCount: 1, servicedCount: 0, servicedToday: true, inaccessible: 0 });
+    expect(formOnly.body).toMatch(/Bait service was performed today/);
 
     const unserviced = buildTodaysResultCopy({ statusKey: 'action', checked: 12, total: 12, activityCount: 1, servicedToday: false, inaccessible: 0 });
     expect(unserviced.headline).toBe('Termite activity observed at 1 station');
     expect(unserviced.body).toMatch(/1 of the 12 stations inspected/);
-    expect(unserviced.body).not.toMatch(/serviced today/);
+    expect(unserviced.body).not.toMatch(/serviced/);
     expect(unserviced.body).toMatch(/monitored closely/);
+  });
+
+  it('activity without a documented station count never invents one', () => {
+    const copy = buildTodaysResultCopy({ statusKey: 'action', checked: 12, total: 12, activityCount: null, inaccessible: 0 });
+    expect(copy.headline).toBe('Termite activity observed');
+    expect(copy.body).toMatch(/observed at the stations inspected today/);
+    expect(copy.body).not.toMatch(/1 station/);
   });
 
   it('evidence (previous feeding) never escalates to an active-termites claim', () => {
@@ -112,6 +109,9 @@ describe('buildTodaysMetrics', () => {
       { label: 'Stations serviced', value: '3' },
     ]);
     expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0 })[1].value).toBe('None observed');
+    // Activity recorded with no count: "Observed", never "None observed"
+    // under a headline that says otherwise.
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: null, activityObserved: true, servicedCount: 0 })[1].value).toBe('Observed');
     expect(buildTodaysMetrics({ checked: null })).toBeNull();
   });
 });
@@ -130,7 +130,10 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
   it('falls back to the typed counts and returns null without an inspected count', () => {
     const net = buildStationNetwork({ values: CLEAN_VALUES });
     expect(net.counts.checked).toBe(12);
+    expect(net.counts.activity).toBe(0);
     expect(net.items.map((i) => i.key)).toEqual(['inspected', 'bait']);
+    // No count on the form and no map → null, not 0 (the copy distinguishes).
+    expect(buildStationNetwork({ values: { stations_checked: 8 } }).counts.activity).toBeNull();
     expect(net.items[1].status).toBe('clear');
     expect(buildStationNetwork({ values: {} })).toBeNull();
   });
@@ -164,8 +167,10 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', visitSequence: 3 });
     expect(out.status).toEqual({ key: 'protected', tone: 'good', label: 'No termite activity observed' });
     expect(out.metrics).toHaveLength(3);
-    expect(out.servicedToday).toBe(false);
+    expect(out.statusSummary).not.toMatch(/serviced/);
     expect(out.visitSequence).toBe(3);
+    expect(out.nextStep).toBeNull();
+    expect(out.nextVisit).toBeNull();
     expect(out.defense.items[0]).toMatchObject({ key: 'inspected', status: 'clear' });
     expect(out.primaryMove).toBeNull();
   });
@@ -179,15 +184,39 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     });
     expect(fromPins.status.key).toBe('action');
     expect(fromPins.status.tone).toBe('watch');
-    expect(fromPins.servicedToday).toBe(true);
+    expect(fromPins.statusSummary).toMatch(/Bait was serviced at 2 stations today/);
     expect(fromPins.metrics[2]).toEqual({ label: 'Stations serviced', value: '2' });
 
-    const fromForm = buildTermiteReportV2({ typedSnapshotValues: { ...values, bait_actions: 'Replaced cartridges at 6 and 10' }, typedReportType: 'termite_bait_station' });
-    expect(fromForm.servicedToday).toBe(true);
+    const fromForm = buildTermiteReportV2({ typedSnapshotValues: { ...values, bait_actions: 'Bait replaced' }, typedReportType: 'termite_bait_station' });
+    expect(fromForm.statusSummary).toMatch(/Bait service was performed today/);
 
     const undocumented = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station' });
-    expect(undocumented.servicedToday).toBe(false);
-    expect(undocumented.statusSummary).not.toMatch(/serviced today/);
+    expect(undocumented.statusSummary).not.toMatch(/serviced/);
+  });
+
+  it('activity recorded without a station count → "observed" headline and metric, no invented count', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { stations_checked: 10, termite_activity: 'Previous feeding noted', bait_consumption: 'Light feeding' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status.key).toBe('evidence');
+    expect(out.status.label).toBe('Evidence of termite activity observed');
+    expect(out.metrics[1]).toEqual({ label: 'Termite activity', value: 'Observed' });
+    expect(out.defense.items.map((i) => i.key)).toEqual(['inspected', 'bait']);
+  });
+
+  it('carries the required next step and only a same-line next visit', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: CLEAN_VALUES,
+      typedReportType: 'termite_bait_station',
+      nextStep: '  Recheck active station sooner.  ',
+      nextVisit: { scheduledDate: '2026-11-16', windowStart: '09:00', serviceType: 'Termite Bait Station Service' },
+    });
+    expect(out.nextStep).toBe('Recheck active station sooner.');
+    expect(out.nextVisit).toEqual({ scheduledDate: '2026-11-16', windowStart: '09:00', serviceType: 'Termite Bait Station Service' });
+    const none = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', nextStep: '', nextVisit: { serviceType: 'x' } });
+    expect(none.nextStep).toBeNull();
+    expect(none.nextVisit).toBeNull();
   });
 
   it('passes the technician report through as aiSummary', () => {
@@ -202,21 +231,25 @@ describe('termiteReportV2PdfSignature — PDF cache-key component', () => {
     if (original === undefined) delete process.env.TERMITE_REPORT_V2;
     else process.env.TERMITE_REPORT_V2 = original;
   });
+  const baitRecord = { service_type: 'Custom Termite Plan', service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: {} } }) };
 
   it('is empty when the gate is off', () => {
     delete process.env.TERMITE_REPORT_V2;
-    expect(termiteReportV2PdfSignature({ service_line: 'termite', service_type: 'Termite Bait Station Service' })).toBe('');
+    expect(termiteReportV2PdfSignature(baitRecord)).toBe('');
   });
 
-  it('is -termv2 for termite bait-station services when the gate is on', () => {
+  it('keys on the frozen typed snapshot type — the same predicate as the render gate, not the service name', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
-    expect(termiteReportV2PdfSignature({ service_line: 'termite', service_type: 'Termite Bait Station Service' })).toBe('-termv2');
-    expect(termiteReportV2PdfSignature({ service_type: 'Termite Monitoring (Quarterly)' })).toBe('-termv2');
+    expect(termiteReportV2PdfSignature(baitRecord)).toBe('-termv2');
+    // object-shaped service_data (already parsed by a caller)
+    expect(termiteReportV2PdfSignature({ service_data: { typedReportSnapshot: { type: 'termite_bait_station' } } })).toBe('-termv2');
   });
 
-  it('is empty for other termite forms and other service lines', () => {
+  it('is empty for other typed types, records without a snapshot, and malformed service_data', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
-    expect(termiteReportV2PdfSignature({ service_line: 'termite', service_type: 'Termite Liquid Treatment' })).toBe('');
-    expect(termiteReportV2PdfSignature({ service_line: 'pest', service_type: 'Pest Control (Quarterly)' })).toBe('');
+    expect(termiteReportV2PdfSignature({ service_type: 'Termite Bait Station Service', service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_liquid' } }) })).toBe('');
+    expect(termiteReportV2PdfSignature({ service_type: 'Termite Bait Station Service', service_data: null })).toBe('');
+    expect(termiteReportV2PdfSignature({ service_data: '{not json' })).toBe('');
+    expect(termiteReportV2PdfSignature({})).toBe('');
   });
 });

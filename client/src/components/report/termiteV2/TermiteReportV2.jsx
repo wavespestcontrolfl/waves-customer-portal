@@ -24,6 +24,22 @@ const MUTED = 'var(--muted)';
 const BORDER = CUSTOMER_SURFACE.border;
 const CARD = COLORS.white;
 
+// Typed findings the dashboard already renders (hero counts, activity state,
+// bait consumption, location). Every OTHER typed field — activity signs,
+// bait/station issues and actions, conducive conditions, the full
+// recommendation list — still prints in the typed findings card, so a
+// flooded station or a cartridge replacement never drops out of the customer
+// record when the dashboard mounts (codex P1 #3600 r1).
+export const TERMITE_V2_DASHBOARD_FIELD_KEYS = new Set([
+  'total_stations',
+  'stations_checked',
+  'stations_inaccessible',
+  'stations_with_activity',
+  'termite_activity',
+  'active_station_location',
+  'bait_consumption',
+]);
+
 // Status tone → accent + soft wash (same triad as pest/mosquito V2 — one family).
 const TONE = {
   good: { color: COLORS.glassNavy, wash: 'rgba(4, 57, 94, 0.08)', border: 'rgba(4, 57, 94, 0.35)' },
@@ -104,12 +120,17 @@ function stationTitle(st) {
   return `Station ${st.number}${st.label ? ` · ${st.label}` : ''}`;
 }
 
-export function TermiteStationRecord({ stationMap, servicedToday = false }) {
+export function TermiteStationRecord({ stationMap }) {
   const [expanded, setExpanded] = useState(false);
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   if (!stations.length) return null;
   const exceptions = stationExceptions(stationMap);
-  const normal = stations.filter((st) => !exceptions.includes(st));
+  const checked = stations.filter((st) => st.status === 'ok' || st.status === 'serviced');
+  // Historical / fail-soft reports carry registry pins with NO status
+  // (termite-stations.js falls back to the registry when a visit has no
+  // check rows). Those are "on file", never "checked — no activity"
+  // (codex P2 #3600 r1).
+  const onFile = stations.filter((st) => !exceptions.includes(st) && !checked.includes(st));
 
   const exceptionRow = (st) => (
     <div
@@ -123,10 +144,11 @@ export function TermiteStationRecord({ stationMap, servicedToday = false }) {
     >
       <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.glassNavy }}>{stationTitle(st)}</div>
       <div style={{ fontSize: 14, lineHeight: 1.6, color: TEXT, marginTop: 2 }}>
+        {/* Servicing is a visit-level fact (a pin is activity OR serviced,
+            never both) — the hero body carries it; no per-station claim. */}
         {st.status === 'activity' ? (
           <>
             <div>Termite activity observed</div>
-            {servicedToday ? <div>Bait serviced today</div> : null}
             <div style={{ color: MUTED }}>Monitoring continues</div>
           </>
         ) : (
@@ -139,8 +161,8 @@ export function TermiteStationRecord({ stationMap, servicedToday = false }) {
     </div>
   );
 
-  const normalRow = (st) => {
-    const line = RECORD_LINES[st.status] || { color: '#64748B', text: 'On file' };
+  const plainRow = (st) => {
+    const line = RECORD_LINES[st.status] || { color: '#64748B', text: 'On file · Not checked this visit' };
     return (
       <div key={st.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 0', borderTop: `1px solid ${BORDER}` }}>
         <span
@@ -163,9 +185,15 @@ export function TermiteStationRecord({ stationMap, servicedToday = false }) {
     );
   };
 
-  const normalSummary = exceptions.length
-    ? `${normal.length} other station${normal.length === 1 ? '' : 's'} checked — no activity observed`
-    : `All ${normal.length} station${normal.length === 1 ? '' : 's'} checked — no activity observed`;
+  const collapsed = [...checked, ...onFile];
+  const summaryParts = [];
+  if (checked.length) {
+    summaryParts.push(`${exceptions.length ? '' : 'All '}${checked.length} ${exceptions.length ? 'other ' : ''}station${checked.length === 1 ? '' : 's'} checked — no activity observed`);
+  }
+  if (onFile.length) {
+    summaryParts.push(`${onFile.length} station${onFile.length === 1 ? '' : 's'} on file — not checked this visit`);
+  }
+  const summary = summaryParts.join(' · ');
 
   return (
     <section data-glass="card" style={card}>
@@ -176,9 +204,9 @@ export function TermiteStationRecord({ stationMap, servicedToday = false }) {
           <div style={{ display: 'grid', gap: 12 }}>{exceptions.map(exceptionRow)}</div>
         </>
       ) : null}
-      {normal.length > 0 ? (
+      {collapsed.length > 0 ? (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, paddingTop: exceptions.length ? 14 : 0, marginTop: exceptions.length ? 14 : 0, borderTop: exceptions.length ? `1px solid ${BORDER}` : 'none' }}>
-          <span style={{ fontSize: 14, color: MUTED }}>{normalSummary}</span>
+          <span style={{ fontSize: 14, color: MUTED }}>{summary}</span>
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
@@ -189,7 +217,21 @@ export function TermiteStationRecord({ stationMap, servicedToday = false }) {
           </button>
         </div>
       ) : null}
-      {expanded ? <div style={{ marginTop: 8 }}>{normal.map(normalRow)}</div> : null}
+      {expanded ? <div style={{ marginTop: 8 }}>{collapsed.map(plainRow)}</div> : null}
+    </section>
+  );
+}
+
+// ── What happens next: the tech's required next-step commitment ───────────────
+// Every termite_bait_station completion records a next step (activity-
+// indicators REQUIRED_NEXT_STEP_TYPES). The dashboard replaces the typed
+// Today's Result card that used to print it, so it prints it here.
+export function TermiteWhatsNext({ nextStep }) {
+  if (!nextStep) return null;
+  return (
+    <section data-glass="card" style={card}>
+      <div style={eyebrow}>What happens next</div>
+      <p style={{ margin: 0, fontSize: 15, lineHeight: 1.55, color: TEXT }}>{nextStep}</p>
     </section>
   );
 }
@@ -216,7 +258,11 @@ export function TermiteNextStep({ primaryMove }) {
 // The report reinforces what the customer actually bought: an installed
 // monitoring network around the property, documented visit by visit.
 export function TermiteProtection({ nextVisitLabel = null, bondLines = [], programLabel = 'Termite bait station program' }) {
+  // nextVisitLabel is the SAME-LINE next appointment only (builder-scoped);
+  // the ACTIVE badge rides bond evidence alone — a scheduled visit is a
+  // date, not a warranty claim (codex P2 #3600 r1).
   if (!nextVisitLabel && !bondLines.length) return null;
+  const active = bondLines.length > 0;
   const cell = { minWidth: 0 };
   const cellLabel = { ...eyebrow, marginBottom: 4 };
   const cellValue = { fontSize: 15, fontWeight: 700, color: TEXT, lineHeight: 1.4 };
@@ -227,9 +273,11 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
           <div style={eyebrow}>Your termite protection</div>
           <div style={{ fontSize: 17, fontWeight: 700, color: TEXT }}>{programLabel}</div>
         </div>
-        <span style={{ background: COLORS.glassNavy, color: '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto' }}>
-          ACTIVE
-        </span>
+        {active ? (
+          <span style={{ background: COLORS.glassNavy, color: '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 12, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto' }}>
+            ACTIVE
+          </span>
+        ) : null}
       </div>
       <div style={{ display: 'grid', gap: 14 }}>
         {nextVisitLabel ? (
@@ -245,8 +293,9 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
           </div>
         ))}
       </div>
+      {/* My Plan tab renders the termite bond card (PortalPage MyPlanTab). */}
       <a
-        href="/?tab=documents"
+        href="/?tab=plan"
         style={{
           display: 'inline-block',
           marginTop: 18,
