@@ -1063,7 +1063,8 @@ async function claimVisitNotification(row, kind) {
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-      if (!fresh || String(fresh.visit_id || '') !== String(visit.id) || !rowStillAtVisitStop(fresh, visit)) return { state: 'detached', token: null };
+      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      if (!rowStillAtVisitStop(fresh, visit, await otherLiveMembers(t, visit.id, fresh.id))) return { state: 'detached', token: null };
       // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
       // miss) is RECLAIMED — the retry the ledger promised (codex r6) — and
       // so is a STALE `claimed` row (a claim whose finalize failed or whose
@@ -1104,12 +1105,35 @@ async function claimVisitNotification(row, kind) {
   }
 }
 
-/** Row's current stop tuple (date, customer, property, window vs the visit union) still matches the visit. */
-function rowStillAtVisitStop(row, visit) {
-  return dateOnly(row.scheduled_date) === dateOnly(visit.scheduled_date)
-    && String(row.customer_id) === String(visit.customer_id)
-    && String(row.property_id || '') === String(visit.property_id || '')
-    && windowsOverlap(row.window_start, row.window_end, visit.window_start, visit.window_end);
+/**
+ * Row's current stop tuple (date, customer, property) still matches the
+ * visit AND its window still connects to the visit's OTHER live members —
+ * the same rule handleChildStopChanged applies (codex #3603 r11): a row
+ * moved inside the stale union but away from every sibling is a separate
+ * stop. Windowless rows, and rows with no windowed siblings, connect.
+ */
+function rowStillAtVisitStop(row, visit, otherMembers = []) {
+  if (dateOnly(row.scheduled_date) !== dateOnly(visit.scheduled_date)
+      || String(row.customer_id) !== String(visit.customer_id)
+      || String(row.property_id || '') !== String(visit.property_id || '')) return false;
+  if (!row.window_start) return true;
+  // Only siblings that are themselves still at the stop count as anchors
+  // (same tuple, window inside the visit's recorded union) — a sibling
+  // that moved away must not make the unmoved row look detached.
+  const anchors = (otherMembers || []).filter((m) => m && m.window_start
+    && (m.scheduled_date == null || dateOnly(m.scheduled_date) === dateOnly(visit.scheduled_date))
+    && (m.customer_id == null || String(m.customer_id) === String(visit.customer_id))
+    && (m.property_id == null || String(m.property_id || '') === String(visit.property_id || ''))
+    && windowsOverlap(m.window_start, m.window_end, visit.window_start, visit.window_end));
+  if (!anchors.length) return windowsOverlap(row.window_start, row.window_end, visit.window_start, visit.window_end);
+  return anchors.some((m) => windowsOverlap(row.window_start, row.window_end, m.window_start, m.window_end));
+}
+
+/** Non-terminal members of a visit other than `rowId`, with their stop tuple + windows (for connectivity checks). */
+async function otherLiveMembers(t, visitId, rowId) {
+  return t('scheduled_services').where({ visit_id: visitId }).whereNot('id', rowId)
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
 }
 
 /**
@@ -1204,7 +1228,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
       if (!lockedPrimary
           || String(lockedPrimary.visit_id || '') !== String(visit.id)
           || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')
-          || !rowStillAtVisitStop(lockedPrimary, visit)) {
+          || !rowStillAtVisitStop(lockedPrimary, visit, await otherLiveMembers(t, visit.id, lockedPrimary.id))) {
         logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}) — skipped`);
         return null;
       }

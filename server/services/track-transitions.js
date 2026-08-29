@@ -455,6 +455,14 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         serviceId: svc.id,
       });
 
+      // Ownership re-checked IMMEDIATELY before the provider call (codex
+      // r11): the ETA lookup above can stall across the lease boundary and a
+      // reclaim (new token) may own the notice by now — never send twice.
+      if (visitClaim === 'owner'
+          && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
+        smsOutcome = 'lease_expired';
+        throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
+      }
       const result = await TwilioService.sendTechEnRoute(
         svc.customer_id,
         techName,
@@ -493,8 +501,12 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         }
       }
     } catch (err) {
-      logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
-      if (smsOutcome !== 'sent') smsOutcome = 'retry';
+      if (err && err.leaseExpired) {
+        logger.warn(`[track-transitions] en-route SMS for ${serviceId} skipped: ${err.message}`);
+      } else {
+        logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
+        if (smsOutcome !== 'sent') smsOutcome = 'retry';
+      }
     }
   }
   return { smsSent, smsOutcome, visitClaim, claimToken };

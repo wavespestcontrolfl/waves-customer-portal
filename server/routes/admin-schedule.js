@@ -11571,11 +11571,13 @@ router.put('/:id/status', async (req, res, next) => {
     // internally idempotent (atomic guard on track_state='scheduled',
     // SMS guard on track_sms_sent_at), so a retry from any path is safe.
     if (toStatus === 'en_route') {
+      let enRouteResult = null;
       try {
         const result = await trackTransitions.markEnRoute(svc.id, {
           actorType: 'admin',
           actorId: req.technicianId,
         });
+        enRouteResult = result;
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_en_route',
@@ -11592,15 +11594,22 @@ router.put('/:id/status', async (req, res, next) => {
         });
       }
 
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
-          icon: '\u{1F697}',
-          preferenceKey: 'tech_en_route',
-          dedupeKey: `scheduled-service:${svc.id}:en-route`,
-          metadata: { scheduledServiceId: svc.id },
-        });
-      } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      // Visit group (codex #3603 r11): the bell/push is ONE per visit, like
+      // the text — visit-scoped dedupe key, and a member that did not own
+      // the visit notice (covered / claim in flight / claim error / lease
+      // expired) does not push at all.
+      const nonOwner = enRouteResult && ['covered', 'claim_in_flight', 'claim_error', 'lease_expired'].includes(String(enRouteResult.smsOutcome || ''));
+      if (!nonOwner) {
+        try {
+          const NotificationService = require('../services/notification-service');
+          await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
+            icon: '\u{1F697}',
+            preferenceKey: 'tech_en_route',
+            dedupeKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
+            metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
+          });
+        } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
+      }
     }
 
     if (toStatus === 'on_site') {

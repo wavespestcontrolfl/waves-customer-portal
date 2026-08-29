@@ -271,10 +271,11 @@ describe('fanOutLiveTransition', () => {
     ['reassigned technician', { technician_id: 't9' }],
     ['moved to another day (detach seam pending)', { scheduled_date: '2026-09-01' }],
     ['window moved outside the visit (detach seam pending)', { window_start: '15:00', window_end: '16:00' }],
+    ['window moved inside the stale union but away from every sibling (r11)', { window_start: '09:15', window_end: '09:30' }],
   ])('primary revalidated under the stop lock — %s ⇒ no fan-out', async (_label, over) => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { first: lockedPrimary(over), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' }] },
+      scheduled_services: { first: lockedPrimary(over), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '10:00', window_end: '11:00' }] },
     };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
     expect(out).toBe(null);
@@ -305,7 +306,10 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
     expect((await claimVisitNotification(ROW, 'on_site')).state).toBe('in_flight');
   });
   test('a row a split just detached (or moved off the stop, or a visit no longer open) never claims', async () => {
-    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '15:00', window_end: '16:00' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '15:00', window_end: '16:00' }), select: () => [{ id: 's1', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', window_start: '09:00', window_end: '10:00' }] }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
+    // moved INSIDE the stale union but away from every sibling (r11) ⇒ detached too
+    db.__script.scheduled_services.first = () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '11:15', window_end: '11:30' });
     expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v2' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
     expect((await claimVisitNotification(ROW, 'en_route')).state).toBe('detached');
