@@ -1818,13 +1818,13 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 });
 
 // POST /:id/record-payment — log an off-Stripe payment (cash, check,
-// Zelle, or other) against an open invoice. Marks the invoice paid,
+// Zelle, Venmo, or other) against an open invoice. Marks the invoice paid,
 // stops the follow-up sequence, and optionally fires the receipt in
 // the same call so the operator can close the bill in one tap.
 //
 // Body: {
-//   method:       'cash' | 'check' | 'zelle' | 'other'  (required)
-//   reference?:   string  — check #, Zelle confirmation, etc.  (≤200 chars)
+//   method:       'cash' | 'check' | 'zelle' | 'venmo' | 'paypal' | 'other'  (required)
+//   reference?:   string  — check #, Zelle confirmation, Venmo/PayPal transaction ID, etc.  (≤200 chars)
 //   note?:        string  — operator note appended to invoice notes  (≤400 chars)
 //   sendReceipt?: boolean — fire receipt SMS/email after marking paid (default true)
 //   via?:         'email' | 'sms' | 'both'  — receipt channels (default 'both')
@@ -1834,7 +1834,10 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
 // and refuses to mark a void invoice paid. Stripe-paid invoices keep
 // their card_brand/card_last_four; manual payments leave those NULL so
 // timeline rendering can distinguish.
-const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+// Venmo and PayPal are named tenders (2026-08-29) so revenue reports can tell
+// them apart from 'other' — still off-gateway settlements (no webhook, no
+// Stripe object); recorded after the money lands.
+const VALID_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 const VALID_PAYMENT_PLAN_FREQUENCIES = ['weekly', 'biweekly', 'monthly'];
 
 function parsePositiveMoney(value, field) {

@@ -1307,7 +1307,7 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['serviceReportNotifyBilling', 'service_report_notify_billing'],
 ];
 
-const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
@@ -5110,7 +5110,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // Body: {
 //   amount: number    — non-zero; negative deducts
 //   kind:   string     — 'prepayment' | 'goodwill' | 'adjustment'
-//   method?: string    — cash/check/zelle/card/other (prepayment only)
+//   method?: string    — cash/check/zelle/venmo/paypal/other (prepayment only)
 //   note?:  string
 // }
 //
@@ -5125,7 +5125,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // also applies the required card surcharge); booking it as a manual cash-
 // style payments row here would grant spendable credit + paid revenue
 // without actually collecting the card.
-const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 
 router.post('/:id/credits', requireAdmin, async (req, res, next) => {
   try {

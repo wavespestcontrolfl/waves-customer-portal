@@ -1663,7 +1663,7 @@ function InvoiceList({
                             <button
                               onClick={() => setPaymentModalInvoice(inv)}
                               style={sBtn(D.heading, D.white, isMobile)}
-                              title="Record cash, check, or Zelle payment and close the invoice"
+                              title="Record cash, check, Zelle, Venmo, or PayPal payment and close the invoice"
                             >
                               Add payment
                             </button>
@@ -2123,11 +2123,13 @@ function buildInvoiceTimeline(inv) {
   }
   if (inv.paid_at) {
     // Stripe payments carry card_brand / card_last_four; manual payments
-    // (cash/check/zelle/other) carry payment_method + payment_reference.
+    // (cash/check/zelle/venmo/paypal/other) carry payment_method + payment_reference.
     const MANUAL_LABELS = {
       cash: "Cash",
       check: "Check",
       zelle: "Zelle",
+      venmo: "Venmo",
+      paypal: "PayPal",
       other: "Other",
     };
     let method;
@@ -3581,18 +3583,26 @@ function RecordPaymentModal({
       ? "Check number"
       : method === "zelle"
         ? "Zelle confirmation #"
-        : method === "other"
-          ? "Reference"
-          : "Reference (optional)";
+        : method === "venmo"
+          ? "Venmo transaction ID"
+          : method === "paypal"
+            ? "PayPal transaction ID"
+            : method === "other"
+              ? "Reference"
+              : "Reference (optional)";
 
   const referencePlaceholder =
     method === "check"
       ? "e.g. 1042"
       : method === "zelle"
         ? "e.g. RP1ABCXYZ"
-        : method === "other"
-          ? "e.g. money order #, Venmo handle"
-          : "";
+        : method === "venmo"
+          ? "e.g. 4123456789012345678 or @handle"
+          : method === "paypal"
+            ? "e.g. 1AB23456CD789012E"
+            : method === "other"
+              ? "e.g. money order #"
+              : "";
 
   const receiptEmail = recipientLookup
     ? recipientLookup.emailRecipient?.email || ""
@@ -3755,6 +3765,8 @@ function RecordPaymentModal({
           {methodChoice("cash", "Cash")}
           {methodChoice("check", "Check")}
           {methodChoice("zelle", "Zelle")}
+          {methodChoice("venmo", "Venmo")}
+          {methodChoice("paypal", "PayPal")}
           {methodChoice("other", "Other")}
         </div>{" "}
         <label

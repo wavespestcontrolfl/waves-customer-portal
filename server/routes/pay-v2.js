@@ -18,7 +18,7 @@ const logger = require('../services/logger');
 const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
-const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
+const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -357,6 +357,10 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
+    const manualPayOptions = isInvoiceCollectibleStatus(data.status)
+      ? manualPayOptionsFromEnv()
+      : null;
+
     const getCaptureNeeded = getSaveRequired
       && (data.status === 'prepaid'
         || (isInvoiceCollectibleStatus(data.status) && (await invoiceCreditWouldFullyCover(data))))
@@ -455,6 +459,10 @@ router.get('/:token', async (req, res, next) => {
       // Absent (not null) when the gate is off or there is nothing owed —
       // the gate-off payload stays byte-identical to today.
       ...(previousBalance ? { previousBalance } : {}),
+      // Off-Stripe tenders (Zelle / Venmo) shown under checkout. Absent when
+      // neither env var is set (kill switch) or the invoice is not collectible
+      // — there is nothing to send money against once it's settled.
+      ...(manualPayOptions ? { manualPayOptions } : {}),
     });
   } catch (err) {
     next(err);
