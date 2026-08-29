@@ -4331,7 +4331,10 @@ function stripManagedBodyImages(body, slug) {
   // fence, a code span, a comment or an MDX expression is text the reader
   // sees as written — the rendered view (same line count) decides.
   const rendered = renderedBodyView(raw).lines;
-  const unmasked = contentGuardrails.blankNonRenderedMarkdown(raw).split('\n');
+  // Code/comment-stripped AND JSX/MDX-masked (same as renderedBodyView's
+  // definition read): a `[label]:` inside a tag attribute or an expression
+  // defines nothing and must not drive a removal.
+  const unmasked = blankJsxAndExpressions(normalizeAngleDestinations(contentGuardrails.blankNonRenderedMarkdown(raw))).split('\n');
   const lineStarts = [0];
   for (let k = 0; k < raw.length; k += 1) if (raw[k] === '\n') lineStarts.push(k + 1);
   const lineOf = (pos) => { let lo = 0; let hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
