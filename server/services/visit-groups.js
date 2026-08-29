@@ -294,6 +294,15 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       if (!target || String(target.status) !== 'open' || target.stop_base_key !== baseKey) {
         throw new Error('visit membership conflict: attached visit not open for joining');
       }
+      // Membership freeze applies to JOINS too (codex #3590 r4): once the
+      // visit has a packet, child artifact, issued link, or payment
+      // attempt, its member set is frozen — a late join would desync
+      // packet items and the customer surface.
+      const targetActivity = await visitActivity(target.id, t);
+      const joinGate = canSplit(targetActivity);
+      if (!joinGate.ok) {
+        throw new Error(`visit membership conflict: target frozen (${joinGate.reason})`);
+      }
       for (const r of fresh) {
         if (r.visit_id) continue; // already a member
         const probe = canJoin(r, target);
@@ -362,6 +371,14 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       throw new Error('visit membership conflict: a completion attempt is in flight');
     }
 
+    // The visit owns assignment (rev-5 item 6): when the parent has (or
+    // adopts) a technician, EVERY member aligns — including previously
+    // attached children, or tech-scoped dispatch views would split the
+    // physical stop (codex #3590 r4).
+    if (visit.technician_id) {
+      await t('scheduled_services').where({ visit_id: visit.id })
+        .whereNull('technician_id').update({ technician_id: visit.technician_id });
+    }
     const unattachedIds = fresh.filter((r) => !r.visit_id).map((r) => r.id);
     const stamped = unattachedIds.length
       ? await t('scheduled_services')
@@ -509,7 +526,22 @@ async function handleChildStopChanged(scheduledServiceId) {
         && !(fresh.technician_id && visit.technician_id
           && String(fresh.technician_id) !== String(visit.technician_id))
         && !JOIN_INELIGIBLE_STATUSES.includes(String(fresh.status || ''));
-      if (stillMatches) return false;
+      if (stillMatches) {
+        // The move stayed inside the stop but may have shifted the union —
+        // recompute the visit window from current members (codex P2).
+        const members = await t('scheduled_services').where({ visit_id: visit.id })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES)
+          .select('window_start', 'window_end');
+        const starts = members.map((m) => m.window_start).filter(Boolean);
+        const ends = members.map((m) => m.window_end).filter(Boolean);
+        const patch = {};
+        const newStart = starts.length ? starts.sort()[0] : null;
+        const newEnd = ends.length ? ends.sort().slice(-1)[0] : null;
+        if (String(newStart || '') !== String(visit.window_start || '')) patch.window_start = newStart;
+        if (String(newEnd || '') !== String(visit.window_end || '')) patch.window_end = newEnd;
+        if (Object.keys(patch).length) await t('service_visits').where({ id: visit.id }).update(patch);
+        return false;
+      }
       await t('scheduled_services').where({ id: fresh.id }).update({ visit_id: null });
       const remaining = await t('scheduled_services')
         .where({ visit_id: visit.id })
@@ -528,6 +560,51 @@ async function handleChildStopChanged(scheduledServiceId) {
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] handleChildStopChanged(${scheduledServiceId}) skipped: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Legacy-completion gate for alternate completion routes (pest-recap) and
+ * the deferred dissolve of the main /complete path. `ensure` answers "may
+ * this row complete per-row right now?" WITHOUT mutating anything:
+ * unattached/dissolved ⇒ ok; open visit with any packet, or a
+ * closing/closed visit ⇒ not ok (409 material). `dissolve` runs after a
+ * legacy completion durably commits: the open packet-less visit dissolves
+ * (reason legacy_completion) so it can never speak for rows that already
+ * spoke for themselves. Both idempotent, both stop-lock ordered.
+ */
+async function ensureLegacyCompletable(scheduledServiceId) {
+  const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
+  if (!row) return { ok: false, reason: 'not_found' };
+  if (!row.visit_id) return { ok: true };
+  const visit = await db('service_visits').where({ id: row.visit_id }).first('id', 'status');
+  if (!visit) return { ok: false, reason: 'orphan', visitId: row.visit_id }; // fail closed
+  if (String(visit.status) === 'dissolved') return { ok: true };
+  if (['closing', 'closed'].includes(String(visit.status))) {
+    return { ok: false, reason: 'visit_' + visit.status, visitId: visit.id };
+  }
+  const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id');
+  if (packet) return { ok: false, reason: 'packet_exists', visitId: visit.id };
+  return { ok: true, openVisitId: visit.id };
+}
+
+async function dissolveForLegacyCompletion(visitId) {
+  try {
+    return await db.transaction(async (t) => {
+      const visit = await t('service_visits').where({ id: visitId }).first();
+      if (!visit || String(visit.status) !== 'open') return false;
+      await lockStop(t, visit.stop_base_key);
+      const packet = await t('visit_completion_packets').where({ visit_id: visit.id }).first('id');
+      if (packet) return false;
+      await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
+      await t('service_visits').where({ id: visit.id })
+        .update({ status: 'dissolved', close_reason: 'legacy_completion', closed_at: t.fn.now() });
+      return true;
+    });
+  } catch (err) {
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] dissolveForLegacyCompletion(${visitId}) skipped: ${err.message}`);
     return false;
   }
 }
@@ -583,14 +660,17 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     const subset = attachedVisit
       ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
       : compatible;
-    return await createOrJoinVisit({
-      rows: [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))],
-      createdBy: createdBy || 'dispatch',
-      // Inside a caller transaction (converter/seeder), group on the SAME
-      // trx — the new rows aren't visible outside it and a second
-      // transaction would deadlock against its row locks.
-      trx: database && database.isTransaction ? database : null,
-    });
+    const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
+    if (database && database.isTransaction) {
+      // Inside a caller transaction (converter/seeder) the work must run
+      // on that trx (its uncommitted rows are invisible elsewhere), but a
+      // grouping failure must not abort the caller's transaction (25P02
+      // poisons every later statement) — so run inside a SAVEPOINT
+      // (knex nested transaction) and let the catch below swallow the
+      // rolled-back savepoint (codex #3590 r4).
+      return await database.transaction((sp) => createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch', trx: sp }));
+    }
+    return await createOrJoinVisit({ rows, createdBy: createdBy || 'dispatch' });
   } catch (err) {
     const logger = require('./logger');
     logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
@@ -604,6 +684,8 @@ module.exports = {
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
+  ensureLegacyCompletable,
+  dissolveForLegacyCompletion,
   stopBaseKey,
   visitActivity,
   _test: {

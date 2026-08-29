@@ -4292,6 +4292,7 @@ const {
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
+  let legacyVisitToDissolve = null;
   let markedSucceeded = false;
   let durableCompletionCommitted = false;
   try {
@@ -5324,34 +5325,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (!lockedRow.visit_id) return null;
         const parent = await trx('service_visits')
           .where({ id: lockedRow.visit_id }).first();
-        if (!parent) return lockedRow.visit_id; // orphan: fail closed
+        if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
         if (String(parent.status) === 'dissolved') return null;
-        // Phase-1 fallback (post-ownership, post-validation, post-claim):
-        // an open visit with no packet dissolves and legacy completion
-        // proceeds; any packet or closing/closed visit hard-blocks.
+        // READ-ONLY (codex #3590 r4: later validators can still 422, and a
+        // rejected completion must not have dissolved anything): an open
+        // packet-less visit is allowed through and remembered — the
+        // dissolve runs only after the completion durably commits
+        // (dissolveForLegacyCompletion at the durable-commit sites). The
+        // committed claim keeps stamping/packets away in the meantime.
         if (String(parent.status) === 'open') {
           const packet = await trx('visit_completion_packets')
             .where({ visit_id: parent.id }).first('id');
-          if (!packet) {
-            await trx('scheduled_services').where({ visit_id: parent.id }).update({ visit_id: null });
-            await trx('service_visits').where({ id: parent.id })
-              .update({ status: 'dissolved', close_reason: 'legacy_completion', closed_at: trx.fn.now() });
-            return null;
-          }
+          if (!packet) return { legacyVisitId: parent.id };
         }
-        return lockedRow.visit_id;
+        return { blockedBy: parent.id };
       };
-      let groupedNow = null;
+      let recheckOutcome = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          groupedNow = await db.transaction(visitRecheck);  
+          recheckOutcome = await db.transaction(visitRecheck);  
           break;
         } catch (recheckErr) {
           if (recheckErr && recheckErr.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
           throw recheckErr;
         }
       }
-      if (groupedNow) {
+      if (recheckOutcome && recheckOutcome.blockedBy) {
         await CompletionAttempts.markCompletionAttemptFailed(
           completionAttempt,
           new Error('visit_grouped'),
@@ -5359,8 +5358,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         return res.status(409).json({
           error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
           code: 'visit_grouped',
-          visitId: groupedNow,
+          visitId: recheckOutcome.blockedBy,
         });
+      }
+      if (recheckOutcome && recheckOutcome.legacyVisitId) {
+        legacyVisitToDissolve = recheckOutcome.legacyVisitId;
       }
     }
 
@@ -6233,6 +6235,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
+      // Phase-1 legacy fallback, deferred to durable commit (codex #3590
+      // r4): the open packet-less visit this completion was allowed
+      // through dissolves only now that the completion actually exists.
+      if (legacyVisitToDissolve) {
+        void require('../services/visit-groups').dissolveForLegacyCompletion(legacyVisitToDissolve);
+        legacyVisitToDissolve = null;
+      }
     } else {
       try {
         conditionsAtApplication = shouldCaptureApplicationConditions({
@@ -7885,6 +7894,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         );
       });
         durableCompletionCommitted = true;
+      // Phase-1 legacy fallback, deferred to durable commit (codex #3590
+      // r4): the open packet-less visit this completion was allowed
+      // through dissolves only now that the completion actually exists.
+      if (legacyVisitToDissolve) {
+        void require('../services/visit-groups').dissolveForLegacyCompletion(legacyVisitToDissolve);
+        legacyVisitToDissolve = null;
+      }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
@@ -13125,6 +13141,25 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
+  // Visit-group guard (codex #3590 r4: alternate completion route): a
+  // grouped row completes per-row only when its visit is dissolvable —
+  // same contract as /:serviceId/complete. An open packet-less visit is
+  // dissolved AFTER the recap durably commits (below); a visit with a
+  // packet, or closing/closed, hard-blocks.
+  let recapLegacyVisitId = null;
+  try {
+    const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
+    if (!gate.ok) {
+      return res.status(409).json({
+        error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+        code: 'visit_grouped',
+        visitId: gate.visitId || null,
+      });
+    }
+    recapLegacyVisitId = gate.openVisitId || null;
+  } catch (vgErr) {
+    return next(vgErr);
+  }
   try {
     if (!(await assertRecapOwnership(req, res))) return;
     const { actorType, actorId } = recapActor(req);
@@ -13144,6 +13179,9 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       clientPestRating: clientPestRating == null ? null : clientPestRating,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
+    if (recapLegacyVisitId) {
+      void require('../services/visit-groups').dissolveForLegacyCompletion(recapLegacyVisitId);
+    }
     res.json(result);
   } catch (err) { next(err); }
 });

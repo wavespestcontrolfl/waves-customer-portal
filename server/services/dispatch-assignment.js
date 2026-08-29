@@ -234,12 +234,15 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // post-commit; skipped inside a caller trx (uncommitted row invisible
   // to the helper's own transaction) — those callers re-run assignment
   // through this writer on commit paths that matter.
-  if (!trx) {
-    try {
-      await require('./visit-groups').handleChildStopChanged(jobId);
-    } catch (vgErr) {
-      logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`);
-    }
+  const runVisitSeam = () => require('./visit-groups').handleChildStopChanged(jobId)
+    .catch((vgErr) => logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`));
+  if (trx?.executionPromise) {
+    // Transactional callers (admin-schedule assign) — run after THEIR
+    // commit, same pattern as the broadcast above (codex #3590 r4: the
+    // canonical schedule-assignment route always passes a trx).
+    trx.executionPromise.then(runVisitSeam).catch(() => {});
+  } else {
+    await runVisitSeam();
   }
 
   return {

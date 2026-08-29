@@ -9247,6 +9247,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // Visit-group seam (visit-group-scope.md §2; codex #3590 r4): a direct
+    // Edit-Appointment date/window/technician change must repair grouped
+    // membership like every other writer — a child whose stop no longer
+    // matches its visit detaches. Post-commit, best-effort, no-op for
+    // ungrouped rows.
+    try {
+      await require('../services/visit-groups').handleChildStopChanged(req.params.id);
+    } catch (vgErr) {
+      logger.warn(`[schedule/update-details] visit-group seam failed for ${req.params.id}: ${vgErr.message}`);
+    }
+
     // Rebooker-parity post-commit half of the live-move rewind above:
     // tech_status release + customer tracker refresh. Best-effort — the
     // move is committed; a side-effect failure must not fail the edit.

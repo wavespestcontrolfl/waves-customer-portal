@@ -3437,13 +3437,6 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     weekendShift: 'forward',
     durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
   });
-  // Visit groups: a seeded follow-up landing on a date where the customer
-  // already has an open groupable row is one physical stop (doc §2). Gate-
-  // checked + best-effort; runs before reminder registration so a grouped
-  // row's reminders can be visit-deduped by the effects worker later.
-  for (const seededRow of seedResult.insertedRows || []) {
-    await VisitGroups.maybeGroupRow(seededRow.id, { database, createdBy: 'seeder' });
-  }
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
   }
@@ -4599,6 +4592,10 @@ const EstimateConverter = {
               : (unit.service.frequency || 'recurring');
             const standaloneRow = {
               customer_id: customerId,
+              // Property identity must match the reserved start or the
+              // same-trip rows can never group (visit-group join keys on
+              // property_id; codex #3590 r4).
+              ...(reservedStart.property_id ? { property_id: reservedStart.property_id } : {}),
               scheduled_date: unitDate,
               ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
               ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
