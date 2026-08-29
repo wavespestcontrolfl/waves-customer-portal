@@ -163,11 +163,14 @@ function lowRatingExitFields(reason) {
 // any human draft), so old under-4★ wording is never auto-posted to a 4-5★
 // review nor posted verbatim until a person edits it (hook on #3587 r6).
 // A pre-rule under-4★ claim could also park as provider_down / verifier_reject
-// BEFORE the old code stamped low_rating / unrated (those are terminal failure
-// parks: no reply is live, nothing is mid-flight), so they leave the lane too
-// when the persisted rating is under 4 (codex #3587 r5). Reconciliation parks
-// (google_uncertain / persist_failed: a PUT may be live) never do.
-const LEGACY_PARK_REASON_SQL = "(auto_reply_reason IN ('low_rating', 'unrated') OR (auto_reply_reason IN ('provider_down', 'verifier_reject') AND COALESCE(star_rating, 0) < 4))";
+// / runner_error BEFORE the old code stamped low_rating / unrated, and a
+// pre-rule queued row could park location_disabled when its location left the
+// allowlist (all terminal failure parks: no reply is live, nothing is
+// mid-flight — publish failures park under their own reasons inside
+// processClaimedRow), so they leave the lane too when the persisted rating is
+// under 4 (codex #3587 r5/r7/r8). Reconciliation parks (google_uncertain /
+// persist_failed: a PUT may be live) never do.
+const LEGACY_PARK_REASON_SQL = "(auto_reply_reason IN ('low_rating', 'unrated') OR (auto_reply_reason IN ('provider_down', 'verifier_reject', 'runner_error', 'location_disabled') AND COALESCE(star_rating, 0) < 4))";
 const LEGACY_RELEASE_FIELDS = { auto_reply_status: null, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0, auto_reply_claimed_until: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null, auto_reply_grounding: null };
 function legacyLowRatingQuery(qb, nowIso) {
   return qb

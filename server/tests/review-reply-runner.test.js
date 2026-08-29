@@ -75,7 +75,7 @@ jest.mock('../models/db', () => {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
         if (/^COALESCE\(star_rating, 0\) < 4$/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
-        if (/auto_reply_reason IN \('low_rating', 'unrated'\) OR/.test(sql)) filters.push((r) => ['low_rating', 'unrated'].includes(r.auto_reply_reason) || (['provider_down', 'verifier_reject'].includes(r.auto_reply_reason) && (Number(r.star_rating) || 0) < 4));
+        if (/auto_reply_reason IN \('low_rating', 'unrated'\) OR/.test(sql)) filters.push((r) => ['low_rating', 'unrated'].includes(r.auto_reply_reason) || (['provider_down', 'verifier_reject', 'runner_error', 'location_disabled'].includes(r.auto_reply_reason) && (Number(r.star_rating) || 0) < 4));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
         if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
@@ -440,8 +440,16 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'pd-low', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_attempts: 3, auto_reply_error: 'down', auto_reply_version: 'reply-v1' }),
       row({ id: 'vr-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_grounding: { review: { rating: 0 } }, auto_reply_version: 'reply-v1' }),
       row({ id: 'vr-ok', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_version: 'reply-v1' }),
+      // …including runner_error (exception before any publish attempt — publish failures park under
+      // their own reasons) and location_disabled (allowlist narrowed while pre-rule rows were queued) (r7/r8).
+      row({ id: 're-low', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'runner_error', auto_reply_attempts: 3, auto_reply_error: 'boom', auto_reply_version: 'reply-v1' }),
+      row({ id: 'ld-low', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'location_disabled', auto_reply_version: null }),
+      row({ id: 'ld-ok', star_rating: 4, auto_reply_status: 'parked', auto_reply_reason: 'location_disabled' }),
     ];
-    expect(await Runner.sweepLowRatingParks()).toBe(7);
+    expect(await Runner.sweepLowRatingParks()).toBe(9);
+    expect(state.rows[14]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_attempts: 0, auto_reply_error: null });
+    expect(state.rows[15]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
+    expect(state.rows[16]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'location_disabled' });
     expect(state.rows[11]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_attempts: 0, auto_reply_error: null, auto_reply_version: null });
     expect(state.rows[12]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_grounding: null });
     expect(state.rows[13]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject' });
