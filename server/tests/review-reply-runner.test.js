@@ -466,6 +466,16 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows = [row({ id: 'up', star_rating: 5, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
     expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(1);
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued' });
+    // A released row that KEPT its "[DRAFT]" text is a person's draft from then on: the upgrade edit (sync)
+    // parks it human_draft_stale like any human draft — old under-4★ wording is never auto-posted to the
+    // now 4-5★ review, nor posted verbatim until a person edits it (hook on #3587 r6).
+    const kept = row({ id: 'kept', star_rating: 2, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_draft: null, auto_reply_version: null, review_reply: '[DRAFT] Hi Dana, sorry.' });
+    expect(Runner.humanDraftOn(kept)).toBe('Hi Dana, sorry.');
+    expect(Runner.reviewEditFields(kept, { star_rating: 5, review_text: kept.review_text, reviewer_name: kept.reviewer_name })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null });
+    state.rows = [{ ...kept, star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() }];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(0);
+    await expect(Runner.postNow('kept', { type: 'admin' }, { expectedDraft: 'Hi Dana, sorry.' })).rejects.toMatchObject({ code: 'stale_claim' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', review_reply: '[DRAFT] Hi Dana, sorry.' });
     // …but not while it is still under 4★.
     state.rows = [row({ id: 'still-low', star_rating: 3, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
     expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(0);

@@ -156,7 +156,12 @@ function lowRatingExitFields(reason) {
 // mid-flight — both are excluded from the read AND re-checked in the
 // compare-and-set, so the sweep never clears a claim it does not own.
 // low_rating_requested / unrated_requested is not a legacy park and is
-// never selected.
+// never selected. Re-entry after a rating upgrade: a released row WITHOUT
+// text is NULL state and the catch-up enqueue takes it; a released row WITH
+// its "[DRAFT]" text is, from then on, a person's draft — the sync's
+// reviewEditFields parks it human_draft_stale on the upgrade edit (as for
+// any human draft), so old under-4★ wording is never auto-posted to a 4-5★
+// review nor posted verbatim until a person edits it (hook on #3587 r6).
 // A pre-rule under-4★ claim could also park as provider_down / verifier_reject
 // BEFORE the old code stamped low_rating / unrated (those are terminal failure
 // parks: no reply is live, nothing is mid-flight), so they leave the lane too
@@ -620,7 +625,8 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const reason = rating === 0 ? 'unrated' : 'low_rating';
     // NULL state (reason stamped), not skipped: if the reviewer later raises
     // the review to 4–5★ the catch-up enqueue may take it within the normal
-    // window; skipped would exclude it for good (codex #3587 r1).
+    // window; skipped would exclude it for good (codex #3587 r1). (No draft
+    // is left on the row here, so nothing turns into a human draft.)
     await releaseClaim(row, lowRatingExitFields(reason));
     return { outcome: 'skipped', reason };
   }
