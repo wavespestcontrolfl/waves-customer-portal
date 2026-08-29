@@ -274,7 +274,12 @@ describe('ws upgrade — per-call token, never a reusable secret', () => {
 describe('setup frame — bound to the authenticated CallSid', () => {
   const { RelayConversation } = require('../services/voice-agent/relay-conversation');
 
-  function connect(authenticatedCallSid) {
+  // Every socket double opened by a test is closed in afterEach: the relay
+  // arms real (unref'd) idle/max-session timers per connection, and a socket
+  // that is never closed leaves them live for the rest of the jest worker —
+  // firing minutes later inside an unrelated test file.
+  const openSockets = [];
+  function connect(authenticatedCallSid, extras = {}) {
     const listeners = {};
     const ws = {
       readyState: 1,
@@ -283,10 +288,13 @@ describe('setup frame — bound to the authenticated CallSid', () => {
       send: jest.fn(),
       terminate: jest.fn(),
     };
-    mockWssHandlers.connection(ws, { authenticatedCallSid });
+    mockWssHandlers.connection(ws, { authenticatedCallSid, ...extras });
+    const close = () => { if (listeners.close) listeners.close(); };
+    openSockets.push(close);
     return {
       ws,
       setup: (frame) => listeners.message(Buffer.from(JSON.stringify({ type: 'setup', ...frame }))),
+      close,
     };
   }
 
@@ -300,6 +308,7 @@ describe('setup frame — bound to the authenticated CallSid', () => {
   });
 
   afterEach(() => {
+    while (openSockets.length) openSockets.pop()();
     delete process.env.VOICE_RELAY_ENABLED;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.VOICE_RELAY_WS_SECRET;
@@ -340,21 +349,7 @@ describe('setup frame — bound to the authenticated CallSid', () => {
   describe('collections routing by upgrade-time source proof', () => {
     const { CollectionsConversation } = require('../services/collections/outbound-voice/collections-conversation');
 
-    function connectAs(authenticatedCallSid, extras = {}) {
-      const listeners = {};
-      const ws = {
-        readyState: 1,
-        OPEN: 1,
-        on: jest.fn((event, handler) => { listeners[event] = handler; }),
-        send: jest.fn(),
-        terminate: jest.fn(),
-      };
-      mockWssHandlers.connection(ws, { authenticatedCallSid, ...extras });
-      return {
-        ws,
-        setup: (frame) => listeners.message(Buffer.from(JSON.stringify({ type: 'setup', ...frame }))),
-      };
-    }
+    const connectAs = connect;
 
     test('a collections call whose label was stripped STILL routes to the collections session', () => {
       const { setup } = connectAs('CA-collections-1', { authenticatedCollectionsCall: true });
@@ -368,6 +363,42 @@ describe('setup frame — bound to the authenticated CallSid', () => {
       setup({ callSid: 'CA-inbound-1', from: '+19415550142' });
       expect(RelayConversation).toHaveBeenCalledTimes(1);
       expect(CollectionsConversation).not.toHaveBeenCalled();
+    });
+  });
+
+  // The idle/max-session backstops are unref'd real timers armed per socket.
+  // They must be CLEARED by close (not merely survive it), and when one does
+  // fire it must never throw out of the timer callback — that is exactly how a
+  // stale session double from this file crashed an unrelated test file in the
+  // same jest worker (#3611 server CI).
+  describe('backstop timers are torn down with the socket', () => {
+    beforeEach(() => { jest.useFakeTimers(); });
+    afterEach(() => { jest.useRealTimers(); });
+
+    test('close clears the idle backstop — nothing fires after the socket is gone', () => {
+      const { ws, setup, close } = connect('CA-timers-1');
+      setup({ callSid: 'CA-timers-1', from: '+19415550142' });
+      close();
+      expect(ws.terminate).toHaveBeenCalledTimes(1);
+      expect(() => jest.advanceTimersByTime(20 * 60 * 1000)).not.toThrow();
+      expect(ws.terminate).toHaveBeenCalledTimes(1); // teardown ran once, from close
+    });
+
+    test('an idle timeout on a session whose object has no end() still tears down cleanly', () => {
+      // RelayConversation is a bare jest.fn() here — its instances have no end().
+      const { ws, setup } = connect('CA-timers-2');
+      setup({ callSid: 'CA-timers-2', from: '+19415550142' });
+      expect(ws.terminate).not.toHaveBeenCalled();
+      expect(() => jest.advanceTimersByTime(2 * 60 * 1000 + 1)).not.toThrow();
+      expect(ws.terminate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a session whose end() rejects or throws never escapes teardown', () => {
+      RelayConversation.mockImplementationOnce(() => ({ end: () => { throw new Error('boom'); } }));
+      const { ws, setup, close } = connect('CA-timers-3');
+      setup({ callSid: 'CA-timers-3', from: '+19415550142' });
+      expect(() => close()).not.toThrow();
+      expect(ws.terminate).toHaveBeenCalledTimes(1);
     });
   });
 });
