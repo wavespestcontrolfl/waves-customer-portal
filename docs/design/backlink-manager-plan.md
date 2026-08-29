@@ -568,8 +568,14 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
 
 - **Inputs:** the domain, its enrichment, the submission-URL hints, and — for
   `competitor_gap` rows — the competitor's actual source URL (the page the link lives on).
-- **Fetch:** `contact-finder.fetchPage()` only (SSRF-pinned; refuses private hosts; bounded
-  bytes). Candidate pages: the hint, the competitor page, and a fixed probe list
+- **Fetch:** `contact-finder.fetchPage()` only — HARDENED in step 1 before any bulk intake or
+  investigation runs through it, because today it is neither pinned nor bounded (it checks DNS,
+  then lets `node-fetch` resolve the host AGAIN — a rebinding TOCTOU — and calls `res.text()`
+  before slicing, so responses are fully buffered): the step-1 change gives it an IP-pinning,
+  public-only dispatcher (connect to the validated address, `Host` header preserved, every
+  redirect hop re-validated the same way — or route it through the §13 egress proxy) and a
+  streaming byte cap that aborts the socket at 600 KB, plus a per-hop count bound and
+  timeout; `finalUrl` and the bodyless `resolveOnly` mode (§4) ride on the same hardened core. Candidate pages: the hint, the competitor page, and a fixed probe list
   (`/submit`, `/add-listing`, `/join`, `/membership`, `/members`, `/vendors`,
   `/sponsors`, `/advertise`, `/directory`, `/resources`, `/contact`, `/signup`, `/register`)
   — capped at ~8 fetches per domain.
