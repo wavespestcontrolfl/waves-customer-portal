@@ -4786,6 +4786,19 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
+  test('blankDefinitelyHiddenContent restores only the FIRST summary that is a DIRECT child of the closed <details>; a summary nested in a wrapper stays hidden (GH r24)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // Wrapped summary = collapsed body content, not the disclosure widget.
+    expect(keep('<details><div><summary>Peek ![p](/x.webp)</summary></div></details>')).not.toContain('Peek');
+    // A wrapper BEFORE the direct summary does not hide it; the second direct summary is body content.
+    const t = '<details><p>lead</p><summary>Widget ![w](/w.webp)</summary><summary>Second ![s](/s.webp)</summary>body</details>';
+    expect(keep(t)).toContain('Widget ![w](/w.webp)');
+    expect(keep(t)).not.toContain('Second');
+    expect(keep(t)).not.toContain('lead');
+    // Void / self-closing elements before the summary never open a child.
+    expect(keep('<details><br><img src="/a.webp"/><summary>Peek</summary>body</details>')).toContain('Peek');
+  });
+
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {
     const body = ['  ## Indented', '', '- item', '  continued', 'lazy continuation', '', '  still item', '', 'after list', '', ' - - -', 'x'].join('\n');
     const { inList } = guardrails.blankNonRenderedMarkdownWithDepths(body);

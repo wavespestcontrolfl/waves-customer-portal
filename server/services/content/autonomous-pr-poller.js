@@ -1364,14 +1364,18 @@ async function maybeAutoMerge(run, pr) {
   // 3.7 The body-image check validated unchanged assets as the DEFAULT
   //    branch carried them at that moment; a base push since then could
   //    swap one of those blobs under the merge. Re-read the tip and let the
-  //    next tick re-validate against it.
-  if (bodyImagesBaseSha && typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
+  //    next tick re-validate against it. Runs here AND again immediately
+  //    before the merge call in the new_supporting_blog lane (the topic
+  //    recheck + locked queue read below are more async work — GH r24);
+  //    for the other lanes doMerge() follows this check directly.
+  const baseMovedSinceBodyImageCheck = async () => {
+    if (!bodyImagesBaseSha || typeof gh.getBranchSha !== 'function' || typeof gh.env !== 'function') return false;
     const tip = await gh.getBranchSha(gh.env().defaultBranch);
-    if (tip && tip !== bodyImagesBaseSha) {
-      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} PR #${pr.number}: base moved during gating (${bodyImagesBaseSha.slice(0, 9)} → ${tip.slice(0, 9)})`);
-      return { pending: true, reason: 'base_moved_during_gating' };
-    }
-  }
+    if (!tip || tip === bodyImagesBaseSha) return false;
+    logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} PR #${pr.number}: base moved during gating (${bodyImagesBaseSha.slice(0, 9)} → ${tip.slice(0, 9)})`);
+    return true;
+  };
+  if (await baseMovedSinceBodyImageCheck()) return { pending: true, reason: 'base_moved_during_gating' };
 
   // 3.8 Owner rulings 2026-08-27: the topic-targeting gate ran pre/post-draft,
   //     but this PR may have waited while another post claimed its entity, or
@@ -1416,6 +1420,12 @@ async function maybeAutoMerge(run, pr) {
         if (!(await queueRowStillParkedLocked(run, trx))) {
           logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
           withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        // 3.9 Last async step before the merge call: the base tip must
+        //     still be the one the body-image check hashed (GH r24).
+        if (await baseMovedSinceBodyImageCheck()) {
+          withheld = { pending: true, reason: 'base_moved_during_gating' };
           return null;
         }
         return doMerge();

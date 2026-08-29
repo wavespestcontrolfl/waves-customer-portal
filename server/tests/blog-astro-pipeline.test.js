@@ -5335,6 +5335,17 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(AstroPublisher._internals.bodyImageRefs('- item\n  [pic]: /images/blog/x/body-1.webp\n\n![a][pic]')).toEqual([]);
   });
 
+  test('bodyImageRefs: HTML character references in a destination are decoded before percent-decoding — inline and reference forms probe the path the browser requests (GH r24)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '![Detail](/images/blog/x/body&amp;detail.webp)\n\n[ref]: /images/blog/x/sill&#x2F;close%20up.webp\n\n![Sill][ref]\n\n![Literal](/images/blog/x/no&bogus;entity&amp.webp)';
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([
+      '/images/blog/x/body&detail.webp',
+      '/images/blog/x/sill/close up.webp',
+      // An unknown or unterminated reference is literal text (CommonMark: `;` mandatory).
+      '/images/blog/x/no&bogus;entity&amp.webp',
+    ]);
+  });
+
   test('bodyImageRefs: a legacy .md renders CommonMark HTML blocks as raw text — Markdown images inside them do not count; .mdx parses JSX children as Markdown and they do (GH r24)', () => {
     const { bodyImageRefs, blankMarkdownHtmlBlocks } = AstroPublisher._internals;
     const body = [

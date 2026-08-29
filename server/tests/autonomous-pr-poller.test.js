@@ -793,9 +793,29 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
 
     publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-2' });
-    gh.getBranchSha.mockResolvedValueOnce('main-tip-2');
+    gh.getBranchSha.mockResolvedValue('main-tip-2');
     res = await poller.pollPending();
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    // The new_supporting_blog lane re-reads the tip inside the merge lock, right before the merge call (GH r24).
+    expect(gh.getBranchSha).toHaveBeenCalledTimes(3);
+  });
+
+  test('base tip re-checked inside the merge lock immediately before the merge call: a push landing during the topic recheck defers the merge (GH r24)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    // Step 3.7 sees the validated tip; the in-lock recheck sees a newer one.
+    gh.getBranchSha.mockResolvedValueOnce('main-tip-1').mockResolvedValueOnce('main-tip-2');
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'base_moved_during_gating' });
+    expect(gh.getBranchSha).toHaveBeenCalledTimes(2);
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7) and PARKS the run (r12)', async () => {

@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
@@ -2153,8 +2154,16 @@ function normalizeAngleDestinations(text) {
   // escaped punctuation is interpreted before encoding, as CommonMark does.
   return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/[ ()<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
 }
+// CommonMark resolves HTML character references in a destination BEFORE
+// the URL is emitted (`body&amp;detail.webp` renders a request for
+// `body&detail.webp`; `&#x2F;` is `/`) — so both inline and reference
+// destinations are entity-decoded first, then percent-decoded, and the
+// committed-file check probes the path the browser asks for (GH r24).
+// Strict = the full HTML5 named list with the `;` mandatory, as the spec
+// requires; an unknown or unterminated reference stays literal text.
 function decodeDestination(src) {
-  try { return decodeURIComponent(src); } catch (_) { return src; }
+  const text = decodeHTMLStrict(String(src ?? ''));
+  try { return decodeURIComponent(text); } catch (_) { return text; }
 }
 // Every image the rendered body shows — inline (`![alt](dest "title")`),
 // full/collapsed/shortcut reference (`![alt][label]`, `![alt][]`, `![alt]`)

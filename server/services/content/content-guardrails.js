@@ -165,6 +165,9 @@ function opensHiddenContent(tag) {
   return false;
 }
 
+// HTML void elements: never open a child, never carry a close tag.
+const VOID_TAG_NAMES = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
 // NESTING-AWARE: a regex stopping at the first </span> left the tail of a
 // hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
 function blankHiddenContent(str) {
@@ -211,8 +214,22 @@ function blankContentWhere(str, opens, { keepSummary = false } = {}) {
       if (r.tag.name !== 'details') continue;
       const insideOther = ranges.some((o) => o !== r && o.start <= r.start && r.stop <= o.stop);
       if (insideOther) continue;
+      // …and only the FIRST <summary> that is a DIRECT child of the
+      // <details> is the disclosure widget (HTML: "the first summary element
+      // child"); a summary nested deeper (`<details><div><summary>…`) stays
+      // inside the collapsed body (GH r24). Direct = no unclosed element
+      // between the <details> open tag and the summary's open tag; void
+      // elements never open a child.
       const last = r.endTagIdx === -1 ? tags.length : r.endTagIdx;
-      const open = tags.slice(r.t + 1, last).find((x) => x.name === 'summary' && !x.isClose && !x.selfClosing);
+      let open = null;
+      let childDepth = 0;
+      for (let u = r.t + 1; u < last; u += 1) {
+        const x = tags[u];
+        if (x.selfClosing || VOID_TAG_NAMES.has(x.name)) continue;
+        if (x.isClose) { childDepth = Math.max(0, childDepth - 1); continue; }
+        if (childDepth === 0 && x.name === 'summary') { open = x; break; }
+        childDepth += 1;
+      }
       const close = open ? tags.slice(tags.indexOf(open) + 1, last).find((x) => x.name === 'summary' && x.isClose) : null;
       if (open && close) for (let k = open.end + 1; k < close.start; k += 1) out[k] = text[k];
     }
