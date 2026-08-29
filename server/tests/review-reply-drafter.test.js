@@ -439,7 +439,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoach says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nPalm was glad to help alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nMoles are no match for Marcus.'))).toBe('unlisted_name');
-    // …while an allowlisted plural stays exempt whatever follows it.
+    // codex #3580 r2: a listed opener in a name-shaped context is a name.
+    expect(verify(good('Hi Dana,\n\nGoing and Marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches and Marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, our technician, was glad to help alongside Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches Smith helped with the ants alongside Marcus.'))).toBe('unlisted_name');
+    // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
     const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });

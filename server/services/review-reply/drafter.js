@@ -275,20 +275,27 @@ what when where whether which while who why wish with would yes you your you're 
 // (three pre-push hook rounds). Pest / lawn nouns, common gerunds, sentence
 // adverbs, abstract nouns — PLURAL / mass nouns only, because the singulars
 // (Roach, Palm, Ant) and some plurals (Moles) are surnames; nothing that is
-// also a personal name (Trust, Peace, Grace, Hope, Will, May stay out). Added after the 2026-08-29 dry run
+// also a personal name (Trust, Peace, Grace, Hope, Will, May, Going, Walking,
+// Grass, Trees, Weeds stay out). Added after the 2026-08-29 dry run
 // ("Ants are relentless", "Finding a company you can count on", "Skipping the
 // contract" were half of all verifier rejections).
 const ORDINARY_OPENERS = new Set(`
 ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice fleas ticks
 wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
-armadillos grubs weeds fungus grass lawns yards turf shrubs trees mulch finding keeping skipping
-having getting being knowing hearing seeing looking making taking staying protecting treating
-helping walking showing going coming letting giving working watching checking honestly thankfully
-hopefully truly really luckily fortunately clearly obviously usually typically sometimes between
-without within whatever whenever wherever neither none plus dependability reliability consistency
-communication service treatment treatments visits results protection prevention nothing something
-everything anything
+armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
+being knowing hearing seeing looking making taking staying protecting treating helping showing
+coming letting giving working watching checking honestly thankfully hopefully truly really
+luckily fortunately clearly obviously usually typically sometimes between without within whatever
+whenever wherever neither none plus dependability reliability consistency communication service
+treatment treatments visits results protection prevention nothing something everything anything
 `.split(/\s+/).filter(Boolean));
+// …and even a listed opener is NOT exempt when what follows is name-shaped
+// (codex #3580 r2, "Going and Marcus are glad…"): a coordination with a
+// capitalised word, an appositive, or another capitalised word — the shape
+// every laundering example used. Structural, so it covers surnames the list
+// audit missed.
+const NAME_SHAPED_AFTER_OPENER_RE = /^\s*(?:(?:and|or|with|&|plus|alongside)\s+\p{Lu}|,\s*(?:our|the|an?|your|who|whose|from)\b|\p{Lu})/u;
+
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
@@ -570,7 +577,8 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // Sentence starts get the common-word exemption only; a capitalized
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
-    if (sentenceInitial && (SENTENCE_STARTERS.has(w) || ORDINARY_OPENERS.has(w))) continue;
+    if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && !NAME_SHAPED_AFTER_OPENER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
