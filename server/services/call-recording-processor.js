@@ -2591,7 +2591,7 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     // street/unit string in another city/ZIP is a different property just
     // as much as a canonical-key match is (codex r5 P1).
     const same = f === 'address'
-      ? (literal || leadAddressKeysEquivalent(leadAddressCompareKey(suppliedValues[f]), leadAddressCompareKey(lockedVal)))
+      ? (literal || leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal))
         && leadAddressPlaceCorroborates(suppliedValues, lockedLead)
       : literal;
     if (same) out[f] = lockedVal;
@@ -2640,13 +2640,11 @@ function leadAddressTailPlace(address) {
   const tail = String(parts.tail || '').trim();
   if (tail) return snapshotTailPlace(`street, ${tail}`);
   // A comma-free WHOLE line ("100 Main St Apt 4 Bradenton FL 34205") has no
-  // parsed tail, but its inline unit run is a lexically safe delimiter —
-  // the same premise leadAddressKeysEquivalent's prefix rule rests on — so
+  // parsed tail, but its inline unit run is a lexically safe delimiter, so
   // everything after the last unit run is the place. Without that evidence
   // a locked lead with empty city/zip columns would corroborate ANY place
-  // and a cross-shape restatement from another city could take rollback
-  // ownership (#3608 pre-push audit P1). No inline unit → no delimiter →
-  // no evidence (and no cross-shape match either), never a locality guess.
+  // (#3608 pre-push audit P1). No inline unit → no delimiter → no evidence,
+  // never a locality guess.
   // From the RAW line, not through normalizeStreetLine: a terminal locality
   // word that doubles as a street suffix ("Palm Harbor" → "Palm Hbr") must
   // reach placeCorroborates as the city the caller will restate (codex r7).
@@ -2688,40 +2686,17 @@ function leadAddressCompareKey(v) {
   return unitK ? `${streetKey}|${unitK}` : streetKey;
 }
 
-// Two lead-address keys name the same door when they are equal, OR when the
-// comma-separated form's "street {u:unit}" is an exact space-delimited
-// prefix of a whole-line (comma-free) key — the inline unit is the
-// delimiter, so "100 main st|4" ≡ "100 main st {u:4} sarasota fl 34236"
-// while "100 main st north|4" or "100 main st|5" are not (pre-push audit
-// P1). A unit-less key never prefix-matches (no delimiter → "100 main st"
-// would swallow "100 main st north …"); place is corroborated separately.
-function leadAddressKeysEquivalent(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const inlineForm = (k) => {
-    const bar = k.lastIndexOf('|');
-    return bar > 0 ? `${k.slice(0, bar)} {u:${k.slice(bar + 1)}}` : null;
-  };
-  for (const [x, y] of [[a, b], [b, a]]) {
-    const inl = inlineForm(x);
-    if (!inl) continue;
-    if (y === inl) return true;
-    // The text after the marker must be locality only: a further secondary
-    // unit the shared parser does not know ("Rm 2", "Trlr 7") or a hash
-    // names a smaller door, and "…, Apt 4" alone must not claim it (codex r7).
-    if (y.startsWith(`${inl} `) && !remainderNamesSubpremise(y.slice(inl.length + 1))) return true;
-  }
-  return false;
-}
-
-// True when a (lower-cased, punctuation-free) remainder carries a secondary-
-// unit designator the fan-out recognizes — the shared UNIT_DESIGNATORS
-// plus USPS "trlr"/"rm", minus "fl" (state) — or a hash token.
-function remainderNamesSubpremise(remainder) {
-  const { UNIT_DESIGNATORS } = require('../utils/address-normalizer');
-  const tokens = String(remainder || '').split(' ').filter(Boolean);
-  return tokens.some((t) => t.startsWith('#') || t === 'trlr' || t === 'rm' || (t !== 'fl' && UNIT_DESIGNATORS.has(t)));
-}
+// Ownership compares keys for EXACT equality. A comma-free legacy whole line
+// ("100 Main St Apt 4 Sarasota FL 34236") and the composed comma form
+// ("100 Main St, Apt 4, …") therefore key differently and a restatement in
+// the other shape records no successor ownership — the ratified #3608 r3
+// scope-out. A prefix/equivalence rule bridging the two shapes was tried
+// (pre-push audit → codex r7/r8) and every round found a new class it got
+// wrong (spelled vs abbreviated directionals, Road/Rd before a route
+// number, open-ended Rear/Front/Upper qualifiers): the comma-free shape has
+// no delimiter that makes "same door" lexically decidable, so it is not
+// guessed. The writer has composed the comma form since #3602; the
+// whole-line shape only exists in pre-#3602 rows.
 
 // Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
 // street key to "{u:<canonical unit key>}" and list the keys found. A run
@@ -2761,6 +2736,7 @@ function canonicalizeInlineUnits(streetKey) {
   const hashAt = (idx) => !isRouteHash(idx) && (isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1])));
   const out = [];
   const unitKeys = [];
+  const runs = [];
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
@@ -2778,10 +2754,11 @@ function canonicalizeInlineUnits(streetKey) {
     if (!run.length) { out.push(t); i += 1; continue; }
     const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
     unitKeys.push(key);
+    runs.push({ start: i, end: j });
     out.push(`{u:${key}}`);
     i = j;
   }
-  return { streetKey: out.join(' '), unitKeys };
+  return { streetKey: out.join(' '), unitKeys, runs };
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
@@ -14878,8 +14855,14 @@ function analyzeLeadAddress(line1, line2) {
   const unitConflict = embedded ? !duplicate : (inlineKeys.length > 0 && !duplicate);
   if (!embedded && (duplicate || unitConflict)) {
     // Whole-line street already names the door: never append a second one.
+    // Kept verbatim when it fits; an overlong line is bounded with its last
+    // inline unit run and the place after it as the protected tail, so the
+    // slice eats street text, never the door or the locality (codex r8 P1).
+    const protectedParts = parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street };
     return {
-      address: formatAddressBounded({ line1: parts.street, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
       unitConflict,
     };
   }
@@ -14901,6 +14884,31 @@ function analyzeLeadAddress(line1, line2) {
     unitConflict,
   };
 }
+// Split a comma-free whole line at its LAST inline unit run, in the raw
+// text: { line1: street before the run, line2: the run as written, city:
+// everything after }. Token positions come from canonicalizeInlineUnits over
+// the same tokens lower-cased and punctuation-stripped (empties dropped
+// with an index map), so the raw spelling is preserved. No run → line1 only.
+function wholeLineProtectedParts(street) {
+  const rawTokens = String(street || '').trim().split(/\s+/).filter(Boolean);
+  const normTokens = [];
+  const rawIndex = [];
+  rawTokens.forEach((t, idx) => {
+    const n = t.replace(/[.,]/g, '').toLowerCase();
+    if (n) { normTokens.push(n); rawIndex.push(idx); }
+  });
+  const { runs } = canonicalizeInlineUnits(normTokens.join(' '));
+  if (!runs.length) return { line1: rawTokens.join(' ') };
+  const last = runs[runs.length - 1];
+  const startRaw = rawIndex[last.start];
+  const endRaw = last.end < rawIndex.length ? rawIndex[last.end] : rawTokens.length;
+  return {
+    line1: rawTokens.slice(0, startRaw).join(' '),
+    line2: rawTokens.slice(startRaw, endRaw).join(' ') || null,
+    city: rawTokens.slice(endRaw).join(' ') || null,
+  };
+}
+
 // leads.address column width (migration 20260401000095: default string →
 // varchar(255)); a longer composed value makes Postgres reject the whole
 // enrichment update and fails the call-processing attempt.
@@ -14914,7 +14922,6 @@ CallRecordingProcessor._test = {
   analyzeLeadAddress,
   leadAddressCompareKey,
   leadAddressTailPlace,
-  leadAddressKeysEquivalent,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,

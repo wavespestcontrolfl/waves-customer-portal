@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => ({
   logGateStatus: jest.fn(),
 }));
 
-const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey, leadAddressTailPlace, leadAddressKeysEquivalent } = require('../services/call-recording-processor')._test;
+const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey, leadAddressTailPlace } = require('../services/call-recording-processor')._test;
 
 describe('composeLeadAddress', () => {
   test('appends the unit to the street', () => {
@@ -293,55 +293,51 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4')).toEqual({ address: '100 Main St Bldg 2 Apt 4 Sarasota FL 34236', unitConflict: true });
   });
 
-  test('the same door in comma-free and comma-separated shapes records ownership either way', () => {
+  test('comma-free and comma-separated shapes of the same door key DIFFERENTLY (ratified scope-out) — no cross-shape ownership, no wrong-city claim', () => {
     const whole = '100 Main St Apt 4 Sarasota FL 34236';
     const comma = '100 Main St, Apt 4, Sarasota, FL 34236';
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey(comma))).toBe(true);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey(comma), leadAddressCompareKey(whole))).toBe(true);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St, Unit 4'))).toBe(true);
-    // A post-directional between the suffix and the unit must not stop suffix canonicalization
-    // ("Street N Apt 4 …" keys as "st n", same as the comma form's "100 Main Street N").
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street N Apt 4 Sarasota FL 34236'), leadAddressCompareKey('100 Main Street N, Apt 4, Sarasota, FL 34236'))).toBe(true);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street NE #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St NE, Unit 4'))).toBe(true);
-    // Attached-hash alphabetic units ("#A", "#PH") are units in the shared parser — the whole-line
-    // key must canonicalize them too, and the composer must not append a second copy.
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #A Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #A, Sarasota, FL 34236'))).toBe(true);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #PH Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #PH, Sarasota, FL 34236'))).toBe(true);
+    expect(leadAddressCompareKey(whole)).not.toBe(leadAddressCompareKey(comma));
+    // Neither shape records ownership over the other (exact key only — the comma-free legacy shape has no
+    // delimiter that makes "same door" lexically decidable; see the note above leadAddressCompareKey).
+    expect(reaffirmedFilledLeadFields({ address: comma, city: 'Sarasota', zip: '34236' }, { address: whole, city: 'Sarasota', zip: '34236' }).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Sarasota', zip: '34236' }, { address: comma, city: null, zip: null }).address).toBeUndefined();
+    // The SAME shape restated still reaffirms, in every spelling the canonical key equates.
+    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Sarasota', zip: '34236' }, { address: whole, city: 'Sarasota', zip: '34236' }).address).toBe(whole);
+    expect(leadAddressCompareKey('100 Main Street N Apt 4 Sarasota FL 34236')).toBe(leadAddressCompareKey('100 Main St N #4 Sarasota FL 34236'));
+    expect(leadAddressCompareKey('100 Main Street North Apt 4 Sarasota FL 34236')).toBe(leadAddressCompareKey('100 Main St North Unit 4 Sarasota FL 34236'));
+    expect(leadAddressCompareKey('100 Main St #A Sarasota FL 34236')).toBe(leadAddressCompareKey('100 Main St Unit A Sarasota FL 34236'));
+    expect(leadAddressCompareKey('100 Main St Apt 4 Sarasota FL 34236')).not.toBe(leadAddressCompareKey('100 Main St Apt 5 Sarasota FL 34236'));
     expect(composeLeadAddress('100 Main St #A Sarasota FL 34236', '#A')).toBe('100 Main St #A Sarasota FL 34236');
-    // Spelled-out post-directionals abbreviate the suffix too (r7): "Street North Apt 4 …" ≡ "St North, Apt 4".
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Apt 4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St North, Apt 4'))).toBe(true);
-    // A further secondary unit after the recognized run is a smaller door — "…, Apt 4" alone never claims it (r7).
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St Apt 4 Rm 2 Sarasota FL 34236'), leadAddressCompareKey('100 Main St, Apt 4, Sarasota, FL 34236'))).toBe(false);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St Apt 4 Trlr 7'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
-    // "Street North Port" is a city, not a post-directional — the suffix stays unabbreviated, and it is a different street.
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Port FL 34287'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
-    // Different unit, different street, or a unit-less side: never.
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St, Apt 5'))).toBe(false);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St North, Apt 4'))).toBe(false);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St'))).toBe(false);
-    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St North Sarasota FL 34236'), leadAddressCompareKey('100 Main St'))).toBe(false);
-    // Reaffirmation across shapes, place corroborated by the columns.
-    const lockedWhole = { address: whole, city: 'Sarasota', zip: '34236' };
-    expect(reaffirmedFilledLeadFields({ address: comma, city: 'Sarasota', zip: '34236' }, lockedWhole).address).toBe(whole);
-    expect(reaffirmedFilledLeadFields({ address: comma, city: 'Bradenton', zip: '34205' }, lockedWhole).address).toBeUndefined();
-    const lockedComma = { address: comma, city: null, zip: null };
-    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Sarasota', zip: '34236' }, lockedComma).address).toBe(comma);
-    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Bradenton', zip: '34205' }, lockedComma).address).toBeUndefined();
     // A comma-free WHOLE line with EMPTY city/zip columns still carries its place after the
-    // inline unit — a same-door restatement from another city must not take ownership.
+    // inline unit — a restatement from another city must not take ownership.
     expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton FL 34205')).toEqual({ zip: '34205', city: expect.stringMatching(/bradenton/i) });
     expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton')).toEqual({ zip: null, city: expect.stringMatching(/bradenton/i) });
     expect(leadAddressTailPlace('100 Main St Apt 4')).toBeNull();
+    expect(leadAddressTailPlace('100 Main St North Port FL 34287')).toBeNull();
     // The locality is read from the RAW line — a terminal city word that is also a street suffix is not abbreviated (r7).
     expect(leadAddressTailPlace('100 Main St Apt 4 Palm Harbor')).toEqual({ zip: null, city: expect.stringMatching(/palm harbor/i) });
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Palm Harbor', zip: null }, { address: '100 Main St Apt 4 Palm Harbor', city: null, zip: null }).address).toBe('100 Main St Apt 4 Palm Harbor');
-    expect(leadAddressTailPlace('100 Main St North Port FL 34287')).toBeNull();
     const lockedWholeNoCols = { address: '100 Main St Apt 4 Bradenton FL 34205', city: null, zip: null };
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Sarasota', zip: '34236' }, lockedWholeNoCols).address).toBeUndefined();
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Bradenton, FL 34205', city: 'Bradenton', zip: '34205' }, lockedWholeNoCols).address).toBe(lockedWholeNoCols.address);
-    const lockedWholeCityOnly = { address: '100 Main St Apt 4 Bradenton', city: null, zip: null };
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Sarasota', zip: null }, lockedWholeCityOnly).address).toBeUndefined();
-    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Bradenton', zip: null }, lockedWholeCityOnly).address).toBe(lockedWholeCityOnly.address);
+    expect(reaffirmedFilledLeadFields({ address: lockedWholeNoCols.address, city: 'Sarasota', zip: '34236' }, lockedWholeNoCols).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: lockedWholeNoCols.address, city: 'Bradenton', zip: '34205' }, lockedWholeNoCols).address).toBe(lockedWholeNoCols.address);
+    const lockedPalm = { address: '100 Main St Apt 4 Palm Harbor', city: null, zip: null };
+    expect(reaffirmedFilledLeadFields({ address: lockedPalm.address, city: 'Sarasota', zip: null }, lockedPalm).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: lockedPalm.address, city: 'Palm Harbor', zip: null }, lockedPalm).address).toBe(lockedPalm.address);
+  });
+
+  test('an overlong whole line that already names the door is bounded with the unit and place protected', () => {
+    const longStreet = `100 ${'Verylongstreetname '.repeat(15)}Blvd`;
+    const whole = `${longStreet} Apt 4 Sarasota FL 34236`;
+    expect(whole.length).toBeGreaterThan(255);
+    for (const line2 of ['Apt 4', 'Apt 5']) {
+      const { address, unitConflict } = analyzeLeadAddress(whole, line2);
+      expect(unitConflict).toBe(line2 === 'Apt 5');
+      expect(address.length).toBeLessThanOrEqual(255);
+      expect(address).toMatch(/, Apt 4, Sarasota FL 34236$/);
+      expect(address.startsWith('100 Verylongstreetname')).toBe(true);
+      expect(address).not.toMatch(/Apt 5/);
+    }
+    // Fits → kept verbatim (no reshaping of a comma-free legacy value that is within the bound).
+    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4').address).toBe('100 Main St Apt 4 Sarasota FL 34236');
   });
 
   test('stored place evidence is read from the UNBOUNDED tail (the clamp is write-time only)', () => {
