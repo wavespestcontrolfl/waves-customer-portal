@@ -357,7 +357,14 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
-    const manualPayOptions = isInvoiceCollectibleStatus(data.status)
+    // Off-Stripe tenders are offered only when a transfer is actually the
+    // right thing to do (codex #3610 P1 ×2): never when the invoice must
+    // capture a saved method (a Zelle/Venmo/PayPal transfer creates neither
+    // the Stripe method nor the consent the recurring signup needs), and
+    // never when account credit will settle the whole invoice at /setup
+    // (the customer owes no cash — a transfer of `amountDue` would be an
+    // overpayment).
+    const manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor
       ? manualPayOptionsFromEnv()
       : null;
 
@@ -459,9 +466,10 @@ router.get('/:token', async (req, res, next) => {
       // Absent (not null) when the gate is off or there is nothing owed —
       // the gate-off payload stays byte-identical to today.
       ...(previousBalance ? { previousBalance } : {}),
-      // Off-Stripe tenders (Zelle / Venmo) shown under checkout. Absent when
-      // neither env var is set (kill switch) or the invoice is not collectible
-      // — there is nothing to send money against once it's settled.
+      // Off-Stripe tenders (Zelle / Venmo / PayPal) shown under checkout.
+      // Absent when no env var is set (kill switch), when the invoice is not
+      // collectible, when it requires a saved method, or when account credit
+      // covers it — see the manualPayOptions comment above.
       ...(manualPayOptions ? { manualPayOptions } : {}),
     });
   } catch (err) {

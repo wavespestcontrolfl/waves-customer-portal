@@ -126,6 +126,14 @@ describe('stripe computeChargeAmount', () => {
     expect(isCardMethodType('klarna')).toBe(true);
   });
 
+  test('off-gateway manual tenders are never card-family (codex #3610 P0)', () => {
+    for (const m of ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other', 'PayPal', 'Venmo']) {
+      expect(isCardMethodType(m)).toBe(false);
+      expect(shouldSurcharge(m, 'credit')).toBe(false);
+      expect(computeChargeAmount(100, m, { funding: 'credit' }).surchargeCents).toBe(0);
+    }
+  });
+
   test('CARD_SURCHARGE_RATE is 2.9% (legacy compat)', () => {
     expect(CARD_SURCHARGE_RATE).toBeCloseTo(0.029, 4);
   });

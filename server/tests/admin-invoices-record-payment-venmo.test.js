@@ -24,7 +24,18 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 
+jest.mock('../services/stripe', () => ({
+  retrievePaymentIntent: jest.fn(),
+  cancelPaymentIntent: jest.fn(async () => ({ status: 'canceled' })),
+}));
+jest.mock('../services/pay-combined', () => ({
+  clearPaymentIntentStamps: jest.fn(async () => undefined),
+  releaseCombinedSessionBeforeCollection: jest.fn(async () => undefined),
+}));
+
 const express = require('express');
+const StripeService = require('../services/stripe');
+const PayCombined = require('../services/pay-combined');
 const db = require('../models/db');
 const router = require('../routes/admin-invoices');
 
@@ -89,5 +100,67 @@ describe('record-payment method whitelist', () => {
       expect(error).toBe('method must be one of: cash, check, zelle, venmo, paypal, other');
       expect(db).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('record-payment retires an open pay-page PaymentIntent first (codex #3610 P1)', () => {
+  const OPEN_INVOICE = {
+    id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '150.00', credit_applied: 0,
+    invoice_number: 'WPC-2026-0001', payer_id: null, payer_statement_id: null,
+    stripe_payment_intent_id: 'pi_open_1', notes: null,
+  };
+  const SENTINEL = 'stop-before-trx';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return makeRecorder({ first: jest.fn(async () => ({ ...OPEN_INVOICE })) });
+      throw new Error(`unexpected table ${table}`);
+    });
+    // The guard runs BEFORE the transaction; stop there so this suite pins
+    // the guard alone (the paid-flip path is covered by the payment-plan suite).
+    db.transaction.mockImplementation(async () => { throw new Error(SENTINEL); });
+  });
+
+  test('an unconfirmed PI is canceled and unstamped before the paid flip', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_open_1', status: 'requires_payment_method' });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/record-payment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'zelle', sendReceipt: false }),
+      });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toBe(SENTINEL);
+    });
+    expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_open_1', { cancellation_reason: 'abandoned' });
+    expect(PayCombined.clearPaymentIntentStamps).toHaveBeenCalledWith(db, 'pi_open_1', { keepInvoiceIds: ['inv-1'] });
+    expect(db.transaction).toHaveBeenCalled();
+  });
+
+  test.each(['processing', 'succeeded', 'requires_capture'])('money in flight (%s) refuses with 409 and never flips paid', async (status) => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_open_1', status });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/record-payment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'venmo', sendReceipt: false }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/already in flight/);
+    });
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('an unverifiable PI (Stripe unreachable) fails closed with 409', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/record-payment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'paypal', sendReceipt: false }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/could not be verified/);
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 });

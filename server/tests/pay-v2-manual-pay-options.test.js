@@ -76,10 +76,10 @@ function invoiceData(overrides = {}) {
   };
 }
 
-async function getPayPage(data) {
+async function getPayPage(data, { customerRow } = {}) {
   InvoiceService.getByToken.mockResolvedValue(data);
   db.mockImplementation((table) => {
-    if (table === 'customers') return chain({ first: { billing_mode: null, monthly_rate: null } });
+    if (table === 'customers') return chain({ first: customerRow || { billing_mode: null, monthly_rate: null } });
     return chain({ first: null });
   });
   const layer = payRouter.stack.find((l) => l.route?.path === '/:token' && l.route.methods.get);
@@ -143,6 +143,33 @@ describe('GET /pay/:token manualPayOptions', () => {
       venmo: { handle: '@WavesPest' },
       paypal: { handle: 'WavesPest' },
     });
+  });
+
+  test('env set ⇒ key absent when the invoice must capture a saved method (codex P1)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    // per_application billing ⇒ invoiceRequiresSavedMethod() is true.
+    const { body } = await getPayPage(invoiceData(), { customerRow: { billing_mode: 'per_application', monthly_rate: null } });
+    expect(body.invoice.saveRequired).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+  });
+
+  test('env set ⇒ key absent when account credit will settle the whole invoice (codex P1)', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    const gates = require('../config/feature-gates').gates;
+    gates.autoApplyAccountCredit = true;
+    try {
+      const { body } = await getPayPage(invoiceData(), {
+        customerRow: { billing_mode: null, monthly_rate: null, account_credits: 500, auto_apply_account_credit: true },
+      });
+      expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+      // Partial credit (balance < amount due) still offers the transfer.
+      const partial = await getPayPage(invoiceData(), {
+        customerRow: { billing_mode: null, monthly_rate: null, account_credits: 20, auto_apply_account_credit: true },
+      });
+      expect(partial.body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' } });
+    } finally {
+      gates.autoApplyAccountCredit = false;
+    }
   });
 
   test('env set ⇒ key absent on a settled invoice', async () => {

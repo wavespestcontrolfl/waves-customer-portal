@@ -1919,6 +1919,16 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // cleanup; anything in flight refuses (the collectible guard above
     // already blocks 'processing' invoices, this covers seam races).
 
+    // Standalone pay-page PaymentIntent (codex #3610 P1): the combined-session
+    // release inside the transaction below leaves a NON-combined PI untouched,
+    // yet the pay page mints one on load and now steers customers to
+    // Zelle/Venmo/PayPal beside it. Cancel it before the paid flip so a
+    // still-open tab can't confirm it after the transfer is recorded; refuse
+    // while money is in flight. Runs pre-lock (Stripe call), same as
+    // apply-credit; the trx's collectible guard covers the seam.
+    const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
+    if (openPi) return res.status(openPi.status).json({ error: openPi.error });
+
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
 
     // Append operator note to invoice notes (don't clobber existing notes).
@@ -2176,6 +2186,48 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // money in flight the request is refused for manual review.
 const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
 
+// ── Retire an open Stripe collection session before an off-Stripe settlement ──
+// Once the invoice is paid/prepaid, assertInvoiceCollectible blocks NEW
+// PaymentIntents / Terminal handoffs, but an already-minted PI (the pay page
+// mints one on load) could still be confirmed from a still-open tab and
+// charge the card a second time. Cancel it; refuse if money is in flight
+// (mirrors the cancelled-service auto-void triage). Shared by apply-credit
+// and record-payment (codex #3610 P1 — the pay page now actively steers
+// customers to Zelle/Venmo/PayPal while its PI is live). Returns null when
+// clear, or a { status, error } the route sends as-is.
+async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
+  const openPiId = invoice.stripe_payment_intent_id || null;
+  if (!openPiId) return null;
+  const StripeService = require('../services/stripe');
+  let pi;
+  try {
+    pi = await StripeService.retrievePaymentIntent(openPiId);
+  } catch (e) {
+    return { status: 409, error: `Open payment session ${openPiId} could not be verified (${e.message}); resolve it before ${action}` };
+  }
+  // Null = Stripe unconfigured/unreachable — we can't prove the PI is dead,
+  // so fail closed rather than settle while a client secret could still
+  // collect (the webhook treats paid/prepaid as terminal and would skip it).
+  if (!pi) {
+    return { status: 409, error: `Open payment session ${openPiId} could not be verified (payment service unavailable); resolve it before ${action}` };
+  }
+  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
+    return { status: 409, error: `A payment is already in flight (${pi.status}); wait for it to settle or refund it before ${action}` };
+  }
+  if (pi.status !== 'canceled') {
+    try {
+      await StripeService.cancelPaymentIntent(openPiId, { cancellation_reason: 'abandoned' });
+    } catch (e) {
+      return { status: 409, error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before ${action}` };
+    }
+  }
+  // Unbind combined siblings from the canceled intent — regardless of
+  // who canceled it (codex #3427 r17 P2).
+  await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId, { keepInvoiceIds: [String(invoice.id)] });
+  return null;
+}
+
+
 router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -2216,39 +2268,11 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     }
 
     // ── Cancel any open collection session (pre-lock Stripe triage) ──
-    // Once the invoice is prepaid, assertInvoiceCollectible blocks NEW
-    // PaymentIntents / Terminal handoffs, but an already-minted PI could
-    // still settle and charge the card. Cancel it; refuse if money is in
-    // flight (mirrors the cancelled-service auto-void triage).
+    // openPiId is re-checked under the row lock below (a PI stamped between
+    // this triage and the lock means a concurrent /setup won the seam).
     const openPiId = invoice.stripe_payment_intent_id || null;
-    if (openPiId) {
-      const StripeService = require('../services/stripe');
-      let pi;
-      try {
-        pi = await StripeService.retrievePaymentIntent(openPiId);
-      } catch (e) {
-        return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (${e.message}); resolve it before applying credit` });
-      }
-      // Null = Stripe unconfigured/unreachable — we can't prove the PI is dead,
-      // so fail closed rather than consume credit while a client secret could
-      // still settle (the webhook treats prepaid as terminal and would skip it).
-      if (!pi) {
-        return res.status(409).json({ error: `Open payment session ${openPiId} could not be verified (payment service unavailable); resolve it before applying credit` });
-      }
-      if (pi && PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
-        return res.status(409).json({ error: `A payment is already in flight (${pi.status}); wait for it to settle or refund it before applying credit` });
-      }
-      if (pi && pi.status !== 'canceled') {
-        try {
-          await StripeService.cancelPaymentIntent(openPiId, { cancellation_reason: 'abandoned' });
-        } catch (e) {
-          return res.status(409).json({ error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before applying credit` });
-        }
-      }
-      // Unbind combined siblings from the canceled intent — regardless of
-      // who canceled it (codex #3427 r17 P2).
-      await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId, { keepInvoiceIds: [String(invoice.id)] });
-    }
+    const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'applying credit' });
+    if (openPi) return res.status(openPi.status).json({ error: openPi.error });
 
     // ── Atomic credit draw-down + prepaid transition ──
     let outcome;
