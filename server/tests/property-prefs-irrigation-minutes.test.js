@@ -94,7 +94,8 @@ describe('property preferences — irrigation on by default', () => {
     expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, \.\.\.confirmFields, updated_at/);
     // gh-r20/r21: confirmation after a move accrues PER sizing field (the portal
     // autosaves one field per PUT) — never a shared stamp, never a non-sizing edit.
-    expect(src).toMatch(/const IRRIGATION_SIZING_FIELDS = \[\s*'irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week',\s*\];/);
+    // gh-r25: the sizing list + confirmation parser live in the shared module (sweep + report use the same).
+    expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS, parseConfirmedFields \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
     expect(src).toMatch(/const confirmedNow = IRRIGATION_SIZING_FIELDS\.filter\(\(f\) => f in updates\);/);
     expect(src).toMatch(/irrigation_confirmed_fields: JSON\.stringify\(\[\.\.\.new Set\(\[\.\.\.parseConfirmedFields\(existing\?\.irrigation_confirmed_fields\), \.\.\.confirmedNow\]\)\]\)/);
     expect(src).toMatch(/\.\.\.stampIrrigationOn,\n\s+\.\.\.confirmFields,\n/);

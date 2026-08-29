@@ -200,16 +200,9 @@ const IRRIGATION_INPUT_FIELDS = [
   'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
   'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
 ];
-// The subset the weekly watering plan sizes controller instructions from —
-// mirrored in irrigation-weekly-email.js (IRRIGATION_SIZING_FIELDS).
-const IRRIGATION_SIZING_FIELDS = [
-  'irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week',
-];
-function parseConfirmedFields(raw) {
-  let list = raw;
-  if (typeof raw === 'string') { try { list = JSON.parse(raw); } catch { list = []; } }
-  return Array.isArray(list) ? list.filter((f) => typeof f === 'string') : [];
-}
+// The subset the weekly watering plan / lawn report size controller
+// instructions from, and the confirmation-set parser — shared with both.
+const { IRRIGATION_SIZING_FIELDS, parseConfirmedFields } = require('../services/irrigation-schedule-confirmation');
 
 // =========================================================================
 // GET /api/property/preferences

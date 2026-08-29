@@ -122,3 +122,25 @@ describe('strict plan pin outranks the live gate/premise visibility checks (code
     expect(src).toMatch(/if \(servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string'\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
   });
 });
+
+describe('report water context withholds every irrigation source after a move (codex gh-r25)', () => {
+  const { buildLawnWaterContext, reportScheduleUnconfirmed } = require('../services/service-report/report-data');
+  const prefs = { irrigation_run_minutes: 20, watering_days: JSON.stringify(['Mon']), irrigation_system_type: JSON.stringify(['spray']), irrigation_inches_per_week: null, irrigation_confirmed_fields: '[]', irrigation_home_changed_at: '2026-08-28T00:00:00Z', irrigation_system: true };
+  test('portal, turf-profile and assessment figures all withhold; confirmed prefs restore them', () => {
+    const args = { assessment: { irrigation_inches_per_week: 0.9 }, turfProfile: { irrigation_inches_per_week: 1.1 }, propertyPrefs: prefs, completionRainfall7dInches: 0.3 };
+    expect(reportScheduleUnconfirmed(args)).toBe(true);
+    const moved = buildLawnWaterContext({ ...args, scheduleUnconfirmed: true });
+    expect(moved.irrigationInchesPerWeek ?? null).toBe(null);
+    const confirmed = buildLawnWaterContext({ ...args, propertyPrefs: { ...prefs, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes', 'watering_days', 'irrigation_system_type']) } });
+    expect(confirmed.irrigationInchesPerWeek).toBeGreaterThan(0);
+    // Tech-only schedule after a move is unconfirmed too.
+    expect(reportScheduleUnconfirmed({ assessment: {}, turfProfile: { irrigation_inches_per_week: 1.1 }, propertyPrefs: { irrigation_home_changed_at: '2026-08-28T00:00:00Z', irrigation_confirmed_fields: '[]' } })).toBe(true);
+    expect(reportScheduleUnconfirmed({ assessment: {}, turfProfile: { irrigation_inches_per_week: 1.1 }, propertyPrefs: { irrigation_confirmed_fields: '[]' } })).toBe(false);
+  });
+  test('the render wires the flag and the PDF signature stamps the move + confirmation state', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
+    expect(src).toMatch(/scheduleUnconfirmed: lawnScheduleUnconfirmed,/);
+    expect(src).toMatch(/waterContext\.scheduleUnconfirmed = lawnScheduleUnconfirmed;/);
+    expect(src).toMatch(/:moved=\$\{prefs\?\.irrigation_home_changed_at/);
+  });
+});

@@ -38,18 +38,8 @@ const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, 
 // within a second of queuing it).
 const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
-const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week'];
-function sizingFieldsUnconfirmed(row) {
-  let confirmed = row.irrigation_confirmed_fields;
-  if (typeof confirmed === 'string') { try { confirmed = JSON.parse(confirmed); } catch { confirmed = []; } }
-  if (!Array.isArray(confirmed)) confirmed = [];
-  const present = (v) => {
-    if (v == null || v === '') return false;
-    if (typeof v === 'string' && /^\s*\[\s*\]\s*$/.test(v)) return false;
-    return !(Array.isArray(v) && v.length === 0);
-  };
-  return IRRIGATION_SIZING_FIELDS.some((f) => present(row[f]) && !confirmed.includes(f));
-}
+// Sprinkler settings follow the home — one resolver shared with the report.
+const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -1160,8 +1150,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // per portal autosave) before any of them sizes an instruction — a
       // single re-saved field, a non-sizing irrigation edit, or the row-wide
       // updated_at never re-confirms the rest (codex gh-r20/r21).
-      const scheduleUnconfirmed = !!customer.irrigation_home_changed_at
-        && sizingFieldsUnconfirmed(customer);
+      const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
       const priorWeekEvents = weekPlanEnabled ? await loadPriorWeekPlanEvents({ customerId: customer.id, weekEnding }) : null;
       const decisionInputs = {
         firstName: customer.first_name,

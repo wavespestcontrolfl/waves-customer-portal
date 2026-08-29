@@ -153,18 +153,11 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   const lib = fs.readFileSync(path.join(__dirname, '../services/email-template-library.js'), 'utf8');
   test('settings saved before the home moved are withheld from the decision (all schedule inputs), and the plan email is told why', () => {
     // gh-r20/r21: confirmation is PER sizing field since the move — never the row-wide updated_at.
-    expect(sweep).toMatch(/const scheduleUnconfirmed = !!customer\.irrigation_home_changed_at\s*&& sizingFieldsUnconfirmed\(customer\);/);
+    // gh-r25: ONE shared resolver (irrigation-schedule-confirmation) for the sweep and the report,
+    // over the prefs row PLUS the tech fallback figures the sweep selects.
+    expect(sweep).toMatch(/const scheduleUnconfirmed = scheduleUnconfirmedAfterMove\(customer\);/);
+    expect(sweep).toMatch(/require\('\.\/irrigation-schedule-confirmation'\)/);
     expect(sweep).not.toMatch(/prefs_updated_at|irrigation_settings_saved_at/);
-    const { _private } = require('../services/irrigation-weekly-email');
-    const row = (over) => ({ irrigation_run_minutes: 20, watering_days: JSON.stringify(['Mon']), irrigation_system_type: JSON.stringify(['spray']), irrigation_inches_per_week: null, irrigation_confirmed_fields: JSON.stringify([]), ...over });
-    expect(_private.sizingFieldsUnconfirmed(row())).toBe(true);
-    // One re-saved field never confirms the rest…
-    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes']) }))).toBe(true);
-    // …every NON-NULL sizing field re-saved does (an empty field has nothing stale to reuse).
-    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] }))).toBe(false);
-    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_run_minutes: null, watering_days: '[]', irrigation_system_type: [], irrigation_inches_per_week: null }))).toBe(false);
-    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_inches_per_week: 1, irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] }))).toBe(true);
-    expect(_private.sizingFieldsUnconfirmed(row({ irrigation_confirmed_fields: 'not json' }))).toBe(true);
     // gh-r22: the raw inputs still ride (the decision must route to the PLAN
     // renderer, never the "missing schedule" setup copy); the plan itself
     // drops the sizing fields + the former home's programmed total.

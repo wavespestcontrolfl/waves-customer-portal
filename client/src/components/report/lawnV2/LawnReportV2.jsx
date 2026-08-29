@@ -699,6 +699,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
+      {water.scheduleUnconfirmed ? (
+        <p data-testid="lawn-schedule-unconfirmed" style={{ margin: '10px 0 0', fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
+          Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type under Irrigation in your portal to bring your irrigation figure back.
+        </p>
+      ) : null}
       {/* This week's watering plan (server-gated): the same decision the Monday
           email sent, so the card and the inbox never disagree. */}
       {/* Treatment aftercare outranks the weekly plan (lawn-diagnostic-plan:

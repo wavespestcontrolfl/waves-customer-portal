@@ -362,7 +362,10 @@ function buildWeekPlan({
   // Cool season is "every 10–14 days if needed": a run last week means a
   // hold this week — the one-event-per-week ceiling alone would prescribe a
   // run every Monday while the copy promises the longer cadence.
-  if (season === 'cool' && Number(priorWeekEvents) > 0) {
+  // …and only with evidence the run happened: ≥ ½" of observed rain last
+  // week means the plan's own override said skip it (unknown → no hold).
+  const lastRain = finiteOrNull(lastWeekRainInches);
+  if (season === 'cool' && Number(priorWeekEvents) > 0 && !(lastRain != null && lastRain >= RAIN_SKIP_INCHES)) {
     reasons.push('cool_season_cadence');
     const fallback = sizeRun(EVENT_DEPTH_MIN_INCHES);
     return { ...common, action: 'hold', events: 0, depthInches: null, minutesPerEvent: null, fallbackMinutesPerEvent: fallback.minutesPerEvent };

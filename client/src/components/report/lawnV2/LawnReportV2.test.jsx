@@ -183,6 +183,13 @@ describe('GaugePrimitives honesty guards', () => {
   });
 });
 
+describe('WaterIntakeBar moved-home note (codex gh-r25)', () => {
+  it('explains a withheld irrigation figure after an address change', () => {
+    render(<WaterIntakeBar water={{ rainInches: 0.3, irrigationInches: null, targetInches: 0.75, status: 'low', scheduleOnFile: false, scheduleUnconfirmed: true }} />);
+    expect(screen.getByTestId('lawn-schedule-unconfirmed')).toHaveTextContent(/address changed/);
+  });
+});
+
 describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
   const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true, prescribesRun: true } };
   it('with a plan on the card the legacy balance explanation is suppressed — the plan is the sole watering instruction (codex gh-r21)', () => {

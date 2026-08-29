@@ -49,6 +49,7 @@ const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
+const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -320,10 +321,24 @@ function portalIrrigationInches(propertyPrefs) {
   }).inchesPerWeek;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
-  const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
-  const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
-  const prefsIrrigationInches = portalIrrigationInches(propertyPrefs);
+// Every irrigation source the card would size from, checked against the
+// move guard the weekly email applies (one shared resolver).
+function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
+  return scheduleUnconfirmedAfterMove({
+    ...(propertyPrefs || {}),
+    turf_irrigation_inches_per_week: turfProfile?.irrigation_inches_per_week ?? null,
+    assessment_irrigation_inches_per_week: assessment?.irrigation_inches_per_week ?? null,
+  });
+}
+
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null, scheduleUnconfirmed = false } = {}) {
+  // Sprinkler settings follow the home: after a move every source — portal,
+  // turf profile, assessment — is withheld until re-saved, so the card
+  // never pairs the new home's rain with the former home's irrigation and
+  // total rows (codex gh-r25). "Not on file" + a re-enter note instead.
+  const turfIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(turfProfile?.irrigation_inches_per_week);
+  const assessmentIrrigationInches = scheduleUnconfirmed ? null : numberOrNull(assessment.irrigation_inches_per_week);
+  const prefsIrrigationInches = scheduleUnconfirmed ? null : portalIrrigationInches(propertyPrefs);
   // PORTAL ENTRY WINS: what the customer enters in the portal is what the report
   // shows. The customer's own schedule takes priority over turf/assessment readings.
   // (A figure derived from their runtime entries counts as a portal entry — same
@@ -2039,7 +2054,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // carries it: an A→B→A edit sequence during a render would otherwise
     // restore the original stamp while the render read B (TOCTOU) — the
     // timestamp makes every edit sequence change the signature.
-    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
+    // The move stamp + confirmation set ride too: the fan-out stamps a move
+    // without touching updated_at, and a cached PDF keyed before it would
+    // keep serving the former home's irrigation rows.
+    irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}:moved=${prefs?.irrigation_home_changed_at ? new Date(prefs.irrigation_home_changed_at).toISOString() : ''}:conf=${typeof prefs?.irrigation_confirmed_fields === 'string' ? prefs.irrigation_confirmed_fields : JSON.stringify(prefs?.irrigation_confirmed_fields || [])}`;
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
   } catch {
@@ -2607,11 +2625,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       weekWeatherUnfrozen = true;
     }
   }
+  const lawnScheduleUnconfirmed = reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment });
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
     propertyPrefs,
     fawnSnapshot,
+    scheduleUnconfirmed: lawnScheduleUnconfirmed,
     serviceDate: assessment.service_date,
     completionRainfallInchesToday: firstNumber(
       completionConditions.rain_24h_in,
@@ -2629,6 +2649,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // policy changed mid-week) → no callout: a "this week" instruction must
   // never be built from a historical report's weather and season.
   waterContext.weekPlan = null;
+  // The card says WHY the irrigation row is not on file after a move.
+  waterContext.scheduleUnconfirmed = lawnScheduleUnconfirmed;
   // A render pinned to a SENT plan must produce that plan or refuse — the
   // live gate and premise checks below are visibility rules for unpinned
   // renders, never a way past the pin: a gate flipped off between the
@@ -2730,15 +2752,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // this figure renders beside the water balance, and the two must come
       // from the same source or one report shows a tech reading next to a
       // balance computed from the customer's own (possibly derived) schedule.
-      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs)
-        ?? numberOrNull(turfProfile.irrigation_inches_per_week)
-        ?? numberOrNull(assessment.irrigation_inches_per_week),
+      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) ? null
+        : (portalIrrigationInches(propertyPrefs)
+          ?? numberOrNull(turfProfile.irrigation_inches_per_week)
+          ?? numberOrNull(assessment.irrigation_inches_per_week)),
       soilPh: turfProfile.soil_ph || null,
       knownChinchHistory: !!turfProfile.known_chinch_history,
       knownDiseaseHistory: !!turfProfile.known_disease_history,
       knownDroughtStress: !!turfProfile.known_drought_stress,
     } : (propertyPrefs ? {
-      irrigationInchesPerWeek: portalIrrigationInches(propertyPrefs),
+      irrigationInchesPerWeek: reportScheduleUnconfirmed({ propertyPrefs, turfProfile: null, assessment }) ? null : portalIrrigationInches(propertyPrefs),
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
@@ -5079,6 +5102,7 @@ module.exports = {
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
   loadServicePremise,
+  reportScheduleUnconfirmed,
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,

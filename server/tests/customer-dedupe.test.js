@@ -1065,6 +1065,18 @@ describe('executeMerge', () => {
     expect(same.stamps).toEqual([]);
   });
 
+  it('an addressless surviving shell inherits the loser\'s home — no move stamp (codex gh-r25)', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: null, city: null, zip: null };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' };
+    const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    const base = trx.getMockImplementation();
+    const stamps = [];
+    trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => { if (q.called('update')) stamps.push(q.args('update')[0]); return q.called('update') ? 1 : []; })));
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(stamps).toEqual([]);
+  });
+
   it('moves the cached account_credits with the ledger and zeroes the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', account_credits: '10.00' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', account_credits: '25.50' };

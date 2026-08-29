@@ -1346,7 +1346,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the kept address (codex #3565 gh-r22). Same premise test as the
     // address fan-out's move guard. Left in place by an undo (conservative:
     // it only ever withholds).
-    if (require('./customer-address-fanout').homesDiffer(winner, loser)) {
+    const fanout = require('./customer-address-fanout');
+    // Only two REAL addresses are evidence of different homes: an addressless
+    // shell inherits the loser's address in the backfill below, so those
+    // settings belong to the surviving home (codex gh-r25).
+    if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
       try {
         await trx.transaction(async (sp) => {
           const n = await sp('property_preferences').where({ customer_id: winnerId })

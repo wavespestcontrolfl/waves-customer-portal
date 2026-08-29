@@ -78,6 +78,9 @@ describe('buildWeekPlan — sizing', () => {
     expect(after.events).toBe(0);
     expect(after.reasons).toContain('cool_season_cadence');
     expect(after.fallbackMinutesPerEvent).toBeGreaterThan(0); // wilt override still offered
+    // gh-r25: ≥ ½" of rain last week means the override said skip → no evidence of a run → no hold.
+    expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 1, lastWeekRainInches: 0.6, ...SPRAY }).reasons).not.toContain('cool_season_cadence');
+    expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 1, lastWeekRainInches: 0.2, ...SPRAY }).reasons).toContain('cool_season_cadence');
     // No run last week (or unknown) → sized normally; warm seasons ignore the input.
     expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 0, ...SPRAY }).action).toBe('run');
     expect(buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: null, ...SPRAY }).action).toBe('run');
