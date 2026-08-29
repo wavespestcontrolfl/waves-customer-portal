@@ -4980,6 +4980,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   test('stripManagedBodyImages resolves rendered spans structurally — angle-destination and wrapped-alt managed images are stripped too (GH r23)', () => {
     const body = '## A\n\nProse.\n\n![gen](</images/blog/x/body-1.webp>)\n\n![wrapped\nalt](/images/blog/x/body-2.webp)\n\nMore.';
     expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\nMore.');
+    // A code-span copy of the SAME managed image on the same line as a real one stays; only the rendered one goes (hook P1).
+    expect(AstroPublisher.stripManagedBodyImages('See `![gen](/images/blog/x/body-1.webp)` then ![gen](/images/blog/x/body-1.webp) here.', 'x')).toBe('See `![gen](/images/blog/x/body-1.webp)` then here.');
+    expect(AstroPublisher.stripManagedBodyImages('> ![gen](/images/blog/x/body-1.webp)\n> Quoted prose.', 'x')).toBe('>\n> Quoted prose.');
     // A definition inside a JSX attribute / MDX expression defines nothing — the outside reference and the tag stay (hook P1).
     const jsx = '![a][pic]\n\n<Callout note="\n[pic]: /images/blog/x/body-1.webp\n" />';
     expect(AstroPublisher.stripManagedBodyImages(jsx, 'x')).toBe(jsx);

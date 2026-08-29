@@ -4595,11 +4595,17 @@ function stripManagedBodyImages(body, slug) {
   // Only RENDERED occurrences are stripped: an image-like string inside a
   // fence, a code span, a comment or an MDX expression is text the reader
   // sees as written — the rendered view (same line count) decides.
-  const rendered = renderedBodyView(raw).lines;
   // Code/comment-stripped AND JSX/MDX-masked (same as renderedBodyView's
   // definition read): a `[label]:` inside a tag attribute or an expression
   // defines nothing and must not drive a removal.
   const unmasked = blankJsxAndExpressions(normalizeAngleDestinations(contentGuardrails.blankNonRenderedMarkdown(raw))).split('\n');
+  // POSITIONAL rendered-ness: the same masking WITHOUT angle normalization
+  // is length-preserving per line (only quote/list markers are stripped at
+  // the line start), so a raw span is rendered iff its `![label]` opener is
+  // still unblanked at its own columns — a code-span / comment / expression
+  // copy of the same image on the same line stays as written.
+  const maskedPos = blankJsxAndExpressions(contentGuardrails.blankNonRenderedMarkdown(raw)).split('\n');
+  const rawLines = raw.split('\n');
   const lineStarts = [0];
   for (let k = 0; k < raw.length; k += 1) if (raw[k] === '\n') lineStarts.push(k + 1);
   const lineOf = (pos) => { let lo = 0; let hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
@@ -4608,11 +4614,14 @@ function stripManagedBodyImages(body, slug) {
   const removals = [];
   for (const span of contentGuardrails.eachMarkdownLink(raw)) {
     if (!span.isImage) continue;
-    // Rendered-ness is decided STRUCTURALLY: the rendered view of the
-    // span's line(s) must itself carry an image with the same managed src
-    // (angle destinations normalized, wrapped alts spanning lines included).
-    const renderedSlice = rendered.slice(lineOf(span.start), lineOf(span.end) + 1).join('\n');
-    const renderedSrcs = new Set(imageRefsInText(renderedSlice, defs).map((r) => r.src));
+    const li = lineOf(span.start);
+    const rawLine = rawLines[li];
+    const maskedLine = String(maskedPos[li] || '');
+    const offset = rawLine.length - maskedLine.length; // stripped quote/list prefix
+    const col0 = span.start - lineStarts[li];
+    const colEnd = Math.min(span.labelEnd, lineStarts[li] + rawLine.length - 1) - lineStarts[li];
+    let renderedHere = col0 - offset >= 0;
+    for (let c = col0; renderedHere && c <= colEnd; c += 1) if (maskedLine[c - offset] !== rawLine[c]) renderedHere = false;
     let src = null;
     if (span.kind === 'inline') src = decodeDestination(contentGuardrails.parseLinkDestination(raw.slice(span.destStart, span.destEnd + 1), { allowEmpty: true }) || '');
     else if (span.kind !== 'malformed') {
@@ -4620,7 +4629,7 @@ function stripManagedBodyImages(body, slug) {
       const label = contentGuardrails.normalizeReferenceLabel(tail || raw.slice(span.labelStart + 1, span.labelEnd));
       if (label && defs.has(label)) src = decodeDestination(defs.get(label));
     }
-    if (src && isManaged(src) && renderedSrcs.has(src)) removals.push([span.start, span.end]);
+    if (src && isManaged(src) && renderedHere) removals.push([span.start, span.end]);
   }
   // Splice the image syntax OUT but KEEP its newlines (a wrapped alt spans
   // lines): line counts never change, so `lines[i]` and `rawLines[i]` stay
@@ -4632,7 +4641,6 @@ function stripManagedBodyImages(body, slug) {
     for (let li = lineOf(from); li <= lineOf(to); li += 1) touched.add(li);
     text = text.slice(0, from) + raw.slice(from, to + 1).replace(/[^\n]/g, '') + text.slice(to + 1);
   }
-  const rawLines = raw.split('\n');
   const lines = text.split('\n');
   const kept = [];
   const titleOnly = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
