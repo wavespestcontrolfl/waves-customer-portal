@@ -442,6 +442,9 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
 // a lease of equal length that started earlier could expire while the email
 // is still legitimately in flight — another sweep would replace the snapshot
 // and this worker's claim-scoped stamp would then miss (codex #3565 gh-r19).
+// Returns true (renewed), false (claim LOST — another worker replaced the
+// row; the caller must not send its older decision), or null (unreadable —
+// ambiguous, the caller proceeds best-effort).
 async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
   if (!customerId || !weekEnding || !claimToken) return false;
   try {
@@ -452,7 +455,7 @@ async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
     return n > 0;
   } catch (err) {
     logger.warn(`[irrigation-week-plan] claim renew failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -465,9 +468,17 @@ async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
   try {
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: prior })
-      .whereNotNull('sent_at')
-      .first('week_plan');
+      .first('week_plan', 'sent_at', 'decision_hash');
     if (!row) return null;
+    // Delivered = stamped, OR the durable customer-week delivery record says
+    // the provider accepted it (sent_at can be null when markWeekPlanSent
+    // failed after acceptance) and names this decision (or none) — the same
+    // reconciliation the sweep and the merge use (codex gh-r20).
+    if (!row.sent_at) {
+      const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${prior}` });
+      if (delivery.state !== 'sent') return null;
+      if (delivery.decisionHash && delivery.decisionHash !== row.decision_hash) return null;
+    }
     const plan = typeof row.week_plan === 'string' ? JSON.parse(row.week_plan) : row.week_plan;
     const events = Number(plan?.events);
     return Number.isFinite(events) ? events : null;

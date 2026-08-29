@@ -5,25 +5,34 @@
  * watering days, head type, typed weekly inches) as belonging to the home
  * they were saved for: settings saved BEFORE this stamp are the former
  * property's system and must not size exact controller instructions for
- * the new one (codex #3565 gh-r19). Re-saving Irrigation in the portal
- * bumps updated_at past the stamp and re-confirms them.
+ * the new one (codex #3565 gh-r19). Re-confirmation is a DEDICATED stamp,
+ * irrigation_settings_saved_at, advanced only when irrigation fields are
+ * saved — the row-wide updated_at moves on any preference edit (a gate
+ * code, a pet) and must not count as reconfirming sprinkler settings
+ * (codex gh-r20).
  *
  * Additive, hasColumn-guarded — same shape as irrigation_run_minutes.
  */
+const COLUMNS = ['irrigation_home_changed_at', 'irrigation_settings_saved_at'];
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('property_preferences'))) return;
-  if (!(await knex.schema.hasColumn('property_preferences', 'irrigation_home_changed_at'))) {
-    await knex.schema.alterTable('property_preferences', (t) => {
-      t.timestamp('irrigation_home_changed_at', { useTz: true });
-    });
+  for (const col of COLUMNS) {
+    if (!(await knex.schema.hasColumn('property_preferences', col))) {
+      await knex.schema.alterTable('property_preferences', (t) => {
+        t.timestamp(col, { useTz: true });
+      });
+    }
   }
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('property_preferences'))) return;
-  if (await knex.schema.hasColumn('property_preferences', 'irrigation_home_changed_at')) {
-    await knex.schema.alterTable('property_preferences', (t) => {
-      t.dropColumn('irrigation_home_changed_at');
-    });
+  for (const col of COLUMNS) {
+    if (await knex.schema.hasColumn('property_preferences', col)) {
+      await knex.schema.alterTable('property_preferences', (t) => {
+        t.dropColumn(col);
+      });
+    }
   }
 };

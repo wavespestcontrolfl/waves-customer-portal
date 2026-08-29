@@ -941,7 +941,7 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // primary-address change stamps irrigation_home_changed_at (address
       // fan-out) and settings saved before it are withheld from the plan
       // until re-saved (codex #3565 gh-r19).
-      'pp.updated_at as prefs_updated_at',
+      'pp.irrigation_settings_saved_at',
       'pp.irrigation_home_changed_at',
       // A schedule can also have been recorded by a tech rather than typed by
       // the customer (codex #3138 r1 P2). The lawn report already treats
@@ -1092,8 +1092,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         serviceDate: weekEnding,
       });
 
+      // Re-confirmation is the DEDICATED irrigation save stamp, never the
+      // row-wide updated_at (a gate-code or pet edit must not re-confirm the
+      // former home's sprinkler settings — codex gh-r20). `>=`: a stamp and a
+      // same-transaction save compare equal.
       const scheduleUnconfirmed = !!customer.irrigation_home_changed_at
-        && (!customer.prefs_updated_at || new Date(customer.irrigation_home_changed_at) >= new Date(customer.prefs_updated_at));
+        && (!customer.irrigation_settings_saved_at || new Date(customer.irrigation_home_changed_at) >= new Date(customer.irrigation_settings_saved_at));
       const priorWeekEvents = weekPlanEnabled ? await loadPriorWeekPlanEvents({ customerId: customer.id, weekEnding }) : null;
       const decisionInputs = {
         firstName: customer.first_name,
@@ -1101,8 +1105,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         weekEnding,
         // Settings saved BEFORE the home moved describe the former property's
         // sprinkler system — withheld (events-only plan, reconfirm ask), never
-        // turned into exact controller minutes for the new home. `>=`: the
-        // stamp and a same-transaction updated_at bump compare equal.
+        // turned into exact controller minutes for the new home.
         irrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.irrigation_inches_per_week,
         turfIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.turf_irrigation_inches_per_week,
         assessmentIrrigationInchesPerWeek: scheduleUnconfirmed ? null : customer.assessment_irrigation_inches_per_week,
@@ -1277,8 +1280,10 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // Renew the snapshot claim on the SAME transition the library's own
         // in-flight lease starts (the queued row), so the two leases can't
         // drift apart across template resolution / suppression checks.
+        // A renewal that finds the claim LOST (false) aborts the send inside
+        // the library; an unreadable renewal (null) proceeds best-effort.
         onQueued: snapshotArgs?.claimToken
-          ? () => renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })
+          ? async () => (await renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })) !== false
           : null,
       });
 
@@ -1288,7 +1293,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // library marks results that DID reach the provider this call
       // (providerAttempted) — those keep their attempt even when reported as
       // deduped (webhook/supersede races), as does a thrown error.
-      if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
+      if ((result.deduped || result.blocked || result.aborted) && !result.providerAttempted) summary.attempted -= 1;
+
+      // The claim renewal at the queue transition found this worker no
+      // longer owns the snapshot (an overlapping sweep replaced it): the
+      // library aborted before dispatch — nothing to stamp, and the discard
+      // is the new owner's to make (codex gh-r20).
+      if (result.aborted) {
+        summary.plan.claimed_elsewhere += 1;
+        continue;
+      }
 
       if (snapshotArgs) {
         if (result.sent && (!result.deduped || result.providerAttempted)) {

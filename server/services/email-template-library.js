@@ -915,8 +915,9 @@ async function sendTemplate({
   // library's own in-flight lease starts) — lets a caller holding a sibling
   // lease (the weekly watering-plan snapshot claim) renew it on the same
   // transition instead of a lease that began before template resolution
-  // and suppression checks (codex #3565 gh-r19). Failures are logged, never
-  // fatal to the send.
+  // and suppression checks (codex #3565 gh-r19). Resolving `false` ABORTS
+  // the send before dispatch (the row is marked failed, pre-provider); a
+  // throw is logged and the send proceeds.
   onQueued = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
@@ -1180,10 +1181,27 @@ async function sendTemplate({
     }
   }
   if (typeof onQueued === 'function') {
+    let keep = true;
     try {
-      await onQueued(message);
+      keep = (await onQueued(message)) !== false;
     } catch (err) {
       logger.warn(`[email-template-library] onQueued hook failed for ${templateKey}: ${err.message}`);
+    }
+    if (!keep) {
+      // The caller's sibling lease is LOST (an overlapping worker owns the
+      // decision now): never dispatch this attempt. The queued row becomes
+      // a pre-provider failure — no provider id — so the customer-week
+      // reconciliation reads it as retryable, not as a delivery
+      // (codex #3565 gh-r20).
+      const reason = 'aborted_by_caller_before_dispatch';
+      let aborted;
+      try {
+        [aborted] = await db('email_messages').where({ id: message.id })
+          .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+      } catch (err) {
+        logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);
+      }
+      return { sent: false, aborted: true, reason, message: aborted || { ...message, status: 'failed', error_message: reason }, rendered };
     }
   }
 

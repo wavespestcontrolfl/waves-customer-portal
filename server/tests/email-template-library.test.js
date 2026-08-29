@@ -366,6 +366,50 @@ describe('email template library rendering', () => {
     expect(result).toEqual(expect.objectContaining({ sent: true, deduped: true, superseded: true }));
   });
 
+  test('onQueued resolving false ABORTS before dispatch: row marked failed (pre-provider), no sendOne (codex #3565 gh-r20)', async () => {
+    const queuedMessage = { id: 'msg-abort', status: 'queued', subject_snapshot: 'S' };
+    const queueInsert = chain({ returning: [queuedMessage] });
+    const abortUpdate = chain({ returning: [{ ...queuedMessage, status: 'failed', error_message: 'aborted_by_caller_before_dispatch' }] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [queueInsert, abortUpdate],
+    });
+    const onQueued = jest.fn(async (m) => { expect(m.id).toBe('msg-abort'); return false; });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      onQueued,
+    });
+    expect(onQueued).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(abortUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'aborted_by_caller_before_dispatch' }));
+    expect(result).toEqual(expect.objectContaining({ sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' }));
+    expect(result.message.status).toBe('failed');
+  });
+
+  test('onQueued resolving true (or throwing) never blocks dispatch', async () => {
+    const queuedMessage = { id: 'msg-ok', status: 'queued', subject_snapshot: 'S' };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-ok' };
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+      email_template_versions: [chain({ first: version({ id: 'ver-1' }) })],
+      email_suppressions: [chain({ result: [] })],
+      email_messages: [chain({ returning: [queuedMessage] }), chain({ returning: [sentMessage] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-ok' });
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: 'estimate.expiring_notice',
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
+      onQueued: async () => { throw new Error('hook blew up'); },
+    });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(result.sent).toBe(true);
+  });
+
   test('deduplicates membership.started categories before provider send', async () => {
     const queuedMessage = {
       id: 'msg-membership-started',

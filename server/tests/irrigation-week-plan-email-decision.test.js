@@ -152,11 +152,13 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   const sweep = fs.readFileSync(path.join(__dirname, '../services/irrigation-weekly-email.js'), 'utf8');
   const lib = fs.readFileSync(path.join(__dirname, '../services/email-template-library.js'), 'utf8');
   test('settings saved before the home moved are withheld from the decision (all schedule inputs), and the plan email is told why', () => {
-    expect(sweep).toMatch(/const scheduleUnconfirmed = !!customer\.irrigation_home_changed_at\s*&& \(!customer\.prefs_updated_at \|\| new Date\(customer\.irrigation_home_changed_at\) >= new Date\(customer\.prefs_updated_at\)\);/);
+    // gh-r20: the DEDICATED irrigation save stamp re-confirms, never the row-wide updated_at.
+    expect(sweep).toMatch(/const scheduleUnconfirmed = !!customer\.irrigation_home_changed_at\s*&& \(!customer\.irrigation_settings_saved_at \|\| new Date\(customer\.irrigation_home_changed_at\) >= new Date\(customer\.irrigation_settings_saved_at\)\);/);
+    expect(sweep).not.toMatch(/prefs_updated_at/);
     for (const k of ['irrigationInchesPerWeek: scheduleUnconfirmed \\? null : customer\\.irrigation_inches_per_week', 'turfIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'assessmentIrrigationInchesPerWeek: scheduleUnconfirmed \\? null', 'irrigationRunMinutes: scheduleUnconfirmed \\? null : customer\\.irrigation_run_minutes', 'wateringDays: scheduleUnconfirmed \\? null : customer\\.watering_days', 'irrigationSystemType: scheduleUnconfirmed \\? null : customer\\.irrigation_system_type']) {
       expect(sweep).toMatch(new RegExp(k));
     }
-    expect(sweep).toMatch(/'pp\.updated_at as prefs_updated_at',\s*'pp\.irrigation_home_changed_at',/);
+    expect(sweep).toMatch(/'pp\.irrigation_settings_saved_at',\s*'pp\.irrigation_home_changed_at',/);
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
@@ -164,7 +166,11 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
-    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? \(\) => renewWeekPlanClaim\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\)/);
+    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \(await renewWeekPlanClaim\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\)\) !== false/);
+    // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
+    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
+    expect(lib).toMatch(/return \{ sent: false, aborted: true, reason, message: aborted \|\| \{ \.\.\.message, status: 'failed', error_message: reason \}, rendered \};/);
     const queued = lib.indexOf("[message] = await db('email_messages').insert(queuedPayload).returning('*');");
     const hook = lib.indexOf("if (typeof onQueued === 'function') {", queued);
     const send = lib.indexOf('sendOne(', hook);

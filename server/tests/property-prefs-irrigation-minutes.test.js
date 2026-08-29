@@ -90,7 +90,7 @@ describe('property preferences — irrigation on by default', () => {
     // Key PRESENCE, not a non-empty value: clearing notes / zones→0 /
     // unchecking the rain sensor on a legacy false row is still the
     // customer's first edit under Irrigation (pre-push codex P1).
-    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true \}/);
+    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true, irrigation_settings_saved_at: db\.fn\.now\(\) \}/); // gh-r20: dedicated confirmation stamp
     expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, updated_at/);
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)

@@ -303,8 +303,12 @@ router.put('/preferences', async (req, res, next) => {
     }
     // Stamped on the row, not on `updates`: the account-updated email lists
     // what the customer changed, and the stamp is not a customer edit.
+    // irrigation_settings_saved_at: the weekly watering plan trusts sprinkler
+    // settings only when saved AFTER the last primary-address change — this
+    // dedicated stamp (never the row-wide updated_at, which any preference
+    // edit moves) is what re-confirms them (codex #3565 gh-r20).
     const stampIrrigationOn = IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
-      ? { irrigation_system: true }
+      ? { irrigation_system: true, irrigation_settings_saved_at: db.fn.now() }
       : {};
 
     // Normalize irrigation system type to an array (accepts legacy scalar)

@@ -356,12 +356,30 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(cap.whereNull).toBe('sent_at');
     expect(Object.keys(cap.update)).toEqual(['claimed_at', 'updated_at']);
     expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: null })).toBe(false);
+    // 0 rows = the claim is LOST (false); an unreadable renewal is ambiguous (null).
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => 0 }));
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(false);
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { throw new Error('db down'); } }));
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(null);
+    // Prior week: a STAMPED row counts directly.
+    const rig = (planRow, messages = []) => db.mockImplementation((table) => (table === 'email_messages'
+      ? { where(w) { cap.msgWhere = w; return this; }, select: async () => messages }
+      : { where(w) { cap.where = w; return this; }, first: async (...cols) => { cap.first = cols; return planRow; } }));
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: NOW, decision_hash: 'h1' });
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
     expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-16' });
-    expect(cap.whereNotNull).toBe('sent_at');
-    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => null }));
+    // UNSTAMPED but provider-accepted (delivery record names its hash) counts too (gh-r20)…
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
+    expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
+    // …a record naming a DIFFERENT decision, or no delivery at all, does not.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
-    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('db down'); } }));
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'failed', categories: JSON.stringify(['plan:h1']) }]);
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    rig(null);
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
   });
 
