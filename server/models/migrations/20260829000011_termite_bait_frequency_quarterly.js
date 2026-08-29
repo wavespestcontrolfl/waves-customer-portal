@@ -25,8 +25,14 @@ exports.up = async function up(knex) {
     .where({ service_key: 'termite_bait', frequency: 'annual', visits_per_year: 4 })
     .update({ frequency: 'quarterly', updated_at: knex.fn.now() });
   if (await knex.schema.hasTable('system_settings')) {
+    // Merge with any prior run: a re-run after a successful first run
+    // updates zero rows and must not erase first-run ownership (codex
+    // #3579 r3 P1) — down() still owes the reversal of the ORIGINAL change.
+    let prior = false;
+    const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+    try { prior = !!(row && JSON.parse(row.value).changed); } catch { prior = false; }
     await knex('system_settings').where({ key: STATE_KEY }).del();
-    await knex('system_settings').insert({ key: STATE_KEY, value: JSON.stringify({ changed: changed > 0 }) });
+    await knex('system_settings').insert({ key: STATE_KEY, value: JSON.stringify({ changed: prior || changed > 0 }) });
   }
 };
 

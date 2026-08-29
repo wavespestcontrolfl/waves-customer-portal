@@ -407,6 +407,14 @@ describe('20260829000011 termite_bait frequency', () => {
     await termiteFix.up(fakeKnex(db));
     expect(svc(db, 'termite_bait').frequency).toBe('semiannual');
   });
+  test('up() → up() → down() still restores what the FIRST run changed', async () => {
+    const db = seedDb();
+    await termiteFix.up(fakeKnex(db));
+    await termiteFix.up(fakeKnex(db));
+    expect(svc(db, 'termite_bait').frequency).toBe('quarterly');
+    await termiteFix.down(fakeKnex(db));
+    expect(svc(db, 'termite_bait').frequency).toBe('annual');
+  });
   test('down() never rewrites a row up() did not change (pre-corrected quarterly stays quarterly)', async () => {
     const db = seedDb();
     svc(db, 'termite_bait').frequency = 'quarterly';
@@ -445,5 +453,34 @@ describe('runtime alias bridge (pre-deploy labels keep resolving the renamed row
   test('after down(), a NEW label still resolves the restored catalog row', () => {
     const catalog = [{ id: 'svc', name: 'Lawn Care Program Service', service_key: 'lawn_care_recurring' }];
     expect(resolveCallBookingCatalogService({ extracted: { matched_service: 'Bi-Monthly Lawn Care Service' }, services: catalog })).toMatchObject({ id: 'svc' });
+  });
+});
+
+describe('completion-defaults resolver bridges both spellings (survives the migration down())', () => {
+  const { __private } = require('../services/completion-defaults-resolver');
+  const loadActiveTemplate = __private && __private.loadActiveTemplate;
+  const fakeKnexFor = (aliasRows, templateRows) => {
+    const chain = (rows) => {
+      const q = {
+        _rows: rows,
+        join() { return q; },
+        whereIn(col, vals) { q._rows = q._rows.filter((r) => vals.includes(r[col.replace(/^pst\./, '')] ?? r.service_type)); return q; },
+        andWhere() { return q; },
+        where(cond) { if (cond && typeof cond === 'object') q._rows = q._rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+        orderBy() { return q; },
+        async first() { return q._rows[0] || null; },
+      };
+      return q;
+    };
+    return (table) => chain(table.startsWith('protocol_template_service_types') ? aliasRows : templateRows);
+  };
+  const itIf = loadActiveTemplate ? test : test.skip;
+  itIf('a NEW-name visit resolves the template registered under the OLD alias after down()', async () => {
+    const knex = fakeKnexFor(
+      [{ service_type: 'Lawn Care Program Service', id: 'pt-1', status: 'active' }],
+      [],
+    );
+    const tpl = await loadActiveTemplate('Bi-Monthly Lawn Care Service', knex);
+    expect(tpl).toMatchObject({ id: 'pt-1' });
   });
 });
