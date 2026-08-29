@@ -295,6 +295,12 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey(comma))).toBe(true);
     expect(leadAddressKeysEquivalent(leadAddressCompareKey(comma), leadAddressCompareKey(whole))).toBe(true);
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St, Unit 4'))).toBe(true);
+    // A post-directional between the suffix and the unit must not stop suffix canonicalization
+    // ("Street N Apt 4 …" keys as "st n", same as the comma form's "100 Main Street N").
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street N Apt 4 Sarasota FL 34236'), leadAddressCompareKey('100 Main Street N, Apt 4, Sarasota, FL 34236'))).toBe(true);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street NE #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St NE, Unit 4'))).toBe(true);
+    // "Street North Port" is a city, not a post-directional — the suffix stays unabbreviated, and it is a different street.
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Port FL 34287'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
     // Different unit, different street, or a unit-less side: never.
     expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St, Apt 5'))).toBe(false);
     expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St North, Apt 4'))).toBe(false);

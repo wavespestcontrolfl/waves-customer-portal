@@ -231,11 +231,21 @@ function normalizeStreetLine(value) {
     if (!alias) continue;
 
     const tail = tokens.slice(i + 1);
-    const suffixIsTerminal = tail.length === 0;
-    const suffixBeforeDirection = tail.length > 0 && tail.every((token) => DIRECTIONALS.has(token.replace(/[.,]/g, '').toLowerCase()));
-    const nextToken = tail[0]?.replace(/[.,]/g, '').toLowerCase() || '';
-    const suffixBeforeUnit = !!tail[0] && (tail[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
-    if (!suffixIsTerminal && !suffixBeforeDirection && !suffixBeforeUnit) continue;
+    // A suffix counts when it ends the street, or is followed by a post-directional run
+    // ("St N", "St NE") that itself ends the street or precedes a unit ("St N Apt 4 …").
+    // The directional run is skipped, not required to be the whole tail, so a whole-line
+    // address ("100 Main Street N Apt 4 Sarasota FL 34236") canonicalizes the same as its
+    // comma-separated street ("100 Main Street N"). "Street North Port" still does not
+    // qualify — "Port" is neither a directional nor a unit, so the suffix is left alone.
+    let afterDirectionals = 0;
+    while (afterDirectionals < tail.length && DIRECTIONALS.has(tail[afterDirectionals].replace(/[.,]/g, '').toLowerCase())) {
+      afterDirectionals += 1;
+    }
+    const rest = tail.slice(afterDirectionals);
+    const nextToken = rest[0]?.replace(/[.,]/g, '').toLowerCase() || '';
+    const suffixIsTerminal = rest.length === 0;
+    const suffixBeforeUnit = !!rest[0] && (rest[0].startsWith('#') || UNIT_DESIGNATORS.has(nextToken));
+    if (!suffixIsTerminal && !suffixBeforeUnit) continue;
 
     tokens[i] = titleToken(alias);
     for (let j = i - 1; j >= 0; j -= 1) {
