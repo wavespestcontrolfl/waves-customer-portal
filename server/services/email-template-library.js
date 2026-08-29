@@ -1196,7 +1196,12 @@ async function sendTemplate({
       const reason = 'aborted_by_caller_before_dispatch';
       let aborted;
       try {
-        [aborted] = await db('email_messages').where({ id: message.id })
+        // Scoped to THIS queued attempt (id + queued + send_attempt_token),
+        // exactly like the provider-error path: a newer worker that has
+        // reclaimed the row owns a new token and must never be marked
+        // failed by this one (0 rows → leave it alone; still no dispatch).
+        [aborted] = await db('email_messages')
+          .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
           .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
       } catch (err) {
         logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);

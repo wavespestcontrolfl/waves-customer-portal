@@ -1317,10 +1317,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // Renew the snapshot claim on the SAME transition the library's own
         // in-flight lease starts (the queued row), so the two leases can't
         // drift apart across template resolution / suppression checks.
-        // A renewal that finds the claim LOST (false) aborts the send inside
-        // the library; an unreadable renewal (null) proceeds best-effort.
+        // Ownership must be VERIFIED at the queue transition: only an
+        // explicit `true` renewal dispatches — a lost claim (false) and an
+        // unreadable one (null) both abort inside the library (fail closed;
+        // a reclaimed snapshot must never be followed by this worker's
+        // older decision).
         onQueued: snapshotArgs?.claimToken
-          ? async () => (await renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })) !== false
+          ? async () => (await renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })) === true
           : null,
           });
           break;

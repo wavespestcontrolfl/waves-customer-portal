@@ -386,6 +386,8 @@ describe('email template library rendering', () => {
     expect(onQueued).toHaveBeenCalledTimes(1);
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(abortUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', error_message: 'aborted_by_caller_before_dispatch' }));
+    // Scoped to THIS queued attempt — a reclaimed row (new token) is never marked failed by the old worker.
+    expect(abortUpdate.where).toHaveBeenCalledWith({ id: 'msg-abort', status: 'queued', send_attempt_token: expect.any(String) });
     expect(result).toEqual(expect.objectContaining({ sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' }));
     expect(result.message.status).toBe('failed');
   });
