@@ -3270,6 +3270,20 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
       expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
     });
 
+    test('a merge discovered during retirement queues internal-link planning like the mergeAstro merge paths (codex r26 P2)', async () => {
+      const logger = require('../services/logger');
+      process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'true';
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr.mockResolvedValue({ number: 43, state: 'closed', merged: true, merged_at: '2026-08-28T09:00:00Z', merge_commit_sha: 'm1', head: { ref: 'content/blog-ant-trails' } });
+      try {
+        await AstroPublisher.reconcileTopicBlockedPostPrs();
+        for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+        const lines = [...logger.info.mock.calls, ...logger.warn.mock.calls].map((c) => String(c[0]));
+        expect(lines.some((l) => /internal-link planning/.test(l))).toBe(true);
+      } finally { process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false'; }
+    });
+
     test('a row republished while GitHub was awaited (current PR #44) is NOT overwritten with the old merged PR #43 (codex r21 P1)', async () => {
       const stamps = [];
       reconcileDb([owedRow()], stamps, { current: owedRow({ astro_pr_number: 44, astro_branch_name: 'content/blog-ant-trails-v2', astro_status: 'pr_open' }) });

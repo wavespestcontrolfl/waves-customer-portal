@@ -926,6 +926,22 @@ describe('PR codex r22 (b4db7a542)', () => {
       expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
     }
   });
+  test('the District of Columbia and dotted D.C. are out-of-footprint (r26)', () => {
+    for (const t of ['pest control in the District of Columbia', 'termite regulations in the District of Columbia', 'D.C. termite treatment', 'Washington, D.C. rodent control']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('a.c. units and rodents in sarasota attics').out_of_area).toEqual([]);
+  });
+  test('slug collision is judged on the publisher\'s category route, not just the emitted slug (r26)', () => {
+    // Emitted under /termite/, committed under its category as /pest-control/in-wall-pest-control/ — which is LIVE.
+    const r = gate.evaluate(blog({ query: 'in wall pest tubes', title: 'In-Wall Pest Tubes Explained', slug: '/termite/in-wall-pest-control/', category: 'pest-control' }), { corpus: CORPUS });
+    expect(r.ok).toBe(false);
+    const hit = r.findings.find((f) => f.code === gate.CODES.SLUG_COLLIDES_LIVE);
+    expect(hit).toMatchObject({ url: '/pest-control/in-wall-pest-control/' });
+    expect(hit.message).toMatch(/commits it under its category/);
+    // The same emitted slug under the termite category is a different route — no collision.
+    expect(gate.evaluate(blog({ query: 'in wall termite tubes', title: 'In-Wall Termite Tubes Explained', slug: '/termite/in-wall-pest-control/', category: 'termite' }), { corpus: CORPUS }).findings.map((f) => f.code)).not.toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

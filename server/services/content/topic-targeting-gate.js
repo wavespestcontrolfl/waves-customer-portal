@@ -278,6 +278,8 @@ const METRO_ALIASES = Object.freeze([
   ['Las Vegas', /\bvegas\b/gi],
   ['Atlanta', /\batl\b/gi],
   ['Houston', /\bhtx\b/gi],
+  // The dotted district form; bare "DC" is a safe postal abbreviation already.
+  ['Washington, D.C.', /\bd\.c\.(?![a-z])/gi],
 ]);
 function metroAliasHits(text) {
   return METRO_ALIASES.filter(([, re]) => { re.lastIndex = 0; return re.test(text); }).map(([name]) => name);
@@ -293,7 +295,7 @@ const NATIONWIDE_RE = new RegExp(
 // before the abbreviation matchers when they carry that context.
 const SCIENCE_EXEMPT_RE = /\b(?:(?:low|high|soil|leaf|tissue|available|excess|deficient|deficiency|deficiencies|adequate|optimal|foliar|calcium|magnesium|potassium|nitrogen|phosphorus|sulfur|iron|ppm|mg\/l|percent|%)\s+(?:ca|mg|k|n|p|s|fe|mn|zn|cu|b|mo|al|na|cl|co|ni)|(?:ca|mg|k|n|p|fe|mn|zn|cu|na|al|co|ni)\s+(?:levels?|deficienc(?:y|ies)|ratios?|content|uptake|availability|toxicity|sufficiency|in\s+(?:soil|soils|turf|lawns?|grass|leaves|plants?|tissue))|ga(?:3)?\s+(?:applications?|treatments?|sprays?|levels?|rates?|concentrations?|sensitivity)|ct\s+(?:values?|scans?|products?|calculations?|concentration))\b/gi;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
-const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
+const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico|district of columbia)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
 // entity-ownership scan regardless of document frequency.
@@ -952,8 +954,18 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // the runner grants one feedback retry, and a redraft that fixes the city
   // but keeps the owned entity would otherwise spend it on a finding it was
   // never told about.
+  // Ownership is judged WITHIN a category: a chemical or species name can
+  // legitimately anchor a termite post and a mosquito post. Unknown category
+  // → compare against all (conservative).
+  const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   const selfUrl = normalizeSlug(slug);
   const selfLeaf = slugLeaf(selfUrl);
+  // The publisher commits the CATEGORY route (categoryRouteSlug: <category>/
+  // <leaf>) whatever category segment the emitted slug carried, so a
+  // collision is judged against that route too — "/termite/existing/" with
+  // category pest-control lands on /pest-control/existing/.
+  const routes = new Set([selfUrl]);
+  if (category && selfLeaf) routes.add(`/${category}/${selfLeaf}/`);
   // Only a LEAF-ONLY slug (no category segment) is written to the flat
   // src/content/blog/<leaf>.md and can overwrite a legacy file serving a
   // category-qualified URL; category-qualified candidates collide on the
@@ -966,14 +978,11 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // (Rows already live are exempted upstream by isLiveRow /
   // refresh_existing_page; nothing that enters evaluate() legitimately owns
   // an existing URL.)
-  const collided = selfUrl ? idx.posts.find((post) => post.url === selfUrl || (leafOnly && selfLeaf && slugLeaf(post.url) === selfLeaf)) : null;
+  const collided = selfUrl ? idx.posts.find((post) => routes.has(post.url) || (leafOnly && selfLeaf && slugLeaf(post.url) === selfLeaf)) : null;
   if (collided) {
-    findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: collided.url, message: `Slug ${selfUrl} collides with the LIVE post ${collided.url}${collided.url === selfUrl ? '' : ' (same leaf — the publisher writes one file per leaf)'}. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
+    const viaRoute = collided.url !== selfUrl && routes.has(collided.url);
+    findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: collided.url, message: `Slug ${selfUrl} collides with the LIVE post ${collided.url}${collided.url === selfUrl ? '' : viaRoute ? ` (the publisher commits it under its category as ${collided.url})` : ' (same leaf — the publisher writes one file per leaf)'}. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
   }
-  // Ownership is judged WITHIN a category: a chemical or species name can
-  // legitimately anchor a termite post and a mosquito post. Unknown category
-  // → compare against all (conservative).
-  const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   const owners = new Map();
   // Entities come from every targeting field (keyword + title + slug): an
   // idea may carry a generic or empty keyword with the owned entity only in

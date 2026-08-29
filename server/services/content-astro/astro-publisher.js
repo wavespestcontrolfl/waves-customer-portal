@@ -935,6 +935,8 @@ async function retireTopicBlockedPostPr(post) {
       const merged = current && current.astro_pr_number === prNumber
         ? await applyMergeEffect(post.id, current, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null, { onlyIfPrNumber: prNumber })
         : 0;
+      // The same post-merge side effect both mergeAstro merge paths queue.
+      if (merged) queueInternalLinkPlanning(current);
       if (!merged) logger.warn(`[astro-publisher] post ${post.id} moved on to another PR — merged topic-blocked PR #${prNumber} gets terminal bookkeeping only`);
       if (!await terminal('merged')) return { retired: false, merged: true, reason: 'terminal_stamp_failed' };
       await settle();
