@@ -2138,11 +2138,17 @@ function frozenSetupFeeAmount(estimateData = {}) {
 // customer accepted, never a live constant. 0 = no disclosed setup.
 function frozenRodentBaitSetupAmount(estimateData = {}) {
   const data = normalizeEstimateData(estimateData);
+  // Quote-wizard saves persist the disclosed setup ONLY as a raw engine
+  // line (engineResult.lineItems / result.lineItems) — the mapped oneTime
+  // containers exist on mapper-shaped saves alone (codex #3591 r5 P1), so
+  // both shapes are scanned.
   const containers = [
     data?.result?.oneTime?.items,
     data?.result?.oneTime?.specItems,
     data?.result?.specItems,
     data?.oneTime?.items,
+    data?.result?.lineItems,
+    data?.engineResult?.lineItems,
   ];
   for (const arr of containers) {
     if (!Array.isArray(arr)) continue;
@@ -5654,8 +5660,15 @@ const EstimateConverter = {
               // stamping splits it across visits — recording the net would
               // understate the year by the deposit. Residential with no deposit
               // is untaxed so this stays === annualAmount there.
+              // The one-time bait-station setup rides the INVOICE but is not
+              // annual coverage money (codex #3591 r5 P1): prepay_amount is
+              // the coverage-slicing basis (renewals split it across covered
+              // visits), so the setup share is excluded — otherwise every
+              // covered visit is over-credited by setup/visits during the
+              // payment-pending window. Residential prepay is untaxed, so
+              // subtracting the face amount is exact.
               prepayAmount: draftInvoiceAmount != null
-                ? Math.round((draftInvoiceAmount + appliedPrepayDepositCredit) * 100) / 100
+                ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit - prepayRodentSetupAmount) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get

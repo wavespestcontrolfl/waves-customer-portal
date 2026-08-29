@@ -3487,7 +3487,16 @@ export function calculateEstimate(inputs) {
   const md = inputs.manualDiscount;
   let manualDiscountAmount = 0;
   let manualDiscountInfo = null;
-  const manualDiscountableRecurringAnnual = waveGuardDiscountableAnnual - da;
+  // Manual (admin-entered) recurring discounts stay scoped to the four core
+  // programs on the server (MANUAL_RECURRING_DISCOUNT_SERVICES) — rodent
+  // bait takes the automatic tier % but is NOT manually discountable, so
+  // its post-WaveGuard annual leaves the manual base (codex #3591 r5 P1;
+  // the server regression test asserts the manual amount stays zero on a
+  // rodent-only estimate).
+  const rodentPostWgAnnual = R.rodBait
+    ? Math.round(R.rodBait.annual * (1 - wd) * 100) / 100
+    : 0;
+  const manualDiscountableRecurringAnnual = Math.max(0, waveGuardDiscountableAnnual - da - rodentPostWgAnnual);
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
     if (md.type === 'PERCENT') {

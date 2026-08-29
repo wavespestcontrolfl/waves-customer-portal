@@ -1256,8 +1256,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         if (Number(ext.per_sq_ft ?? ext.perSqFt) > 0) {
           constants.RODENT.baitBracketExtension.perSqFt = Number(ext.per_sq_ft ?? ext.perSqFt);
         }
-        if (Number(ext.stations_per_step ?? ext.stationsPerStep) > 0) {
-          constants.RODENT.baitBracketExtension.stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+        // Zero is a VALID increment (price grows past the top bracket while
+        // the station allowance stays flat) and the admin validator accepts
+        // it — the sync must honor it, not silently keep the old value
+        // (codex #3591 r5 P2).
+        const stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+        if (Number.isInteger(stationsPerStep) && stationsPerStep >= 0) {
+          constants.RODENT.baitBracketExtension.stationsPerStep = stationsPerStep;
         }
         if (Number(ext.per_visit_per_step ?? ext.perVisitPerStep) > 0) {
           constants.RODENT.baitBracketExtension.perVisitPerStep = r(Number(ext.per_visit_per_step ?? ext.perVisitPerStep));

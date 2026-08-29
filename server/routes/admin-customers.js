@@ -777,12 +777,19 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // canonical helper would fall back to the LIST rate here (its
         // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
         if (acceptedAnnual === 0) return {};
+        // The rodent billing-unit marker must ride the adapter objects
+        // (codex #3591 r5 P1): rodentBaitLineBillsMonthly inside the
+        // canonical helper reads it off the LINE it receives — a fresh
+        // object without it reclassifies a new per-application rodent row
+        // as legacy monthly and returns no provenance.
+        const billingMarker = line?.perApplicationBilled === true ? { perApplicationBilled: true } : {};
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,
             perApp: discountedPerApp,
             ...cadenceFields,
             annualAfterDiscount: acceptedAnnual,
+            ...billingMarker,
           }
           : {
             service: resolvedServiceKey,
@@ -792,6 +799,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
             annualAfterDiscount: acceptedAnnual,
             finalAnnual: line?.finalAnnual,
             annual: line?.annual ?? line?.ann,
+            ...billingMarker,
           });
         return pa?.amount > 0 ? { perApplicationPrice: pa.amount } : {};
       } catch { return {}; }
