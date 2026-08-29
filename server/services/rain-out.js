@@ -1991,12 +1991,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
       if (seriesMoveId && ownsSeriesText) {
         try {
-          if (sms.sent) {
+          if (sms.sent || sms.reason === 'QUIET_HOURS_HOLD') {
+            // Sent — or QUEUED: a quiet-hours hold is a deferral the sender
+            // delivers itself once the window opens, so the text is OWNED
+            // and concluded here (customer_notified true). Leaving it as a
+            // bare claim would read as an abandoned claim after the lease
+            // horizon and the reconciler would send a second confirmation
+            // beside the queued one (hook r29 P1).
             await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true });
-          } else if (sms.reason !== 'QUIET_HOURS_HOLD') {
-            // Definitive non-send (a quiet-hours HOLD is a deferral the
-            // sender delivers later — the claim stays): release the claim
-            // so a retry may send.
+          } else {
+            // Definitive non-send: release the claim so a retry may send.
             await db('series_moves').where({ id: seriesMoveId }).update({ notified_at: null, customer_notified: false });
           }
         } catch (err) {

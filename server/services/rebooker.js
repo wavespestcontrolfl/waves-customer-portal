@@ -1831,10 +1831,6 @@ class SmartRebooker {
         // named so the operator fixes that visit's time first instead of the
         // series silently carrying an off-hour start forward.
         let occurrenceWindow;
-        // A customer-path normalization (below) rewrites the sibling's
-        // bounds — the legacy presentation fields must not keep showing
-        // the old ones (codex r13 P2).
-        let sibWindowNormalized = false;
         // options.clearAnchorWindow: the caller's explicit "clear both bounds"
         // rides IN this transaction with the date move (the Edit appointment
         // modal) — the anchor lands windowless, never half-applied across
@@ -1850,9 +1846,13 @@ class SmartRebooker {
           // new date, so it passes the canonical validator on EVERY series
           // path (windows start on the hour — AGENTS.md), not only for admin
           // callers. Staff paths abort with the visit named (they can fix
-          // that visit's time); customer paths (web, SMS) must not dead-end
-          // on a legacy sibling's data — the sibling's start is normalized
-          // to its hour, duration kept, same as Quick Move's anchor rule.
+          // that visit's time). Customer paths (web, SMS) must neither
+          // dead-end on a legacy sibling's data nor silently change a
+          // future appointment's time (the date-only contract; the
+          // confirmation describes the anchor slot only — codex r14/hook r29):
+          // the stored window is carried VERBATIM. The on-the-hour rule
+          // governs newly selected windows; a kept legacy one is not a new
+          // selection.
           try {
             occurrenceWindow = seriesOccurrenceWindow({ start: null, end: null }, sib, { ...options, adminWindowRules: true });
           } catch (err) {
@@ -1861,12 +1861,8 @@ class SmartRebooker {
               err.message = `The future visit on ${dateOnly(sib.scheduled_date)} keeps a time this move can't carry forward (${err.message}) — fix that visit's time first, then move the series`;
               throw err;
             }
-            const [hh] = String(sib.window_start).split(':');
-            const flooredStart = `${String(hh).padStart(2, '0')}:00`;
-            const sibDuration = windowDurationMinutes(sib.window_start, sib.window_end, sib.estimated_duration_minutes);
-            occurrenceWindow = { start: flooredStart, end: deriveWindowEnd(flooredStart, sibDuration) };
-            sibWindowNormalized = true;
-            logger.warn(`[rebooker] series sibling ${sib.id} kept an off-hour start ${sib.window_start} — normalized to ${flooredStart} on its new date (${err.message})`);
+            occurrenceWindow = { start: sib.window_start || null, end: sib.window_end || null };
+            logger.warn(`[rebooker] series sibling ${sib.id} keeps its off-hour window ${sib.window_start}–${sib.window_end || '?'} verbatim on its new date (${err.message})`);
           }
         }
         // An exception row this shift lands exactly on its cadence date has
@@ -1888,10 +1884,6 @@ class SmartRebooker {
           window_end: occurrenceWindow.end,
           status: isAnchor ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
-          // Consumers prefer window_display / time_window over the bounds
-          // (admin-schedule, appointment cards) — a normalized window must
-          // not leave them promising the former off-hour time.
-          ...(sibWindowNormalized ? { time_window: null, window_display: null } : {}),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
           // Day change invalidates the row's route sequence — clear it so the

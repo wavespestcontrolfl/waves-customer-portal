@@ -555,10 +555,11 @@ describe('rescheduleSeries — one recorded operation', () => {
     preclose.mockRestore();
   });
 
-  test('a customer/SMS series path normalizes an off-hour kept sibling start to its hour (duration kept) instead of dead-ending; staff paths abort', async () => {
+  test('a customer/SMS series path carries an off-hour kept sibling window VERBATIM (never silently re-times a future visit) instead of dead-ending; staff paths abort', async () => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '09:15:00', window_end: '11:15:00' })]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {});
-    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00', window_end: '11:00' });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: dayOffset(19), window_start: '09:15:00', window_end: '11:15:00' });
+    expect(updates[1].update.mock.calls[0][0]).not.toHaveProperty('window_display');
   });
 
   test('a pinned NULL window_start fences a window added meanwhile (presence-based, like window_end)', async () => {
@@ -1040,7 +1041,7 @@ describe('caller wiring (source)', () => {
     expect(reb).toContain('|| lockedSkipWeekends !== seriesSkipWeekends) {');
     // …with the preference row read FOR SHARE inside the trx (held through commit), a normalized sibling window clears the legacy presentation fields, and the notification intent is recorded with the operation and driven from it on every effects pass.
     expect(reb).toContain(".forShare()\n            .first('preferred_day');");
-    expect(reb).toContain("...(sibWindowNormalized ? { time_window: null, window_display: null } : {}),");
+    expect(reb).not.toContain('sibWindowNormalized');
     expect(reb).toContain('notifyRequested: options.notifyRequested === true,');
     expect(reb).toContain("replayed: true, notifyRequested: prior.notify_requested === true };");
     const dispSrc = read('../routes/admin-dispatch.js');
