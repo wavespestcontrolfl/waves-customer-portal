@@ -1340,7 +1340,14 @@ function EstimateToolView() {
       .then((body) => (body && Array.isArray(body.keys) ? body.keys : null))
       .catch(() => null);
     existingQualifyingKeysRef.current = keysLoad;
-    keysLoad.then((keys) => { if (Array.isArray(keys)) setExistingQualifyingKeys(keys); });
+    keysLoad.then((keys) => {
+      // Only the CURRENT binding's load may populate state (codex #3591 r30
+      // P2): a bind that was cleared or replaced before this fetch resolved
+      // (account selected, then a property lookup found no match) must not
+      // repopulate the former customer's families for an unmatched quote.
+      if (existingQualifyingKeysRef.current !== keysLoad) return;
+      if (Array.isArray(keys)) setExistingQualifyingKeys(keys);
+    });
   };
 
   /* ── Live lawn pricing config → client fallback engine ────── */

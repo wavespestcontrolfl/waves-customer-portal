@@ -11,6 +11,7 @@ const {
   isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
   isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -391,6 +392,24 @@ describe('self-booking plan sync helpers', () => {
       service_type: 'Pest & Rodent Control',
       service_name: 'Pest & Rodent Control',
     })).toBe(false);
+  });
+
+  test('non-bait rodent exclusion: a rodent-led catalog identity vetoes a stale bait label (codex #3591 r30 P1)', () => {
+    // Repointed to trapping but still labeled as bait: the catalog decides —
+    // the row is NOT tier evidence and never enrolls a rodent_bait plan.
+    const repointed = { service_type: 'Rodent Bait Station Service', service_key: 'rodent_trapping', service_name: 'Rodent Trapping' };
+    expect(isNonBaitRodentServiceRow(repointed)).toBe(true);
+    // The reverse: a bait catalog identity with a stale trapping label stays
+    // qualifying coverage.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'rodent_bait_station_quarterly' })).toBe(false);
+    // Unlinked legacy rows still classify from the label alone.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping' })).toBe(true);
+    // A non-rodent catalog identity leaves the label-based classification
+    // untouched (the catalog-family prune in detectWaveGuardPlanKeys owns
+    // that row's family).
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Bait Station Service', service_key: 'pest_general_quarterly' })).toBe(false);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Pest & Rodent Control', service_key: 'rodent_trapping' })).toBe(true);
   });
 
   test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {

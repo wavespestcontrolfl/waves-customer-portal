@@ -48,6 +48,11 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(booking).toMatch(/if \(priorKind === 'rodent_bait_setup'\) \{\s*\n\s*const \{ stripWaivedRodentSetupFromDraft \} = require\('\.\/public-quote'\)\._internals;/);
   });
 
+  test('the lookup-failure waiver keeps the setup-fee KIND so the rodent strip + frozen reader honor it (codex #3591 r30 P1)', () => {
+    expect(publicQuote).toMatch(/return \{ amount: 0, waived: 'membership_undetermined', kind: setupFeeBasis\?\.kind \};/);
+    expect(publicQuote).not.toMatch(/waived: 'membership_undetermined' \}/);
+  });
+
   test('consumed-handoff retry identity comes ONLY from the contact-bound shared recovery', () => {
     // The gate arm must never assign identity itself — bindGateEstimate
     // validates only the draft's stored contact.

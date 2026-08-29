@@ -704,4 +704,14 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).toContain('Base price does not include bagging or debris hauling.');
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
+
+  test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {
+    // A bind cleared/replaced before its fetch resolved must not repopulate
+    // the former customer's families for an unmatched fallback quote.
+    const bindAt = legacyAdminSource.indexOf('const bindMatchedCustomer = (match) => {');
+    expect(bindAt).toBeGreaterThan(0);
+    const bind = legacyAdminSource.slice(bindAt, bindAt + 2500);
+    expect(bind).toContain('existingQualifyingKeysRef.current = keysLoad;');
+    expect(bind).toMatch(/keysLoad\.then\(\(keys\) => \{[\s\S]*?if \(existingQualifyingKeysRef\.current !== keysLoad\) return;\s*\n\s*if \(Array\.isArray\(keys\)\) setExistingQualifyingKeys\(keys\);/);
+  });
 });

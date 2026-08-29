@@ -1072,12 +1072,24 @@ function rodentRowTextFields(row = {}) {
 // rows are qualifying WaveGuard coverage, so only NON-bait rodent-led rows
 // (trapping, exclusion, sanitation, one-time) stay excluded from the
 // reconciliation evidence.
+const RODENT_BAIT_TOKEN_RE = /\b(bait|station|stations|monitor|monitoring)\b/;
+function textHasRodentBaitToken(value) {
+  return RODENT_BAIT_TOKEN_RE.test(String(value || '').toLowerCase().replace(/[_-]+/g, ' '));
+}
+
 function isNonBaitRodentServiceRow(row = {}) {
   if (!isRodentLedServiceRow(row)) return false;
-  return !rodentRowTextFields(row).some((value) => {
-    const s = String(value || '').toLowerCase().replace(/[_-]+/g, ' ');
-    return /\b(bait|station|stations|monitor|monitoring)\b/.test(s);
-  });
+  // A rodent-led CATALOG identity decides bait vs non-bait on its own
+  // (codex #3591 r30 P1): a recurring row repointed to rodent_trapping that
+  // still carries a stale "Rodent Bait Station Service" service_type is a
+  // trapping row — the stale label must not keep it in the tier evidence
+  // (detectWaveGuardPlanKeys would then fall through to the full text and
+  // enroll the trapping plan as rodent_bait). Rows with no catalog identity,
+  // or a non-rodent one (the catalog-family prune handles those), still
+  // classify from every text field as before.
+  const catalogText = catalogTextForServiceRow(row);
+  if (catalogText && textIsRodentLed(catalogText)) return !textHasRodentBaitToken(catalogText);
+  return !rodentRowTextFields(row).some(textHasRodentBaitToken);
 }
 
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)

@@ -1714,7 +1714,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued });
       } catch (memberErr) {
         logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
-        return { amount: 0, waived: 'membership_undetermined' };
+        // The waiver keeps its KIND (codex #3591 r30 P1): the rodent-setup
+        // strip below and frozenRodentBaitSetupAmount both key on
+        // kind === 'rodent_bait_setup' — a kindless zero left the engine's
+        // positive rodent_bait_setup row in the draft, so a later view or
+        // acceptance charged the setup this failure path had waived.
+        return { amount: 0, waived: 'membership_undetermined', kind: setupFeeBasis?.kind };
       }
     };
 
