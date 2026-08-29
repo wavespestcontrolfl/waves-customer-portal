@@ -74,8 +74,13 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: hasPlan
         ? 'Noted the shortfall and set this week’s watering plan on the report.'
         : 'Noted the shortfall and set the watering target on the report.',
+      // The sentence must agree with the plan card below it — a hold /
+      // conditional plan is never described as "setting runs" (gh-r44,
+      // same rule as buildRootCause).
       customerAction: hasPlan
-        ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
+        ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
+          ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
+          : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
         : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and color next visit.'

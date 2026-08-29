@@ -102,7 +102,6 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
     : (ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null);
   const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
   const profileCounty = norm(county);
-  const profileDiverges = !!pCity && !!cCity && pCity !== cCity;
   // A profile with NO city context can still be stale: when the customer's
   // current ZIP/city maps to a different county, the current one wins.
   const countyConflicts = !!profileCounty && !!currentCounty && profileCounty !== currentCounty;
@@ -124,7 +123,13 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
     // a contradiction (codex gh-r34).
     return profileCounty && !countyConflicts ? profileCounty : currentCounty;
   }
-  if (profileCounty && !profileDiverges && !countyConflicts) return profileCounty;
+  // No stamped move: the technician's profile county stands unless the
+  // CURRENT address establishes a conflicting county. A differing postal
+  // city alone (Sarasota → University Park at the same street + shared ZIP
+  // 34243) is a same-home alias — real moves stamp irrigation_home_changed_at
+  // via the address fan-out, and a city that resolves to a different county
+  // still wins through countyConflicts (codex gh-r44).
+  if (profileCounty && !countyConflicts) return profileCounty;
   return currentCounty;
 }
 

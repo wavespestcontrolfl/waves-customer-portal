@@ -118,6 +118,9 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // what lets the weekly watering plan trust the profile county again.
   const [countyTouched, setCountyTouched] = useState(false);
   const [grassTouched, setGrassTouched] = useState(false);
+  // Move stamp the loaded turf form was rendered against (freshness token
+  // echoed on save — codex #3565 gh-r44).
+  const profileHomeStampRef = useRef(null);
   // Tech-confirmed scores. Initialized from the server-adjusted /assess
   // scores; the tech can nudge any tile up/down before confirm.
   // recordTechCalibration on the server uses the AI vs tech delta to
@@ -311,6 +314,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
     setProfileLoading(true);
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/turf-profile`);
+      profileHomeStampRef.current = d.irrigation_home_changed_at ?? null;
       // Server returns { profile: row | null }. Coerce nulls to ''
       // so the form's controlled inputs don't drop to uncontrolled.
       const p = d.profile;
@@ -347,6 +351,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       ),
       county_confirmed: countyTouched,
       grass_confirmed: grassTouched,
+      confirmed_as_of: profileHomeStampRef.current ?? null,
     };
     setProfileSaving(true);
     try {

@@ -116,9 +116,12 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ city: 'Sarasota' })).toBeNull();
     expect(resolveRestrictionCounty({ city: 'Sarasota', zip: '34239' })).toBe('Sarasota'); // an unambiguous ZIP still resolves
     expect(resolveRestrictionCounty({})).toBeNull();
-    // Stale profile (same guard as the plan engine): profile city ≠ customer
-    // city → the profile's county is dropped; the current city decides.
+    // A current address that establishes a CONFLICTING county wins over the profile.
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Port Charlotte' })).toBe('Charlotte');
+    // gh-r44: with NO stamped move, a postal-city alias alone never invalidates the profile county —
+    // Sarasota → University Park at shared ZIP 34243 keeps the tech's Manatee.
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Sarasota', city: 'University Park', zip: '34243' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: 'Venice', city: 'Englewood' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Bradenton' })).toBe('Manatee');
     // No profile city context but the current city maps to a DIFFERENT county → the current city wins.
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Port Charlotte' })).toBe('Charlotte');
@@ -182,7 +185,7 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     const path = require('path');
     const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
     // Same transaction as the profile upsert (the turf fence's trx), never a second one after commit (hook P1 on 45beb0731).
-    expect(route).toMatch(/withTurfProfileFence\(db, customerId, async \(trx\) => \{[\s\S]*?\.returning\('\*'\);[\s\S]*?if \(countyConfirmed\) \{\s*await confirmIrrigationFields\(trx, customerId, \[COUNTY_CONFIRMED_FIELD\]\);\s*\}\s*return rows;\s*\}\);/);
+    expect(route).toMatch(/withTurfProfileFence\(db, customerId, async \(trx\) => \{[\s\S]*?\.returning\('\*'\);[\s\S]*?if \(countyConfirmed && requestFresh\) \{\s*await confirmIrrigationFields\(trx, customerId, \[COUNTY_CONFIRMED_FIELD\]\);\s*\}\s*return rows;\s*\}\);/);
     // gh-r33: an EXPLICIT review flag, never payload presence (the form re-sends every loaded field on every save).
     expect(route).toMatch(/const countyConfirmed = \(req\.body \|\| \{\}\)\.county_confirmed === true\s*&& typeof fields\.county === 'string' && !!fields\.county\.trim\(\);/);
     const panel = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'admin', 'LawnAssessmentPanel.jsx'), 'utf8');
