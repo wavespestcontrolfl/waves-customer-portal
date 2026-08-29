@@ -332,8 +332,202 @@ async function syncOperationalStatus(svc, toStatus, actorId) {
  * Returns: { ok, state, enRouteAt, smsSent, alreadyEnRoute, reason? }
  */
 async function markEnRoute(serviceId, opts = {}) {
+  const result = await markEnRouteCore(serviceId, opts);
+  // Visit group: canonical en-route path for every signal, so the whole
+  // stop follows from here — on the idempotent re-tap too, which is what
+  // repairs a sibling left behind by a transient failure (codex #3603 r1).
+  if (result && result.ok && !opts._visitSibling && result._row) {
+    const smsOutcome = result.smsOutcome || (result.smsSent ? 'sent' : 'already_handled');
+    const fan = await applyVisitFanOut({
+      row: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
+      smsOutcome, notificationOwner: result.visitNotificationOwner === true, claimToken: result.visitClaimToken || null,
+    });
+    if (fan) {
+      result.visitFanOut = fan;
+      // The canonical result carries the stop's truth (codex r5): an
+      // incomplete fan-out is NOT ok — routes 409 ("tap again"), the admin
+      // alert recorder fires, and automatic callers (geofence / GPS / time
+      // clock) do not record success, so their next signal re-runs it.
+      if (fan.ok === false) { result.ok = false; result.reason = 'visit_fanout_incomplete'; }
+    }
+  }
+  if (result) delete result._row;
+  return result;
+}
+
+/**
+ * Fan the transition out to the visit and reconcile the notification claim
+ * (shared by both tracker writers). Returns the fan-out result, or a
+ * synthetic { ok:false } when the claim itself failed or an owned claim
+ * could not be finalized because the fan-out did not run.
+ */
+async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, notificationOwner, claimToken = null }) {
+  const visitGroups = require('./visit-groups');
+  let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner, claimToken });
+  if (!row.visit_id) return fan;
+  if (smsOutcome === 'claim_error' || smsOutcome === 'claim_in_flight' || smsOutcome === 'lease_expired') {
+    const reason = smsOutcome === 'claim_error' ? 'notification claim failed'
+      : smsOutcome === 'lease_expired' ? 'notification lease expired' : 'notification claim in flight';
+    return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason };
+  }
+  // Owned claim whose ledger row the fan-out did not finalize — because it
+  // did not run (primary detached / visit no longer open) OR because it
+  // aborted before its finalize step (codex r7): finalize here, so the row
+  // never stays `claimed` and a retryable miss is reclaimable next signal.
+  const finalizeAttempted = fan && (fan.effect || (fan.trackerFailures || []).some((f) => f.id === 'effect_finalize'));
+  if (notificationOwner && !finalizeAttempted) {
+    const fin = await visitGroups.finalizeVisitNotification(row.visit_id, kind, smsOutcome, new Date(), claimToken);
+    if (!fin.ok) {
+      fan = { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason: fin.reason };
+    } else if (fan && fin.status) {
+      fan.effect = { effectType: fin.effectType, status: fin.status };
+    }
+  }
+  return fan;
+}
+
+/**
+ * The en-route customer text for ONE row, with the visit-scoped claim in
+ * front of it (codex #3603 r4–r6). Shared by the fresh flip and the
+ * idempotent re-entry of a grouped row whose guard is still NULL (a prior
+ * claim error / provider failure), so "the next signal retries" is true.
+ * `attemptAt` is THIS attempt's en_route_at — every guard write is fenced
+ * to it plus the schedule tuple and tracker state.
+ */
+async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}, attemptAt }) {
+  let smsSent = false;
+  // Classification for the visit effect ledger (codex #3603 r2): a
+  // deterministic suppression (opt-out / covered sibling / already handled)
+  // must read differently from a provider failure ('retry').
+  let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
+  let visitClaim = null;
+  let claimToken = null;
+  const guardOpen = !svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears;
+  const attemptFence = {
+    id: serviceId,
+    track_state: 'en_route',
+    en_route_at: attemptAt,
+    scheduled_date: svc.scheduled_date ?? null,
+  };
+  if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling && guardOpen) {
+    // Claimed under the stop lock with membership verified (r5): 'detached'
+    // means this row is no longer in the visit — it texts as a plain row.
+    const claim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
+    visitClaim = claim && claim.state;
+    claimToken = claim && claim.token;
+    if (visitClaim === 'taken') {
+      smsOutcome = 'covered';
+      try {
+        // Fenced to THIS attempt (r6): a live reschedule that reset the
+        // row's guards for a new attempt must not be stamped covered.
+        await db('scheduled_services').where({ ...attemptFence, visit_id: svc.visit_id })
+          .whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+      } catch (err) {
+        logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
+      }
+    } else if (visitClaim === 'error' || visitClaim === 'in_flight') {
+      // Unknown claim state, or another member's claim still in flight (a
+      // lease, r8): never send, leave the guard NULL so the next signal
+      // retries; the wrapper reports the stop incomplete.
+      smsOutcome = visitClaim === 'error' ? 'claim_error' : 'claim_in_flight';
+    }
+  }
+  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
+  if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route', claimToken))) {
+    // Our own lease expired before we could send (a stalled process): a
+    // reclaim may own the notice now — never send twice (codex r9).
+    smsOutcome = 'lease_expired';
+  }
+  // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
+  // way" text came from the visit's primary row; the visit stamps this row
+  // as covered afterwards (visit-groups.fanOutLiveTransition).
+  if (!opts.suppressCustomerSms && mayText && guardOpen && smsOutcome !== 'lease_expired') {
+    try {
+      const tech = svc.technician_id
+        ? await db('technicians').where({ id: svc.technician_id }).first('name')
+        : null;
+      const techName = tech?.name || 'Your Waves technician';
+      const trackToken = svc.track_view_token;
+
+      const etaMinutes = await resolveEnRouteEtaMinutes({
+        technicianId: svc.technician_id,
+        customerId: svc.customer_id,
+        serviceId: svc.id,
+      });
+
+      // Lease RENEWED atomically under our token IMMEDIATELY before the
+      // provider call (codex r11/r12): ownership stays valid through the
+      // send even if the ETA lookup ate the lease; a reclaim (new token)
+      // makes the renew fail — never send twice.
+      if (visitClaim === 'owner'
+          && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'en_route', claimToken))) {
+        smsOutcome = 'lease_expired';
+        throw Object.assign(new Error('lease expired before send'), { leaseExpired: true });
+      }
+      const result = await TwilioService.sendTechEnRoute(
+        svc.customer_id,
+        techName,
+        etaMinutes,
+        trackToken,
+        {
+          operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
+        },
+      );
+
+      // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
+      // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
+      smsOutcome = result && result.success ? 'sent' : (result == null || result.suppressed ? 'suppressed' : 'retry');
+      if (smsOutcome === 'suppressed' && svc.visit_id) {
+        // Grouped row: stamp the attempt handled so later signals do not
+        // reclaim and send a stale notice once the preference flips.
+        try {
+          await db('scheduled_services').where(attemptFence).whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+        } catch (guardErr) {
+          logger.error(`[track-transitions] en-route opt-out guard stamp failed for ${serviceId}: ${guardErr.message}`);
+        }
+      }
+      if (result && result.success) {
+        smsSent = true;
+        try {
+          // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
+          // the schedule tuple), not just track_state — a same-day reschedule
+          // can rewind the row and a FRESH attempt can reach en_route while
+          // this Twilio call was in flight. The SMS did go out; if the guard
+          // write misses, the fresh attempt re-sending is intended.
+          await db('scheduled_services').where(attemptFence).update({ track_sms_sent_at: new Date() });
+        } catch (guardErr) {
+          // The text DID go out — keep 'sent'; the guard stamp failure is its
+          // own log line (codex r5).
+          logger.error(`[track-transitions] en-route SMS guard stamp failed for ${serviceId}: ${guardErr.message}`);
+        }
+      }
+    } catch (err) {
+      if (err && err.leaseExpired) {
+        logger.warn(`[track-transitions] en-route SMS for ${serviceId} skipped: ${err.message}`);
+      } else {
+        logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
+        if (smsOutcome !== 'sent') smsOutcome = 'retry';
+      }
+    }
+  }
+  return { smsSent, smsOutcome, visitClaim, claimToken };
+}
+
+async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
+  // for a row that no longer is the row the fan-out locked (rescheduled /
+  // detached in between) is refused rather than applied to the new attempt.
+  if (opts._visitSibling && opts.expect) {
+    const e = opts.expect;
+    if (String(svc.visit_id || '') !== String(e.visitId || '')
+        || (scheduledDayOf(svc) || '') !== String(e.scheduledDate || '')
+        || String(svc.status) !== String(e.status)) {
+      return { ok: false, reason: 'sibling_state_changed' };
+    }
+  }
+
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   // Terminal operational status rejects here, not just at the routes: the
   // stale-heal below reloads and re-enters, and a completion can commit
@@ -477,12 +671,24 @@ async function markEnRoute(serviceId, opts = {}) {
     if (svc.track_state === 'en_route') {
       emitCustomerTrackRefresh(svc, 'en_route', svc.en_route_at || new Date());
     }
+    // Grouped row already en route with its guard still NULL (a prior claim
+    // error or provider failure): the re-entry IS the retry (codex r6) —
+    // reclaim and send, fenced to the existing attempt's en_route_at.
+    let retry = { smsSent: false, smsOutcome: undefined, visitClaim: null, claimToken: null };
+    if (svc.visit_id && svc.track_state === 'en_route' && !svc.track_sms_sent_at
+        && !opts._visitSibling && !opts.suppressCustomerSms) {
+      retry = await claimAndSendEnRoute({ svc, serviceId, opts, attemptAt: svc.en_route_at });
+    }
     return {
       ok: true,
       state: svc.track_state,
       enRouteAt: svc.en_route_at,
-      smsSent: false,
+      smsSent: retry.smsSent,
+      ...(retry.smsOutcome ? { smsOutcome: retry.smsOutcome } : {}),
+      visitNotificationOwner: retry.visitClaim === 'owner',
+      visitClaimToken: retry.claimToken || null,
       alreadyEnRoute: svc.track_state === 'en_route',
+      _row: svc,
     };
   }
 
@@ -540,6 +746,7 @@ async function markEnRoute(serviceId, opts = {}) {
       enRouteAt: fresh?.en_route_at || null,
       smsSent: false,
       alreadyEnRoute: fresh?.track_state === 'en_route' || !fresh,
+      _row: svc,
     };
   }
 
@@ -569,63 +776,8 @@ async function markEnRoute(serviceId, opts = {}) {
   // A stale guard from the aborted earlier attempt was cleared in the flip
   // write above, so it must not suppress today's send. A same-day guard
   // (SMS already sent for THIS attempt) still suppresses.
-  let smsSent = false;
-  if (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears) {
-    try {
-      const tech = svc.technician_id
-        ? await db('technicians').where({ id: svc.technician_id }).first('name')
-        : null;
-      const techName = tech?.name || 'Your Waves technician';
-      const trackToken = svc.track_view_token;
-
-      // Best-effort live ETA from tech_status → customer geocode.
-      // Returns null when tech GPS is stale/missing or the customer
-      // address isn't geocoded — SMS still fires without the ETA line.
-      const etaMinutes = await resolveEnRouteEtaMinutes({
-        technicianId: svc.technician_id,
-        customerId: svc.customer_id,
-        serviceId: svc.id,
-      });
-
-      const result = await TwilioService.sendTechEnRoute(
-        svc.customer_id,
-        techName,
-        etaMinutes,
-        trackToken,
-        {
-          // Send-window operator provenance: a tech/admin manually marking
-          // a late visit en route chose the moment and the customer notice
-          // is the time-sensitive point of the tap — the tech is literally
-          // driving there. Geofence/system transitions stay fenced.
-          operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
-        },
-      );
-
-      // sendTechEnRoute can return undefined (opt-out path), falsy results,
-      // or { success, sid }. Only mark sent on a positive signal.
-      if (result && result.success) {
-        // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
-        // the schedule tuple), not just track_state — a same-day reschedule
-        // can rewind the row and a FRESH attempt can reach en_route while
-        // this Twilio call was in flight, and a state-only match would
-        // stamp the old attempt's guard onto the new attempt, suppressing
-        // its notification. The SMS did go out; if the guard write misses,
-        // the fresh attempt re-sending is the intended behavior.
-        await db('scheduled_services')
-          .where({
-            id: serviceId,
-            track_state: 'en_route',
-            en_route_at: now,
-            scheduled_date: svc.scheduled_date ?? null,
-          })
-          .update({ track_sms_sent_at: new Date() });
-        smsSent = true;
-      }
-    } catch (err) {
-      logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
-      // Leave track_sms_sent_at NULL so a retap can retry.
-    }
-  }
+  const sendResult = await claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears, attemptAt: now });
+  const { smsSent, smsOutcome, visitClaim, claimToken } = sendResult;
 
   // One-time "introducing the app" email for a new recurring customer's first
   // visit — fired here so it lands exactly when "watch your tech arrive live"
@@ -649,8 +801,13 @@ async function markEnRoute(serviceId, opts = {}) {
     state: 'en_route',
     enRouteAt: now,
     smsSent,
+    smsOutcome,
+    visitNotificationOwner: visitClaim === 'owner',
+    visitClaimToken: claimToken || null,
     alreadyEnRoute: false,
+    _row: svc,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
+    ...(opts.suppressCustomerSms ? { smsSuppressed: 'visit' } : {}),
   };
 }
 
@@ -705,7 +862,7 @@ function classifyArrivalSend(result) {
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
 async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
-  if (svc.arrival_sms_sent_at) return;
+  if (svc.arrival_sms_sent_at) return 'already_handled';
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
   // means "handled", so an arrival under a disabled gate is recorded, not sent.
@@ -736,10 +893,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
     );
   }
   const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
-  if (!claimed) return;
+  if (!claimed) return 'not_claimed';
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
-  if (!isEnabled('techArrivedSms')) return;
+  if (!isEnabled('techArrivedSms')) return 'gate_off';
 
   let outcome = 'retry';
   try {
@@ -765,6 +922,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
     }
   }
+  return outcome;
 }
 
 /**
@@ -774,6 +932,18 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
+  // for a row that no longer is the row the fan-out locked (rescheduled /
+  // detached in between) is refused rather than applied to the new attempt.
+  if (opts._visitSibling && opts.expect) {
+    const e = opts.expect;
+    if (String(svc.visit_id || '') !== String(e.visitId || '')
+        || (scheduledDayOf(svc) || '') !== String(e.scheduledDate || '')
+        || String(svc.status) !== String(e.status)) {
+      return { ok: false, reason: 'sibling_state_changed' };
+    }
+  }
+
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   // Terminal operational status rejects on EVERY load (same guard as
   // markEnRoute): the stale-attempt repair below reloads and re-enters,
@@ -972,8 +1142,63 @@ async function markOnProperty(serviceId, opts = {}) {
   // (geofence drive-past for a job the tech hasn't actually started) skips it —
   // the flip leaves the guard NULL so a later real arrival still sends.
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
+  let arrivalSms = 'not_attempted';
+  let visitClaim = null;
+  let claimToken = null;
   if (arrivalRow && !opts.suppressArrivalSms) {
-    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+    // Visit-scoped claim before the per-row arrival sender, taken under the
+    // stop lock with membership verified (codex r4/r5).
+    if (svc.visit_id && !opts._visitSibling && !arrivalRow.arrival_sms_sent_at) {
+      const claim = await require('./visit-groups').claimVisitNotification(svc, 'on_site');
+      visitClaim = claim && claim.state;
+      claimToken = claim && claim.token;
+    }
+    if (visitClaim === 'owner' && !(await require('./visit-groups').renewNotificationLease(svc.visit_id, 'on_site', claimToken))) {
+      arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
+    } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
+      arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+    } else if (visitClaim === 'taken') {
+      arrivalSms = 'covered';
+      try {
+        // Fenced to THIS arrival attempt (r6): same predicate shape as the
+        // arrival guard claim — tracker state, schedule tuple, arrived_at.
+        const fence = db('scheduled_services')
+          .where({ id: serviceId, visit_id: svc.visit_id, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null })
+          .whereNull('arrival_sms_sent_at');
+        if (claimArrivedAt == null) fence.whereNull('arrived_at');
+        else fence.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
+        await fence.update({ arrival_sms_sent_at: new Date() });
+      } catch (err) {
+        logger.error(`[track-transitions] arrival covered stamp failed for ${serviceId}: ${err.message}`);
+      }
+    } else {
+      // unknown claim state, or a live claim in flight: never send, guard stays NULL
+      arrivalSms = visitClaim === 'in_flight' ? 'claim_in_flight' : 'claim_error';
+    }
+  }
+  if (result && result.ok) {
+    result.arrivalSms = arrivalSms;
+    // Visit group: this is the canonical arrival path for every signal
+    // (manual, admin, geofence, GPS, time clock), so the whole stop follows
+    // from here (visit-group-scope.md §3; codex #3603 r1). Siblings re-enter
+    // with _visitSibling and never fan out again. Audit actor: opts.actorId
+    // (admin flips pass the authenticated admin here, NOT as actingTechId —
+    // that one names the tech in the customer text).
+    // A suppressed arrival is a geofence DRIVE-PAST (the tech is still on
+    // another job) — it is not a live grouped-stop transition and must not
+    // start the siblings (codex r7); the real arrival (manual / time clock /
+    // a later ENTER) fans out.
+    if (!opts._visitSibling && !opts.suppressArrivalSms) {
+      const fan = await applyVisitFanOut({
+        row: svc, kind: 'on_site', actorType: opts.actorType || 'tech',
+        actorId: opts.actorId || opts.actingTechId || null, smsOutcome: arrivalSms,
+        notificationOwner: visitClaim === 'owner', claimToken,
+      });
+      if (fan) {
+        result.visitFanOut = fan;
+        if (fan.ok === false) { result.ok = false; result.reason = 'visit_fanout_incomplete'; }
+      }
+    }
   }
   return result;
 }

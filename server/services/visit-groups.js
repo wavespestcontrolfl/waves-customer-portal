@@ -104,6 +104,13 @@ function canJoin(row, visit) {
   if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) {
     return { ok: false, reason: 'row_terminal' };
   }
+  // An unconfirmed office-review booking is not yet a real stop (it needs
+  // the tech's field-confirm tap or the office's activation first); it
+  // groups once confirmed — the shared status writer regroups it on
+  // pending → confirmed (codex #3603 r2).
+  if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) {
+    return { ok: false, reason: 'office_review' };
+  }
   if (!row.groupable) return { ok: false, reason: 'not_groupable' };
   if (!familiesCompatible(row.group_family, visit.group_family)) return { ok: false, reason: 'family' };
   if (row.technician_id && visit.technician_id
@@ -341,6 +348,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       .whereIn('ss.id', ids)
       .select(
         'ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.source_action', 'ss.customer_confirmed',
         'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.status',
         'ss.visit_id',
         'svc.groupable as groupable', 'svc.group_family as group_family',
@@ -387,6 +395,9 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       }
       if (!r.groupable || !r.group_family) {
         throw new Error('rows not mutually groupable: not_groupable');
+      }
+      if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(r)) {
+        throw new Error('rows not mutually groupable: office_review');
       }
     }
     // A row that already carries a completion artifact (service record or
@@ -890,6 +901,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
       .where('ss.id', rowId)
       .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.source_action', 'ss.customer_confirmed',
         'ss.window_start', 'ss.window_end', 'ss.technician_id',
         'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
     if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
@@ -906,6 +918,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     // window + tech for the office). Office placement/explicit grouping
     // is the path for those rows — as subject AND as partner.
     if (!row.window_start) return null;
+    if (require('./call-booking-source-actions').isPendingOutboundReviewBooking(row)) return null;
     if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -923,6 +936,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     else partnersQ.whereNull('ss.property_id');
     partnersQ.select('ss.window_start', 'ss.window_end', 'ss.technician_id',
       'ss.customer_id', 'ss.property_id', 'ss.scheduled_date', 'ss.status',
+      'ss.source_action', 'ss.customer_confirmed',
       'svc.groupable', 'svc.group_family');
     // Every same-stop candidate, deterministically ordered — a cap made
     // grouping depend on heap order once a customer had more rows than
@@ -974,6 +988,537 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
   }
 }
 
+// ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
+// En Route / Arrived are tapped ONCE per visit. The tapped row is the
+// primary; every eligible sibling (same open visit, non-terminal, same
+// technician) transitions in the SAME transaction through the shared
+// status writer (each row's own CAS still runs). Tracker writers run per
+// sibling after commit with the customer text suppressed — the customer
+// gets exactly one "on the way" / "arrived" text, from the primary — and
+// the visit records the one-shot in visit_effects (tracker_en_route /
+// tracker_arrived), which also starts the membership freeze (canDissolve).
+// Implicit SIBLING eligibility only — a `rescheduled` row is a withdrawn
+// placeholder awaiting replacement (JOIN_INELIGIBLE_STATUSES) and is never
+// advanced by another member's tap (codex #3603 r7); the explicit primary
+// keeps its route-level rules.
+const LIVE_TRANSITION_FROM = Object.freeze({
+  en_route: ['pending', 'confirmed'],
+  on_site: ['pending', 'confirmed', 'en_route'],
+});
+
+function siblingEligibleFor(toStatus, siblingStatus) {
+  const allowed = LIVE_TRANSITION_FROM[String(toStatus || '')];
+  return Boolean(allowed && allowed.includes(String(siblingStatus || '')));
+}
+
+/**
+ * THE visit-aware step of every tracker transition (codex #3603 r1): called
+ * by track-transitions.markEnRoute / markOnProperty after the primary row's
+ * own write succeeded — manual taps, admin status flips, geofence, GPS
+ * arrival and the time clock all converge there, so one En Route / Arrived
+ * signal moves the whole stop no matter which entry point produced it.
+ *
+ * Runs on EVERY call for a grouped primary, including idempotent re-taps,
+ * and is idempotent itself (siblings already at the target are skipped for
+ * status but still reconciled for tracker state; effect rows insert
+ * on-conflict-ignore) — a transient failure after a partial run is repaired
+ * by the next signal instead of leaving siblings stale.
+ *
+ * Lock order: stop advisory lock → sibling row locks, in its OWN
+ * transaction after the primary's transaction committed — the primary's
+ * status write never holds a row lock while waiting on the stop lock, so
+ * two taps on different members (or a tap vs a split/reschedule seam)
+ * cannot deadlock.
+ *
+ * `primary` is the already-loaded scheduled_services row (select *) — an
+ * ungrouped row costs no query at all.
+ */
+/**
+ * Visit-scoped notification claim (doc §2 handoff rule; codex #3603 r4/r5):
+ * taken by a member's tracker path BEFORE its per-row customer send, UNDER
+ * the stop lock with the row's membership re-verified — a row a split just
+ * detached never claims (and never blocks) the old visit's notice. The
+ * visit_effects row for (visit, tracker_*) is inserted `claimed` on the
+ * unique key: exactly one concurrent member wins and sends; the others see
+ * 'taken' and stamp themselves covered. Customer texts are at-most-once —
+ * an unknown claim state ('error') never sends and is reported to the
+ * caller as an incomplete stop, never silently swallowed.
+ * Returns { state: 'owner' | 'taken' | 'in_flight' | 'detached' | 'error',
+ * token } — `token` (random, stored as visit_effects.claim_token, codex r10)
+ * is the owner's proof of ownership for its pre-send lease check and its
+ * finalize; a reclaim issues a new token, so a stalled former owner can
+ * neither send nor finalize over it. null when the row has no visit.
+ */
+async function claimVisitNotification(row, kind) {
+  if (!row || !row.visit_id) return null;
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  const logger = require('./logger');
+  const token = require('crypto').randomBytes(16).toString('hex');
+  try {
+    return await db.transaction(async (t) => {
+      let visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      await lockStop(t, visit.stop_base_key);
+      // Re-read the parent AFTER the lock (codex #3603 r14): a whole-visit
+      // reassignment / window recompute that committed while we waited
+      // must be judged on the current parent, not the pre-lock snapshot.
+      visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      // Full stop tuple, not just the id (codex r9): a same-day window move
+      // whose detach seam has not run yet still carries the old visit_id.
+      const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
+        .first('id', 'visit_id', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
+      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      // The visit owns assignment: a one-child reassignment that committed
+      // ahead of its detach seam is a detached row (codex r12).
+      if (visit.technician_id && String(fresh.technician_id || '') !== String(visit.technician_id)) return { state: 'detached', token: null };
+      if (!rowStillAtVisitStop(fresh, visit, await otherLiveMembers(t, visit.id, fresh.id))) return { state: 'detached', token: null };
+      // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
+      // miss) is RECLAIMED — the retry the ledger promised (codex r6) — and
+      // so is a STALE `claimed` row (a claim whose finalize failed or whose
+      // process died: the claim is a short lease, codex r8). A live
+      // `claimed` row is 'in_flight' (another member is sending — or the
+      // lease has not expired yet): never send, never stamp covered, the
+      // caller reports the stop incomplete and the next signal retries.
+      // sent / suppressed ⇒ 'taken' (this row is covered).
+      const leaseCutoff = new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS);
+      const rows = await t('visit_effects')
+        .insert({
+          visit_id: visit.id,
+          effect_type: effectType,
+          dedupe_key: `${visit.id}:${effectType}`,
+          status: 'claimed',
+          attempts: 0,
+          claimed_at: new Date(),
+          claim_token: token,
+        })
+        .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
+        .merge({ status: 'claimed', claimed_at: new Date(), claim_token: token })
+        .where(function reclaimable() {
+          this.where('visit_effects.status', '=', 'failed')
+            .orWhere(function staleClaim() {
+              this.where('visit_effects.status', '=', 'claimed').where('visit_effects.claimed_at', '<', leaseCutoff);
+            });
+        })
+        .returning('id');
+      if (rows && rows.length) return { state: 'owner', token };
+      const existing = await t('visit_effects')
+        .where({ visit_id: visit.id, effect_type: effectType, dedupe_key: `${visit.id}:${effectType}` })
+        .first('status');
+      return { state: existing && String(existing.status) === 'claimed' ? 'in_flight' : 'taken', token: null };
+    });
+  } catch (err) {
+    logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
+    return { state: 'error', token: null };
+  }
+}
+
+/**
+ * Row's current stop tuple (date, customer, property) still matches the
+ * visit AND its window still connects to the visit's OTHER live members —
+ * the same rule handleChildStopChanged applies (codex #3603 r11): a row
+ * moved inside the stale union but away from every sibling is a separate
+ * stop. Windowless rows, and rows with no windowed siblings, connect.
+ */
+function rowStillAtVisitStop(row, visit, otherMembers = []) {
+  if (dateOnly(row.scheduled_date) !== dateOnly(visit.scheduled_date)
+      || String(row.customer_id) !== String(visit.customer_id)
+      || String(row.property_id || '') !== String(visit.property_id || '')) return false;
+  if (!row.window_start) return true;
+  // Only siblings that are themselves still at the stop count as anchors
+  // (same tuple, window inside the visit's recorded union) — a sibling
+  // that moved away must not make the unmoved row look detached.
+  const anchors = (otherMembers || []).filter((m) => m && m.window_start
+    && (m.scheduled_date == null || dateOnly(m.scheduled_date) === dateOnly(visit.scheduled_date))
+    && (m.customer_id == null || String(m.customer_id) === String(visit.customer_id))
+    && (m.property_id == null || String(m.property_id || '') === String(visit.property_id || ''))
+    && windowsOverlap(m.window_start, m.window_end, visit.window_start, visit.window_end));
+  if (!anchors.length) return windowsOverlap(row.window_start, row.window_end, visit.window_start, visit.window_end);
+  return anchors.some((m) => windowsOverlap(row.window_start, row.window_end, m.window_start, m.window_end));
+}
+
+/** Non-terminal members of a visit other than `rowId`, with their stop tuple + windows (for connectivity checks). */
+async function otherLiveMembers(t, visitId, rowId) {
+  return t('scheduled_services').where({ visit_id: visitId }).whereNot('id', rowId)
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
+}
+
+/**
+ * Advance the claimed ledger row with the owner's ACTUAL attempt outcome
+ * (codex r4/r5): sent / suppressed / failed; attempts counted; a sent row
+ * is never downgraded. Non-attempt outcomes are a no-op. Its own checked
+ * step: a failure here leaves the row `claimed`, so the caller reports the
+ * stop incomplete instead of advertising a status that was never written.
+ */
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null) {
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
+  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  try {
+    await db('visit_effects')
+      .insert({
+        visit_id: visitId,
+        effect_type: effectType,
+        dedupe_key: `${visitId}:${effectType}`,
+        status,
+        attempts: 1,
+        sent_at: status === 'sent' ? at : null,
+      })
+      .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
+      .merge({
+        status,
+        attempts: db.raw('?? + 1', ['visit_effects.attempts']),
+        sent_at: status === 'sent' ? at : null,
+        updated_at: at,
+      })
+      .where('visit_effects.status', '<>', 'sent')
+      // Only the current claim owner finalizes (codex r10): a stale owner's
+      // late finalize never clobbers a reclaimer's row.
+      .modify((q) => { if (token) q.where('visit_effects.claim_token', '=', token); });
+    return { ok: true, effectType, status };
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects finalize failed: ${err.message}`);
+    return { ok: false, effectType, status, reason: `effect finalize failed: ${err.message}` };
+  }
+}
+
+const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off']);
+// A claim is a lease: a `claimed` row older than this is reclaimable (its
+// owner's finalize failed or its process died). Sized well above any
+// plausible send (a multi-contact Twilio loop takes seconds, not minutes);
+// the owner also re-checks its lease right before the provider call
+// (notificationLeaseLive) so a stalled sender never fires after a reclaim
+// (codex #3603 r9). No provider-level idempotency exists for SMS.
+const NOTIFICATION_CLAIM_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * Atomically RENEW the owner's lease (claimed_at = now) — succeeds only
+ * while the row is still `claimed` under OUR token (codex #3603 r12). The
+ * owner calls this immediately before its provider call so ownership stays
+ * valid through the send even if the preceding work ate the lease; a
+ * reclaim (new token) or a terminal row makes this fail — do not send.
+ */
+async function renewNotificationLease(visitId, kind, token) {
+  if (!visitId || !token) return false;
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  try {
+    const n = await db('visit_effects')
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}`, status: 'claimed', claim_token: token })
+      .update({ claimed_at: new Date() });
+    return Number(n) > 0;
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] lease renew ${effectType} for visit ${visitId} failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Is the owner's claim still live (status claimed, inside the lease)? Used
+ * before slow pre-send work; the send itself is guarded by
+ * renewNotificationLease.
+ */
+async function notificationLeaseLive(visitId, kind, token) {
+  if (!visitId || !token) return false;
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  try {
+    const row = await db('visit_effects')
+      .where({ visit_id: visitId, effect_type: effectType, dedupe_key: `${visitId}:${effectType}` })
+      .first('status', 'claimed_at', 'claim_token');
+    // Ours, still claimed, inside the lease — a reclaim replaced the token.
+    return Boolean(row && String(row.status) === 'claimed' && row.claimed_at
+      && String(row.claim_token || '') === String(token)
+      && (Date.now() - new Date(row.claimed_at).getTime()) < NOTIFICATION_CLAIM_LEASE_MS);
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] lease check ${effectType} for visit ${visitId} failed: ${err.message}`);
+    return false;
+  }
+}
+
+async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId = null, smsOutcome = null, notificationOwner = false, claimToken = null }) {
+  const toStatus = kind === 'en_route' ? 'en_route' : kind === 'on_site' ? 'on_site' : null;
+  if (!primary || !primary.visit_id || !toStatus) return null;
+  const targetTrack = kind === 'en_route' ? 'en_route' : 'on_property';
+  const logger = require('./logger');
+  const lifecycleAt = new Date();
+  let fan = null;
+  try {
+    fan = await db.transaction(async (t) => {
+      let visit = await t('service_visits').where({ id: primary.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return null;
+      await lockStop(t, visit.stop_base_key);
+      // Re-read the parent after the lock (codex r14) — see claimVisitNotification.
+      visit = await t('service_visits').where({ id: primary.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return null;
+      // Revalidate the PRIMARY under the stop lock (codex #3603 r2): a split
+      // or stop change can detach it between the tracker's row load and
+      // this lock — the tracker CAS does not predicate on visit_id. Only a
+      // primary that is still this visit's member, on the same technician,
+      // and actually at the target status leads its siblings.
+      const lockedPrimary = await t('scheduled_services').where({ id: primary.id }).forUpdate()
+        .first('id', 'visit_id', 'technician_id', 'status', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
+      if (!lockedPrimary
+          || String(lockedPrimary.visit_id || '') !== String(visit.id)
+          || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')
+          || (visit.technician_id && String(lockedPrimary.technician_id || '') !== String(visit.technician_id))
+          || !rowStillAtVisitStop(lockedPrimary, visit, await otherLiveMembers(t, visit.id, lockedPrimary.id))) {
+        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}) — skipped`);
+        return null;
+      }
+      if (String(lockedPrimary.status) !== toStatus) {
+        // Still a member but its operational status lags the tracker (an
+        // automatic caller's best-effort status sync failed): NOT benign —
+        // nothing moved, the caller must report the stop incomplete (r6).
+        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary status ${lockedPrimary.status} lags target ${toStatus} — incomplete`);
+        return { incomplete: 'primary_status_lagging' };
+      }
+      const siblings = await t('scheduled_services')
+        .where({ visit_id: visit.id })
+        .whereNot('id', primary.id)
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .forUpdate()
+        .select('id', 'status', 'technician_id', 'track_state', 'source_action', 'customer_confirmed',
+          'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end',
+          'actual_start_time', 'check_in_time', 'arrived_at');
+      const { transitionJobStatus } = require('./job-status');
+      const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
+      const moved = [];
+      const trackers = [];
+      const covered = [];
+      const skipped = [];
+      // The stop = the primary's CONNECTED COMPONENT over member windows
+      // (codex r8): 09-10 · 10-11 · 11-12 is one stop even though 11-12
+      // never touches the tapped 09-10 row — the same chain rule
+      // windowedMembersConnected applies at creation. Windowless members
+      // join anything. Only same-tuple, same-tech members can chain.
+      const sameStopTuple = (s) => dateOnly(s.scheduled_date) === dateOnly(visit.scheduled_date)
+        && String(s.customer_id) === String(visit.customer_id)
+        && String(s.property_id || '') === String(visit.property_id || '')
+        && String(s.technician_id || '') === String(primary.technician_id || '');
+      // Bridges are WINDOWED, join-eligible members only — a windowless row
+      // joins the stop but never links two disjoint windows (mirrors
+      // windowedMembersConnected), and a withdrawn/terminal row bridges
+      // nothing.
+      const component = new Set([lockedPrimary.id]);
+      // A WINDOWLESS primary is join-only, never a link (codex r9): seed the
+      // bridges from the windowed, join-eligible siblings instead — but only
+      // when they form ONE chain among themselves; two chains would be
+      // ambiguous, so nothing follows and the office resolves it.
+      let bridges;
+      if (lockedPrimary.window_start) {
+        bridges = [lockedPrimary];
+      } else {
+        const windowed = siblings.filter((s) => s.window_start && sameStopTuple(s) && !JOIN_INELIGIBLE_STATUSES.includes(String(s.status || '')));
+        if (!windowed.length) {
+          // An all-windowless (explicitly grouped) visit is ONE stop by
+          // definition (codex r10): every same-tuple sibling is a member.
+          siblings.filter(sameStopTuple).forEach((s) => component.add(s.id));
+          bridges = [];
+        } else {
+          bridges = windowedMembersConnected(windowed) ? windowed.slice() : [];
+          if (!bridges.length) logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: windowless primary, siblings form more than one chain — nothing follows`);
+        }
+      }
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const s of siblings) {
+          if (component.has(s.id) || !sameStopTuple(s)) continue;
+          if (bridges.some((m) => windowsOverlap(s.window_start, s.window_end, m.window_start, m.window_end))) {
+            component.add(s.id);
+            if (s.window_start && !JOIN_INELIGIBLE_STATUSES.includes(String(s.status || ''))) bridges.push(s);
+            grew = true;
+          }
+        }
+      }
+      for (const s of siblings) {
+        // Exact technician equality — an unassigned sibling is NOT the
+        // primary's tech's to advance (codex r1): the visit owns assignment,
+        // so a null here is an inconsistency to surface, not a wildcard.
+        if (String(s.technician_id || '') !== String(primary.technician_id || '')) {
+          skipped.push({ id: s.id, reason: 'technician' });
+          continue;
+        }
+        // Stop identity revalidated on the LOCKED row (codex r6): a
+        // reschedule that committed before its post-commit detach seam ran
+        // still carries the old visit_id — never advance a row that is no
+        // longer physically at this stop.
+        // Stop identity (r6/r7/r8): a row outside the primary's connected
+        // component — date/customer/property changed, or its window no
+        // longer chains to the stop — is a separate stop, whatever its stale
+        // visit_id still says.
+        if (!component.has(s.id)) {
+          skipped.push({ id: s.id, reason: 'stop_changed' });
+          continue;
+        }
+        if (String(s.status) !== toStatus) {
+          if (!siblingEligibleFor(toStatus, s.status)) { skipped.push({ id: s.id, reason: `status:${s.status}` }); continue; }
+          // An office-review booking needs the tech's explicit field-confirm
+          // stamp + activation (tech-track's autoConfirmOutboundReviewBooking)
+          // before a day-of advance — never implied by a sibling's tap. It
+          // stays behind for its own tap (fail closed: no silent activation).
+          if (isPendingOutboundReviewBooking(s)) { skipped.push({ id: s.id, reason: 'office_review' }); continue; }
+          if (toStatus === 'on_site') {
+            const { buildOnSiteLifecycleUpdates } = require('../utils/service-duration-capture');
+            const updates = buildOnSiteLifecycleUpdates(s, lifecycleAt);
+            if (Object.keys(updates).length) await t('scheduled_services').where({ id: s.id }).update(updates);
+          }
+          await transitionJobStatus({ jobId: s.id, fromStatus: s.status, toStatus, transitionedBy: actorId, trx: t });
+          moved.push(s.id);
+        }
+        covered.push(s.id);
+        if (String(s.track_state || '') !== targetTrack) trackers.push(s.id);
+      }
+      const stampCol = toStatus === 'en_route' ? 'en_route_at' : 'arrived_at';
+      await t('service_visits').where({ id: visit.id }).whereNull(stampCol).update({ [stampCol]: lifecycleAt });
+      return { visitId: visit.id, visitDate: dateOnly(visit.scheduled_date), moved, trackers, covered, skipped };
+    });
+  } catch (err) {
+    // Surfaced, not swallowed (codex #3603 r2): the caller reports the
+    // stop as NOT fully synced; the next signal (re-tap / Sync Stop /
+    // automatic arrival) re-runs this idempotently.
+    logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id} (visit ${primary.visit_id}) failed: ${err.message}`);
+    return { ok: false, visitId: primary.visit_id, reason: err.message, siblingIds: [], trackerIds: [], skipped: [] };
+  }
+  if (!fan) return null;
+  if (fan.incomplete) return { ok: false, visitId: primary.visit_id, reason: fan.incomplete, siblingIds: [], trackerIds: [], skipped: [] };
+
+  // Tracker writes for lagging siblings — customer text suppressed (the one
+  // text came from the primary). _visitSibling stops the tracker from
+  // fanning out again from inside the fan-out.
+  const trackTransitions = require('./track-transitions');
+  // Collected, not just logged (codex #3603 r3): a sibling whose tracker
+  // write failed after the status commit leaves a stale customer-visible
+  // tracker with every operational status already matching — the caller
+  // must report the stop as not fully synced so the next signal repairs it.
+  const trackerFailures = [];
+  for (const id of fan.trackers) {
+    try {
+      // Expected-state fence (codex r9): the tracker refuses a sibling that
+      // a reschedule rewound / detached between the fan-out transaction and
+      // this write (sibling_state_changed), instead of advancing the new
+      // attempt with messaging suppressed.
+      const expect = { visitId: fan.visitId, scheduledDate: fan.visitDate, status: toStatus };
+      const r = kind === 'en_route'
+        ? await trackTransitions.markEnRoute(id, { actorType, actorId, suppressCustomerSms: true, _visitSibling: true, expect })
+        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, actorType, actorId, suppressArrivalSms: true, _visitSibling: true, expect });
+      if (!r || !r.ok) {
+        trackerFailures.push({ id, reason: (r && r.reason) || 'tracker returned ok=false' });
+        logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
+      }
+    } catch (err) {
+      trackerFailures.push({ id, reason: err.message });
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} failed: ${err.message}`);
+    }
+  }
+  // Covered-by-visit stamps on every reconciled sibling (whereNull ⇒
+  // idempotent): no later per-row path re-texts the customer.
+  const smsCol = kind === 'en_route' ? 'track_sms_sent_at' : 'arrival_sms_sent_at';
+  // Siblings are stamped covered ONLY when the visit notice is terminally
+  // handled (codex #3603 r13): after a retryable provider failure the effect
+  // is `failed` and reclaimable — a sibling's later signal must still reach
+  // claimVisitNotification, so its guard stays open. Claim-state outcomes
+  // (in flight / error / lease expired / not attempted) likewise leave the
+  // siblings to the owner's own reconciliation.
+  let noticeHandled = ['sent', 'suppressed', 'gate_off', 'already_handled', 'covered'].includes(String(smsOutcome));
+  if (noticeHandled && String(smsOutcome) === 'already_handled') {
+    // The primary's guard being stamped does not prove the VISIT notice was
+    // delivered (codex r14: a retryable arrival miss whose guard release
+    // failed leaves the guard stamped while the effect is `failed`). Only a
+    // terminal effect — or no visit effect at all (legacy per-row send) —
+    // covers the siblings.
+    try {
+      const effectType0 = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+      const eff = await db('visit_effects')
+        .where({ visit_id: fan.visitId, effect_type: effectType0, dedupe_key: `${fan.visitId}:${effectType0}` })
+        .first('status');
+      noticeHandled = !eff || ['sent', 'suppressed'].includes(String(eff.status));
+    } catch (err) {
+      noticeHandled = false;
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: effect status read failed: ${err.message}`);
+    }
+  }
+  if (fan.covered.length && noticeHandled) {
+    try {
+      // Fenced to THIS visit attempt (codex r5): a sibling force-rescheduled
+      // after the transaction (guards cleared, new date, new row identity)
+      // must not be stamped covered by its old stop.
+      await db('scheduled_services')
+        .whereIn('id', fan.covered)
+        .where({ visit_id: fan.visitId })
+        .where('scheduled_date', fan.visitDate)
+        .where('track_state', targetTrack)
+        .whereNull(smsCol)
+        .update({ [smsCol]: lifecycleAt });
+    } catch (err) {
+      // A sibling left without its covered stamp could still text later
+      // (codex r4) — that is an incomplete stop, reported as such.
+      trackerFailures.push({ id: 'covered_stamp', reason: err.message });
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: covered-by-visit stamp failed: ${err.message}`);
+    }
+  }
+  // The visit's one-shot ledger row, advanced ONLY by the notification
+  // owner's actual attempt (codex r4/r5) — its own checked step.
+  const recordEffect = notificationOwner && NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome));
+  let effect = null;
+  if (recordEffect) {
+    const fin = await finalizeVisitNotification(fan.visitId, kind, smsOutcome, lifecycleAt, claimToken);
+    if (fin.ok) effect = { effectType: fin.effectType, status: fin.status };
+    else trackerFailures.push({ id: 'effect_finalize', reason: fin.reason });
+  }
+  // Structural skips (stop tuple / technician no longer match the visit)
+  // mean a detach seam did not run — repair membership durably NOW through
+  // the canonical seam (codex r14); a row that still is not detached
+  // afterwards is an incomplete stop (alert / 409), never silent success.
+  for (const x of fan.skipped.filter((k) => k.reason === 'technician' || k.reason === 'stop_changed')) {
+    try {
+      const detached = await handleChildStopChanged(x.id);
+      if (!detached) trackerFailures.push({ id: x.id, reason: `structural_skip_unrepaired:${x.reason}` });
+    } catch (err) {
+      trackerFailures.push({ id: x.id, reason: `structural_skip_repair_failed:${err.message}` });
+    }
+  }
+  if (fan.skipped.length) {
+    logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);
+  }
+  const base = { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect };
+  if (trackerFailures.length) {
+    return { ...base, ok: false, trackerFailures, reason: `tracker write failed for ${trackerFailures.map((f) => `${f.id}: ${f.reason}`).join('; ')}` };
+  }
+  return { ...base, ok: true };
+}
+
+/**
+ * Attach a shared `visit` summary to every row of a schedule payload that
+ * carries a visitId (pure; mutates the rows). Consumers (tech home, dispatch
+ * board) render one grouped card from it. Ungrouped rows are untouched.
+ */
+function visitSummariesForRows(rows, {
+  idKey = 'visitId', memberIdKey = 'id', durationKey = 'estimatedDuration', statusKey = 'status',
+} = {}) {
+  const byVisit = new Map();
+  for (const r of rows || []) {
+    const v = r && r[idKey];
+    if (!v) continue;
+    if (!byVisit.has(v)) byVisit.set(v, []);
+    byVisit.get(v).push(r);
+  }
+  for (const [visitId, members] of byVisit) {
+    const live = members.filter((m) => !TERMINAL_ROW_STATUSES.includes(String(m[statusKey] || '')));
+    const summary = {
+      id: visitId,
+      serviceCount: members.length,
+      memberIds: members.map((m) => m[memberIdKey]),
+      primaryId: (live[0] || members[0])[memberIdKey],
+      estimatedDuration: members.reduce((acc, m) => acc + (Number(m[durationKey]) || 0), 0),
+      serviceTypes: members.map((m) => m.serviceType || m.service_type).filter(Boolean),
+      liveCount: live.length,
+    };
+    for (const m of members) m.visit = summary;
+  }
+  return byVisit;
+}
+
 module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
@@ -986,7 +1531,15 @@ module.exports = {
   lockStopForRow,
   openMembers,
   visitActivity,
+  fanOutLiveTransition,
+  claimVisitNotification,
+  notificationLeaseLive,
+  renewNotificationLease,
+  finalizeVisitNotification,
+  visitSummariesForRows,
   _test: {
+    siblingEligibleFor,
+    visitSummariesForRows,
     windowedMembersConnected,
     stopBaseKey,
     windowsOverlap,

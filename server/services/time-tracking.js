@@ -289,7 +289,12 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
       // technicianId is the tech who actually started the job (the logged-in
       // tech, or the IMEI tech in the geofence-auto path) — pass it so the
       // arrival SMS names the acting tech, not the job's stale assignment.
-      await trackTransitions.markOnProperty(jobId, { actingTechId: technicianId });
+      const result = await trackTransitions.markOnProperty(jobId, { actingTechId: technicianId });
+      // A grouped stop that did not fully sync is NOT success (codex #3603
+      // r6): the durable office surface is the transition-failure alert.
+      await require('./track-transition-alerts').recordTrackTransitionResultFailure({
+        jobId, action: 'mark_on_property', actorId: technicianId, result,
+      });
     } catch (err) {
       logger.error(`[time-tracking] markOnProperty failed for job ${jobId}: ${err.message}`);
     }

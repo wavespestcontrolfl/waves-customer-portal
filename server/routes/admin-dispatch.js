@@ -3811,7 +3811,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
       }
     } else if (toStatus === 'on_site') {
       try {
-        const result = await trackTransitions.markOnProperty(svc.id);
+        const result = await trackTransitions.markOnProperty(svc.id, {
+          // Audit provenance for the grouped fan-out (codex #3603 r3): the
+          // admin is the actor; the assigned tech stays the one named to
+          // the customer (actingTechId deliberately NOT set).
+          actorType: 'admin',
+          actorId: req.technicianId,
+        });
         await recordTrackTransitionResultFailure({
           jobId: svc.id,
           action: 'mark_on_property',
@@ -15279,6 +15285,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
       .first(
         's.id as job_id',
         's.customer_id',
+        's.visit_id',
         's.technician_id as tech_id',
         's.status',
         's.service_type',
@@ -15341,6 +15348,7 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
       notes: row.notes || null,
       internal_notes: row.internal_notes || null,
       updated_at: row.updated_at,
+      visit_id: row.visit_id || null,
     });
   } catch (err) {
     logger.error(`[dispatch/jobs/:id] hydration failed: ${err.message}`);
