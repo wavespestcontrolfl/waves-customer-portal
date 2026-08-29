@@ -3171,6 +3171,32 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
       .rejects.toThrow(/no longer matches the verified build commit/);
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
+
+  test('expectBaseSha: the default-branch tip is re-read inside the merge lock right before the merge call — a moved base refuses (BLOG_BASE_MOVED), a still base merges (GH r25)', async () => {
+    const setup = () => {
+      const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+      const queries = [read];
+      db.mockImplementation(() => queries.shift() || chain());
+      gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA } });
+      mockHubOnlyBranchFile();
+      gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
+      gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
+      gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+    };
+    setup();
+    gh.getBranchSha.mockResolvedValue('main-tip-2');
+    let thrown;
+    try { await AstroPublisher.mergeAstro('post-pin-1', { expectBaseSha: 'main-tip-1' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BASE_MOVED');
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    setup();
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    const result = await AstroPublisher.mergeAstro('post-pin-1', { expectBaseSha: 'main-tip-1' });
+    expect(result.merged).toBe(true);
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
+  });
 });
 
 describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter (PR #3549 codex r4)', () => {
@@ -4989,6 +5015,28 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     // A wrapped-alt removal must not shift later lines: a managed definition after it still goes, unrelated prose stays (hook P0).
     const shifted = '![wrapped\nalt][pic]\n\nKeep this prose.\n\n[pic]: /images/blog/x/body-1.webp\nAnd this line too.';
     expect(AstroPublisher.stripManagedBodyImages(shifted, 'x')).toBe('Keep this prose.\n\nAnd this line too.');
+  });
+
+  test('refresh lane: a managed-image listing failure propagates as a transient error — no PR on a partial deletion set (GH r25)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.listDir.mockRejectedValue(new Error('GitHub 502'));
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('could not list managed images');
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(thrown?.code).toBeUndefined(); // transient, not BLOG_BODY_IMAGES_FAILED
+    expect(gh.createPr).not.toHaveBeenCalled();
   });
 
   test('refresh lane: stale managed assets ABOVE the first free name are swept from the directory listing (GH r23)', async () => {

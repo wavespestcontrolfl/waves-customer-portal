@@ -1077,7 +1077,10 @@ function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
 // the generated body-N.webp files live until merge): no hero in the body,
 // every ref committed, ≥ minimum distinct sources, distinct PICTURES (dHash).
 // Gate off → ok.
-async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null }, deps = {}) {
+// `mdx`: the target file's flavour (false = flat `.md`, where a raw HTML
+// block hides the Markdown inside it) — the same rendering the publisher's
+// own checks and pages-poll's HEAD check use for that file (GH r25).
+async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null, mdx = true }, deps = {}) {
   let bodyImagesOn = false;
   try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
   if (!bodyImagesOn) return { ok: true };
@@ -1085,24 +1088,24 @@ async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null
   const gh = deps.gh || ghDefault;
   if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
   const getFile = (path) => gh.getFile(path, prHeadRef);
-  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile });
+  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile, mdx });
   if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
   if (valid.distinct < pub.BODY_IMAGE_MIN) {
     return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
   }
-  const srcs = [...new Set(pub.bodyImageRefs(body).map((r) => r.src))];
+  const srcs = [...new Set(pub.bodyImageRefs(body, { mdx }).map((r) => r.src))];
   const pictures = await pub.assertDistinctPictures({ srcs, heroSrc, getFile });
   if (!pictures.ok) return { ok: false, reason: `body images: ${pictures.reason}` };
   return { ok: true };
 }
 // Scheduler-lane variant: the fixed MARKDOWN is all the lane has (no run /
 // draft payload) — hero src and body come from the fix itself.
-async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null } = {}, deps = {}) {
+async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null, mdx = true } = {}, deps = {}) {
   let parsed;
   try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
   const data = (parsed && parsed.data) || {};
   const heroSrc = (data.hero_image && typeof data.hero_image === 'object' && data.hero_image.src) || '';
-  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef }, deps);
+  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef, mdx }, deps);
 }
 
 async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
@@ -2141,7 +2144,13 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // The fixed body must still carry its ≥ minimum distinct, committed body
     // pictures (gate on) — checked against the PR branch, like the
     // autonomous lane's validateAutonomousRunGates step 5.
-    revalidateBodyImages: async (fixedMarkdown) => revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef: row.astro_branch_name }, deps),
+    // Rendered as the scheduler's file renders: publishAstro writes a flat
+    // `.md` (scheduledBlogFilePathForPost), whose raw HTML blocks hide the
+    // Markdown inside them — same flavour pages-poll's HEAD check applies.
+    revalidateBodyImages: async (fixedMarkdown) => revalidateBodyImagesForMarkdown(fixedMarkdown, {
+      prHeadRef: row.astro_branch_name,
+      mdx: !/\.md$/i.test(String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '')),
+    }, deps),
     prePushCheck: async () => {
       const fresh = await db('blog_posts').where({ id: row.id }).first();
       return !!fresh && fresh.publish_status === 'publishing'

@@ -244,5 +244,7 @@ describe('pollPost scheduler auto-merge: body-image contract at the HEAD (GH r19
     expect(merge).not.toHaveBeenCalled();
     tip.mockResolvedValue('main-tip-1');
     expect(await pagesPoll.pollPost(post)).toMatchObject({ ok: true, autoMerged: true });
+    // The validated tip travels into mergeAstro, which re-checks it inside its merge lock (GH r25).
+    expect(merge).toHaveBeenLastCalledWith('post-1', expect.objectContaining({ expectHeadSha: 'abc', expectBaseSha: 'main-tip-1' }));
   });
 });

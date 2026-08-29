@@ -2811,10 +2811,16 @@ async function supersededBodyImages({ slug, kept, superseded = [], files = [] })
   const keptPaths = new Set([...kept].map((src) => `public${src}`));
   const managed = new Map(superseded.map((d) => [d.repoPath, d]));
   if (typeof gh.listDir === 'function') {
-    let entries = [];
+    // A listing failure PROPAGATES (transient — no BLOG_BODY_IMAGES_FAILED
+    // code, so the run retries): a sweep built on a partial listing would
+    // leave orphaned body-N.webp public and their managed names occupied
+    // (GH r25). A directory that does not exist yet is an empty listing
+    // (github-client returns [] on 404), not an error.
+    let entries;
     try { entries = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`)) || []; } catch (listErr) {
-      // The sweep is best-effort; the pinned occupied names above still go.
-      logger.warn(`[astro-publisher] could not list body images for ${slug}: ${listErr.message}`);
+      const err = new Error(`autonomous blog body images: could not list managed images for ${slug}: ${listErr.message}`);
+      err.cause = listErr;
+      throw err;
     }
     for (const e of Array.isArray(entries) ? entries : []) {
       if (!e || e.type !== 'file' || !/^body-\d+\.webp$/i.test(String(e.name || ''))) continue;
@@ -3636,7 +3642,13 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
-async function mergeAstro(postId, { expectHeadSha = null } = {}) {
+// `expectBaseSha`: the default-branch tip a caller's body-image check
+// validated unchanged assets against (pages-poll) — re-read inside the
+// topic-merge lock immediately before the merge call, since the gates
+// between the caller's check and mergePr are more async work and the merge
+// pins only the PR head (GH r25). A moved tip throws BLOG_BASE_MOVED
+// (retryable: the next tick re-validates against the new base).
+async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.astro_pr_number) throw new Error('post has no open PR');
@@ -3697,6 +3709,14 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       ? await doMerge()
       : await require('../content/topic-targeting-gate').withTopicMergeLock(db, async () => {
         await assertTopicTargetingStillClear(post, pr);
+        if (expectBaseSha) {
+          const tip = await gh.getBranchSha(gh.env().defaultBranch);
+          if (tip && tip !== expectBaseSha) {
+            const moved = new Error(`PR #${pr.number}: default branch moved during gating (${String(expectBaseSha).slice(0, 9)} → ${String(tip).slice(0, 9)}); re-verify body images before merge`);
+            moved.code = 'BLOG_BASE_MOVED';
+            throw moved;
+          }
+        }
         return doMerge();
       });
 

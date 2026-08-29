@@ -242,6 +242,9 @@ async function pollPost(post, { allowMerge = true } = {}) {
         // on THEN; a PR opened under the old setting must not auto-merge
         // hero-only once the gate flips. Same posture as the human-merge
         // withhold above: park the claim at pending_review for an admin.
+        // The base tip the body-image check validated against — handed to
+        // mergeAstro, which re-checks it inside its merge lock (GH r25).
+        let validatedBaseSha = null;
         {
           const pub = require('./astro-publisher');
           if (typeof pub.assertBodyImagesAtHead === 'function' && post.astro_branch_name) {
@@ -288,6 +291,7 @@ async function pollPost(post, { allowMerge = true } = {}) {
                 logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — base moved during gating (${String(check.baseSha).slice(0, 9)} → ${String(tip).slice(0, 9)})`);
                 return { ok: true, url, mergeDeferred: true, reason: 'base_moved_during_gating' };
               }
+              validatedBaseSha = check.baseSha;
             }
           }
         }
@@ -301,7 +305,7 @@ async function pollPost(post, { allowMerge = true } = {}) {
           // deploymentCommitSha may be null (CF metadata missing) — mergeAstro
           // treats null as "no build-commit assertion" and still enforces its
           // own Codex-clear + head-pinned merge.
-          await mergeAstro(post.id, { expectHeadSha: deploymentCommitSha(deploy) });
+          await mergeAstro(post.id, { expectHeadSha: deploymentCommitSha(deploy), expectBaseSha: validatedBaseSha });
           logger.info(`[pages-poll] auto-merged PR for ${post.slug || post.id} (preview build succeeded)`);
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {

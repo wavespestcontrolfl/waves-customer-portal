@@ -225,6 +225,22 @@ describe('scheduler-lane body-image revalidation (GH r19 P1)', () => {
     } finally { spy.mockRestore(); }
   });
 
+  test('a flat .md fix is validated as .md renders: images inside a raw HTML block are literal text and do not count; the same body counts as .mdx (GH r25)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'blogBodyImages');
+    try {
+      const md = `---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n## A\n\n<div>![a](/images/blog/x/body-1.webp)</div>\n\n## B\n\n<div>![b](/images/blog/x/body-2.webp)</div>\n`;
+      const gh = { getFile: jest.fn(async () => null) };
+      const asMd = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x', mdx: false }, { gh, astroPublisherInternals: internals });
+      expect(asMd.ok).toBe(false);
+      expect(asMd.reason).toMatch(/0 distinct in-article image/);
+      // .mdx parses the JSX children as Markdown — both images are seen (and then fail on the missing files, not on the count).
+      const asMdx = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(asMdx.reason).not.toMatch(/0 distinct/);
+      expect(asMdx.reason).toMatch(/not committed|missing|body-1/);
+    } finally { spy.mockRestore(); }
+  });
+
   test('maybeRemediateBlogPost mirrors the fixed body WITHOUT publisher-managed body-N references (GH r22)', async () => {
     const { maybeRemediateBlogPost } = require('../services/content/codex-remediation');
     const pub = require('../services/content-astro/astro-publisher');
