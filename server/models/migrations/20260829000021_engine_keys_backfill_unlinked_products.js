@@ -7,15 +7,17 @@
  * the pricing engine but no row claimed their key, so bookings landed with
  * service_id = null and resolved by name only:
  *
- *   one_time_lawn            → lawn_care_one_time
- *   palm_injection           → palm_injection
- *   pest_initial_roach       → cockroach_control (standalone roach treatment)
- *   flea_package             → flea_tick (already claims flea_knockdown_single)
- *   rodent_trapping_followup → rodent_trapping_followup
+ *   palm_injection     → palm_injection
+ *   pest_initial_roach → cockroach_control (standalone roach treatment)
+ *   flea_package       → flea_tick (already claims flea_knockdown_single)
  *
- * Deliberately NOT backfilled (ambiguous — one engine key, several rows):
- * rodent_sanitation (light/standard/heavy tiers), termite_bond (1/5/10-yr),
- * trap_only_retainer (PR B). The linker refuses multi-claimed keys by design.
+ * Deliberately NOT backfilled:
+ *   - one_time_lawn: SHARED with Lawn Pest Knockdown (codex #3485 r1 P1 —
+ *     containment cannot tell the two products apart);
+ *   - rodent_trapping_followup: an aggregate follow-up COUNT line, not a
+ *     one-appointment identity (accept-path contract);
+ *   - rodent_sanitation (3 tiers), termite_bond (3 terms), trap_only_retainer
+ *     (PR B): one engine key, several rows — the linker refuses multi-claims.
  *
  * Ownership-recorded: only a NULL engine_keys array is set (an admin-stamped
  * array is never overwritten), and flea_tick's key is APPENDED only if
@@ -23,11 +25,9 @@
  */
 const STATE_KEY = 'migration.20260829000021.state';
 const SEEDS = [
-  { service_key: 'lawn_care_one_time', add: ['one_time_lawn'] },
   { service_key: 'palm_injection', add: ['palm_injection'] },
   { service_key: 'cockroach_control', add: ['pest_initial_roach'] },
   { service_key: 'flea_tick', add: ['flea_package'] },
-  { service_key: 'rodent_trapping_followup', add: ['rodent_trapping_followup'] },
 ];
 
 function parseKeys(v) {
@@ -45,8 +45,11 @@ exports.up = async function up(knex) {
     const current = parseKeys(row.engine_keys);
     const missing = seed.add.filter((k) => !current.includes(k));
     if (!missing.length) continue;
-    // Refuse to create a second claimant: another active row already owning the key wins.
-    const claimed = await knex('services').whereRaw('engine_keys @> ?::jsonb', [JSON.stringify(missing)]).whereNot({ id: row.id }).first('id');
+    // Refuse to create a second ACTIVE claimant (the runtime resolver only
+    // competes among is_active rows; an archived historical mapping must not
+    // suppress the live one — pre-push codex P1).
+    const claimed = await knex('services').whereRaw('engine_keys @> ?::jsonb', [JSON.stringify(missing)])
+      .where({ is_active: true }).whereNot({ id: row.id }).first('id');
     if (claimed) continue;
     const next = [...current, ...missing];
     const count = await knex('services').where({ id: row.id })
