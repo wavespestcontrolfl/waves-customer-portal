@@ -281,14 +281,21 @@ async function fanOutRename(knex, serviceKey, fromName, toName) {
     const sbRows = await knex('self_booked_appointments')
       .whereIn('id', [...visitsByBooking.values()])
       .select('id', 'service_type');
-    const bookingToVisit = new Map([...visitsByBooking].map(([visitId, sbId]) => [sbId, visitId]));
+    // EVERY relabeled visit per booking (a booking can link several rows —
+    // pre-push codex P1): down() gates the booking's reversal on ALL of
+    // them still being open, never on one arbitrary sibling.
+    const bookingToVisits = new Map();
+    for (const [visitId, sbId] of visitsByBooking) {
+      if (!bookingToVisits.has(sbId)) bookingToVisits.set(sbId, []);
+      bookingToVisits.get(sbId).push(visitId);
+    }
     for (const sb of sbRows) {
       const next = swapRenamedPrefix(sb.service_type, fromName, toName);
       if (!next) continue;
       const count = await knex('self_booked_appointments')
         .where({ id: sb.id, service_type: sb.service_type })
         .update({ service_type: next });
-      if (count) rec.selfBookings[sb.id] = bookingToVisit.get(sb.id) || null;
+      if (count) rec.selfBookings[sb.id] = bookingToVisits.get(sb.id) || [];
     }
   }
 
@@ -548,13 +555,14 @@ exports.down = async function down(knex) {
     const selfBookings = rec.selfBookings && typeof rec.selfBookings === 'object' ? rec.selfBookings : {};
     const sbIds = Object.keys(selfBookings);
     if (sbIds.length && (await knex.schema.hasTable('self_booked_appointments'))) {
+      // Recorded value is a LIST of linked visit ids (a scalar from an
+      // older state row is tolerated); the booking reverts only while
+      // every linked visit is still open.
+      const linkedVisits = (v) => (Array.isArray(v) ? v : v ? [v] : []);
       const sbTerminal = await terminalVisitIdSet(
-        [...new Set(Object.values(selfBookings).filter(Boolean))]
+        [...new Set(Object.values(selfBookings).flatMap(linkedVisits))]
       );
-      const revertible = sbIds.filter((id) => {
-        const visitId = selfBookings[id];
-        return !visitId || !sbTerminal.has(visitId);
-      });
+      const revertible = sbIds.filter((id) => linkedVisits(selfBookings[id]).every((visitId) => !sbTerminal.has(visitId)));
       if (revertible.length) {
         // Per-row: cadence-qualified copies restore with their qualifier.
         const sbRows = await knex('self_booked_appointments')

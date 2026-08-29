@@ -44,6 +44,8 @@ function seedDb() {
     scheduled_services: [
       { id: 'v-open-1', service_type: PEST_OLD, status: 'pending', service_id: 'svc-pest6', self_booking_id: 'sb-1' },
       { id: 'v-open-2', service_type: PEST_OLD, status: 'confirmed', service_id: null },
+      // Second visit linked to the SAME self-booking as v-open-1.
+      { id: 'v-open-1b', service_type: PEST_OLD, status: 'pending', service_id: 'svc-pest6', self_booking_id: 'sb-1' },
       { id: 'v-done', service_type: PEST_OLD, status: 'completed', service_id: 'svc-pest6' },
       { id: 'v-cancel', service_type: PEST_OLD, status: 'cancelled', service_id: 'svc-pest6' },
       { id: 'v-resched', service_type: PEST_OLD, status: 'rescheduled', service_id: 'svc-pest6' },
@@ -298,6 +300,19 @@ describe('20260829000010 cadence convention renames', () => {
     // Rows whose catalog name DID revert are restored as usual.
     expect(svc(db, 'lawn_care_recurring').name).toBe(LAWN_OLD);
     expect(visit(db, 'v-lawn').service_type).toBe(LAWN_OLD);
+  });
+
+  test('a booking with several linked visits reverts only while ALL of them are still open', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.renames.pest_general_bimonthly.selfBookings['sb-1'].sort()).toEqual(['v-open-1', 'v-open-1b']);
+    visit(db, 'v-open-1b').status = 'completed';
+    await migration.down(fakeKnex(db));
+    // v-open-1 (still open) restores; the booking keeps the new label because its sibling is history.
+    expect(visit(db, 'v-open-1').service_type).toBe(PEST_OLD);
+    expect(visit(db, 'v-open-1b').service_type).toBe(PEST_NEW);
+    expect(db.self_booked_appointments[0].service_type).toBe(PEST_NEW);
   });
 
   test('down() leaves every snapshot of a visit completed since up() under its new label', async () => {
