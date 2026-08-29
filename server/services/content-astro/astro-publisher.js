@@ -1976,8 +1976,13 @@ function scanBodySections(body, { title = '' } = {}) {
     }
     paraStart = -1;
   };
+  const recordImages = (i) => { for (const ref of refsByLine.get(i) || []) { cur.hasImage = true; cur.images.push(ref.src); } };
   for (let i = 0; i < rendered.length; i++) {
     const line = rendered[i];
+    // A container change (quote depth, list membership) without a blank
+    // line ends the paragraph: nested lines are not part of the top-level
+    // prose (its lead) and the slot stays above the nested block.
+    if (paraStart >= 0 && ((depths[i] || 0) !== (depths[paraStart] || 0) || !!inList[i] !== !!inList[paraStart])) closePara(i);
     const heading = topLevel(i) ? line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/) : null;
     if (heading) {
       closePara(i);
@@ -1987,11 +1992,15 @@ function scanBodySections(body, { title = '' } = {}) {
       // image under an H3 marks the H2 illustrated). An H1 closes the range.
       if (heading[1].length <= 2) {
         sections.push(cur);
-        cur = heading[1].length === 2 ? { heading: heading[2].trim(), start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
+        const text = heading[2].replace(/!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?/g, ' ').replace(/\s+/g, ' ').trim();
+        cur = heading[1].length === 2 ? { heading: text, start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
       }
+      // An image embedded in the heading itself illustrates the section it
+      // opens (or the one it sits in).
+      recordImages(i);
       continue;
     }
-    for (const ref of refsByLine.get(i) || []) { cur.hasImage = true; cur.images.push(ref.src); }
+    recordImages(i);
     if (line.trim() === '') { closePara(i); continue; }
     // A dashes-only or equals-only underline DIRECTLY under a top-level
     // paragraph is a SETEXT heading (CommonMark): the paragraph is heading
@@ -2121,8 +2130,19 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
   }
   const hero = String(heroSrc || '');
   const isHeroRef = (src) => (hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src);
-  const grandfathered = new Set((Array.isArray(legacyHeroSrcs) ? legacyHeroSrcs : []).map((src) => String(src || '')).filter((src) => src && isHeroRef(src)));
-  const refs = bodyImageRefs(body).filter((r) => !grandfathered.has(String(r.src || '')));
+  // Grandfather by OCCURRENCE: the live body's hero references are exempt
+  // one-for-one; a refresh that repeats the same reference again is
+  // validated (and fails) normally.
+  const grandfathered = new Map();
+  for (const src of (Array.isArray(legacyHeroSrcs) ? legacyHeroSrcs : []).map((v) => String(v || ''))) {
+    if (src && isHeroRef(src)) grandfathered.set(src, (grandfathered.get(src) || 0) + 1);
+  }
+  const refs = bodyImageRefs(body).filter((r) => {
+    const src = String(r.src || '');
+    const left = grandfathered.get(src) || 0;
+    if (left > 0) { grandfathered.set(src, left - 1); return false; }
+    return true;
+  });
   for (const ref of refs) {
     const src = String(ref.src || '');
     if (isHeroRef(src)) {
@@ -2143,16 +2163,16 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
   return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size, refs };
 }
 
-// The exact hero reference(s) the LIVE body embeds (legacy convention) →
-// refresh grandfathers those srcs and nothing else.
+// The exact hero reference OCCURRENCES the LIVE body embeds (legacy
+// convention) → refresh grandfathers that many of each src and nothing else.
 function legacyHeroRefs(body, heroSrc) {
   const hero = String(heroSrc || '');
-  const out = new Set();
+  const out = [];
   for (const r of bodyImageRefs(body)) {
     const src = String(r.src || '');
-    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) out.add(src);
+    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) out.push(src);
   }
-  return [...out];
+  return out;
 }
 
 // `siblings` = already-resolved images with bytes (the freshly generated
@@ -2188,8 +2208,15 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     }
     if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
   }
+  // Every draft-authored picture is pinned to the blob it was judged on
+  // (its alt is the draft's, so the bytes must be the ones the alt
+  // describes) — re-checked on the fresh branch before the commit.
+  const pinned = [];
   for (const src of draftSrcs) {
-    const buf = await committedImageBuffer(`public${src}`);
+    const repoPath = `public${src}`;
+    const file = await gh.getFile(repoPath);
+    const buf = await committedImageBuffer(repoPath, async () => file);
+    pinned.push({ repoPath, sha: file?.sha || null });
     if (!buf) {
       const err = new Error(`autonomous blog body images: draft for ${slug} references ${src} whose bytes cannot be read — cannot verify it is a distinct picture`);
       err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2206,7 +2233,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
 
   const have = valid.distinct;
   const need = BODY_IMAGE_MIN - have;
-  if (need <= 0) return none;
+  if (need <= 0) return { ...none, pinned };
 
   const slots = bodyImageSlots(body, need, { title: frontmatter?.title });
   if (slots.length < need) {
@@ -2332,7 +2359,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
-  return { body: nextBody, files, images, newAlts };
+  return { body: nextBody, files, images, newAlts, pinned };
 }
 
 // Paths a body-image commit depends on, re-checked on the FRESH branch just
@@ -2349,6 +2376,10 @@ async function bodyImageCommitConflicts(bodyImages, branch) {
   for (const img of (bodyImages.images || []).filter((i) => i.reused && i.repoPath)) {
     const onBranch = await gh.getFile(img.repoPath, branch);
     if (!onBranch || (img.sha && onBranch.sha !== img.sha)) conflicts.push(`${img.repoPath} (reused picture changed: expected ${img.sha}, found ${onBranch?.sha || 'missing'})`);
+  }
+  for (const pin of bodyImages.pinned || []) {
+    const onBranch = await gh.getFile(pin.repoPath, branch);
+    if (!onBranch || (pin.sha && onBranch.sha !== pin.sha)) conflicts.push(`${pin.repoPath} (authored picture changed: expected ${pin.sha}, found ${onBranch?.sha || 'missing'})`);
   }
   return conflicts;
 }
@@ -2958,7 +2989,7 @@ async function publishRefresh(draft, brief = {}) {
   // the SHA it was diffed against, and each generated asset path (allocated
   // as ABSENT from main — resolveBodyImages never overwrites a committed
   // picture) must still be absent, or a concurrent write would be lost.
-  if (refreshImages.files.length || (refreshImages.images || []).some((i) => i.reused)) {
+  if (refreshImages.files.length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
     const conflicts = [];
     const onBranch = await gh.getFile(filePath, branch);
     if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);

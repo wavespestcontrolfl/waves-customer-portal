@@ -322,8 +322,32 @@ function markdownReferenceDefinitions(str) {
 // `keepReferenceTails`: leave `][label]` reference tails in place — the
 // balanced scanner below then decides per occurrence (an IMAGE reference
 // is kept under keepImages; a link reference is still blanked).
+// Blank exactly the reference definitions the strict parser recognizes
+// (same walk as markdownReferenceDefinitions): a `[label]:` line whose
+// remainder — or whose continuation line — is a valid destination. A
+// reference-looking prefix followed by anything else is paragraph text and
+// stays (an image on that line still renders and must still be seen).
+function blankReferenceDefinitions(str) {
+  const lines = String(str || '').split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(REF_DEFINITION_LABEL_RE);
+    if (!m) continue;
+    const rest = lines[i].slice(m[0].length);
+    if (rest.trim() !== '') {
+      if (parseLinkDestination(rest)) lines[i] = blankSpan(lines[i]);
+      continue;
+    }
+    const next = lines[i + 1];
+    if (next !== undefined && next.trim() !== '' && parseLinkDestination(next)) {
+      lines[i] = blankSpan(lines[i]);
+      lines[i + 1] = blankSpan(next);
+      i += 1;
+    }
+  }
+  return lines.join('\n');
+}
 function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false } = {}) {
-  const defsBlanked = String(str || '').replace(/^[ \t]*\[[^\]\n]+\]:(?:[ \t]*\S[^\n]*|[ \t]*\n[ \t]*\S[^\n]*)?/gm, blankSpan);
+  const defsBlanked = blankReferenceDefinitions(str);
   return (keepReferenceTails ? defsBlanked : defsBlanked.replace(/\]\s*\[[^\]\n]*\]/g, blankSpan))
     .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
 }

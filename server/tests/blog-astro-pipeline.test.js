@@ -3922,7 +3922,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       expect(res.reason).toMatch(/embeds the hero image/);
       expect(res.reason).toContain(swapped);
     }
-    expect(AstroPublisher._internals.legacyHeroRefs(`![h](${heroSrc})\n\n![x](/images/blog/a/hero.webp)\n\n![y](/images/blog/a/body-1.webp)\n\n![h2](${heroSrc})`, heroSrc)).toEqual([heroSrc, '/images/blog/a/hero.webp']);
+    expect(AstroPublisher._internals.legacyHeroRefs(`![h](${heroSrc})\n\n![x](/images/blog/a/hero.webp)\n\n![y](/images/blog/a/body-1.webp)\n\n![h2](${heroSrc})`, heroSrc)).toEqual([heroSrc, '/images/blog/a/hero.webp', heroSrc]); // occurrences, not unique (GH r13)
     gh.getFile.mockImplementation(async (path, ref) => {
       if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? headMd : mainMd, sha: 'f' };
       if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
@@ -4124,6 +4124,51 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(thrown?.code).toBeUndefined();
     expect(gh.commitFiles).not.toHaveBeenCalled();
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('bodyImageRefs: an image on the line after a reference-looking prefix is still rendered and validated; hero grandfather is per OCCURRENCE (GH r13)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs, legacyHeroRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('[ref]:\nProse ![bad](/images/blog/x/missing.webp)').map((r) => r.src)).toEqual(['/images/blog/x/missing.webp']);
+    expect((await validateBodyImageRefs({ body: '[ref]:\nProse ![bad](/images/blog/x/missing.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => null })).reason).toMatch(/not committed/);
+    const hero = '/images/2025/12/shrub.webp';
+    expect(legacyHeroRefs(`![a](${hero})\n\n![b](${hero})`, hero)).toEqual([hero, hero]);
+    const getFile = async () => ({ content: 'x' });
+    // Live body carried the hero ONCE → one occurrence is exempt; a refresh that repeats it fails.
+    expect(await validateBodyImageRefs({ body: `![a](${hero})\n\n![p](/images/blog/x/body-1.webp)\n\n![q](/images/blog/x/body-2.webp)`, heroSrc: hero, getFile, legacyHeroSrcs: [hero] })).toMatchObject({ ok: true, distinct: 2 });
+    expect((await validateBodyImageRefs({ body: `![a](${hero})\n\n![again](${hero})\n\n![p](/images/blog/x/body-1.webp)`, heroSrc: hero, getFile, legacyHeroSrcs: [hero] })).reason).toMatch(/embeds the hero image/);
+  });
+
+  test('bodyImageSlots: a quote or list directly under prose (no blank line) closes the paragraph — the lead and slot exclude the nested block; a heading-embedded image marks its section illustrated (GH r13)', () => {
+    const body = ['## A', '', 'Prose line.', '> quoted testimonial', '', '## B', '', 'B prose.', '- item', '', '## ![inspection](/images/blog/x/body-1.webp) What to inspect', '', 'C prose.', '', '## D', '', 'D prose.'].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    const byHeading = Object.fromEntries(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, { last: lines[sec.lastProse - 1], lead: sec.lead, img: !!sec.hasImage }]));
+    expect(byHeading).toEqual({
+      A: { last: 'Prose line.', lead: 'Prose line.', img: false },
+      B: { last: 'B prose.', lead: 'B prose.', img: false },
+      'What to inspect': { last: 'C prose.', lead: 'C prose.', img: true },
+      D: { last: 'D prose.', lead: 'D prose.', img: false },
+    });
+    expect(bodyImageSlots(body, 3, { title: 'T' }).map((sl) => sl.heading)).toEqual(['A', 'B', 'D']);
+  });
+
+  test('update lane: draft-authored pictures are pinned to their blobs even when the draft already meets the minimum — a replacement on main by commit time throws transient and drops the branch (GH r13)', async () => {
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      const m = path.match(/drywood-frass-venice\/(body-1|body-2)\.webp$/);
+      if (m) return { content: '', sha: ref ? `${m[1]}-replaced` : `${m[1]}-orig`, raw: { content: bytes[m[1]] } };
+      return null;
+    });
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    expect(thrown?.message).toMatch(/body-1\.webp \(authored picture changed: expected body-1-orig, found body-1-replaced\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
   });
 
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {

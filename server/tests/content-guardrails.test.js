@@ -4684,6 +4684,9 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     const multi = guardrails.markdownReferenceDefinitions('[pic]:\n  /images/blog/x/body-1.webp "t"\n[angle]:\n</a b.webp>\n[none]:\n\ntext');
     expect([...multi.entries()]).toEqual([['pic', '/images/blog/x/body-1.webp'], ['angle', '/a b.webp']]);
     expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n  /dest.webp\nprose')).toBe('      \n            \nprose');
+    // Only definitions the strict parser recognizes are blanked: an invalid continuation or trailing junk is paragraph text and stays (GH r13).
+    expect(guardrails.blankLinkDefinitionsAndTitles('[ref]:\nProse ![bad](/missing.webp)')).toBe('[ref]:\nProse ![bad](/missing.webp)');
+    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n[y]: /ok.webp "t"')).toBe(`[x]: /dest.webp junk\n${' '.repeat('[y]: /ok.webp "t"'.length)}`);
     // Full-grammar remainder: a quoted / parenthesized title is fine, trailing junk makes the line a paragraph (no definition).
     const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk', '[f]: </f g.webp>  (paren "quote")'].join('\n'));
     expect([...strict.keys()]).toEqual(['a', 'b', 'c', 'f']);
