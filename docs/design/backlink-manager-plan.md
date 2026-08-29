@@ -230,7 +230,7 @@ types (their only non-payment dimension: the send click's `outreach_send` approv
 it and NOTHING else), **execution** for every other type (self-service, account,
 business-claim, membership, vendor registration, human steps), **payment** in addition
 whenever `payment_required`, and — for a `legal_attestation=true` path of ANY type, outreach
-included — a separate **execution-dimension `accept_terms` authority row** whose approval is
+included — a separate **execution-dimension `accept_terms` authority row** (level per `policy.legal_attestation_requires_owner`: `OWNER_LEGAL` by default, else the normal `AUTO_*`/`OWNER_*` execution rules) whose approval, when owner-gated, is
 bound to `legal_terms_hash`; the send approval never satisfies it (§3.6b). An outreach
 placement therefore carries no execution row unless it must accept terms, so the 56 drafts
 and their follow-ups need exactly the communication authority (plus payment only if paid,
@@ -656,8 +656,10 @@ required authorities, one per dimension the path touches: `payment` (when
 `execution` (every non-outreach type: free/account/claim/membership/human-step — an outreach
 placement carries an execution row ONLY as the `accept_terms` instance when
 `legal_attestation=true`, §3.3b: the function then emits BOTH the communication decision AND
-an execution decision of `OWNER_LEGAL` for that instance — never the general `acquire`
-execution row). A paid guest post therefore needs
+an execution decision for that instance — `OWNER_LEGAL` when
+`policy.legal_attestation_requires_owner` (default true), else the normal execution rules
+(`AUTO_ACCOUNT`/`AUTO_FREE` per policy, the acceptance still bound to `legal_terms_hash`) —
+never the general `acquire` execution row). A paid guest post therefore needs
 BOTH an `AUTO_PAID_WITHIN_POLICY`/`OWNER_PAYMENT` decision AND an
 `AUTO_OUTREACH`/`OWNER_OUTREACH` decision with its exact-draft approval; the claim,
 reservation and send/submit steps require every dimension's gate/approval to be satisfied
@@ -1515,7 +1517,7 @@ unset its gate; budget kill = the issuer program's limit.
   re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
   the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released (→ `slot_released`). The runner's
   `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
-  one conversation per inbox — enforced by a durable RECIPIENT-level guard, not the domain lock: `claimProspectDomain` locks only the canonical domain, so the send claim additionally takes `pg_advisory_xact_lock(hashtext('link_outreach_inbox:' || lower(recipient)))` and refuses when any other placement with that recipient is `contacted`/`negotiating`/in a send in-flight (a partial unique index on `lower(recipient_email)` over those statuses makes it durable across pods); signup lanes coexist per location by design; no templated blasts.
+  one conversation per inbox — enforced by a durable RECIPIENT-level guard, not the domain lock: `claimProspectDomain` locks only the canonical domain, so the send claim additionally takes `pg_advisory_xact_lock(hashtext('link_outreach_inbox:' || lower(recipient)))` and refuses when any other placement with that recipient is `contacted`/`negotiating`/in a send in-flight (a partial unique index on `lower(outreach_to_email)` — the shipped recipient column on `seo_link_prospects` — over those statuses makes it durable across pods); signup lanes coexist per location by design; no templated blasts.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
   `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
   with `expected_rel='sponsored'` and scored accordingly.
