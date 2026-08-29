@@ -78,6 +78,12 @@ describe('20260829000020 public_quote_selectable', () => {
     expect(db.services.find((r) => r.service_key === 'pest_re_service').public_quote_selectable).toBe(true);
     expect(db.system_settings).toHaveLength(1); // state retained for idempotent reruns
   });
+  test('one-time pest is seeded on whichever row the environment carries (prod vs migration-built)', async () => {
+    const db = { services: [svc('pest_initial_cleanout')], system_settings: [] };
+    await selectable.up(fakeKnex(db));
+    expect(db.services[0].public_quote_selectable).toBe(true);
+    expect(selectable.SELECTABLE_KEYS).toContain('one_time_pest_control');
+  });
   test('every seeded key names a product a NEW customer buys — no follow-on/internal keys', () => {
     const banned = /re_service|_setup|cartridge|followup|guarantee|renewal|membership|general_appointment|lawn_inspection|trap_only|combo|pest_termite_bait|rodent_monitoring|termite_active_/;
     for (const k of selectable.SELECTABLE_KEYS) expect({ k, ok: !banned.test(k) }).toEqual({ k, ok: true });

@@ -31,7 +31,11 @@ const SELECTABLE_KEYS = [
   'mosquito_monthly', 'mosquito_seasonal', 'mosquito_one_time',
   // pest
   'pest_general_quarterly', 'pest_general_monthly', 'pest_general_bimonthly', 'pest_general_semiannual',
-  'one_time_pest_control', 'cockroach_control', 'german_roach', 'german_roach_initial',
+  // One-time pest: prod carries the admin-created one_time_pest_control row;
+  // migration-built databases carry its documented twin pest_initial_cleanout
+  // (20260401000105) — the same environment split 20260825000011 handles.
+  // Both keys are listed; the seed only flips rows that exist.
+  'one_time_pest_control', 'pest_initial_cleanout', 'cockroach_control', 'german_roach', 'german_roach_initial',
   // rodent
   'rodent_exclusion', 'rodent_trapping', 'rodent_exclusion_only', 'rodent_trapping_exclusion',
   'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation', 'rodent_wire_mesh',

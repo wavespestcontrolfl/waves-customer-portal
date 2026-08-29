@@ -3997,7 +3997,7 @@ function EstimateToolView() {
               <Checkbox k="svcOnetimePest" label="Pest Treatment" />{" "}
               <Checkbox k="svcOnetimeMosquito" label="Mosquito Treatment" />{" "}
               <Checkbox k="svcFlea" label="Flea Treatment" />{" "}
-              <Checkbox k="svcRoach" label="Cockroach Specialty Service" />
+              <Checkbox k="svcRoach" label="Cockroach Treatment Service" />
               {form.svcRoach && (
                 <div style={sSubOpts}>
                   {" "}
