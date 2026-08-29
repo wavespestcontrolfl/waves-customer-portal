@@ -1142,7 +1142,10 @@ class SmartRebooker {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
-          .whereNot('id', serviceId)
+          // Visit members move together (moveVisitAsUnit passes them in
+          // excludeServiceIds) — a chained sibling's OLD slot is not a
+          // conflict for the shifted primary (codex #3609 r1).
+          .whereNotIn('id', [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))])
           .whereNotIn('status', ['cancelled', 'completed'])
           // Expired estimate-slot holds are dead weight until cleanup
           // reclaims them — same active-reservation predicate
@@ -1374,6 +1377,16 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // Direct series callers (customer pull-forward, explicit admin series
+    // branch) reach the visit-unit choke point too (codex #3609 r1): the
+    // anchor's same-day visit siblings move with it; the anchor's own move
+    // re-enters here with visitPolicy:'single' and proceeds as a series.
+    if (options.visitPolicy !== 'single' && service.visit_id) {
+      const unit = await require('./visit-groups').moveVisitAsUnit({
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
+      });
+      if (unit) return unit;
+    }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
     // concurrency aborts are unaffected.

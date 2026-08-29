@@ -1532,107 +1532,172 @@ function shiftClock(hhmm, deltaMin) {
 
 /**
  * Move a grouped row's WHOLE visit as one unit (R3): called by
- * SmartRebooker.reschedule before its series branch for a row that carries
- * a visit_id and no visitPolicy:'single'. "Just this service" is the
- * explicit split action (splitChild) — never a policy flag on the move.
+ * SmartRebooker.reschedule / rescheduleSeries before their own work for a
+ * row that carries a visit_id and no visitPolicy:'single'. "Just this
+ * service" is the explicit split action (splitChild), never a flag here.
  *
- * 1. Under the stop lock, re-read the open visit and its live members; a
- *    visit with one live member is not a unit (returns null ⇒ plain move).
- * 2. Pre-validate EVERY member (status movable, same tuple) before touching
- *    anything — one immovable member refuses the whole move (409).
- * 3. Retarget the parent (date, shifted window union, new stop key + seq)
- *    in the same transaction, so each member's own post-move seam finds a
- *    parent that already matches.
- * 4. Move the members one by one through rebooker.reschedule with
- *    visitPolicy:'single' (no recursion), skipVisitSeam:true (the detach
- *    seam runs once at the END, after every member moved — running it per
- *    member would detach the first mover from siblings still on the old
- *    stop) and the member ids excluded from the occupancy probe (they move
- *    together). Each member keeps its own series semantics.
- * 5. Run the detach seam for every member, then recompute the union.
- *
- * Sequential by nature (each member move is its own transaction with its
- * own CAS / occupancy checks): a member failing mid-way is reported in
- * `visitMove.failed` and as a warning; the office resolves the divergence
- * (Sync / split). Returns the primary's reschedule result + `visitMove`.
+ * Order (codex #3609 r1 — nothing is committed for the visit before the
+ * tapped row itself has moved):
+ * 1. PLAN, read-only, peek → stop lock → verify key → retry: re-read the
+ *    open visit and its live members, refuse if ANY member is not movable
+ *    or no longer at the stop (409), compute every member's target (same
+ *    date; windows shifted by the primary's start delta; a member already
+ *    at the target is skipped — a route-wide batch that reaches the visit
+ *    through a second member is a no-op, not a second move) and a
+ *    per-member concurrency fence from the LOCKED row (the caller's pins
+ *    describe only the primary).
+ * 2. MOVE the primary with the caller's own options, then each sibling with
+ *    its own fence, visitPolicy:'single' (no recursion), skipVisitSeam
+ *    (the detach seam runs once at the end — per member it would detach
+ *    the first mover from siblings still on the old stop) and the member
+ *    ids excluded from both occupancy probes. Each member keeps its own
+ *    series semantics. The primary failing rethrows — nothing has moved.
+ * 3. RETARGET the parent from the members' ACTUAL rows under BOTH stop
+ *    locks taken in sorted key order: date, window union of the rows that
+ *    landed, new stop key + seq, the caller's technician (incl. an explicit
+ *    null = whole-visit unassignment), and — on a date change or a live
+ *    move — a lifecycle reset (en_route_at / arrived_at cleared, tracker
+ *    effects removed so the new day's notices re-arm).
+ * 4. Detach seam for every member (a sibling that failed stays behind,
+ *    detached), then the union is recomputed.
+ * Warnings from every member are aggregated; a failed sibling is reported
+ * in visitMove.failed and as a warning for the operator.
  */
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
   if (!rebooker || !service || !service.visit_id) return null;
+  const logger = require('./logger');
   const allowLive = options.allowLive === true;
   const movable = (st) => UNIT_MOVE_STATUSES.has(String(st)) || (allowLive && UNIT_MOVE_LIVE_STATUSES.has(String(st)));
   const win = typeof newWindow === 'object' && newWindow ? { start: newWindow.start || null, end: newWindow.end || null }
     : (() => { const m = String(newWindow || '').match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/); return m ? { start: m[1], end: m[2] } : { start: null, end: null }; })();
-  const logger = require('./logger');
+  const newDateStr = dateOnly(newDate);
 
-  const plan = await db.transaction(async (t) => {
-    let visit = await t('service_visits').where({ id: service.visit_id }).first();
-    if (!visit || String(visit.status) !== 'open') return null;
-    await lockStop(t, visit.stop_base_key);
-    visit = await t('service_visits').where({ id: service.visit_id }).first();
-    if (!visit || String(visit.status) !== 'open') return null;
-    const members = await t('scheduled_services').where({ visit_id: visit.id })
-      .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
-      .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-    const primary = members.find((m) => String(m.id) === String(serviceId));
-    if (!primary || members.length < 2) return null;
-    for (const m of members) {
-      if (!movable(m.status)) {
-        throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${m.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: m.id });
-      }
-      if (!rowStillAtVisitStop(m, visit, members.filter((o) => o.id !== m.id))) {
-        throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
-      }
+  // ---- 1. plan (read-only) ----
+  let plan = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      plan = await db.transaction(async (t) => {
+        const peek = await t('service_visits').where({ id: service.visit_id }).first();
+        if (!peek || String(peek.status) !== 'open') return null;
+        await lockStop(t, peek.stop_base_key);
+        const visit = await t('service_visits').where({ id: service.visit_id }).first();
+        if (!visit || String(visit.status) !== 'open') return null;
+        if (visit.stop_base_key !== peek.stop_base_key) {
+          throw Object.assign(new Error('visit stop moved concurrently — retry'), { code: 'VISIT_STOP_MOVED' });
+        }
+        const members = await t('scheduled_services').where({ visit_id: visit.id })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
+          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
+        const primary = members.find((m) => String(m.id) === String(serviceId));
+        if (!primary || members.length < 2) return null;
+        for (const m of members) {
+          if (!movable(m.status)) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${m.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: m.id });
+          }
+          if (!rowStillAtVisitStop(m, visit, members.filter((o) => o.id !== m.id))) {
+            throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
+          }
+        }
+        const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
+        const targets = members.map((m) => {
+          const isPrimary = m.id === primary.id;
+          let window = null;
+          let targetStart = m.window_start || null;
+          if (win.start && m.window_start) {
+            targetStart = isPrimary ? win.start : shiftClock(m.window_start, delta);
+            const targetEnd = isPrimary ? (win.end || shiftClock(m.window_end, delta)) : shiftClock(m.window_end, delta);
+            window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
+          }
+          const alreadyAtTarget = dateOnly(m.scheduled_date) === newDateStr && (!win.start || !m.window_start || m.window_start === targetStart);
+          return {
+            id: m.id, isPrimary, window, alreadyAtTarget,
+            // Per-member fence from the LOCKED row (codex r1): the caller's
+            // expect / expectAnchor / expectOccurrenceIds pin the primary only.
+            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null },
+          };
+        });
+        return {
+          visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
+          customerId: visit.customer_id, propertyId: visit.property_id,
+          targets, memberIds: members.map((m) => m.id),
+          anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
+        };
+      });
+      break;
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+      throw err;
     }
-    // Every member shifts by the same delta the primary's start moves, so
-    // a 09-10 · 10-11 chain stays a chain at the new time. A date-only move
-    // keeps every window as-is.
-    const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
-    const targets = members.map((m) => {
-      if (!win.start || !m.window_start) return { id: m.id, window: null, isPrimary: m.id === primary.id };
-      const start = m.id === primary.id ? win.start : shiftClock(m.window_start, delta);
-      const end = m.id === primary.id ? (win.end || shiftClock(m.window_end, delta)) : shiftClock(m.window_end, delta);
-      return { id: m.id, window: end ? `${start}-${end}` : { start, end: null }, isPrimary: m.id === primary.id };
-    });
-    const newDateStr = dateOnly(newDate);
-    const newKey = stopBaseKey({ propertyId: visit.property_id, customerId: visit.customer_id, scheduledDate: newDateStr });
-    const patch = { scheduled_date: newDateStr };
-    if (win.start) {
-      const starts = members.map((m) => (m.window_start ? (m.id === primary.id ? win.start : shiftClock(m.window_start, delta)) : null)).filter(Boolean).sort();
-      const ends = members.map((m) => (m.window_end ? (m.id === primary.id ? (win.end || shiftClock(m.window_end, delta)) : shiftClock(m.window_end, delta)) : null)).filter(Boolean).sort();
-      patch.window_start = starts[0] || null;
-      patch.window_end = ends[ends.length - 1] || null;
-    }
-    if (newKey !== visit.stop_base_key) {
-      await lockStop(t, newKey);
-      patch.stop_base_key = newKey;
-      patch.stop_seq = await nextStopSeq(t, newKey);
-    }
-    await t('service_visits').where({ id: visit.id }).update(patch);
-    return { visitId: visit.id, targets, memberIds: members.map((m) => m.id) };
-  });
+  }
   if (!plan) return null;
+  const pending = plan.targets.filter((x) => !x.alreadyAtTarget);
+  if (!pending.length) {
+    return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
+  }
 
+  // ---- 2. move members: primary first, then siblings ----
   const moved = [];
   const failed = [];
+  const warnings = [];
   let primaryResult = null;
-  const ordered = [...plan.targets.filter((x) => x.isPrimary), ...plan.targets.filter((x) => !x.isPrimary)];
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, ...siblingBase } = options;
+  const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...plan.memberIds].map(String))];
+  const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
   for (const target of ordered) {
+    const memberOpts = target.isPrimary
+      ? { ...options, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds }
+      : { ...siblingBase, expect: target.expect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
     try {
-      const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, {
-        ...options,
-        visitPolicy: 'single',
-        skipVisitSeam: true,
-        excludeServiceIds: [...new Set([...(options.excludeServiceIds || []), ...plan.memberIds].map(String))],
-      });
+      const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
+      if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
     } catch (err) {
-      if (target.isPrimary) throw err; // the tapped row itself could not move — nothing else moved yet
+      if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
       failed.push({ id: target.id, reason: err.message, code: err.code || null });
       logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${err.message}`);
     }
   }
-  // Detach seam ONCE, after every member moved (or failed in place).
+
+  // ---- 3. retarget the parent from the rows that actually landed ----
+  const newKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
+  try {
+    await db.transaction(async (t) => {
+      for (const key of [...new Set([plan.oldKey, newKey])].sort()) await lockStop(t, key);
+      const visit = await t('service_visits').where({ id: plan.visitId }).first();
+      if (!visit || String(visit.status) !== 'open') return;
+      const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .select('id', 'scheduled_date', 'window_start', 'window_end');
+      const landed = rows.filter((r) => dateOnly(r.scheduled_date) === newDateStr);
+      if (!landed.length) return;
+      const starts = landed.map((r) => r.window_start).filter(Boolean).sort();
+      const ends = landed.map((r) => r.window_end).filter(Boolean).sort();
+      const patch = {
+        scheduled_date: newDateStr,
+        window_start: starts[0] || null,
+        window_end: ends[ends.length - 1] || null,
+      };
+      if (newKey !== visit.stop_base_key) {
+        patch.stop_base_key = newKey;
+        patch.stop_seq = await nextStopSeq(t, newKey);
+      }
+      if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+      if (plan.anyLive || newDateStr !== plan.oldDate) {
+        // The members' lifecycle was rewound by the rebooker; the visit's
+        // must follow, and the day's tracker one-shots re-arm.
+        patch.en_route_at = null;
+        patch.arrived_at = null;
+        await t('visit_effects').where({ visit_id: plan.visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
+      }
+      await t('service_visits').where({ id: plan.visitId }).update(patch);
+    });
+  } catch (err) {
+    warnings.push(`visit parent retarget failed: ${err.message}`);
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: parent retarget failed: ${err.message}`);
+  }
+
+  // ---- 4. detach seam once for every member, then the union ----
   for (const id of plan.memberIds) {
     try { await handleChildStopChanged(id); } catch (err) { logger.warn(`[visit-groups] unit move seam for ${id} failed: ${err.message}`); }
   }
@@ -1642,9 +1707,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (v && String(v.status) === 'open') { await lockStop(t, v.stop_base_key); await recomputeVisitWindow(t, v.id); }
     });
   } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
-  const visitMove = { visitId: plan.visitId, moved, failed };
-  const warnings = [...((primaryResult && primaryResult.warnings) || [])];
+
   if (failed.length) warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
+  const visitMove = { visitId: plan.visitId, moved, failed };
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
 }
 

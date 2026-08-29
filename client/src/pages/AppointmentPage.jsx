@@ -409,6 +409,12 @@ export default function AppointmentPage() {
               The text carrying the link already greets the right person. */}
           Your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
         </div>
+        {Array.isArray(data.service?.visit?.services) && data.service.visit.services.length > 1 && (
+          /* Visit group: one link covers every service at this stop. */
+          <div data-testid="visit-services" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5 }}>
+            This visit includes {data.service.visit.services.join(' · ')}.
+          </div>
+        )}
 
         <div data-glass="soft" style={{
           display: 'flex', alignItems: 'center', gap: 12, marginTop: 16,
