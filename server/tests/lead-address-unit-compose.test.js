@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => ({
   logGateStatus: jest.fn(),
 }));
 
-const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey, leadAddressTailPlace } = require('../services/call-recording-processor')._test;
+const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey, leadAddressTailPlace, leadAddressKeysEquivalent } = require('../services/call-recording-processor')._test;
 
 describe('composeLeadAddress', () => {
   test('appends the unit to the street', () => {
@@ -287,6 +287,26 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St #4 Sarasota FL 34236', '#4'), city: 'Sarasota', zip: '34236' }, lockedAlias).address).toBe(lockedAlias.address);
     // "Apt 4" against a "Bldg 2 Apt 4" line is a different door → conflict, never appended.
     expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4')).toEqual({ address: '100 Main St Bldg 2 Apt 4 Sarasota FL 34236', unitConflict: true });
+  });
+
+  test('the same door in comma-free and comma-separated shapes records ownership either way', () => {
+    const whole = '100 Main St Apt 4 Sarasota FL 34236';
+    const comma = '100 Main St, Apt 4, Sarasota, FL 34236';
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey(comma))).toBe(true);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey(comma), leadAddressCompareKey(whole))).toBe(true);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St, Unit 4'))).toBe(true);
+    // Different unit, different street, or a unit-less side: never.
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St, Apt 5'))).toBe(false);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St North, Apt 4'))).toBe(false);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey(whole), leadAddressCompareKey('100 Main St'))).toBe(false);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St North Sarasota FL 34236'), leadAddressCompareKey('100 Main St'))).toBe(false);
+    // Reaffirmation across shapes, place corroborated by the columns.
+    const lockedWhole = { address: whole, city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: comma, city: 'Sarasota', zip: '34236' }, lockedWhole).address).toBe(whole);
+    expect(reaffirmedFilledLeadFields({ address: comma, city: 'Bradenton', zip: '34205' }, lockedWhole).address).toBeUndefined();
+    const lockedComma = { address: comma, city: null, zip: null };
+    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Sarasota', zip: '34236' }, lockedComma).address).toBe(comma);
+    expect(reaffirmedFilledLeadFields({ address: whole, city: 'Bradenton', zip: '34205' }, lockedComma).address).toBeUndefined();
   });
 
   test('stored place evidence is read from the UNBOUNDED tail (the clamp is write-time only)', () => {

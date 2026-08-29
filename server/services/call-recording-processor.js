@@ -2591,7 +2591,7 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     // street/unit string in another city/ZIP is a different property just
     // as much as a canonical-key match is (codex r5 P1).
     const same = f === 'address'
-      ? (literal || leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal))
+      ? (literal || leadAddressKeysEquivalent(leadAddressCompareKey(suppliedValues[f]), leadAddressCompareKey(lockedVal)))
         && leadAddressPlaceCorroborates(suppliedValues, lockedLead)
       : literal;
     if (same) out[f] = lockedVal;
@@ -2669,6 +2669,27 @@ function leadAddressCompareKey(v) {
   // successor ownership is recorded (#3608 codex r4 P1).
   if (unitK && unitKeys.includes(unitK)) return streetKey;
   return unitK ? `${streetKey}|${unitK}` : streetKey;
+}
+
+// Two lead-address keys name the same door when they are equal, OR when the
+// comma-separated form's "street {u:unit}" is an exact space-delimited
+// prefix of a whole-line (comma-free) key — the inline unit is the
+// delimiter, so "100 main st|4" ≡ "100 main st {u:4} sarasota fl 34236"
+// while "100 main st north|4" or "100 main st|5" are not (pre-push audit
+// P1). A unit-less key never prefix-matches (no delimiter → "100 main st"
+// would swallow "100 main st north …"); place is corroborated separately.
+function leadAddressKeysEquivalent(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const inlineForm = (k) => {
+    const bar = k.lastIndexOf('|');
+    return bar > 0 ? `${k.slice(0, bar)} {u:${k.slice(bar + 1)}}` : null;
+  };
+  for (const [x, y] of [[a, b], [b, a]]) {
+    const inl = inlineForm(x);
+    if (inl && (y === inl || y.startsWith(`${inl} `))) return true;
+  }
+  return false;
 }
 
 // Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
@@ -14848,6 +14869,7 @@ CallRecordingProcessor._test = {
   analyzeLeadAddress,
   leadAddressCompareKey,
   leadAddressTailPlace,
+  leadAddressKeysEquivalent,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,
