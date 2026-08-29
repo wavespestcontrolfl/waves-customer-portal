@@ -22438,6 +22438,10 @@ async function buildPricingBundleInner(estimate) {
         });
       }
     }
+    const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+    const rodentBaitSetupFee = frozenRodentSetupForPreview > 0
+      ? { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false }
+      : null;
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
     if (initialRoachItem) {
       firstVisitFees.push({
@@ -22495,6 +22499,14 @@ async function buildPricingBundleInner(estimate) {
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
+      // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
+      // accept paths bill this frozen figure UP FRONT beside the first
+      // application (never waived by prepay), so the payment choice previews
+      // it as an invoice row and the after-completion extras note excludes
+      // it. Deliberately NOT a firstVisitFees row — those drive the fee
+      // cards and the breakdown exclusions; this row stays in the breakdown.
+      // Omitted entirely when no setup was disclosed (payload byte-identical).
+      ...(rodentBaitSetupFee ? { rodentBaitSetupFee } : {}),
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',

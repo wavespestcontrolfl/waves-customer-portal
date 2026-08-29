@@ -1377,10 +1377,23 @@ export function oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode) {
   const breakdown = pricing?.oneTimeBreakdown;
   const total = Number(breakdown?.total) || 0;
   if (total <= 0) return 0;
+  // The rodent bait-station setup is invoiced up front too (codex #3591 r33
+  // P1) — PPB previews it via extraInvoiceRows, so it is not an "after
+  // completion" extra either.
   const setup = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter(isWaveGuardSetupBreakdownRow)
+    .filter((row) => isWaveGuardSetupBreakdownRow(row) || isRodentBaitSetupBreakdownRow(row))
     .reduce((sum, row) => sum + (Number(row.amount ?? row.price ?? row.total) || 0), 0);
   return Math.max(0, Math.round((total - setup) * 100) / 100);
+}
+
+export function isRodentBaitSetupBreakdownRow(item = {}) {
+  if (String(item?.service || '').toLowerCase() === 'rodent_bait_setup') return true;
+  const raw = [item.label, item.name, item.detail]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return raw.includes('bait station setup');
 }
 
 // Mirrors the server isNonBillableOneTimeRow: inspections, the WaveGuard setup
@@ -5813,6 +5826,12 @@ function EstimateViewPageInner() {
     ? { ...fee, waivedWithPrepay: annualPrepayEligibleEffective }
     : fee);
   const setupFeeEffective = tierAwareFee(pricing.setupFee || null);
+  // Up-front rows beyond the WaveGuard setup (codex #3591 r33 P1): the
+  // frozen rodent bait-station setup is invoiced beside the first
+  // application by BOTH accept paths, so the payment choice previews it.
+  const rodentSetupInvoiceRows = Number(pricing?.rodentBaitSetupFee?.amount) > 0
+    ? [{ label: pricing.rodentBaitSetupFee.label || 'Bait Station Setup', amount: Number(pricing.rodentBaitSetupFee.amount) }]
+    : [];
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -6354,6 +6373,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                extraInvoiceRows={rodentSetupInvoiceRows}
                 setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
@@ -6694,6 +6714,7 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                extraInvoiceRows={rodentSetupInvoiceRows}
                 setupFee={setupFeeEffective}
                 annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}

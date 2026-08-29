@@ -1467,6 +1467,23 @@ describe('oneTimeExtrasForPaymentNote', () => {
     expect(oneTimeExtrasForPaymentNote(setupOnly, {}, 'recurring')).toBe(0);
   });
 
+  it('subtracts the rodent bait-station setup too — it is invoiced up front, not after completion (codex #3591 r33 P1)', () => {
+    const rodent = {
+      oneTimeBreakdown: {
+        total: 348,
+        items: [
+          { service: 'flea_treatment', name: 'Flea treatment', price: 249 },
+          { service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 },
+        ],
+      },
+    };
+    expect(oneTimeExtrasForPaymentNote(rodent, {}, 'recurring')).toBe(249);
+    const labeled = {
+      oneTimeBreakdown: { total: 149, items: [{ name: 'Rodent exclusion', price: 50 }, { name: 'Bait Station Setup', price: 99 }] },
+    };
+    expect(oneTimeExtrasForPaymentNote(labeled, {}, 'recurring')).toBe(50);
+  });
+
   it('matches setup rows by label when the service key is missing', () => {
     const labeled = {
       oneTimeBreakdown: {

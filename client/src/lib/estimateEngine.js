@@ -3816,7 +3816,11 @@ export function calculateEstimate(inputs) {
       discount: wd,
       savings: da,
       pestProgramFloorApplied,
-      rodentBaitMo: R.rodBaitMo || 0,
+      // Since 2026-08-29 the rodent bait plan is a services ROW inside
+      // monthlyTotal — the legacy scalar is emitted as 0 so the admin render
+      // fallbacks (monthlyTotal + rodentBaitMo when grandTotal is absent)
+      // cannot count the plan twice (codex #3591 r33 P2).
+      rodentBaitMo: 0,
       palmInjectionMo: palmMo,
       palmInjectionAnn: palmAnn,
       foamRecurringMo: R.foamRec ? R.foamRec.mo : 0,

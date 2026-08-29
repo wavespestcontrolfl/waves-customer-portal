@@ -705,6 +705,28 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
 
+  test('both admin previews count rodent bait toward the tier ONLY through rodentBaitWaveguardFlags (codex #3591 r33 P1)', () => {
+    for (const src of [legacyAdminSource, adminToolViewSource]) {
+      const at = src.indexOf('const qualifyingRecurringKeys = [');
+      expect(at).toBeGreaterThan(0);
+      const list = src.slice(at, src.indexOf('];', at));
+      expect(list).toContain('...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : [])');
+      expect(list).not.toMatch(/^\s*"svcRodentBait",\s*$/m);
+      expect(src).toMatch(/rodentBaitWaveguardFlags,\n/);
+    }
+  });
+
+  test('client fallback emits rodentBaitMo 0 — the plan rides INSIDE monthlyTotal as a services row (codex #3591 r33 P2)', () => {
+    const clientEngineSource = fs.readFileSync(clientEstimatorPath, 'utf8');
+    expect(clientEngineSource).toMatch(/rodentBaitMo: 0,\n\s*palmInjectionMo: palmMo,/);
+    expect(clientEngineSource).not.toContain('rodentBaitMo: R.rodBaitMo || 0');
+    // The summary/totals cards no longer depend on the scalar (or the tier
+    // count) to render a rodent-only plan.
+    for (const src of [legacyAdminSource, adminToolViewSource]) {
+      expect((src.match(/Number\(E\.recurring\.monthlyTotal\) > 0 \|\|/g) || []).length).toBe(2);
+    }
+  });
+
   test('legacy admin page batch-flow nextEstimate resets the customer binding through the binder (codex #3591 r32 P1)', () => {
     const at = legacyAdminSource.indexOf('function nextEstimate() {');
     expect(at).toBeGreaterThan(0);

@@ -12563,6 +12563,7 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       PLAN_CLASS_BY_SERVICE_KEY,
       annualPrepayOverlapStatusClause,
       resolveDirectRodentSetupObligation,
+      authoritativeServiceKey,
     } = require('../services/secure-appointment-plans');
 
     // Local-calendar date-only reads (NOT toISOString) — a UTC slice on a
@@ -12592,14 +12593,14 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     if (scheduledServiceId) {
       const visit = await conn('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+        .first('id', 'customer_id', 'service_type', 'service_id', 'estimated_price', 'scheduled_date', 'window_start',
           'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
           'recurring_ongoing', 'booster_months', 'source_estimate_id');
       if (!visit) return { httpStatus: 404, httpBody: { error: 'Scheduled service not found' } };
       const parent = visit.recurring_parent_id
         ? await conn('scheduled_services')
           .where({ id: visit.recurring_parent_id })
-          .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+          .first('id', 'service_type', 'service_id', 'estimated_price', 'scheduled_date', 'window_start',
             'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
             'booster_months', 'source_estimate_id')
         : visit;
@@ -12671,6 +12672,10 @@ async function computeAnnualPrepayPreview(query, conn = db) {
         bookedVisitCount,
         customerId: String(anchor.customer_id || visit.customer_id || ''),
         coverageServiceType: String(anchor.service_type || '').trim(),
+        // The PERSISTED anchor identity (codex #3591 r33 P1): plan class and
+        // setup obligation derive from its catalog identity, never from the
+        // label alone (a repointed catalog leaves service_type stale).
+        anchorVisit: { id: anchor.id, service_type: anchor.service_type, service_id: anchor.service_id || null },
         perVisit: anchor.estimated_price != null ? Number(anchor.estimated_price) : null,
         rawCadence: String(anchor.recurring_pattern || '').trim(),
         intervalDays: Number(anchor.recurring_interval_days),
@@ -12828,7 +12833,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // residential programs take the percentage. Anything unlisted (commercial
     // keys, unclassifiable names) has no owner-approved prepay incentive.
     const { recurringServiceKey } = require('../services/estimate-converter');
-    const planClass = PLAN_CLASS_BY_SERVICE_KEY[recurringServiceKey({ name: coverageServiceType })] || null;
+    // Committed series: catalog-first identity from the persisted anchor
+    // (codex #3591 r33 P1); the draft probe has only the label.
+    const coverageServiceKey = input.anchorVisit
+      ? await authoritativeServiceKey(conn, input.anchorVisit)
+      : recurringServiceKey({ name: coverageServiceType });
+    const planClass = PLAN_CLASS_BY_SERVICE_KEY[coverageServiceKey] || null;
     if (!planClass) return blocked('isn’t available for this service');
 
     // The term is anchored on the visit being booked, so the coverage seeder
@@ -12917,11 +12927,16 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // shared resolver the secure-plan page and autoSecure run, so the
     // prepay-on-book lane cannot activate the series without collecting it.
     // Estimate-anchored series carry their own frozen decision (0 here).
-    const unwaivedSetupFee = await resolveDirectRodentSetupObligation(conn, {
-      customer_id: customerId,
-      service_type: coverageServiceType,
-      source_estimate_id: anchorEstimateId || null,
-    });
+    // A committed series hands the resolver its PERSISTED id so the
+    // catalog-first re-read decides (codex #3591 r33 P1); only the draft
+    // probe (no row yet) prices from the fragment.
+    const unwaivedSetupFee = await resolveDirectRodentSetupObligation(conn, input.anchorVisit
+      ? { id: input.anchorVisit.id }
+      : {
+        customer_id: customerId,
+        service_type: coverageServiceType,
+        source_estimate_id: anchorEstimateId || null,
+      });
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
@@ -13237,6 +13252,14 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         }
         voided = resolved.supersedes.map((inv) => ({ id: inv.id, invoiceNumber: inv.invoiceNumber, total: inv.total }));
 
+        // A direct (non-estimate) rodent series' non-member setup rides the
+        // recomputed payload as setupFeeAmount — billed as its OWN line
+        // (codex #3591 r33 P1): the sheet's prepayTotal included it, and the
+        // coverage amount stays the term basis the renewals slice.
+        const switchSetupFee = Number(mintPayload.setupFeeAmount) > 0
+          ? Math.round(Number(mintPayload.setupFeeAmount) * 100) / 100
+          : 0;
+        const expectedSwitchTotal = Math.round((Number(mintPayload.amount) + switchSetupFee) * 100) / 100;
         invoice = await InvoiceService.create({
           database: trx,
           customerId: liveVisit.customer_id,
@@ -13246,14 +13269,20 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
             quantity: 1,
             unit_price: mintPayload.amount,
             category: 'Annual prepay',
-          }],
+          },
+          ...(switchSetupFee > 0 ? [{
+            description: 'Bait Station Setup — one-time setup fee',
+            quantity: 1,
+            unit_price: switchSetupFee,
+            category: 'Setup fee',
+          }] : [])],
           notes: `${mintPayload.note} (visit ${target.visit.id})`,
           dueDate: etDateString(),
         });
         // The sheet displayed a tax-free residential total; anything else
         // coming back (unexpected tax, payer accrual) aborts the whole
         // switch rather than charging a number nobody was shown.
-        if (Math.round(Number(invoice.total) * 100) !== Math.round(Number(mintPayload.amount) * 100)) {
+        if (Math.round(Number(invoice.total) * 100) !== Math.round(expectedSwitchTotal * 100)) {
           const err = new Error('The minted total did not match the quoted total — switch aborted');
           err.switchConflict = true;
           throw err;
@@ -13283,7 +13312,8 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           prepayInvoiceId: invoice.id,
           planLabel: mintPayload.planLabel,
           monthlyRate: Math.round((mintPayload.amount / 12) * 100) / 100,
-          prepayAmount: Math.round(Number(invoice.total) * 100) / 100,
+          // Coverage money only — the setup line is not per-visit coverage.
+          prepayAmount: Math.round((Number(invoice.total) - switchSetupFee) * 100) / 100,
           termStart: mintPayload.termStart,
           coverageServiceType: mintPayload.serviceType,
           coverageVisitCount: mintPayload.visitCount,

@@ -43,6 +43,7 @@ import {
   resolveLookupPropertyTypeAutofill,
   rodentBaitBracketForFootprint,
   rodentBaitPolicyNote,
+  rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
@@ -2466,10 +2467,11 @@ export default function EstimateToolViewV2({
       "svcTs",
       "svcMosquito",
       "svcTermiteBait",
-      // Rodent bait is a full WaveGuard member since 2026-08-29 (owner
-      // directive): tier-counted and tier-discounted in this preview like
-      // in the engine.
-      "svcRodentBait",
+      // Rodent bait counts toward the tier ONLY while the live
+      // rodent_waveguard.tier_qualifier flag says so (codex #3591 r33 P1) —
+      // the same mechanism calculateEstimate and the server engine read, so
+      // the preview never advertises a Silver a Bronze estimate won't give.
+      ...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
     const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
     // ALL commercial pest-family services now auto-price as recurring lines
@@ -8465,6 +8467,7 @@ export default function EstimateToolViewV2({
                       <div className="p-4">
                     {/* Summary Card */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.palmInjectionMo > 0 ||
                       E.recurring.rodentBaitMo > 0) && (
@@ -9311,6 +9314,7 @@ export default function EstimateToolViewV2({
 
                     {/* Bundle + Totals */}
                     {(E.recurring.serviceCount > 0 ||
+                      Number(E.recurring.monthlyTotal) > 0 ||
                       E.oneTime.total > 0 ||
                       E.recurring.rodentBaitMo > 0 ||
                       E.recurring.palmInjectionMo > 0) && (
