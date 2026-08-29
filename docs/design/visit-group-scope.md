@@ -157,6 +157,11 @@ service_visits                                  ← rev 5 shape
                                      the office's reissue response; the hash is written in the
                                      same transaction that claims the completion effect
   summary_token_issued_at · summary_token_revoked_at
+  summary_token_enc     bytea — the raw bearer encrypted at rest (AES-256-GCM, key =
+                                `VISIT_TOKEN_KEK` env, same pattern as stored card/ACH secrets)
+                                so a retried or crashed link-bearing effect (SMS, email,
+                                reissue) can render the URL; NULLed once every link-bearing
+                                effect is terminal. Lookups always go through the hash.
   review_request_id · payment_intent_id
   created_by         converter | seeder | admin:<id> | dispatch
   created_at / updated_at
@@ -173,7 +178,8 @@ visit_effects                                   ← rev 5: ONE durable outbox fo
   id · visit_id · effect_type                      action, replacing per-column comms state
      (reminder_72h | reminder_24h | tracker_en_route | tracker_arrived | completion_sms |
       completion_email | review_ask | visit_payment | visit_receipt | payment_failure)
-  dedupe_key · status (pending | claimed | sent | failed | suppressed) · provider_id
+  dedupe_key · status (pending | claimed | sent | failed | suppressed | unknown_delivery) ·
+  provider_id
   (Twilio SID / SendGrid id / Stripe PI id) · attempts · scheduled_at · sent_at ·
   payload_version · last_error
   UNIQUE (visit_id, effect_type, dedupe_key)
@@ -448,10 +454,13 @@ Rules:
 - Issued `/visit/:token` links keep working after any gate change.
 - Emergency: if the grouped closer cannot complete (worker failure, provider outage), the
   visit parks in `closing` with an admin bell — it never emits per-row messages as a fallback.
-- The legacy per-row `/complete` **refuses** a row whose visit is open (409 *"complete this
-  visit from the visit sheet"*), and the admin's *Separate these services* action is the only
-  way to return rows to per-row completion — and only while §2's dissolution conditions hold.
-  A visit is therefore never closed twice and never speaks twice.
+- The legacy per-row `/complete` **refuses** any row with a non-null `visit_id` whose visit
+  is not `dissolved` — `open`, `closing` and `closed` alike (409 *"complete this visit from
+  the visit sheet"*), checked under the row's existing idempotency claim so it cannot race
+  the packet worker. The only way back to per-row completion is the admin's *Separate these
+  services* action, which dissolves/splits atomically and only while §2's dissolution
+  conditions hold (never while a packet is accepted/processing). A visit is therefore never
+  closed twice and never speaks twice.
 
 **Portal billing history (rev 3, new surface).** The customer portal Billing tab
 (`client/src/pages/PortalPage.jsx` `BillingTab` :5105, Payment History card) groups invoices
@@ -495,7 +504,14 @@ combined PI with the locked allocation), `POST …/pay/quote` (surcharge quote f
 payment method), `POST …/pay/finalize` (re-verify the allocation with `verifyAllocationLocked`,
 then apply the surcharge and confirm). The displayed total, the PI amount, the PI metadata and
 the payment-row surcharge are all derived from **one** `computeChargeAmount(..., { funding })`
-result per finalize; nothing recomputes independently. Card funding is never charged base-only,
+result per finalize; nothing recomputes independently. **Billing-hold enforcement (rev 5c):**
+`/pay`, `/pay/quote`, `/pay/finalize` and the webhook settle all run under the visit advisory
+lock and **refuse (409 `visit_billing_hold`)** unless `service_visits.billing_hold = false`
+AND every selected child has a terminal billable `billing_disposition` (`full` | `adjusted`;
+`waived` invoices are excluded from the allocation, `hold_for_review` blocks the whole
+visit) — the check is inside `verifyAllocationLocked` for visit PIs, not only in the UI, so a
+direct POST can never charge an undisposed amount. Disposition changes after a PI exists
+invalidate the locked allocation (the existing update-amount degrade path). Card funding is never charged base-only,
 and the PI amount always equals what the ledger records (AGENTS.md surcharge / PI-agreement
 rules). ACH/bank funding takes the no-surcharge branch of the same call. The kill-switch sweep
 in `pay-combined.js:703` applies to visit PIs unchanged.
