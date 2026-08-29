@@ -636,6 +636,16 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     expect(monitoring).not.toHaveProperty('termiteBaitStage');
   });
 
+  it('a one-time cartridge-replacement visit keeps its purpose-built typed record', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const service = { service_type: 'Termite Bait Cartridge Replacement', service_data: JSON.stringify({ completedServiceKey: 'termite_cartridge_replacement', typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+    expect(recordStage(service)).toBe('replacement');
+    expect(attachTermiteReportV2({ typedReport: { type: 'termite_bait_station', visitSequence: 1 }, termiteBaitStage: 'replacement' }, service).termiteReportV2).toBeUndefined();
+    expect(termiteReportV2PdfSignature(service)).toBe('');
+    // legacy (no frozen key): the name decides the same way
+    expect(recordStage({ service_type: 'Termite Bait Cartridge Replacement', service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: {} } }) })).toBe('replacement');
+  });
+
   it('a detection-only monitoring visit keeps the typed record (no active-bait copy)', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
     const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };

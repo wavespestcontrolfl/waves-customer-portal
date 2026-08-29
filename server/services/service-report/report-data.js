@@ -3556,7 +3556,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceDate: service.service_date || null,
     // Freezes the station denominator at the visit itself (codex P2 #3600
     // r32) — same completion fields the visit-timing cells read.
-    visitCompletedAt: service.completed_at || service.actual_end_time || service.check_out_time || null,
+    // The public report query selects service_records.* without the
+    // scheduled-service completion columns, so use the already-resolved
+    // completionTime (record + scheduled row + timing evidence) first
+    // (codex P2 #3600 r34).
+    visitCompletedAt: completionTime || service.completed_at || service.actual_end_time || service.check_out_time || null,
     // Read off the FROZEN snapshot that actually OWNS the trapping program —
     // which may be a COMPANION, since typedTypes deliberately lets a
     // non-station primary carry a rodent_trapping companion and that

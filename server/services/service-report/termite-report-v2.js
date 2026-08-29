@@ -44,17 +44,21 @@ function isTermiteBaitServiceName(serviceType) {
 // which are NOT active-bait monitoring checks.
 const TERMITE_INSTALLATION_KEY = 'termite_installation_setup';
 const TERMITE_DETECTION_KEY = 'termite_monitoring';
+const TERMITE_CARTRIDGE_REPLACEMENT_KEY = 'termite_cartridge_replacement';
+// 'replacement' = the one-time per-cartridge follow-on: its purpose-built
+// typed report stands, like installation and detection-only visits
+// (codex P2 #3600 r34).
 function stageForServiceKey(key) {
   if (!key) return null;
   if (key === TERMITE_INSTALLATION_KEY) return 'installation';
   if (key === TERMITE_DETECTION_KEY) return 'detection';
+  if (key === TERMITE_CARTRIDGE_REPLACEMENT_KEY) return 'replacement';
   return 'monitoring';
 }
 // Recurring active-bait monitoring keys are the only "next monitoring
 // visit" candidates: installation, detection-only, AND the one-time
 // per-cartridge replacement follow-on are excluded (codex P2 #3600 r24 —
 // a replacement scheduled ahead of the routine check must not hide it).
-const TERMITE_CARTRIDGE_REPLACEMENT_KEY = 'termite_cartridge_replacement';
 function isMonitoringServiceKey(key) {
   return Boolean(key)
     && key !== TERMITE_INSTALLATION_KEY
@@ -649,7 +653,7 @@ function attachTermiteReportV2(data, service = {}) {
   // (codex P1 #3600 r15 / r18). The PDF signature stays a superset: a
   // record it keys as -termv2 that renders without the dashboard only
   // re-renders once on the flip, never serves a stale render as current.
-  if (stage === 'installation' || stage === 'detection') return data;
+  if (stage === 'installation' || stage === 'detection' || stage === 'replacement') return data;
   const resolved = termiteBaitSnapshotOf(service);
   if (!resolved) return data;
   // The customer-visible report entry that matches the snapshot: the
@@ -749,6 +753,7 @@ function recordStage(service = {}) {
   const name = String(service.service_type || '');
   if (INSTALLATION_NAME_RE.test(name)) return 'installation';
   if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return 'detection';
+  if (/\breplacement\b/i.test(name)) return 'replacement';
   return 'monitoring';
 }
 
