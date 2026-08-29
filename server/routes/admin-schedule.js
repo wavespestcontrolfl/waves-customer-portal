@@ -5167,7 +5167,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // above. Children resolve the CURRENT catalog identity from the
       // inserted parent (serviceId is optional on this endpoint — a legacy
       // or stale label must not seed a whole series with a retired name).
-      const childIdentity = await resolveSeriesChildIdentity(trx, svc);
+      // Only when something will actually be inserted: a one-off booking
+      // takes no catalog read here, and a failed read inside `trx` must not
+      // be able to poison an unrelated parent insert (codex #3604 r3 P2).
+      const childIdentity = (plannedChildDates.length || plannedBoosterDates.length)
+        ? await resolveSeriesChildIdentity(trx, svc)
+        : null;
       for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,

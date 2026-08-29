@@ -1164,8 +1164,11 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
   // Canonical child creator for public booking + estimate conversion: the
   // follow-ups are born with the CURRENT catalog identity (fail-closed to
-  // the parent's own label + link inside the resolver).
-  const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, parent);
+  // the parent's own label + link inside the resolver). Resolved against
+  // the EFFECTIVE cadence — public booking inserts the parent without a
+  // recurring_pattern and supplies it only through opts.pattern, and the
+  // legacy (label, cadence) bridge needs that evidence (codex #3604 r3 P1).
+  const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, { ...parent, recurring_pattern: pattern });
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     childIdentity,

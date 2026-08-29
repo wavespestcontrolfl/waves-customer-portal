@@ -55,6 +55,10 @@ function seedDb() {
       { id: 'svc-old', name: 'Retired Plan', service_key: 'retired', is_active: false },
       { id: 'svc-dup-a', name: 'Palm Care', service_key: 'palm_a', is_active: true },
       { id: 'svc-dup-b', name: 'Palm Care', service_key: 'palm_b', is_active: true },
+      // one ACTIVE + one INACTIVE row share a name: the pre-link lookup
+      // searches all rows, so the name is ambiguous today — never linked
+      { id: 'svc-mosq', name: 'Mosquito Control', service_key: 'mosquito', is_active: true },
+      { id: 'svc-mosq-old', name: 'Mosquito Control', service_key: 'mosquito_legacy', is_active: false },
     ],
     scheduled_services: [
       // links, snapshot stamped (was NULL)
@@ -73,6 +77,8 @@ function seedDb() {
       { id: 'v6', service_id: null, service_type: 'Palm Care', status: 'confirmed', service_key_snapshot: null },
       // no catalog row at all
       { id: 'v7', service_id: null, service_type: 'Owner Custom Label', status: 'pending', service_key_snapshot: null },
+      // name shared by an active AND an inactive row — ambiguous, no link
+      { id: 'v9', service_id: null, service_type: 'Mosquito Control', status: 'pending', service_key_snapshot: null },
     ],
     system_settings: [],
   };
@@ -96,7 +102,8 @@ describe('20260829000060 up()', () => {
       { id: 'v1', service_type: 'Quarterly Pest Control Service', service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' },
       { id: 'v2', service_type: 'monthly pest control service', service_id: 'svc-m', service_key_snapshot: null },
     ]);
-    expect(state.ambiguous).toEqual([{ id: 'v6', service_type: 'Palm Care' }]);
+    expect(byId(db, 'v9').service_id).toBeNull();
+    expect(state.ambiguous).toEqual([{ id: 'v6', service_type: 'Palm Care' }, { id: 'v9', service_type: 'Mosquito Control' }]);
     expect(state.conflicts).toEqual([
       { id: 'v8', service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_monthly', matched_service_key: 'pest_quarterly' },
     ]);

@@ -97,6 +97,14 @@ describe('seedFollowUpsForParent child identity', () => {
     }
   });
 
+  test('public-booking shape: parent inserted WITHOUT recurring_pattern, cadence only in opts.pattern → still resolves via (label, cadence)', async () => {
+    const { conn, inserted } = makeConn();
+    const bare = { ...PARENT, service_type: 'Pest Control', recurring_pattern: undefined, status: 'pending' };
+    await seedFollowUpsForParent(conn, bare, { pattern: 'quarterly', plannedCount: 2 });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({ service_type: 'Quarterly Pest Control Service', service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' });
+  });
+
   test('linked parent whose catalog row was renamed → follow-ups carry the CURRENT name and the parent\'s link', async () => {
     const renamed = [{ id: 'svc-q', name: 'Quarterly Pest Control Plan', service_key: 'pest_quarterly', is_active: true }];
     const { conn, inserted } = makeConn({ services: renamed });

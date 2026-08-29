@@ -13,8 +13,9 @@
  *
  * Population: open visits (NULL status is open; terminal rows keep their
  * history untouched — Invariant 1) with service_id NULL whose service_type
- * equals, case-insensitively, the name of exactly ONE active catalog row.
- * An ambiguous name (two active rows) never links (fail closed). Where the
+ * equals, case-insensitively, the name of exactly ONE catalog row across
+ * the whole catalog, that row being active. A name carried by two rows —
+ * active or not — never links (fail closed; listed as ambiguous). Where the
  * row has no service_key_snapshot, the matched row's service_key is stamped
  * too — the same pair the edit path stamps together (admin-schedule.js
  * resolvedServiceId + resolvedServiceKey). A row whose EXISTING snapshot
@@ -43,10 +44,15 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   const hasSnapshotCol = await knex.schema.hasColumn('scheduled_services', 'service_key_snapshot');
 
-  // Exactly-one-active-row names only.
-  const active = await knex('services').where({ is_active: true }).select('id', 'name', 'service_key');
+  // Names unique across the ENTIRE catalog (inactive rows included) that
+  // belong to an active row. Only service_key is unique in the schema, and
+  // the pre-link identity lookup (lookupServiceForScheduledService) matches
+  // the exact name over ALL rows with an unordered .first() — so a name an
+  // inactive row also carries is ambiguous today, and linking it to the
+  // active row could change the visit's effective identity (codex P0).
+  const all = await knex('services').select('id', 'name', 'service_key', 'is_active');
   const byLower = new Map();
-  for (const s of active) {
+  for (const s of all) {
     if (typeof s.name !== 'string' || !s.name.trim()) continue;
     const key = s.name.trim().toLowerCase();
     if (!byLower.has(key)) byLower.set(key, []);
@@ -66,6 +72,7 @@ exports.up = async function up(knex) {
       continue;
     }
     const svc = matches[0];
+    if (svc.is_active !== true) continue; // only an inactive row carries the name — no link
     // An existing service_key_snapshot is DURABLE identity evidence that
     // lookupServiceForScheduledService honors ahead of the label — and a
     // service_id would outrank it. A snapshot naming a different service

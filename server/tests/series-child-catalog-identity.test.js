@@ -169,7 +169,8 @@ describe('service-name-aliases legacy map', () => {
 describe('canonical recurring seeder (source)', () => {
   const seeder = fs.readFileSync(path.join(__dirname, '../services/recurring-appointment-seeder.js'), 'utf8');
   test('seedFollowUpsForParent resolves the child identity on its connection and hands it to the builder', () => {
-    expect(seeder).toContain('const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, parent);');
+    // Against the EFFECTIVE cadence: public booking supplies it via opts.pattern only.
+    expect(seeder).toContain('const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, { ...parent, recurring_pattern: pattern });');
     expect(seeder).toContain("service_type: opts.serviceType || (opts.childIdentity && opts.childIdentity.service_type) || parent.service_type || 'Service',");
     expect(seeder).toContain('if (opts.childIdentity.service_id) row.service_id = opts.childIdentity.service_id;');
   });
@@ -191,8 +192,12 @@ describe('admin-schedule child-insert sites (source)', () => {
     // auto-extend, 2 recurring-alert extends) + the POST create path, which
     // resolves from the freshly inserted parent (`svc`) for its seeded
     // children AND boosters.
-    const resolves = src.match(/const childIdentity = await resolveSeriesChildIdentity\((trx|conn), (parent|svc)\);/g) || [];
-    expect(resolves).toHaveLength(6);
+    const resolves = src.match(/const childIdentity = await resolveSeriesChildIdentity\((trx|conn), parent\);/g) || [];
+    expect(resolves).toHaveLength(5);
+    // Create path: resolved from the inserted parent, and ONLY when a child
+    // or booster will be inserted (no catalog read on one-off bookings; a
+    // failed read inside trx cannot poison the parent insert).
+    expect(src).toContain('const childIdentity = (plannedChildDates.length || plannedBoosterDates.length)\n        ? await resolveSeriesChildIdentity(trx, svc)\n        : null;');
     expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(7);
     expect(src.match(/classifyAppointmentTag\(childIdentity\.service_type\)/g)).toHaveLength(7);
     expect(src).not.toMatch(/classifyAppointmentTag\(parent\.service_type\)/);
