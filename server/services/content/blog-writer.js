@@ -3,6 +3,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { CITIES } = require('./scoring-config');
 const { _internals: uniq } = require('./uniqueness-gate');
+const topicGate = require('./topic-targeting-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 const { dispatchWithFallback } = require('../llm/call');
 
@@ -19,6 +20,15 @@ const BLOG_TAGS = [
   'Fleas & Ticks', 'Stinging Insects', 'Spiders', 'Bed Bugs',
   'Lawn Disease', 'Lawn Pests', 'Lawn Care', 'Pest Control',
 ];
+
+// Row → canonical blog category (explicit category first, then tag), so the
+// topic-targeting gate judges entity ownership within the same category the
+// publisher will use. Single source: the publisher's own frontmatter mapping
+// (lazy — the publisher is a heavy module).
+function categoryForRow({ category = null, tag = null } = {}) {
+  const { normalizeCategory } = require('../content-astro/astro-publisher');
+  return normalizeCategory(category, tag) || null;
+}
 
 const TAG_ALIASES = new Map([
   ['cockroach', 'Roaches'], ['cockroaches', 'Roaches'], ['roach', 'Roaches'],
@@ -153,6 +163,49 @@ function faqFormatInstruction(serviceFields) {
   return isFaqBlockedService(serviceFields) ? NO_FAQ_SECTION_INSTRUCTION : FAQ_SECTION_INSTRUCTION;
 }
 
+// A blog_posts row is writable by the generator only while it is OUTSIDE the
+// publish pipeline. publish_status='publishing' (scheduler) and a live
+// publish_claimed_at (manual /publish-astro) both mean a publisher owns the
+// row while publishAstro runs — the branch/PR markers don't exist yet, but the
+// publisher already captured the row's content; overwriting now would ship a
+// PR whose source differs from the database. Used as the CAS predicate on
+// every generator write (generated content, topic-gate de-queue).
+// The columns the topic gate reads from a row. The block de-queue is fenced
+// on them: an operator fix that lands while the live corpus loads must not be
+// reset to idea with a verdict about the OLD targeting.
+const TARGETING_COLUMNS = ['title', 'keyword', 'slug', 'tag', 'category', 'city', 'meta_description', 'content'];
+// Compared by value, fenced through updated_at (every admin edit bumps it)
+// rather than bound in SQL.
+const TARGETING_VALUE_FIELDS = ['secondary_keywords'];
+function whereTargetingUnchanged(query, snapshot) {
+  for (const col of TARGETING_COLUMNS) {
+    query = snapshot[col] === null || snapshot[col] === undefined ? query.whereNull(col) : query.where(col, snapshot[col]);
+  }
+  // pg materializes timestamps as ms-precision Dates while Postgres keeps
+  // microseconds — compare at the DB side truncated to ms, or an untouched
+  // row would never match.
+  if (snapshot.updated_at instanceof Date && !Number.isNaN(snapshot.updated_at.getTime())) {
+    query = query.whereRaw("date_trunc('milliseconds', updated_at) = ?", [snapshot.updated_at]);
+  }
+  return query;
+}
+function targetingChanged(before, after) {
+  return TARGETING_COLUMNS.some((col) => (before[col] ?? null) !== (after[col] ?? null))
+    || TARGETING_VALUE_FIELDS.some((col) => JSON.stringify(before[col] ?? null) !== JSON.stringify(after[col] ?? null));
+}
+
+function whereOutsideAstroPipeline(query) {
+  return query
+    .whereNot('status', 'published')
+    .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+    .where((q) => q.whereNull('publish_claimed_at')
+      .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
+    .whereNull('astro_pr_number')
+    .whereNull('astro_branch_name')
+    .where((q) => q.whereNull('astro_status')
+      .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']));
+}
+
 class BlogWriter {
   async getVoiceConfig() {
     const config = await db('blog_voice_config').where('active', true).first();
@@ -166,9 +219,49 @@ class BlogWriter {
     };
   }
 
-  async generatePost(blogPostId) {
+  // `index`: a live topic index the caller already loaded (bulk generation
+  // loads it once per batch); omitted → the gate loads it itself.
+  async generatePost(blogPostId, { index = null } = {}) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Post not found');
+
+    // Owner rulings 2026-08-27 — every persisted row (idea lane, admin
+    // generator, operator-edited, the 5 a.m. queue) passes the topic-
+    // targeting gate BEFORE any writer spend. No verifiable live corpus →
+    // throw (fail closed; the caller logs and the row stays queued). A
+    // block de-queues the row (status → idea, reason recorded) so the 5 a.m.
+    // picker never wedges on it.
+    const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post), index });
+    if (!topic.ok) {
+      const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
+      // Same CAS as the generated-content write below (the corpus load was
+      // async): a row that entered the publish pipeline meanwhile must not be
+      // yanked back to idea, and a row whose targeting an operator fixed
+      // meanwhile must not be stamped with a verdict about the old fields.
+      const dequeued = await whereTargetingUnchanged(whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)), post).update({
+        status: 'idea',
+        astro_publish_error: `BLOG_TOPIC_TARGETING_BLOCKED: ${summary}`.slice(0, 1000),
+        updated_at: new Date(),
+      });
+      if (!dequeued) {
+        const now = await db('blog_posts').where('id', blogPostId).first();
+        const edited = now && targetingChanged(post, now);
+        const err = new Error(edited
+          ? 'Post targeting was edited while the topic gate ran — nothing was changed; re-run generation on the edited row'
+          : 'Post was published or entered the Astro pipeline while the topic gate ran — nothing was changed');
+        err.isOperational = true;
+        err.statusCode = 409;
+        throw err;
+      }
+      const e = new Error(`topic-targeting gate blocked "${post.title}": ${summary}`);
+      e.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+      e.details = topic.findings;
+      // Author-correctable (the row is back at idea with the reason): an
+      // operational 400 like publish-astro, not a generic 500.
+      e.isOperational = true;
+      e.statusCode = 400;
+      throw e;
+    }
 
     const voice = await this.getVoiceConfig();
 
@@ -269,21 +362,10 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     // force a live post back to draft — so the overwrite only lands while
     // the row is still outside the pipeline. Callers on the queued lane
     // (scheduler 5am, bulk-generate, content-agent) are unaffected.
-    const updated = await db('blog_posts')
-      .where('id', blogPostId)
-      .whereNot('status', 'published')
-      // publish_status='publishing' (scheduler) and a live publish_claimed_at
-      // (manual /publish-astro) both mean a publisher owns the row while
-      // publishAstro runs — the branch/PR markers don't exist yet, but the
-      // publisher already captured the row's content; overwriting now would
-      // ship a PR whose source differs from the database.
-      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
-      .where((q) => q.whereNull('publish_claimed_at')
-        .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
-      .whereNull('astro_pr_number')
-      .whereNull('astro_branch_name')
-      .where((q) => q.whereNull('astro_status')
-        .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']))
+    // …and on the SAME targeting snapshot the gate and the LLM used: content
+    // approved and written for the old title/keyword/slug/city/category must
+    // not land on a row an operator re-targeted meanwhile.
+    const updated = await whereTargetingUnchanged(whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)), post)
       .update({
         content,
         word_count: wordCount,
@@ -291,7 +373,11 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
         updated_at: new Date(),
       });
     if (!updated) {
-      const err = new Error('Post was published or entered the Astro pipeline while content was generating — nothing was overwritten');
+      const now = await db('blog_posts').where('id', blogPostId).first();
+      const edited = now && targetingChanged(post, now);
+      const err = new Error(edited
+        ? 'Post targeting was edited while content was generating — nothing was overwritten; re-run generation on the edited row'
+        : 'Post was published or entered the Astro pipeline while content was generating — nothing was overwritten');
       err.isOperational = true;
       err.statusCode = 409;
       throw err;
@@ -424,6 +510,19 @@ Return JSON: {
     count = Math.min(Math.max(Number.parseInt(count, 10) || 20, 1), 50);
 
     const existing = await db('blog_posts').select('title', 'keyword', 'tag', 'slug', 'city');
+
+    // Owner rulings 2026-08-27: every idea is judged by the same
+    // topic-targeting gate as the runner (geo on title/keyword/slug, entity
+    // ownership against the LIVE post corpus). Loaded before any LLM spend
+    // and fail-closed — no verifiable corpus, no ideas this run.
+    let topicIndex;
+    try {
+      topicIndex = await topicGate.loadLiveIndex();
+    } catch (err) {
+      logger.warn(`Blog idea generation held: live blog corpus unavailable for the topic-targeting gate (${err.message})`);
+      return [];
+    }
+
     const voice = await this.getVoiceConfig().catch(() => null);
     const demand = await this.getDemandSignals(25);
 
@@ -534,6 +633,17 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       const keyword = String(raw.keyword || '').trim();
       const slug = slugify(raw.slug || raw.title);
 
+      // Owner rulings 2026-08-27: an idea built around an out-of-footprint
+      // geo, statewide-only framing (an idea IS a title — judged strictly),
+      // or an entity a live post already owns is rejected outright.
+      // Every persisted targeting field is judged here — the meta description
+      // is ownership evidence too (generation would block it later anyway).
+      const topic = topicGate.evaluate(
+        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, city: city || '', category: categoryForRow({ tag }), targeting: raw.meta_description ? String(raw.meta_description).trim() : '' },
+        { index: topicIndex }
+      );
+      if (!topic.ok) { rejected++; continue; }
+
       // Exact-dupe guards (covers short titles the shingle test can't).
       if (keyword && existingKeywords.has(keyword.toLowerCase())) { rejected++; continue; }
       if (slug && (existingSlugs.has(slug) || accepted.some((a) => a.slug === slug))) { rejected++; continue; }
@@ -587,6 +697,7 @@ blogWriter._internals = {
   FAQ_SECTION_INSTRUCTION,
   NO_FAQ_SECTION_INSTRUCTION,
   normalizeTag,
+  categoryForRow,
   conceptKey,
   slugify,
   SEASONAL_PESTS,

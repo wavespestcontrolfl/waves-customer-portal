@@ -296,6 +296,21 @@ async function deleteRef(branch) {
   });
 }
 
+// Delete a branch and VERIFY it is gone: a missing ref on delete (404/422)
+// counts as gone; anything else propagates. → true only when getBranchSha no
+// longer resolves it. Callers retiring a rejected PR must not treat the PR as
+// retired until this is true (a surviving branch lets the closed PR be
+// reopened and merged).
+async function retireBranch(branch) {
+  if (!branch) return true;
+  try {
+    await deleteRef(branch);
+  } catch (err) {
+    if (![404, 422].includes(Number(err?.status))) throw err;
+  }
+  return !(await getBranchSha(branch));
+}
+
 async function verifyAccess() {
   const { owner, repo } = env();
   const out = await ghFetch(`/repos/${owner}/${repo}`);
@@ -325,5 +340,6 @@ module.exports = {
   closePr,
   updatePr,
   deleteRef,
+  retireBranch,
   verifyAccess,
 };

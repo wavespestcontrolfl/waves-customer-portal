@@ -351,6 +351,9 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
   const uniquenessGate = parseJsonMaybe(run?.uniqueness_gate_result, {});
   const comparisonGate = parseJsonMaybe(run?.comparison_table_result, {});
+  // Topic-targeting verdict (owner rulings 2026-08-27): pre-draft result,
+  // post-draft framing/ownership, entity owners, checked fields, corpus size.
+  const topicTargeting = parseJsonMaybe(run?.topic_targeting_result, null);
   const draft = summarizeDraft(parseJsonMaybe(run?.draft_payload, {}), { includeBody: includeDraftBody });
   const seoCompletion = summarizeSeoCompletion(qualityGate?.seo_completion || draft.seo_completion || draft.seo_contract);
 
@@ -412,7 +415,8 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
       quality_gate_result: qualityGate,
       uniqueness_gate_result: uniquenessGate,
       comparison_table_result: comparisonGate,
-      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate),
+      topic_targeting_result: topicTargeting,
+      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate, topicTargeting),
       seo_completion: seoCompletion,
     } : null,
     review_actions: reviewActions({ opportunity, run }),
@@ -537,8 +541,13 @@ function buildSeoRequirementsSummary(contract = {}) {
   };
 }
 
-function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
+function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}, topicGate = null) {
   const hard = Array.isArray(qualityGate?.hard_failures) ? qualityGate.hard_failures : [];
+  // Topic-targeting verdict (pre-draft result + post-draft framing/ownership):
+  // topic_ok is null when the gate did not run for this run.
+  const topicFindings = topicGate
+    ? [...(Array.isArray(topicGate.findings) ? topicGate.findings : []), ...(Array.isArray(topicGate.framing?.findings) ? topicGate.framing.findings : [])]
+    : [];
   const soft = Array.isArray(qualityGate?.soft_failures) ? qualityGate.soft_failures : [];
   const uniqueness = Array.isArray(uniquenessGate?.failed_reasons) ? uniquenessGate.failed_reasons : [];
   const comparisonFindings = Array.isArray(comparisonGate?.findings) ? comparisonGate.findings : [];
@@ -559,6 +568,11 @@ function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
       ? comparisonGate?.pass !== false
       : null,
     comparison_findings: comparisonFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
+    // Only a verdict that actually carries a result counts; {} / absent → null.
+    topic_ok: topicGate && (typeof topicGate.ok === 'boolean' || topicGate.framing)
+      ? (topicGate.ok !== false && topicGate.framing?.ok !== false)
+      : null,
+    topic_findings: topicFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message, ...(f.cities ? { cities: f.cities } : {}), ...(f.owners ? { owners: f.owners } : {}) })),
   };
 }
 

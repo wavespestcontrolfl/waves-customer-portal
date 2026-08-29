@@ -252,6 +252,30 @@ async function pollPost(post, { allowMerge = true } = {}) {
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {
           logger.warn(`[pages-poll] auto-merge failed for ${post.slug || post.id}: ${mergeErr.message}`);
+          // The merge-time topic-targeting recheck is deterministic for this
+          // branch + live corpus (another post claimed the entity, or
+          // remediation changed the targeting): retrying every tick can only
+          // reload the corpus and fail again, and mergeAstro's failure stamp
+          // bumps updated_at so the stale-publishing sweep would never park
+          // it. Park the claim at pending_review (claim-guarded, same rule as
+          // the human-merge park above) AND stamp astro_status publish_failed
+          // (markers kept): pr_open would strand the row — /publish-astro
+          // rejects it and /merge-astro rechecks the unchanged branch — while
+          // publish_failed is the retryable state: the operator edits the
+          // row, and publishAstro closes the stale PR + branch
+          // (cleanupStaleAstroPr) before republishing. The reason is already
+          // in astro_publish_error from mergeAstro's catch.
+          if (mergeErr.code === 'BLOG_TOPIC_TARGETING_BLOCKED') {
+            // CAS on the park mergeAstro just stamped: its PR retirement can
+            // find the PR merged by a human meanwhile and move the row to
+            // astro_status='merged' (the row follows the merge) — that row
+            // must not be flipped back to publish_failed here; the merged→
+            // live flow finalizes it next tick.
+            await db('blog_posts').where({ id: post.id, publish_status: 'publishing', astro_status: 'publish_failed' })
+              .update({ publish_status: 'pending_review', astro_status: 'publish_failed', updated_at: new Date() });
+            logger.warn(`[pages-poll] auto-merge PARKED for ${post.slug || post.id} — topic-targeting gate no longer clear; claim moved to pending_review, row publish_failed (edit + republish)`);
+            return { ok: true, url, topicTargetingBlocked: true };
+          }
           // Codex left findings on the PR → try to auto-fix them so the post
           // can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
           // is on; never merges (that still needs a genuine Codex-clean signal).
@@ -423,11 +447,23 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 async function pollPending() {
+  // Rows a merge-time topic block parked still owing GitHub a close for the
+  // rejected PR (astro_retire_pr_number) leave the poll set below, so this is
+  // where the close is repeated until verified — a swallowed failure must not
+  // leave the violation human-mergeable. Needs only the DB and GitHub, so it
+  // runs BEFORE the Cloudflare check: a Pages outage or missing config must
+  // not disable the cleanup. Never blocks the tick.
+  let topicRetire = { count: 0 };
+  try {
+    topicRetire = await require('./astro-publisher').reconcileTopicBlockedPostPrs();
+  } catch (err) {
+    logger.warn(`[pages-poll] topic-blocked PR reconcile failed: ${err.message}`);
+  }
   try {
     cfEnv(); // throws early if unconfigured
   } catch (err) {
     logger.warn(`[pages-poll] checks skipped: ${err.message}`);
-    return { count: 0, skipped: true, reason: err.message };
+    return { count: 0, skipped: true, reason: err.message, topicRetire };
   }
 
   const pending = await db('blog_posts')
@@ -453,7 +489,7 @@ async function pollPending() {
   }
   const note = deferred > 0 ? ` (${autoMerges} merged, ${deferred} deferred past cap ${maxAutoMerges})` : '';
   logger.info(`[pages-poll] polled ${results.length} blog publish states${note}`);
-  return { count: results.length, results, autoMerges, deferred };
+  return { count: results.length, results, autoMerges, deferred, topicRetire };
 }
 
 module.exports = {

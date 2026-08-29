@@ -1,0 +1,407 @@
+/**
+ * Topic-targeting gate wiring in the autonomous runner (owner rulings
+ * 2026-08-27 after astro #476 Tampa / #490 second-Taexx / #491 "in Florida"):
+ *
+ *   - step 2d (pre-draft, NO writer spend): out-of-area demand, pinned
+ *     statewide framing, or an entity a live post owns → silent by-design
+ *     skip with a topic_targeting:<CODE> reason (exceptions-only queue);
+ *     module/corpus unavailable → engine fault → pending_review (fail closed);
+ *     refreshes never enter the gate.
+ *   - post-draft: the writer's own statewide/out-of-area title → the same
+ *     one-redraft-then-skip loop the guardrails use (topic_framing_failed).
+ */
+
+function makeDbMock() {
+  const updates = [];
+  const dbMock = jest.fn((table) => {
+    const chain = {
+      _table: table,
+      _wheres: [],
+      insert: jest.fn(() => ({
+        returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]),
+        onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) })) })),
+      })),
+      where: jest.fn(function where(...args) { chain._wheres.push(args); return chain; }),
+      update: jest.fn((patch) => { updates.push({ table, wheres: chain._wheres, patch }); return Promise.resolve(1); }),
+    };
+    return chain;
+  });
+  dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+  dbMock._updates = updates;
+  return dbMock;
+}
+
+const IN_WALL = {
+  path: 'src/content/blog/pest-control/in-wall-pest-control.mdx',
+  url: '/pest-control/in-wall-pest-control/',
+  body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\nBuilders install Taexx during framing. The Taexx tubes run inside the walls, and most owners never see Taexx work.\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
+};
+const BENIGN = {
+  path: 'src/content/blog/pest-control/seasonal-ant-pressure.md',
+  url: '/pest-control/seasonal-ant-pressure/',
+  body: '---\ntitle: Seasonal Ant Pressure in SWFL\nslug: /pest-control/seasonal-ant-pressure/\nprimary_keyword: seasonal ant pressure\n---\n\n## Why ants surge\n',
+};
+
+const claimedAt = new Date('2026-08-27T13:00:00Z');
+
+function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn() }, corpus = [IN_WALL, BENIGN], corpusError = null, topicGate, dbMock = makeDbMock(), factsOk = false, guardrails = { pass: true, findings: [] } }) {
+  jest.resetModules();
+  // A brief that carries a city makes the facts-sufficiency gate (step 2b,
+  // before the topic gate) applicable; `factsOk` stubs it sufficient so the
+  // test reaches step 2d.
+  // (doMock survives resetModules — undo it for the next load.)
+  if (factsOk) jest.doMock('../services/content/facts-sufficiency', () => ({ check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true }) }));
+  else jest.dontMock('../services/content/facts-sufficiency');
+  jest.doMock('../models/db', () => dbMock);
+  jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  // A pending-review park schedules the owner notification via setImmediate;
+  // the real module's require would land after Jest teardown. No-op it and
+  // drain the immediate in afterEach (same harness as autonomous-runner.test).
+  jest.doMock('../services/content/email-approvals', () => ({
+    notifyParkedRun: jest.fn().mockResolvedValue(undefined),
+    _internals: { draftPreview: jest.fn().mockReturnValue('') },
+  }));
+  jest.doMock('../services/content/opportunity-queue', () => queue);
+  jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
+  jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
+  jest.doMock('../services/content/protected-pages', () => ({ isProtected: jest.fn().mockResolvedValue({ protected: false }) }));
+  jest.doMock('../services/content/internal-link-planner', () => ({
+    loadAstroCorpusFromGitHub: corpusError
+      ? jest.fn().mockRejectedValue(new Error(corpusError))
+      : jest.fn().mockResolvedValue(corpus),
+  }));
+  jest.doMock('../services/content/content-guardrails', () => ({ evaluate: jest.fn().mockReturnValue(guardrails) }));
+  jest.doMock('../services/content/seo-completion-gate', () => ({ evaluate: jest.fn().mockReturnValue({ passed: true, score: 100, summary: { p0: 0, p1: 0, p2: 0 }, findings: [] }) }));
+  jest.doMock('../services/content/ai-visibility-gate', () => ({ evaluateStatic: jest.fn().mockReturnValue({ passed: true, findings: [], summary: { p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } }) }));
+  if (topicGate) jest.doMock('../services/content/topic-targeting-gate', () => topicGate);
+  else jest.dontMock('../services/content/topic-targeting-gate');
+  jest.dontMock('../services/content/uniqueness-gate');
+  jest.dontMock('../services/content/content-quality-gate');
+  jest.dontMock('../services/content/comparison-table-gate');
+  jest.dontMock('../services/content/claims-ledger-validator');
+  const runner = require('../services/content/autonomous-runner');
+  return { runner, dbMock };
+}
+
+function makeQueue(opp) {
+  return {
+    claimNext: jest.fn().mockResolvedValue(opp),
+    complete: jest.fn().mockResolvedValue(true),
+    pendingReview: jest.fn().mockResolvedValue(true),
+    skip: jest.fn().mockResolvedValue(true),
+    defer: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(true),
+  };
+}
+
+function blogBrief(over = {}) {
+  return {
+    compose: jest.fn().mockResolvedValue({
+      id: 'brief_topic', action_type: 'new_supporting_blog', page_type: 'supporting-blog', human_review_required: false,
+      target_keyword: over.query || 'house came with taexx',
+      service: over.service || 'pest',
+      city: over.city || null,
+      voice_constraints: over.operator_brief ? { operator_brief: over.operator_brief } : {},
+    }),
+  };
+}
+
+beforeEach(() => {
+  process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+  process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+});
+afterEach(async () => {
+  // Drain the runner's setImmediate-scheduled notification before Jest
+  // tears the environment down.
+  await new Promise((resolve) => { setImmediate(resolve); });
+  delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+  delete process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
+});
+
+describe('step 2d — pre-draft topic-targeting gate', () => {
+  test('#476 shape: out-of-area demand skips BEFORE the corpus loads and before any writer spend (by-design → silent skip, not review)', async () => {
+    const queue = makeQueue({ id: 'opp_tampa', action_type: 'new_supporting_blog', query: 'wdo inspection tampa', service: 'termite', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'wdo inspection tampa', service: 'termite' }), dispatcher, corpusError: 'github_down' });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_GEO_OUT_OF_AREA');
+    expect(result.topic_targeting_result.findings[0].code).toBe('TOPIC_GEO_OUT_OF_AREA');
+    expect(queue.skip).toHaveBeenCalledWith('opp_tampa', 'topic_targeting:TOPIC_GEO_OUT_OF_AREA', { claimToken: claimedAt });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('PR codex r9: a category-seed brief city outside the footprint skips pre-draft even with a generic keyword/title/slug', async () => {
+    const queue = makeQueue({ id: 'opp_boise', action_type: 'new_supporting_blog', query: 'pest control frequency', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'pest control frequency', service: 'pest', city: 'Boise', operator_brief: { working_title: 'How Often Should Pest Control Come?', slug: '/pest-control/pest-control-frequency/' } }), dispatcher, corpusError: 'github_down', factsOk: true });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_GEO_OUT_OF_AREA');
+    expect(result.topic_targeting_result.findings[0].cities).toEqual(['Boise']);
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('#490 shape: an entity a live post owns (Taexx → in-wall post) skips with the owner named; no writer spend', async () => {
+    const queue = makeQueue({ id: 'opp_taexx', action_type: 'new_supporting_blog', query: 'house came with taexx', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({
+      queue, dispatcher,
+      briefBuilder: blogBrief({ operator_brief: { working_title: 'Your New Lakewood Ranch Home Came With Taexx: What It Misses', slug: '/pest-control/taexx-system-new-home-lakewood-ranch/' } }),
+    });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_CANNIBALIZES_EXISTING');
+    expect(result.topic_targeting_result.entity_owners.map((o) => o.url)).toEqual(['/pest-control/in-wall-pest-control/']);
+    expect(result.reviewer_notes).toMatch(/in-wall-pest-control/);
+    expect(queue.skip).toHaveBeenCalledWith('opp_taexx', 'topic_targeting:TOPIC_CANNIBALIZES_EXISTING', { claimToken: claimedAt });
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('#491 shape: a PINNED statewide working title skips pre-draft', async () => {
+    const queue = makeQueue({ id: 'opp_fl', action_type: 'new_supporting_blog', query: 'new construction pest control florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({
+      queue, dispatcher,
+      briefBuilder: blogBrief({ query: 'new construction pest control florida', operator_brief: { working_title: 'New-Construction Pest Control in Florida: First-Year Plan', slug: '/pest-control/new-construction-pest-control-first-year-plan/' } }),
+    });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_GEO_STATEWIDE');
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('a clean brief passes the gate and reaches the writer', async () => {
+    const queue = makeQueue({ id: 'opp_ok', action_type: 'new_supporting_blog', query: 'ghost ants sarasota kitchen', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, error: 'writer_stub' }) };
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'ghost ants sarasota kitchen' }) });
+
+    const result = await runner.runNext();
+
+    expect(dispatcher.runWithBrief).toHaveBeenCalled();
+    expect(result.topic_targeting_result).toMatchObject({ ok: true, corpus_size: 2 });
+    expect(result.skip_reason || '').not.toMatch(/topic_targeting/);
+  });
+
+  test('corpus unavailable is an ENGINE fault: held for review, never drafted unchecked', async () => {
+    const queue = makeQueue({ id: 'opp_corpus', action_type: 'new_supporting_blog', query: 'ghost ants sarasota kitchen', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'ghost ants sarasota kitchen' }), corpusError: 'github_down' });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('topic_targeting_unavailable');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_corpus', 'topic_targeting_unavailable', { claimToken: claimedAt });
+    expect(queue.skip).not.toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('an EMPTY corpus is treated as a loader fault, not a pass', async () => {
+    const queue = makeQueue({ id: 'opp_empty', action_type: 'new_supporting_blog', query: 'house came with taexx', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief(), corpus: [] });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting_unavailable');
+    expect(result.topic_targeting_result.error).toMatch(/empty_blog_corpus/);
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('a refresh of the entity owner never enters the gate (that IS the sanctioned move)', async () => {
+    const queue = makeQueue({ id: 'opp_refresh', action_type: 'refresh_existing_page', query: 'taexx system review', page_url: 'https://www.wavespestcontrol.com/pest-control/in-wall-pest-control/', claimed_at: claimedAt, signal_metadata: {} });
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_refresh', action_type: 'refresh_existing_page', page_type: 'supporting-blog', human_review_required: false,
+        target_keyword: 'taexx system review', target_url: 'https://www.wavespestcontrol.com/pest-control/in-wall-pest-control/',
+      }),
+    };
+    const topicGate = { isApplicable: jest.fn().mockReturnValue(false), evaluate: jest.fn(), evaluateDraftFraming: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder, topicGate, corpusError: 'github_down' });
+
+    // The refresh lane needs publisher/prior-body plumbing this harness does
+    // not provide; the run may fault downstream. What is pinned here is only
+    // that the topic gate was consulted for applicability and never evaluated.
+    const result = await runner.runNext().catch(() => null);
+
+    expect(topicGate.isApplicable).toHaveBeenCalledWith({ actionType: 'refresh_existing_page', pageType: 'supporting-blog' });
+    expect(topicGate.evaluate).not.toHaveBeenCalled();
+    expect(result?.skip_reason || '').not.toMatch(/topic_targeting/);
+  });
+});
+
+describe('post-draft topic framing', () => {
+  const draftWith = (title) => ({
+    runWithBrief: jest.fn().mockResolvedValue({
+      ok: true,
+      draft: {
+        url: '/pest-control/kinds-of-ants/',
+        title,
+        frontmatter: { title, slug: '/pest-control/kinds-of-ants/', primary_keyword: 'kinds of ants in florida', meta_description: 'Which ants show up in Southwest Florida homes and what each one means for your kitchen and lawn.' },
+        body: 'Benign copy about ant pressure in Southwest Florida homes.',
+      },
+    }),
+  });
+
+  test('statewide demand passes pre-draft, but a writer title framed "… in Florida" gets ONE feedback redraft (topic_framing_failed)', async () => {
+    const queue = makeQueue({ id: 'opp_frame', action_type: 'new_supporting_blog', query: 'kinds of ants in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = draftWith('Kinds of Ants in Florida: A Field Guide');
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'kinds of ants in florida' }) });
+
+    const result = await runner.runNext();
+
+    expect(dispatcher.runWithBrief).toHaveBeenCalled();
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('topic_framing_failed');
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
+    expect(queue.defer).toHaveBeenCalledWith('opp_frame', expect.any(Date), { claimToken: claimedAt });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+
+  test('a clean brief whose writer emits an OWNED primary_keyword is caught post-draft (topic_ownership_failed, one redraft)', async () => {
+    const queue = makeQueue({ id: 'opp_own', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: {
+          url: '/pest-control/lakewood-ranch-in-wall-system/',
+          title: 'Your New Lakewood Ranch Home Came With an In-Wall System',
+          frontmatter: { title: 'Your New Lakewood Ranch Home Came With an In-Wall System', slug: '/pest-control/lakewood-ranch-in-wall-system/', primary_keyword: 'taexx in wall system', meta_description: 'What the in-wall tubes in a new Lakewood Ranch build actually do, and what they miss.' },
+          body: 'Benign copy about new-construction pest control in Lakewood Ranch.',
+        },
+      }),
+    };
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }) });
+
+    const result = await runner.runNext();
+
+    expect(dispatcher.runWithBrief).toHaveBeenCalled();
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('topic_ownership_failed');
+    expect(result.topic_targeting_result.framing.stage).toBe('ownership');
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_CANNIBALIZES_EXISTING');
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+
+  test('a localized title clears the framing check', async () => {
+    const queue = makeQueue({ id: 'opp_frame_ok', action_type: 'new_supporting_blog', query: 'kinds of ants in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = draftWith('Kinds of Ants in Sarasota Homes: A Field Guide');
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'kinds of ants in florida' }) });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason || '').not.toBe('topic_framing_failed');
+    expect(result.topic_targeting_result.framing.ok).toBe(true);
+  });
+});
+
+describe('approval path — the stored draft is re-validated for topic targeting before publishing', () => {
+  const TAEXX_DRAFT = {
+    url: '/pest-control/lakewood-ranch-taexx/',
+    title: 'Your New Lakewood Ranch Home Came With Taexx',
+    frontmatter: { title: 'Your New Lakewood Ranch Home Came With Taexx', slug: '/pest-control/lakewood-ranch-taexx/', primary_keyword: 'taexx system lakewood ranch', meta_description: 'What the in-wall tubes do.' },
+    body: '## Body\n\nprose',
+  };
+  function approvalDb({ draft }) {
+    const rows = {
+      autonomous_runs: { id: 'run_x', opportunity_id: 'opp_x', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false, action_type: 'new_supporting_blog', draft_payload: JSON.stringify(draft), seo_completion_gate_result: '{}' },
+      opportunity_queue: { id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', status: 'pending_review' },
+    };
+    const dbMock = jest.fn((table) => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'whereIn', 'limit', 'select']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn().mockResolvedValue(rows[table] || null);
+      chain.update = jest.fn().mockResolvedValue(1);
+      chain.insert = jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) }));
+      chain.then = (resolve) => resolve([]);
+      return chain;
+    });
+    dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+    return dbMock;
+  }
+  function loadApproval({ draft = TAEXX_DRAFT, corpusError = null } = {}) {
+    const queue = makeQueue({ id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }), dbMock: approvalDb({ draft }), corpusError });
+    jest.doMock('../services/content/comparison-table-gate', () => ({ evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) }));
+    runner._loadReviewedBrief = jest.fn().mockResolvedValue({ page_type: 'supporting-blog', service: 'pest', target_keyword: 'new home pest control lakewood ranch', voice_constraints: {} });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: true });
+    return runner;
+  }
+
+  test('an owned-entity draft (edited after parking) is refused with a 409 before any claim/publish', async () => {
+    const runner = loadApproval();
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Topic targeting no longer passes on the stored draft \(ownership\): P0 TOPIC_CANNIBALIZES_EXISTING/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a statewide-framed draft is refused at the framing stage', async () => {
+    const runner = loadApproval({ draft: { ...TAEXX_DRAFT, frontmatter: { ...TAEXX_DRAFT.frontmatter, title: 'New-Construction Pest Control in Florida', primary_keyword: 'new construction pest control' } } });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/\(framing\): P0 TOPIC_GEO_STATEWIDE/) });
+  });
+
+  test('live corpus unreachable → 409 fail closed (operator retries), never a publish', async () => {
+    const runner = loadApproval({ corpusError: 'github_down' });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/could not re-validate the stored draft \(github_down\)/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a clean draft passes the recheck and reaches the publishing guards', async () => {
+    const runner = loadApproval({ draft: { ...TAEXX_DRAFT, url: '/pest-control/new-home-pest-control-lakewood-ranch/', frontmatter: { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch', meta_description: 'x' } } });
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: false, reason: 'stop_here' });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ message: expect.stringMatching(/Publishing guard blocked: stop_here/) });
+    expect(runner._evaluatePublishingGuards).toHaveBeenCalled();
+  });
+});
+
+describe('PR codex r16 — one retry, every finding', () => {
+  const draftWith = (title) => ({
+    runWithBrief: jest.fn().mockResolvedValue({
+      ok: true,
+      draft: { url: '/pest-control/kinds-of-ants/', title, frontmatter: { title, slug: '/pest-control/kinds-of-ants/', primary_keyword: 'kinds of ants in florida', meta_description: 'x' }, body: 'Benign copy.' },
+    }),
+  });
+  test('a guardrail failure AND a topic failure on one draft → the single gate retry carries both findings', async () => {
+    const queue = makeQueue({ id: 'opp_both', action_type: 'new_supporting_blog', query: 'kinds of ants in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = draftWith('Kinds of Ants in Florida: A Field Guide');
+    const { runner, dbMock } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'kinds of ants in florida' }), dispatcher, guardrails: { pass: false, findings: [{ severity: 'P0', code: 'PRICE_CLAIM', message: 'names a price' }] } });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('content_guardrails_failed');
+    expect(result.reviewer_notes).toMatch(/topic targeting also failed: P0 TOPIC_GEO_STATEWIDE/);
+    const retry = dbMock._updates.map((u) => u.patch).find((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'));
+    expect(retry).toBeDefined();
+    const codes = JSON.parse(retry.signal_metadata).gate_retry.findings.map((f) => f.code);
+    expect(codes).toEqual(expect.arrayContaining(['PRICE_CLAIM', 'TOPIC_GEO_STATEWIDE']));
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
+  });
+});
+
+describe('post-draft topic-gate ENGINE failure parks for review (hook, PR codex r19 push)', () => {
+  test('gate throws on the emitted draft → topic_targeting_unavailable, pending review, no retry spent', async () => {
+    const real = jest.requireActual('../services/content/topic-targeting-gate');
+    const topicGate = { ...real, evaluateDraftTargeting: jest.fn(() => { throw new Error('gate exploded'); }) };
+    const queue = makeQueue({ id: 'opp_boom', action_type: 'new_supporting_blog', query: 'kinds of ants in sarasota', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/pest-control/kinds-of-ants/', title: 'Kinds of Ants in Sarasota', frontmatter: { title: 'Kinds of Ants in Sarasota', slug: '/pest-control/kinds-of-ants/', primary_keyword: 'kinds of ants in sarasota', meta_description: 'x' }, body: 'Benign copy.' } }) };
+    const { runner, dbMock } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'kinds of ants in sarasota' }), dispatcher, topicGate });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('topic_targeting_unavailable');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
+    expect(queue.defer).not.toHaveBeenCalled();
+    expect(dbMock._updates.map((u) => u.patch).some((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'))).toBe(false);
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_TARGETING_ERROR');
+  });
+});

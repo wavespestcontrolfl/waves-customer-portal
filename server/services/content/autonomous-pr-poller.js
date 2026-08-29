@@ -228,6 +228,333 @@ function deriveBlogRouteUrl(run, brief = {}) {
   return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
 }
 
+// The blog files the publisher may have committed for this run, relative to
+// the astro repo, in publishOrUpdatePage's own probe order: the category
+// route path (where a NEW post is written), then the flat leaf path (an
+// EXISTING flat-convention file that already renders this route is adopted
+// and updated in place), each as .mdx then .md. `routeKey` is the route the
+// adopted file must render — a same-leaf file under another category is not
+// this post. null when nothing can be derived — never guess.
+function blogFileCandidatesForRun(run, brief = {}) {
+  let internals;
+  try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
+  const { categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory, slugLeafOf, blogRouteKey } = internals;
+  if ([categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory, slugLeafOf, blogRouteKey].some((f) => typeof f !== 'function')) return null;
+  const frontmatter = parseJsonObject(run.draft_payload).frontmatter || {};
+  let slugPath;
+  try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
+  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
+  if (!routeSlug) return null;
+  const bases = [`src/content/blog/${routeSlug}`];
+  const leaf = slugLeafOf(routeSlug);
+  if (leaf && !bases.includes(`src/content/blog/${leaf}`)) bases.push(`src/content/blog/${leaf}`);
+  return { routeSlug, routeKey: blogRouteKey(routeSlug), paths: bases.flatMap((b) => [`${b}.mdx`, `${b}.md`]), slugKey: blogRouteKey };
+}
+
+// → { ok } | { ok: false, reason }. Reads the PR head's blog file and re-runs
+// the topic-targeting gate (framing on its own title/slug, ownership on every
+// targeting field) against a fresh live index.
+async function recheckTopicTargeting(run, pr, gh) {
+  let brief = {};
+  try { brief = await briefCategorySignalsForRun(run); } catch (err) { return { ok: false, reason: `brief lookup failed: ${err.message}` }; }
+  const candidates = blogFileCandidatesForRun(run, brief);
+  if (!candidates) return { ok: false, reason: 'blog file path could not be derived from the draft slug' };
+  let parse;
+  try { ({ parse } = require('../content-astro/frontmatter')); } catch (err) { return { ok: false, reason: `gate could not run: ${err.message}` }; }
+  let file = null;
+  for (const path of candidates.paths) {
+    const found = await gh.getFile(path, pr.head?.ref);
+    if (!found || typeof found.content !== 'string') continue;
+    // The publisher's own adoption rule: a file whose frontmatter slug
+    // renders a DIFFERENT route (same leaf, other category) is not this
+    // post's file; one with no readable slug occupies the path it was
+    // resolved from.
+    let existingSlug = '';
+    try { existingSlug = parse(found.content)?.data?.slug || ''; } catch (_) { existingSlug = ''; }
+    if (existingSlug && candidates.slugKey(existingSlug) !== candidates.routeKey) continue;
+    file = found;
+    break;
+  }
+  if (!file) return { ok: false, reason: `branch file for ${candidates.routeSlug} unreadable at ${pr.head?.ref} (probed ${candidates.paths.join(', ')})` };
+  try {
+    const topicGate = require('./topic-targeting-gate');
+    const data = parse(file.content)?.data || {};
+    const index = await topicGate.loadLiveIndex();
+    const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });
+    if (res.ok) return { ok: true };
+    // Gate findings are deterministic for this head + live corpus (another
+    // post owns the entity / framing drifted); everything above is transient.
+    return { ok: false, deterministic: true, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
+  } catch (err) {
+    return { ok: false, reason: `gate could not run: ${err.message}` };
+  }
+}
+
+const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
+// Stamped on a parked run once its closed PR's terminal bookkeeping is done
+// (reconciliation then stops re-reading it); cleared by un-park.
+const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
+// A deterministic merge-time topic block cannot clear by polling: park the
+// run out of the pending set (CAS on the exact pending state, like
+// supersedeRun) with the verdict in reviewer_notes, and stamp the parked
+// opportunity_queue row's skip_reason so the review queue shows why. The PR
+// stays open — the operator edits/replaces the draft or dismisses; a
+// requeue re-drives the lane.
+// queueRowParkedState's rule, usable inside a transaction: the opportunity's
+// lifecycle belongs to its NEWEST run — a newer sibling means this run is
+// stale and the queue row is not ours to change.
+async function newerSiblingRun(q, run) {
+  if (!run.opportunity_id) return null;
+  // Fail closed: a run whose age is unknown cannot prove it is the newest.
+  if (!run.created_at) throw new Error(`run ${run.id} has no created_at — cannot verify it still owns opportunity ${run.opportunity_id}`);
+  return q('autonomous_runs')
+    .where('opportunity_id', run.opportunity_id)
+    .whereNot('id', run.id)
+    .where('created_at', '>', run.created_at)
+    .first('id');
+}
+
+// Atomic: both writes run on `trx` (the topic-merge lock's transaction) and
+// each must affect exactly one row — a lost CAS (operator requeue/dismiss
+// landed meanwhile) throws TOPIC_PARK_LOST, which rolls the transaction
+// back; the caller reports `parked` only after the commit.
+async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
+  const q = trx || db;
+  const pendingReason = pendingSkipReasonForRun(run);
+  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} is retired (closed, branch deleted; reconciled each tick until it is); requeue re-drives the lane with a fresh draft, or dismiss.`;
+  const lost = (what) => { const e = new Error(`topic-block park lost its ${what} CAS (operator action landed) — nothing changed`); e.code = 'TOPIC_PARK_LOST'; return e; };
+  // Lock order = the review-decision path's (lockCurrentRun: queue row
+  // FIRST, then the run) so an operator requeue/dismiss racing this tick
+  // cannot deadlock against it.
+  if (run.opportunity_id) {
+    // Lock the queue row FIRST (FOR UPDATE), validate its exact parked state,
+    // THEN look for a newer sibling — a requeue racing this tick cannot
+    // create + park a replacement between the check and the write.
+    const row = await q('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingReason) throw lost('queue');
+    if (await newerSiblingRun(q, run)) throw lost('newer-sibling');
+    const queueRows = await q('opportunity_queue')
+      .where('id', run.opportunity_id)
+      .where('status', 'pending_review')
+      .where('skip_reason', pendingReason)
+      .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
+    if (Number(queueRows) !== 1) throw lost('queue');
+  }
+  const fresh = await q('autonomous_runs').where('id', run.id).first('reviewer_notes');
+  const runRows = await q('autonomous_runs')
+    .where('id', run.id)
+    .where('outcome', PENDING_OUTCOME)
+    .where('skip_reason', pendingReason)
+    .update({
+      skip_reason: TOPIC_BLOCKED_SKIP_REASON,
+      reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+      poll_pending_reason: null,
+      updated_at: new Date(),
+    });
+  if (Number(runRows) !== 1) throw lost('run');
+  return true;
+}
+
+// The PR is retired AFTER the park is durable (a DB transaction cannot make
+// the GitHub mutation atomic: a closure whose commit then failed would send
+// the still-pending run through finalizeClosed as failed/skipped). Runs the
+// close idempotently — reconcileTopicBlockedPrs repeats it every tick for
+// parked runs whose PR is still open, so a lost response or partial closure
+// converges. Best-effort; never throws.
+async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
+  try {
+    const current = pr || await gh.getPr(prNumber);
+    if (!current) return { retired: false, reason: 'pr_unreadable' };
+    if (current.state === 'open' && !current.merged) {
+      await gh.closePr(prNumber);
+      const ref = current.head?.ref;
+      if (ref && typeof gh.deleteRef === 'function') {
+        try { await gh.deleteRef(ref); } catch (err) { logger.warn(`[autonomous-pr-poller] branch delete after topic-block park failed for PR #${prNumber}: ${err.message}`); }
+      }
+      logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} for topic-blocked run ${run.id}`);
+    }
+    // Closed is not retired until the head branch is VERIFIED gone (a
+    // surviving branch lets the closed PR be reopened and merged); the run
+    // stays in the reconcile set until it is.
+    if (!current.merged && !(await gh.retireBranch(current.head?.ref))) {
+      logger.warn(`[autonomous-pr-poller] PR #${prNumber} for topic-blocked run ${run.id} is closed but its branch ${current.head?.ref} still exists (reconciled next tick)`);
+      return { retired: false, reason: 'branch_not_deleted' };
+    }
+    if (!await stampTerminal(prNumber, current.merged ? 'merged' : 'closed', run)) return { retired: false, reason: 'terminal_stamp_failed' };
+    return { retired: true };
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] PR retire for topic-blocked run ${run.id} failed: ${err.message} (reconciled next tick)`);
+    return { retired: false, reason: err.message };
+  }
+}
+
+// markPrTerminal never throws — it returns { error } — so the result is
+// checked here: false means the terminal bookkeeping did NOT land and the
+// run must stay in the reconcile set for the next tick.
+async function stampTerminal(prNumber, state, run) {
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    const res = await markPrTerminal(prNumber, state);
+    if (res?.error) throw new Error(res.error);
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] markPrTerminal(${state}) for topic-blocked run ${run?.id} PR #${prNumber} failed: ${err.message} (retried next tick)`);
+    return false;
+  }
+}
+
+// Every tick: parked topic-blocked runs whose PR is still open (a retire
+// that failed or half-completed) are retired again. Cheap — one getPr per
+// parked run, and there are few.
+async function reconcileTopicBlockedPrs(gh) {
+  let rows = [];
+  try {
+    rows = await db('autonomous_runs')
+      .where('outcome', PENDING_OUTCOME)
+      .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+      .whereNotNull('astro_pr_url')
+      // Rows whose closed PR finished its terminal bookkeeping leave the set
+      // (marker below); random rotation so a persistently failing retire
+      // cannot starve rows past the limit.
+      .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', TOPIC_BLOCK_PR_RETIRED))
+      .orderByRaw('random()')
+      .limit(25)
+      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes', 'created_at');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] topic-blocked reconcile query failed: ${err.message}`);
+    return { count: 0 };
+  }
+  // Belt and braces: only rows in the parked state (never a pending run).
+  rows = rows.filter((r) => r.skip_reason === TOPIC_BLOCKED_SKIP_REASON && r.outcome === PENDING_OUTCOME && r.astro_pr_url);
+  let retired = 0;
+  let unparked = 0;
+  let superseded = 0;
+  for (const run of rows) {
+    const prNumber = prNumberFromUrl(run.astro_pr_url);
+    if (!prNumber) continue;
+    let pr = null;
+    try { pr = await gh.getPr(prNumber); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile getPr #${prNumber} failed: ${err.message}`); continue; }
+    if (!pr) continue;
+    if (pr.merged || pr.merged_at) {
+      const o = await settleMergedTopicBlockedRun(run, prNumber);
+      if (o === 'unparked') unparked++;
+      if (o === 'superseded') superseded++;
+      continue;
+    }
+    if (pr.state === 'open') {
+      const r = await retireTopicBlockedPr(run, prNumber, gh, { pr });
+      if (r.retired) retired++;
+      continue;
+    }
+    // Closed (by the retire, or by a human): terminal bookkeeping — idempotent,
+    // so a lost stamp converges; then the row leaves the reconcile set.
+    try {
+      // A PR closed by a human (or a retire whose delete was lost) may still
+      // have its branch: verify it is gone before the run leaves the set.
+      if (!(await gh.retireBranch(pr.head?.ref))) { logger.warn(`[autonomous-pr-poller] closed topic-blocked PR #${prNumber} still has branch ${pr.head?.ref} (retried next tick)`); continue; }
+      // Re-read AFTER the retirement: reopened and merged in the window →
+      // the merged path, never a closed stamp that hides a live post.
+      const after = await gh.getPr(prNumber);
+      if (after && (after.merged || after.merged_at)) {
+        const o = await settleMergedTopicBlockedRun(run, prNumber);
+        if (o === 'unparked') unparked++;
+        if (o === 'superseded') superseded++;
+        continue;
+      }
+      if (!await stampTerminal(prNumber, 'closed', run)) continue;
+      await db('autonomous_runs')
+        .where('id', run.id)
+        .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+        .update({ poll_pending_reason: TOPIC_BLOCK_PR_RETIRED, updated_at: new Date() });
+    } catch (err) { logger.warn(`[autonomous-pr-poller] terminal bookkeeping for closed topic-blocked PR #${prNumber} failed: ${err.message} (retried next tick)`); }
+  }
+  return { count: rows.length, retired, unparked, superseded };
+}
+
+// A parked run whose PR a human merged: hand the run back to the pending
+// lifecycle (live-deploy verification, IndexNow, link planning, social)
+// → 'unparked'. The un-park needs the opportunity still parked on THIS run;
+// when the operator has since followed the park note (requeue / dismiss —
+// a newer run owns the opportunity, or the queue row left the parked
+// state), restoring that ownership would resurrect a decision a human
+// overrode (supersedeRun's rule): the merged PR gets its terminal
+// bookkeeping and the run leaves the set as superseded → 'superseded'.
+// A transient CAS loss (row still parked on this run) retries next tick
+// → null. Shared by the merged-on-read and merged-after-retire paths.
+async function settleMergedTopicBlockedRun(run, prNumber) {
+  if (await unparkTopicBlockedRun(run, prNumber)) return 'unparked';
+  let moved = null;
+  try { moved = await topicBlockedOpportunityMovedOn(run); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked run ${run.id}: could not verify whether its opportunity moved on: ${err.message} (retried next tick)`); return null; }
+  if (!moved) return null;
+  // Terminal bookkeeping FIRST; a failed stamp keeps the run in the set (the
+  // supersede would otherwise hide it for good).
+  if (!await stampTerminal(prNumber, 'merged', run)) return null;
+  const res = await supersedeRun(run, moved.row, {
+    fromSkipReason: TOPIC_BLOCKED_SKIP_REASON,
+    note: `PR #${prNumber} was merged by a human after the topic-targeting park, but the opportunity has moved on (${moved.reason}) — run retired as superseded by autonomous-pr-poller; the newer lifecycle owns the opportunity.`,
+  });
+  return res.annotated ? 'superseded' : null;
+}
+
+// → null while the opportunity is still parked on this run, else { reason,
+// row } describing how it moved on (operator requeue/dismiss, or a newer
+// sibling run owns it). A run without an opportunity cannot move on.
+async function topicBlockedOpportunityMovedOn(run) {
+  if (!run.opportunity_id) return null;
+  const row = await db('opportunity_queue').where('id', run.opportunity_id).first('id', 'status', 'skip_reason');
+  if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) {
+    return { reason: row ? `queue row now status='${row.status}'${row.skip_reason ? ` skip_reason='${row.skip_reason}'` : ''}` : 'queue row missing', row };
+  }
+  if (await newerSiblingRun(db, run)) return { reason: 'a newer run owns the opportunity', row };
+  return null;
+}
+
+// Merged after the park: restore the run's pending reason (CAS on the parked
+// state) and the queue row's, with a note — the next pollPending tick
+// finalizes it through the normal merged path.
+// Atomic like the park: both writes in one transaction, each must affect
+// exactly one row (a lost CAS rolls back; retried next tick).
+async function unparkTopicBlockedRun(run, prNumber) {
+  const pendingReason = pendingSkipReasonForRun(run);
+  const note = `PR #${prNumber} was merged after the topic-targeting park — returned to the pending lifecycle for merged finalization by autonomous-pr-poller.`;
+  try {
+    await db.transaction(async (trx) => {
+      // Same lock order as the park and the review-decision path: queue
+      // row first, then the run.
+      if (run.opportunity_id) {
+        // Same protocol as the park: lock the queue row, validate, then the
+        // newer-sibling check, then the writes.
+        const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+        if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) throw new Error('queue row left the parked state');
+        if (await newerSiblingRun(trx, run)) throw new Error('a newer run owns this opportunity — stale run, queue row left alone');
+        const q = await trx('opportunity_queue')
+          .where('id', run.opportunity_id)
+          .where('status', 'pending_review')
+          .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+          .update({ skip_reason: pendingReason, updated_at: new Date() });
+        if (Number(q) !== 1) throw new Error('queue row left the parked state');
+      }
+      const fresh = await trx('autonomous_runs').where('id', run.id).first('reviewer_notes');
+      const n = await trx('autonomous_runs')
+        .where('id', run.id)
+        .where('outcome', PENDING_OUTCOME)
+        .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+        .update({
+          skip_reason: pendingReason,
+          reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+          poll_pending_reason: null,
+          updated_at: new Date(),
+        });
+      if (Number(n) !== 1) throw new Error('run left the parked state');
+    });
+    logger.warn(`[autonomous-pr-poller] un-parked topic-blocked run ${run.id}: PR #${prNumber} merged by a human — finalizing through the merged lifecycle`);
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] un-park after merge failed for run ${run.id}: ${err.message} (retried next tick)`);
+    return false;
+  }
+}
+
 /**
  * The category signals deriveBlogRouteUrl needs from the run's brief
  * (normalizeAutonomousCategory reads brief.service + brief.target_keyword).
@@ -273,6 +600,24 @@ async function resolveTargetForRun(run) {
  * stale tick-start validation. Errors propagate (transient → caught by
  * pollRun, retried next tick) so a lookup outage can never allow a merge.
  */
+// queueRowParkedState's rule under a transaction: lock the queue row (FOR
+// UPDATE) so nothing can move it until the caller commits, validate the
+// exact parked state, then the newer-sibling check. Fail closed: anything
+// that cannot be verified (a run without created_at, a lock error) is
+// "not parked".
+async function queueRowStillParkedLocked(run, trx) {
+  if (!run.opportunity_id) return true;
+  try {
+    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingSkipReasonForRun(run)) return false;
+    if (await newerSiblingRun(trx, run)) return false;
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] run ${run.id}: could not verify the queue row under lock: ${err.message} (merge withheld)`);
+    return false;
+  }
+}
+
 async function queueRowParkedState(run) {
   if (!run.opportunity_id) return { parked: true, row: null };
   const row = await db('opportunity_queue')
@@ -335,7 +680,10 @@ async function reconcileQueueRow(run, { merged }) {
  * non-pending skip_reason instead. Compare-and-set guarded on the exact
  * parked state so a concurrent finalize/operator write wins.
  */
-async function supersedeRun(run, queueRow) {
+// `fromSkipReason` / `note`: the topic-blocked reconcile supersedes from the
+// PARKED reason (topic_targeting_blocked) with its own note; everything else
+// supersedes from the pending reason.
+async function supersedeRun(run, queueRow, { fromSkipReason = null, note = null } = {}) {
   const pendingReason = pendingSkipReasonForRun(run);
   const queueState = queueRow
     ? `status='${queueRow.status}'${queueRow.skip_reason ? ` skip_reason='${queueRow.skip_reason}'` : ''}`
@@ -344,12 +692,12 @@ async function supersedeRun(run, queueRow) {
     const claimed = await db('autonomous_runs')
       .where('id', run.id)
       .where('outcome', PENDING_OUTCOME)
-      .where('skip_reason', pendingReason)
+      .where('skip_reason', fromSkipReason || pendingReason)
       .update({
         skip_reason: SUPERSEDED_SKIP_REASON,
         reviewer_notes: [
           run.reviewer_notes,
-          `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
+          note || `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
         ].filter(Boolean).join(' | '),
         // pollPending `continue`s past trackPendingReason on the supersede
         // path, so without this the last pending reason froze onto the row.
@@ -958,19 +1306,70 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
+  // 3.7 Owner rulings 2026-08-27: the topic-targeting gate ran pre/post-draft,
+  //     but this PR may have waited while another post claimed its entity, or
+  //     remediation may have changed its targeting. Re-run it on the HEAD's
+  //     blog file against a fresh live corpus — the same assertion mergeAstro
+  //     makes — before the direct merge below. Fails closed (unreadable file /
+  //     corpus outage defers to the next tick).
   // 4. The merge itself is pinned to the head commit the gates above were
   //    checked against: GitHub rejects with 409 if the branch received
   //    another push while the merge call was in flight, so an unbuilt/
   //    unreviewed commit can never ride through the gate. The fresh head
   //    re-runs the full gate next tick.
+  const doMerge = () => gh.mergePr(pr.number, {
+    method: 'squash',
+    title: String(pr.title || '').slice(0, 72),
+    sha: pr.head?.sha,
+  });
   let mergeRes;
   try {
-    mergeRes = await gh.mergePr(pr.number, {
-      method: 'squash',
-      title: String(pr.title || '').slice(0, 72),
-      sha: pr.head?.sha,
-    });
+    if (run.action_type === 'new_supporting_blog') {
+      // The recheck and the merge run under the shared topic-merge advisory
+      // lock (same as mergeAstro), so two PRs claiming one entity cannot
+      // both pass against the same old corpus and both merge. A withheld
+      // result is returned through the lock via `withheld`.
+      let withheld = null;
+      const { withTopicMergeLock } = require('./topic-targeting-gate');
+      mergeRes = await withTopicMergeLock(db, async (trx) => {
+        const topic = await recheckTopicTargeting(run, pr, gh);
+        if (!topic.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
+          // Deterministic → park on this transaction (commits with the lock).
+          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx);
+          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
+          return null;
+        }
+        // 3.8 The recheck above was more async work (GitHub + corpus reads):
+        //     an operator dismiss/requeue landing during it must still block
+        //     the merge — repeat the queue re-check immediately before merging.
+        //     …and on THIS transaction with the queue row locked (FOR UPDATE),
+        //     held through the merge — a dismiss/requeue cannot land between
+        //     the check and gh.mergePr.
+        if (!(await queueRowStillParkedLocked(run, trx))) {
+          logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
+          withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        return doMerge();
+      });
+      if (withheld) {
+        // Park committed → retire the PR (idempotent; reconciled every tick).
+        if (withheld.parked) await retireTopicBlockedPr(run, pr.number, gh, { pr });
+        return withheld;
+      }
+    } else {
+      mergeRes = await doMerge();
+    }
   } catch (err) {
+    if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
+      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
+      return { pending: true, reason: 'topic_merge_lock_busy' };
+    }
+    if (err?.code === 'TOPIC_PARK_LOST') {
+      logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: ${err.message}`);
+      return { pending: true, reason: 'queue_row_moved_during_gating' };
+    }
     if (err?.status === 409) {
       logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: PR #${pr.number} head moved after gating (409)`);
       return { pending: true, reason: 'head_moved_during_merge' };
@@ -1175,7 +1574,11 @@ async function pollPending() {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
   }
-  if (!rows.length) return { count: 0, results: [] };
+  // Parked topic-blocked runs whose PR is still open converge here every
+  // tick (a retire that failed or half-completed after the durable park).
+  let topicBlocked = { count: 0, retired: 0 };
+  try { topicBlocked = await reconcileTopicBlockedPrs(require('../content-astro/github-client')); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile failed: ${err.message}`); }
+  if (!rows.length) return { count: 0, results: [], topicBlocked };
 
   // Human review-queue actions (requeue/dismiss) update ONLY the
   // opportunity_queue row and leave the run's parked outcome/skip_reason in
@@ -1238,7 +1641,7 @@ async function pollPending() {
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
-  return { count: results.length, results, autoMerges };
+  return { count: results.length, results, autoMerges, topicBlocked };
 }
 
 module.exports = {
@@ -1249,6 +1652,9 @@ module.exports = {
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,
     prNumberFromUrl,
+    reconcileTopicBlockedPrs,
+    queueRowStillParkedLocked,
+    retireTopicBlockedPr,
     pendingSkipReasonForRun,
     isMetadataLane,
     closedSkipReasonForRun,

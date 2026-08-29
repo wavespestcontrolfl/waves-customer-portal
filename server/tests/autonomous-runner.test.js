@@ -616,7 +616,7 @@ describe('rewrite_title_meta live adapter', () => {
 
 // ── blog uniqueness default-on ──────────────────────────────────────
 describe('blog uniqueness gating', () => {
-  test('new_supporting_blog fails closed (gate_fail) when uniqueness is on by default but no blog corpus is available', async () => {
+  test('new_supporting_blog fails closed when no blog corpus is available — held pre-draft by the topic-targeting gate (no writer spend), never drafted unchecked', async () => {
     const prevShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
     const prevThreshold = process.env.TRUST_BUILD_THRESHOLD;
     const prevUniq = process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS;
@@ -653,13 +653,15 @@ describe('blog uniqueness gating', () => {
         evaluate: jest.fn().mockReturnValue({ ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80 }),
       };
       const publisher = { publishOrUpdatePage: jest.fn() };
-      // linkPlanner has no corpus loader → required blog corpus is unavailable.
-      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, qualityGate, publisher, linkPlanner: {} });
+      // Corpus loader rejects → required blog corpus is unavailable.
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, qualityGate, publisher, linkPlanner: { loadAstroCorpusFromGitHub: jest.fn().mockRejectedValue(new Error('corpus_down')) } });
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
-      expect(result.skip_reason).toBe('gate_fail');
+      expect(result.outcome).toBe('skipped_gate_fail');
+      expect(result.skip_reason).toBe('topic_targeting_unavailable');
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_blog_uniq', 'topic_targeting_unavailable', { claimToken: claimedAt });
+      expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     } finally {
       if (prevShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -1633,7 +1635,17 @@ function loadRunnerWith({
   if (visibilityGate) jest.doMock('../services/content/ai-visibility-gate', () => visibilityGate);
   if (publisher) jest.doMock('../services/content-astro/astro-publisher', () => publisher);
   if (indexNow) jest.doMock('../services/seo/indexnow-submit', () => indexNow);
-  if (linkPlanner) jest.doMock('../services/content/internal-link-planner', () => linkPlanner);
+  // The pre-draft topic-targeting gate (step 2d) needs the live blog corpus
+  // and fails CLOSED without one; default a benign stub loader under any
+  // explicit planner so drafting-path tests keep reaching the writer.
+  jest.doMock('../services/content/internal-link-planner', () => ({
+    loadAstroCorpusFromGitHub: jest.fn().mockResolvedValue([{
+      path: 'src/content/blog/pest-control/seasonal-ant-pressure.md',
+      url: '/pest-control/seasonal-ant-pressure/',
+      body: '---\ntitle: Seasonal Ant Pressure in SWFL\nslug: /pest-control/seasonal-ant-pressure/\nprimary_keyword: seasonal ant pressure\n---\n\n## Why ants surge\n',
+    }]),
+    ...(linkPlanner || {}),
+  }));
   if (internalLinkExecutor) jest.doMock('../services/content/internal-link-pr-executor', () => internalLinkExecutor);
   if (protectedPages) jest.doMock('../services/content/protected-pages', () => protectedPages);
   if (factsSufficiency) jest.doMock('../services/content/facts-sufficiency', () => factsSufficiency);
