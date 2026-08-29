@@ -420,6 +420,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nJennings Smith helped with the ants alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRogers and Marcus are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nHopes are high, and Kevin was glad to help alongside Marcus.'))).toBe('unlisted_name');
+    // hook P1: a surname coordinated with a sourced name ("Davis and Marcus").
+    expect(verify(good('Hi Dana,\n\nDavis and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nHarding with Marcus made sure the ants are gone.'))).toBe('unlisted_name');
+    // …while an ordinary plural coordinated with a lowercase word stays exempt.
+    expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
     const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hi Dana, we will make sure kevin hears your feedback about the ants.'), gants)).toBe('unlisted_name');

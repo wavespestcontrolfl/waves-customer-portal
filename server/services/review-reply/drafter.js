@@ -277,10 +277,11 @@ what when where whether which while who why wish with would yes you your you're 
 // Rogers, Peters), and the token after it is not name-shaped — a singular
 // copula / auxiliary / possessive, a past-tense verb ("Jennings handled"),
 // an appositive ("Sanders, our technician"), or another capitalised word
-// ("Jennings Smith"). Anything else at a sentence start still needs
+// ("Jennings Smith"), or a coordination with a capitalised word ("Davis and
+// Marcus" — hook P1). Anything else at a sentence start still needs
 // provenance exactly as before.
 const COMMON_WORD_FORM_RE = /^[a-z]{2,}(?:ings?|ed|ly|ness|tions?|sions?|ments?|ful|less|able|ible|ous|ive|s)$/;
-const NAME_SHAPED_NEXT_RE = /^\s*(?:,\s*(?:our|the|a|an|your|who|from)\b|(?:is|was|has|had|does|did|will|would|could|should|can|took|came|went|got|made|said|told|knew|kept|left|ran|gave|showed|spoke|met|saw|sent|\p{Ll}+ed|'s|'ll|'d)\b|\p{Lu})/u;
+const NAME_SHAPED_NEXT_RE = /^\s*(?:,\s*(?:our|the|a|an|your|who|from)\b|(?:is|was|has|had|does|did|will|would|could|should|can|took|came|went|got|made|said|told|knew|kept|left|ran|gave|showed|spoke|met|saw|sent|\p{Ll}+ed|'s|'ll|'d)\b|(?:and|&|with|or|plus|alongside)\s+\p{Lu}|\p{Lu})/u;
 function exemptSentenceStart(w, rest) {
   if (SENTENCE_STARTERS.has(w)) return true;
   if (COMMON_FIRST_NAMES.has(w)) return false;
