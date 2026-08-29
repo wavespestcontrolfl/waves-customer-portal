@@ -2083,7 +2083,15 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   const heroSrc = String(parsed?.data?.hero_image?.src || '');
   // Validated as the file on the branch RENDERS: a `.md` post's raw HTML
   // blocks hide the Markdown inside them (an image there is literal text).
-  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)) });
+  // Own managed-namespace keys: the frontmatter route, its category route
+  // (what publishOrUpdatePage stamps and files under), and the file-derived
+  // slug — any of them is "own"; only a clearly foreign namespace parks.
+  const ownSlugs = [String(found.path || '').replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')];
+  try {
+    const fmSlug = slugPathFromFrontmatter(parsed?.data || {});
+    ownSlugs.push(fmSlug, categoryRouteSlug(fmSlug, normalizeAutonomousCategory(parsed?.data || {}, brief || {})));
+  } catch (_) { /* no safe frontmatter slug — file key only */ }
+  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)), slug: ownSlugs });
   if (!valid.ok) return { ok: false, reason: valid.reason };
   if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
   const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
@@ -2248,6 +2256,11 @@ const HTML_BLOCK_DELIMITED = [
 ];
 const HTML_BLOCK_TYPE6_RE = /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>|$)/i;
 const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+// A list item may OPEN an HTML block (`- <div>`): the block then runs inside
+// the item and its content is raw HTML (GH r28). The stripper removes list
+// INDENT but keeps the marker, so opener detection runs on the line with a
+// leading marker removed.
+const LIST_MARKER_PREFIX_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/;
 function blankMarkdownHtmlBlocks(text) {
   const lines = String(text || '').split('\n');
   let closeRe = null; // type 1: ends on the line carrying the closing tag
@@ -2258,7 +2271,8 @@ function blankMarkdownHtmlBlocks(text) {
     const blank = l.trim() === '';
     if (closeRe) { const done = closeRe.test(l); if (done) closeRe = null; prevBlank = blank; return blankLine(l); }
     if (inBlock) { if (blank) { inBlock = false; prevBlank = true; return l; } return blankLine(l); }
-    const t1 = l.match(HTML_BLOCK_TYPE1_RE);
+    const core = l.replace(LIST_MARKER_PREFIX_RE, '');
+    const t1 = core.match(HTML_BLOCK_TYPE1_RE);
     if (t1) {
       closeRe = new RegExp(`</${t1[1]}>`, 'i');
       const done = closeRe.test(l);
@@ -2266,15 +2280,15 @@ function blankMarkdownHtmlBlocks(text) {
       prevBlank = false;
       return blankLine(l);
     }
-    const delim = HTML_BLOCK_DELIMITED.find((d) => d.open.test(l));
+    const delim = HTML_BLOCK_DELIMITED.find((d) => d.open.test(core));
     if (delim) {
       closeRe = delim.close;
-      const done = closeRe.test(l.replace(delim.open, ''));
+      const done = closeRe.test(core.replace(delim.open, ''));
       if (done) closeRe = null;
       prevBlank = false;
       return blankLine(l);
     }
-    if (HTML_BLOCK_TYPE6_RE.test(l) || (prevBlank && HTML_BLOCK_TYPE7_RE.test(l))) { inBlock = true; prevBlank = false; return blankLine(l); }
+    if (HTML_BLOCK_TYPE6_RE.test(core) || (prevBlank && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; prevBlank = false; return blankLine(l); }
     prevBlank = blank;
     return l;
   }).join('\n');
@@ -2533,7 +2547,15 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
 // instead of parking the refresh. Any OTHER hero ref (another post's hero,
 // a changed or invented `/hero.*` path) is validated normally: the
 // grandfather covers what already ships, never what the refresh introduces.
-async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [], mdx = true }) {
+// `slug`: the post's own managed-namespace key(s) (string or array) — when
+// given, a reference into ANOTHER post's `/images/blog/<slug>/body-N`
+// namespace fails: that file is publisher-owned by the other post, and its
+// next refresh may sweep it (GH r28). The HEAD check passes every key the
+// post can legitimately be filed under (frontmatter route, category route,
+// file path) — writer-flat frontmatter and the stamped category route must
+// both count as "own".
+async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [], mdx = true, slug = null }) {
+  const ownKeys = (Array.isArray(slug) ? slug : [slug]).filter(Boolean).map((v) => String(v).replace(/^\/+|\/+$/g, '').toLowerCase());
   // A raw <img> is outside the writer's plain-Markdown subset: it renders a
   // picture the Markdown scan cannot see, so it can neither count toward the
   // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
@@ -2570,6 +2592,12 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
     if (!String(ref.alt || '').trim()) {
       return { ok: false, reason: `body image ${src || 'with empty src'} has no alt text — every in-article image needs a descriptive alt`, distinct: 0 };
     }
+    if (ownKeys.length) {
+      const managed = src.match(/^\/images\/blog\/(.+)\/body-\d+\.webp$/i);
+      if (managed && !ownKeys.includes(managed[1].toLowerCase())) {
+        return { ok: false, reason: `body references another post's generated image (${src}) — publisher-managed body images belong to their own post and may be swept by its next refresh`, distinct: 0 };
+      }
+    }
     const committed = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
       && await getFile(`public${src}`);
     if (!committed) {
@@ -2599,7 +2627,27 @@ function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
   if (!bodyImagesEnabled()) return none;
-  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx });
+  // A refresh draft may RETAIN a publisher-managed reference while
+  // rewriting its section: the picture then ships under prose it may no
+  // longer describe, bypassing the reuse context check (GH r28). Managed
+  // names are the publisher's to move: a retained own-namespace ref whose
+  // draft section no longer matches the LIVE section context is stripped
+  // here, and the normal allocation below regenerates for that section
+  // (the stripped file is reused elsewhere or swept as superseded).
+  if (existingFile?.file?.content) {
+    const liveFlavour = existingFile?.path ? !/\.md$/i.test(String(existingFile.path)) : mdx;
+    const ownPrefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+    const stale = new Set();
+    const { sections } = scanBodySections(body, { title: frontmatter?.title, mdx });
+    for (const sec of sections) {
+      for (const src of sec.images || []) {
+        if (!String(src || '').startsWith(ownPrefix) || !/body-\d+\.webp$/i.test(String(src))) continue;
+        if (!reusableLiveBodyImage(existingFile, src, sec.heading, { title: frontmatter?.title, lead: sec.lead, mdx: liveFlavour })) stale.add(src);
+      }
+    }
+    if (stale.size) body = stripManagedBodyImages(body, slug, { only: stale });
+  }
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2662,7 +2710,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // publisher-managed pictures (a refresh that replaces body-1/body-2 with
   // two authored images): those files are still publicly addressable and
   // hold managed names, so the sweep runs here too (GH r24).
-  if (need <= 0) return { ...none, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
+  if (need <= 0) return { ...none, body, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
 
   const slots = bodyImageSlots(body, need, { title: frontmatter?.title, mdx });
   if (slots.length < need) {
@@ -3410,6 +3458,14 @@ async function publishRefresh(draft, brief = {}) {
   // The refresh writes the resolved file back IN PLACE — a legacy `.md`
   // stays `.md`, so its raw HTML blocks hide the Markdown inside them.
   const refreshMdx = !/\.md$/i.test(String(filePath || ''));
+  // The managed-image directory is keyed by the PUBLISHED ROUTE — the
+  // frontmatter slug the creating lane stamped — not the source file's
+  // path: a flat file can render a nested route, and the new-post lane
+  // filed its body images under that route (GH r27). A legacy post
+  // without a safe frontmatter slug keeps the path-derived key.
+  let refreshAssetSlug;
+  try { refreshAssetSlug = slugPathFromFrontmatter(nextFrontmatter); }
+  catch (_) { refreshAssetSlug = filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''); }
   if (refreshBlogTarget && bodyImagesEnabled()) {
     // The SAME contract resolveBodyImages enforces — every reference
     // committed, ≥ minimum distinct sources, distinct PICTURES (dHash) —
@@ -3418,7 +3474,7 @@ async function publishRefresh(draft, brief = {}) {
     // silently completing as no_changes). A read error propagates.
     const hero = String(nextFrontmatter?.hero_image?.src || '');
     const getLive = (path) => gh.getFile(path);
-    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero, { mdx: refreshMdx }), mdx: refreshMdx });
+    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero, { mdx: refreshMdx }), mdx: refreshMdx, slug: [refreshAssetSlug, filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')] });
     if (!valid.ok || valid.distinct < BODY_IMAGE_MIN) liveShortOfImages = true;
     else {
       const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc: hero, getFile: getLive });
@@ -3498,14 +3554,6 @@ async function publishRefresh(draft, brief = {}) {
   let refreshImages = { body: newBody, files: [], newAlts: [] };
   if (refreshBlogTarget) {
     const heroSrc = String(nextFrontmatter?.hero_image?.src || '');
-    // The managed-image directory is keyed by the PUBLISHED ROUTE — the
-    // frontmatter slug the creating lane stamped — not the source file's
-    // path: a flat file can render a nested route, and the new-post lane
-    // filed its body images under that route (GH r27). A legacy post
-    // without a safe frontmatter slug keeps the path-derived key.
-    let refreshAssetSlug;
-    try { refreshAssetSlug = slugPathFromFrontmatter(nextFrontmatter); }
-    catch (_) { refreshAssetSlug = filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''); }
     refreshImages = await resolveBodyImages({
       frontmatter: nextFrontmatter,
       slug: refreshAssetSlug,
@@ -4716,12 +4764,15 @@ function scheduledBlogFilePathForPost(post) {
 // Every rendered form is removed via the shared scanner — inline images,
 // reference-style images (`![alt][pic]`) and the definitions that point at
 // a managed path — then lines left empty by the removal are dropped.
-function stripManagedBodyImages(body, slug) {
+// `only`: restrict removal to these srcs (a Set) — the stale-context strip
+// removes exactly the mismatched references (GH r28); without it every
+// managed reference for the slug is stripped (remediation mirror).
+function stripManagedBodyImages(body, slug, { only = null } = {}) {
   const raw = String(body || '');
   // Publisher-OWNED names only: `/images/blog/<slug>/body-<digits>.webp` —
   // an authored `body-background.webp` is not ours to remove.
   const managedRe = new RegExp(`^${ASTRO_HERO_PUBLIC_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/${String(slug).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/body-\\d+\\.webp$`);
-  const isManaged = (src) => managedRe.test(String(src || ''));
+  const isManaged = (src) => managedRe.test(String(src || '')) && (!only || only.has(String(src || '')));
   // Only RENDERED occurrences are stripped: an image-like string inside a
   // fence, a code span, a comment or an MDX expression is text the reader
   // sees as written — the rendered view (same line count) decides.

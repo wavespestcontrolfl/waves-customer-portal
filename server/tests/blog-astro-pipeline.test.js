@@ -5449,6 +5449,55 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
   });
 
+  test('bodyImageRefs: a LIST ITEM may open a raw HTML block in .md (`- <div>`) — images inside it are literal text (GH r28)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '- <div>\n  ![li](/images/blog/x/body-9.webp)\n</div>\n\n![real](/images/blog/x/body-1.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    expect(bodyImageRefs(body, { mdx: true }).map((r) => r.alt)).toEqual(['li', 'real']);
+  });
+
+  test('validateBodyImageRefs: a reference into ANOTHER post\'s managed namespace fails; the post\'s own namespace passes (GH r28)', async () => {
+    const { validateBodyImageRefs } = AstroPublisher._internals;
+    const getFile = async () => ({ sha: 'x' });
+    const body = '![Borrowed](/images/blog/other-post/body-1.webp)\n\n![Fine](/images/2026/01/authored.webp)';
+    const cross = await validateBodyImageRefs({ body, getFile, slug: 'pest-control/my-post' });
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toMatch(/another post's generated image/);
+    const own = await validateBodyImageRefs({ body, getFile, slug: 'other-post' });
+    expect(own.ok).toBe(true);
+    // No slug provided → the namespace rule is not applied (callers without one).
+    expect((await validateBodyImageRefs({ body, getFile })).ok).toBe(true);
+  });
+
+  test('resolveBodyImages: a RETAINED managed reference whose draft section no longer matches the live context is stripped and swept — it never ships under rewritten prose (GH r28)', async () => {
+    // The suite's beforeEach already enables blogBodyImages.
+    {
+      const { resolveBodyImages, compressToWebp } = AstroPublisher._internals;
+      const managedSrc = '/images/blog/pest-control/my-post/body-1.webp';
+      const a1 = '/images/2026/01/detail-one.webp'; const a2 = '/images/2026/01/detail-two.webp';
+      const liveBody = `## Alpha\n\nOld lead prose.\n\n![Old alt](${managedSrc})\n\n## Beta\n\nBeta prose.\n`;
+      const draftBody = `## Alpha\n\nCompletely new lead.\n\n![Old alt](${managedSrc})\n\n## Beta\n\nBeta prose.\n\n![One](${a1})\n\n![Two](${a2})\n`;
+      const w = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+      const w1 = await w(1); const w2 = await w(2);
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === `public${a1}`) return { content: '', sha: 'a1', raw: { content: w1 } };
+        if (path === `public${a2}`) return { content: '', sha: 'a2', raw: { content: w2 } };
+        if (path === `public${managedSrc}`) return { content: '', sha: 'b1', raw: { content: w1 } };
+        return null;
+      });
+      gh.listDir.mockResolvedValue([{ type: 'file', name: 'body-1.webp', path: `public${managedSrc}`.replace('public/', 'public/').replace('public', 'public'), sha: 'b1' }].map((e) => ({ ...e, path: `public${managedSrc}` })));
+      const res = await resolveBodyImages({
+        frontmatter: { title: 'My Post' },
+        slug: 'pest-control/my-post',
+        body: draftBody,
+        existingFile: { path: 'src/content/blog/pest-control/my-post.mdx', file: { content: `---\ntitle: My Post\n---\n${liveBody}` } },
+      });
+      expect(res.body).not.toContain(managedSrc);
+      expect(res.body).toContain(a1);
+      expect(res.deletes).toEqual([`public${managedSrc}`]);
+    }
+  });
+
   test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {
     const { bodyImageRefs } = AstroPublisher._internals;
     const body = '![v](/images/blog/x/detail.webp?v=2)\n\n![f](/images/blog/x/other.webp#figure)\n\n![enc](/images/blog/x/what%3Fname.webp)';
