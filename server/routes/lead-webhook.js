@@ -1090,7 +1090,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           if (!triageResult) return;
           try {
             const updates = {};
-            const triageServiceInterestUpdate = serviceInterestUpdateFromTriage(
+            // A keyed lead's label IS its catalog identity — triage prose must
+            // not rewrite it (or reprice the draft under a different service)
+            // while service_key stays put (pre-push codex P1).
+            const triageServiceInterestUpdate = leadServiceKey ? null : serviceInterestUpdateFromTriage(
               leadRecord.service_interest,
               triageResult.serviceInterest
             );
