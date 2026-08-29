@@ -1201,6 +1201,24 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     ? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn('scheduled_services').insert(rows).returning('*'); })()
     : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
+  // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
+  // every caller (estimate converter, admin-schedule, customer booking)
+  // gets grouping for follow-ups landing on an existing groupable stop.
+  // Gate-checked + best-effort inside maybeGroupRow (savepoint on a trx
+  // caller), so a grouping failure never fails a seed.
+  try {
+    const { maybeGroupRow } = require('./visit-groups');
+    // A caller that normalizes conflicts AFTER seeding (booking wizard
+    // occupancy sweep) opts out and groups post-sweep itself (codex r5).
+    const seededForGrouping = opts.visitGrouping === false ? [] : insertedRows;
+    for (const seededRow of seededForGrouping) {
+      if (seededRow && seededRow.id) {
+        await maybeGroupRow(seededRow.id, { database: conn, createdBy: 'seeder' });
+      }
+    }
+  } catch (vgErr) {
+    require('./logger').warn(`[recurring-seeder] visit-group seam failed for parent ${parent.id}: ${vgErr.message}`);
+  }
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   notifyShortfallAfterCommit();
   return {

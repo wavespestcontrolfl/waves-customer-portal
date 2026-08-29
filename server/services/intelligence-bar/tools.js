@@ -2047,6 +2047,16 @@ async function rescheduleAppointment(input) {
 
   logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
 
+  // Visit-group seam (visit-group-scope.md §2; codex #3590 r11): this
+  // writer moves the date/window directly (not via the rebooker), so it
+  // repairs grouped membership itself. Runs LAST, after every query this
+  // tool issues for its own result. Best-effort, no-op for ungrouped rows.
+  try {
+    await require('../visit-groups').handleChildStopChanged(appointment_id);
+  } catch (vgErr) {
+    logger.warn(`[intelligence-bar] visit-group seam failed for ${appointment_id}: ${vgErr.message}`);
+  }
+
   return {
     success: true,
     appointment_id,

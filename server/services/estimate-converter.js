@@ -113,6 +113,7 @@ function grassTypeToPersist(recurringServices, estimateData) {
 }
 
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
+const VisitGroups = require('./visit-groups');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -4600,6 +4601,10 @@ const EstimateConverter = {
               : (unit.service.frequency || 'recurring');
             const standaloneRow = {
               customer_id: customerId,
+              // Property identity must match the reserved start or the
+              // same-trip rows can never group (visit-group join keys on
+              // property_id; codex #3590 r4).
+              ...(reservedStart.property_id ? { property_id: reservedStart.property_id } : {}),
               scheduled_date: unitDate,
               ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
               ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
@@ -4673,6 +4678,16 @@ const EstimateConverter = {
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
+              // Visit groups (visit-group-scope.md §2): a same-trip row and
+              // the reserved start share one physical stop — stamp them at
+              // scheduling. Gate-checked + best-effort inside maybeGroupRow.
+              // Only when the property identity is already on the row —
+              // null-property reservations group at post-commit property
+              // linkage instead (codex #3590 r10), so a customer-keyed
+              // stop can never absorb a legacy row at another address.
+              if (sameTrip && inserted[0] && inserted[0].property_id) {
+                await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
+              }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
