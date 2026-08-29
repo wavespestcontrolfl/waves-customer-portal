@@ -5455,6 +5455,12 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
   });
 
+  test('bodyImageRefs: an INDENTED marker at content depth stays inside an active raw HTML block; only a sibling/outer marker terminates it (#3593 r1)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '- <div>\n  - nested ![in](/images/blog/x/body-1.webp)\n  ![in2](/images/blog/x/body-2.webp)\n- ![next](/images/blog/x/body-3.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['next']);
+  });
+
   test('bodyImageRefs: leaving a container (or a sibling list item) TERMINATES an active raw HTML block in .md — the image outside renders (GH r30)', () => {
     const { bodyImageRefs } = AstroPublisher._internals;
     // The div opens inside the quote; the unquoted line leaves the quote —

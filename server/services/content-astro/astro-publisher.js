@@ -2268,8 +2268,25 @@ const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(
 // INDENT but keeps the marker, so opener detection runs on the line with a
 // leading marker removed.
 const LIST_MARKER_PREFIX_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/;
-function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
+// `rawLines`: the ORIGINAL body's lines (the stripper is newline-
+// preserving) — the stripper removes list indentation, so only the raw
+// line can distinguish a SIBLING marker (raw indent < the opening item's
+// content column ⇒ the item, and with it the leaf block, ends) from an
+// INDENTED marker at content depth (raw text inside the active block,
+// GH #3593 r1).
+function blankMarkdownHtmlBlocks(text, { depths = null, inList = null, rawLines = null } = {}) {
   const lines = String(text || '').split('\n');
+  const rawView = (i) => {
+    const rawLine = String((rawLines && rawLines[i]) ?? lines[i] ?? '');
+    // Strip the quote prefix only when it CARRIES a marker — the bare
+    // `^ {0,3}` would otherwise eat plain list indentation.
+    const qm = rawLine.match(/^ {0,3}(?:> ?)+/);
+    const noQuote = qm ? rawLine.slice(qm[0].length) : rawLine;
+    const indent = (noQuote.match(/^ */) || [''])[0].length;
+    const marker = noQuote.slice(indent).match(/^(?:[-*+]|\d{1,9}[.)])[ \t]+/);
+    return { indent, marker, contentCol: marker ? indent + marker[0].length : indent };
+  };
+  let blockContentCol = 0; // the opening item's content column (raw)
   let closeRe = null; // type 1: ends on the line carrying the closing tag
   let inBlock = false; // types 6/7: end at a blank line
   // A type-7 block needs a BLOCK BOUNDARY, not specifically a blank line
@@ -2286,15 +2303,23 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
     // type-7 HTML block inside the quote (GH r29). The stripper removed the
     // quote marker; `depths`/`inList` carry the container structure. A line
     // carrying its own list marker opens a new item likewise.
-    if (i > 0 && ((depths && (depths[i] || 0) !== (depths[i - 1] || 0))
-      || (inList && !!inList[i] !== !!inList[i - 1])
-      || LIST_MARKER_PREFIX_RE.test(l))) {
+    const containerMoved = i > 0 && ((depths && (depths[i] || 0) !== (depths[i - 1] || 0))
+      || (inList && !!inList[i] !== !!inList[i - 1]));
+    const raw = rawView(i);
+    if (inBlock || closeRe) {
+      // A leaf block cannot outlive its container: leaving the quote, or a
+      // marker at a SHALLOWER raw indent than the opening item's content
+      // column (a sibling or outer item), ends the active block and this
+      // line is processed as the first line of its new context (GH r30).
+      // A marker AT content depth is raw text inside the block — the
+      // stripper removed the indentation that told them apart (#3593 r1).
+      if (containerMoved || (raw.marker && raw.indent < blockContentCol)) {
+        inBlock = false;
+        closeRe = null;
+        atBoundary = true;
+      }
+    } else if (containerMoved || raw.marker) {
       atBoundary = true;
-      // …and a leaf block cannot outlive its container: leaving the quote
-      // or starting a sibling item ENDS an active HTML block, and this line
-      // is processed as the first line of the new context (GH r30).
-      inBlock = false;
-      closeRe = null;
     }
     if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
     if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
@@ -2304,6 +2329,7 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
       closeRe = new RegExp(`</${t1[1]}>`, 'i');
       const done = closeRe.test(l);
       if (done) closeRe = null;
+      else blockContentCol = raw.contentCol;
       atBoundary = done;
       return blankLine(l);
     }
@@ -2312,10 +2338,11 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
       closeRe = delim.close;
       const done = closeRe.test(core.replace(delim.open, ''));
       if (done) closeRe = null;
+      else blockContentCol = raw.contentCol;
       atBoundary = done;
       return blankLine(l);
     }
-    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; atBoundary = false; return blankLine(l); }
+    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; blockContentCol = raw.contentCol; atBoundary = false; return blankLine(l); }
     atBoundary = blank || contentGuardrails.isInterruptingBlock(l);
     return l;
   }).join('\n');
@@ -2335,7 +2362,7 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
 // (blankMarkdownHtmlBlocks); callers pass the TARGET file's extension.
 function renderedBodyView(body, { mdx = true } = {}) {
   const { text: stripped, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
-  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped, { depths, inList });
+  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped, { depths, inList, rawLines: String(body || '').split('\n') });
   // Children of a container a reader DEFINITELY never sees (<script>,
   // <template>, <div hidden>, aria-hidden, display:none, closed <details>,
   // …) are blanked by the guardrails' certainty-only walker. The
