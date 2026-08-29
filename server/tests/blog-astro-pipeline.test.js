@@ -4419,6 +4419,30 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 400 } }, { provider: 'gpt-image-2', result: { fatal: true, status: 'no_b64_in_response' } }]))).toBe(false);
   });
 
+  test('publishAstro republish with a COMMITTED hero (absolute hub URL): the hero enters the duplicate check from its relative src (hook P1)', async () => {
+    const post = {
+      id: 'post-hub', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: 'https://www.wavespestcontrol.com/images/blog/ant-trails-bradenton/hero.webp', hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const heroWebp = (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/blog/ant-trails-bradenton/hero.webp' ? { content: '', sha: 'h', raw: { content: heroWebp } } : null));
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 80, html_url: 'https://github.com/x/pull/80', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-hub');
+
+    // The committed hero's bytes were read for the dHash sibling set (no fresh hero bytes on a committed-hero republish).
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/ant-trails-bradenton/hero.webp');
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual(['public/images/blog/ant-trails-bradenton/body-1.webp', 'public/images/blog/ant-trails-bradenton/body-2.webp', 'src/content/blog/ant-trails-bradenton.md']);
+  });
+
   test('unpublishAstro aborts (branch dropped, no PR) when the body-asset listing fails (GH r20)', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un2', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
     db.mockImplementation(() => read);
@@ -4428,6 +4452,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     try { await AstroPublisher.unpublishAstro('post-un2'); } catch (err) { thrown = err; }
     expect(thrown?.message).toContain('GitHub 502');
     expect(gh.createPr).not.toHaveBeenCalled();
+    // The listing happens BEFORE the branch is cut — no orphan ref per retry (hook P1).
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('assertBodyImagesAtHead: a post that changed on the default branch since the branch was cut is withheld (the merged body is not the PR-head copy) (GH r20)', async () => {

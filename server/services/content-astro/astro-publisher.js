@@ -1167,8 +1167,10 @@ async function publishAstro(postId) {
       body,
       existingFile: liveFile ? { path: filePath, file: liveFile } : null,
       brief: {},
-      // Fresh hero bytes, or the committed hero's repo path when reused.
-      siblings: [{ label: 'hero', buffer: heroImage?.buffer || null, repoPath: heroImage?.buffer ? null : (String(heroPublicRef || '').startsWith('/') ? `public${heroPublicRef}` : null) }],
+      // Fresh hero bytes, or the committed hero's repo path when reused —
+      // derived from the frontmatter's RELATIVE src (buildFrontmatter turns
+      // the stored absolute hub URL of a merged post back into it).
+      siblings: [{ label: 'hero', buffer: heroImage?.buffer || null, repoPath: heroImage?.buffer ? null : (String(data?.hero_image?.src || '').startsWith('/') ? `public${data.hero_image.src}` : null) }],
     });
     if (bodyImages.newAlts.length) {
       await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
@@ -3575,12 +3577,19 @@ async function unpublishAstro(postId) {
   const branch = `content/unpublish-${slug}-${shortId()}`;
 
   try {
-    await gh.createBranch(branch);
-
+    // Everything read from MAIN comes first — a read failure here aborts
+    // before any branch exists, so a retry never leaves an orphan ref.
     const resolved = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
     if (!resolved) throw new Error(`markdown not found on main: ${ASTRO_BLOG_DIR}/${slug}.{mdx,md}`);
     const mdPath = resolved.path;
     const mdFile = resolved.file;
+    // Generated in-article pictures (body-N.webp) live beside the hero and
+    // would otherwise stay publicly addressable — and hold their names, so
+    // a later republish would pay for higher-numbered replacements. A
+    // listing failure aborts the unpublish (the admin retries).
+    const bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
+
+    await gh.createBranch(branch);
 
     await gh.deleteFile({
       path: mdPath,
@@ -3606,13 +3615,6 @@ async function unpublishAstro(postId) {
         });
       }
     }
-    // Generated in-article pictures (body-N.webp) live beside the hero and
-    // would otherwise stay publicly addressable — and hold their names, so
-    // a later republish would pay for higher-numbered replacements.
-    // A listing failure ABORTS the unpublish (the catch below drops the
-    // branch; the admin retries) — proceeding would leave every body picture
-    // public and holding its name.
-    const bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
     for (const asset of bodyAssets) {
       await gh.deleteFile({
         path: asset.path || `${ASTRO_HERO_DIR}/${slug}/${asset.name}`,
