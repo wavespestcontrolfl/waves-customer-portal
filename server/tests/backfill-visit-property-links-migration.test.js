@@ -76,14 +76,34 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const notIns = [];
     const rowsNow = () => db[table] || [];
     const groups = []; // grouped OR predicates from where(fn)
-    const notExists = []; // { table, openOnly } from whereNotExists(fn)
+    const notExists = []; // subqueries from whereNotExists(fn)
+    const exists = []; // subqueries from whereExists(fn)
     const TERMINAL = ['completed', 'cancelled', 'skipped', 'no_show'];
     const isOpen = (r) => r.status == null || !TERMINAL.includes(r.status);
-    const match = (r) => filters.every((f) => Object.entries(f).every(([k, v]) => r[k] === v))
+    // Sub-builder for EXISTS/NOT EXISTS: from(table) + optional correlated
+    // whereRaw('<t>.property_id = customer_properties.id') + optional
+    // open-visit group + optional object filters.
+    const subquery = (fn) => {
+      const sub = { table: null, joinPropertyId: false, openOnly: false, filters: [] };
+      const b = {
+        select() { return b; },
+        from(tbl) { sub.table = tbl; return b; },
+        whereRaw(sql) { if (!/\.property_id = customer_properties\.id$/.test(sql)) throw new Error(`fake whereRaw: ${sql}`); sub.joinPropertyId = true; return b; },
+        where(c) { if (typeof c === 'function') sub.openOnly = true; else sub.filters.push(c); return b; },
+      };
+      fn.call(b);
+      if (!sub.table) throw new Error('fake subquery: no from()');
+      return sub;
+    };
+    const subHit = (sub, r) => (db[sub.table] || []).some((o) => (!sub.joinPropertyId || o.property_id === r.id)
+      && (!sub.openOnly || isOpen(o))
+      && sub.filters.every((f) => Object.entries(f).every(([k, v]) => o[k] === v)));
+    const match = (r) => filters.every((f) => Object.entries(f).every(([k, v]) => (r[k] ?? null) === v))
       && ins.every((c) => c.vals.includes(r[c.col]))
       && notIns.every((c) => !c.vals.includes(r[c.col]))
       && groups.every((g) => g(r))
-      && notExists.every((ne) => !(db[ne.table] || []).some((o) => o.property_id === r.id && (!ne.openOnly || isOpen(o))));
+      && notExists.every((sub) => !subHit(sub, r))
+      && exists.every((sub) => subHit(sub, r));
     // The only grouped predicate the migration uses is the open-visit one:
     // whereNull('status').orWhereNotIn('status', TERMINAL).
     const groupBuilder = () => {
@@ -99,19 +119,8 @@ function fakeKnex(db, { missingTables = [] } = {}) {
         if (typeof cond === 'function') { const { b, pred } = groupBuilder(); cond(b); groups.push(pred); return q; }
         filters.push(cond); return q;
       },
-      whereNotExists(fn) {
-        const sub = { table: null, openOnly: false };
-        const b = {
-          select() { return b; },
-          from(tbl) { sub.table = tbl; return b; },
-          whereRaw(sql) { if (!/\.property_id = customer_properties\.id$/.test(sql)) throw new Error(`fake whereRaw: ${sql}`); return b; },
-          where(fn2) { if (typeof fn2 !== 'function') throw new Error('fake sub where: expected fn'); sub.openOnly = true; return b; },
-        };
-        fn.call(b);
-        if (!sub.table) throw new Error('fake whereNotExists: no from()');
-        notExists.push(sub);
-        return q;
-      },
+      whereNotExists(fn) { notExists.push(subquery(fn)); return q; },
+      whereExists(fn) { exists.push(subquery(fn)); return q; },
       whereIn(col, vals) { ins.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notIns.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
@@ -194,6 +203,30 @@ describe('20260829000050 backfill visit property links', () => {
     expect(property(db, 'p6').active).toBe(false);
     expect(visit(db, 'v-ref-p6-cancelled').property_id).toBe('p6');
     expect(state(db).deactivated.sort()).toEqual(['p4', 'p6']);
+  });
+
+  test('up() link UPDATE re-validates atomically (property retired / visit moved after the scan → no link)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    let scanned = false;
+    const wrapped = (table) => {
+      const q = knex(table);
+      if (table === 'scheduled_services' && !scanned) {
+        const sel = q.select;
+        q.select = async (...cols) => { const out = await sel(...cols); scanned = true;
+          // Race: a merge retires p1 and moves v-mirror to another customer.
+          property(db, 'p1').active = false;
+          visit(db, 'v-mirror').customer_id = 'c2';
+          return out; };
+      }
+      return q;
+    };
+    wrapped.schema = knex.schema; wrapped.fn = knex.fn;
+    await migration.up(wrapped);
+    expect(visit(db, 'v-stamped').property_id).toBeNull();
+    expect(visit(db, 'v-mirror').property_id).toBeNull();
+    expect(visit(db, 'v-partial').property_id).toBe('p2'); // unaffected target still links
+    expect(Object.keys(state(db).linked)).toEqual(['v-partial']);
   });
 
   test('up() retirement UPDATE re-validates atomically (open ref appearing after the scan wins)', async () => {

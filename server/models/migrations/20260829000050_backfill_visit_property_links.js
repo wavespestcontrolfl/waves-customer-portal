@@ -143,11 +143,27 @@ exports.up = async function up(knex) {
     const matches = (byCustomer.get(v.customer_id) || []).filter((p) => p.address_key === key);
     if (matches.length !== 1) continue; // ambiguous → admin picker
     const propertyId = matches[0].id;
-    // CAS: only the row we observed — still unlinked, still open.
+    // CAS: only the row we observed — still unlinked, still open, still the
+    // same customer with the same stamp — AND the target property is still
+    // active, owned by that customer, and carries the matched key (codex
+    // #3601 r2 P1: a customer merge between the scan and this write can
+    // reassign the visit and retire the colliding property; the link must
+    // never land on a now-inactive duplicate).
     const n = await knex('scheduled_services')
-      .where({ id: v.id })
+      .where({
+        id: v.id,
+        customer_id: v.customer_id,
+        service_address_line1: v.service_address_line1 ?? null,
+        service_address_line2: v.service_address_line2 ?? null,
+        service_address_city: v.service_address_city ?? null,
+        service_address_zip: v.service_address_zip ?? null,
+      })
       .whereNull('property_id')
       .where(openVisitStatus)
+      .whereExists(function targetProperty() {
+        this.select(1).from('customer_properties')
+          .where({ id: propertyId, customer_id: v.customer_id, active: true, address_key: key });
+      })
       .update({ property_id: propertyId });
     if (n) state.linked[v.id] = propertyId;
   }
