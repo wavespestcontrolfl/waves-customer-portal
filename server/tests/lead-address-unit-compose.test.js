@@ -96,9 +96,19 @@ describe('composeLeadAddress', () => {
     // vs "St North Port"), so this rare shape is stored whole rather than
     // risk a wrong street or place. Inline-unit dedupe / conflict detection
     // is deliberately out of scope for it.
-    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St Apt 4 Sarasota FL 34236, Apt 4');
+    // …but a unit it already names is never appended twice, and a DIFFERENT
+    // dedicated unit is a conflict held for read-back, never a second door.
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St Apt 4 Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', '#4')).toBe('100 Main St Apt 4 Sarasota FL 34236');
     expect(composeLeadAddress('100 Main St Sarasota FL 34236', 'Apt 4')).toBe('100 Main St Sarasota FL 34236, Apt 4');
-    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 5').unitConflict).toBe(false);
+    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 5')).toEqual({ address: '100 Main St Apt 4 Sarasota FL 34236', unitConflict: true });
+    expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4').unitConflict).toBe(true);
+    // Street words after a designator-shaped token are not units.
+    expect(analyzeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toEqual({ address: '4501 Space Coast Blvd, Apt 4', unitConflict: false });
+    expect(leadAddressCompareKey('4501 Spc Coast Blvd')).toBe('4501 spc coast blvd');
+    expect(leadAddressCompareKey('4501 Spc Coast Blvd')).not.toBe(leadAddressCompareKey('4501 Space Coast Blvd'));
+    expect(leadAddressCompareKey('100 Apartment Road')).not.toBe(leadAddressCompareKey('100 Unit Road'));
+    expect(leadAddressCompareKey('4501 Space Coast Blvd')).toBe('4501 space coast blvd');
     expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', null)).toBe('100 Main St Apt 4 Sarasota FL 34236');
     expect(composeLeadAddress('100 Main St North Port FL 34287', 'Apt 4')).toBe('100 Main St North Port FL 34287, Apt 4');
     expect(composeLeadAddress('100 Main St W Palm Beach FL 33401', 'Apt 4')).toBe('100 Main St W Palm Beach FL 33401, Apt 4');
@@ -245,13 +255,15 @@ describe('reaffirmedFilledLeadFields — address', () => {
     // same: the street already embeds that door, so the appended unit adds
     // no identity. A DIFFERENT dedicated unit still keys differently.
     const restated = composeLeadAddress(commaFree, 'Apt 4');
-    expect(restated).toBe('100 Main St Apt 4 Sarasota FL 34236, Apt 4');
+    expect(restated).toBe('100 Main St Apt 4 Sarasota FL 34236');
     expect(leadAddressCompareKey(restated)).toBe(leadAddressCompareKey(commaFree));
     expect(leadAddressCompareKey(composeLeadAddress(commaFree, '#4'))).toBe(leadAddressCompareKey(commaFree));
-    expect(leadAddressCompareKey(composeLeadAddress(commaFree, 'Apt 5'))).not.toBe(leadAddressCompareKey(commaFree));
+    // A conflicting dedicated unit is dropped and flagged, never a second door.
+    expect(analyzeLeadAddress(commaFree, 'Apt 5')).toEqual({ address: commaFree, unitConflict: true });
+    expect(leadAddressCompareKey('100 Main St Apt 5 Sarasota FL 34236')).not.toBe(leadAddressCompareKey(commaFree));
     const lockedCF = { address: commaFree, city: 'Sarasota', zip: '34236' };
     expect(reaffirmedFilledLeadFields({ address: restated, city: 'Sarasota', zip: '34236' }, lockedCF).address).toBe(commaFree);
-    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress(commaFree, 'Apt 5'), city: 'Sarasota', zip: '34236' }, lockedCF).address).toBeUndefined();
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St Apt 5 Sarasota FL 34236', city: 'Sarasota', zip: '34236' }, lockedCF).address).toBeUndefined();
     expect(reaffirmedFilledLeadFields({ address: restated, city: 'Bradenton', zip: '34205' }, lockedCF).address).toBeUndefined();
     // Every inline spelling the shared parser supports, incl. multipart.
     for (const [line, unit] of [
@@ -273,7 +285,8 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(leadAddressCompareKey('100 Main St Bldg 2 Apt 4 Sarasota FL 34236')).toBe('100 main st {u:bldg 2 unit 4} sarasota fl 34236');
     const lockedAlias = { address: '100 Main St Apt 4 Sarasota FL 34236', city: 'Sarasota', zip: '34236' };
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St #4 Sarasota FL 34236', '#4'), city: 'Sarasota', zip: '34236' }, lockedAlias).address).toBe(lockedAlias.address);
-    expect(leadAddressCompareKey(composeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4'))).not.toBe(leadAddressCompareKey('100 Main St Bldg 2 Apt 4 Sarasota FL 34236'));
+    // "Apt 4" against a "Bldg 2 Apt 4" line is a different door → conflict, never appended.
+    expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4')).toEqual({ address: '100 Main St Bldg 2 Apt 4 Sarasota FL 34236', unitConflict: true });
   });
 
   test('stored place evidence is read from the UNBOUNDED tail (the clamp is write-time only)', () => {

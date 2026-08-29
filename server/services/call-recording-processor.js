@@ -2681,26 +2681,32 @@ function leadAddressCompareKey(v) {
 // (#3608 codex r5 + r6).
 function canonicalizeInlineUnits(streetKey) {
   const {
-    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, isStateZipPair,
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
   } = require('../utils/address-normalizer');
   const tokens = String(streetKey || '').split(' ').filter(Boolean);
+  // Same grammar as the shared peel: a designator counts only when the
+  // value that follows is unit-shaped ("apt 4", "unit ph1", "ste 200-a") —
+  // never a street word ("Space Coast Blvd", "Apartment Road", "Unit Road");
   // 'fl' is also the floor designator — "fl 34236" is the state tail.
-  const isDesignator = (t, next) => UNIT_DESIGNATORS.has(t) && !isStateZipPair(t, next || '');
-  const isHashValue = (t) => t.length > 1 && t.startsWith('#');
+  const isValue = (t) => !!t && UNIT_VALUE.test(t);
+  const isDesignator = (t, next, after) => UNIT_DESIGNATORS.has(t)
+    && !isStateZipPair(t, next || '')
+    && (isValue(next) || (next === '#' && isValue(after)));
+  const isHashValue = (t) => t.length > 1 && t.startsWith('#') && isValue(t);
   const out = [];
   const unitKeys = [];
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
-    if (!(isDesignator(t, tokens[i + 1]) || t === '#' || isHashValue(t))) { out.push(t); i += 1; continue; }
+    if (!(isDesignator(t, tokens[i + 1], tokens[i + 2]) || (t === '#' && isValue(tokens[i + 1])) || isHashValue(t))) { out.push(t); i += 1; continue; }
     const run = [];
     let j = i;
     while (j < tokens.length) {
       const c = tokens[j];
       if (isHashValue(c)) { run.push(c); j += 1; continue; }
-      if (c === '#' && j + 1 < tokens.length) { run.push(c, tokens[j + 1]); j += 2; continue; }
-      if (isDesignator(c, tokens[j + 1]) && j + 2 < tokens.length && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
-      if (isDesignator(c, tokens[j + 1]) && j + 1 < tokens.length && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (c === '#' && isValue(tokens[j + 1])) { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
       break;
     }
     if (!run.length) { out.push(t); i += 1; continue; }
@@ -14796,8 +14802,21 @@ function analyzeLeadAddress(line1, line2) {
   const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
   if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
   const key = (u) => unitLineValueKey(normalizeUnitLine(u));
-  const duplicate = !!embedded && key(embedded) === key(unit);
-  const unitConflict = !!embedded && !duplicate;
+  // A comma-free FULL address is kept whole, so its inline unit is not the
+  // trailing pair — find it anywhere in the street through the same
+  // canonicalizer the ownership key uses, so a repeated dedicated unit is
+  // not appended and a DIFFERENT one is a conflict held for read-back
+  // rather than a second door persisted silently (pre-push audit P1).
+  const inlineKeys = embedded ? [] : canonicalizeInlineUnits(parts.street.replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()).unitKeys;
+  const duplicate = embedded ? key(embedded) === key(unit) : inlineKeys.includes(key(unit));
+  const unitConflict = embedded ? !duplicate : (inlineKeys.length > 0 && !duplicate);
+  if (!embedded && (duplicate || unitConflict)) {
+    // Whole-line street already names the door: never append a second one.
+    return {
+      address: formatAddressBounded({ line1: parts.street, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
   if (unitConflict) {
     // The retained inline unit is the protected tail here too — an overlong
     // street must not truncate the one door this policy chose to keep

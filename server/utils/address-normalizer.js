@@ -628,6 +628,9 @@ module.exports = {
   // street from city apply the same protection splitStreetAndCity does.
   CITY_PREFIX_TOKENS,
   UNIT_DESIGNATORS,
+  // A unit VALUE token per the shared peel grammar — shared so callers that
+  // recognize inline units elsewhere never accept a street word as a value.
+  UNIT_VALUE,
   // The canonical 'fl' disambiguation: 'fl' followed by a ZIP-shaped value
   // is the STATE marker ("FL 34236"), otherwise the FLOOR designator.
   // Shared so unit extraction elsewhere applies the identical rule.
