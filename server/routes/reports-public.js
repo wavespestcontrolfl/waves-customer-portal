@@ -165,6 +165,7 @@ const {
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
+const { cockroachReportV2PdfSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -543,6 +544,10 @@ async function buildServiceReportV1ResponseData(service, token, {
   // STATION visits (flag-gated). ONE composer shared with the queued PDF
   // renderer (pdf-queue.js) — see attachTermiteReportV2.
   attachTermiteReportV2(data, service);
+
+  // Cockroach Report V2 — treatment-program dashboard for cockroach typed
+  // primaries (flag-gated). Same ONE-composer contract as termite.
+  attachCockroachReportV2(data, service);
 
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1
@@ -1842,6 +1847,8 @@ router.get('/:token', async (req, res, next) => {
       // TERMITE_REPORT_V2 — same contract as the mosquito component: a gate
       // flip must re-render cached termite bait-station PDFs.
       const termiteV2Signature = termiteReportV2PdfSignature(service);
+      // COCKROACH_REPORT_V2 — same contract (cockroach-report-v2.js).
+      const cockroachV2Signature = cockroachReportV2PdfSignature(service);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1859,7 +1866,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1978,7 +1985,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

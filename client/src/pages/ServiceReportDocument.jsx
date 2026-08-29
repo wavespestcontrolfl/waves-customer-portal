@@ -3,6 +3,7 @@ import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants
 import { cleanVisitSummary } from './ReportViewPage';
 import { epaReg, isProductApplication } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
@@ -364,7 +365,10 @@ export default function ServiceReportDocument({ data, token }) {
     // map counts may override hand-edited typed counts) — same filter as the
     // live report, so the PDF never prints two inspected totals (codex P2
     // #3600 r7).
-    .filter((f) => !(Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
+    .filter((f) => !(Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey))
+    // Cockroach V2 owns species / level / locations / evidence / conditions /
+    // work / prep — the document prints them as its own bullets below.
+    .filter((f) => !data.cockroachReportV2 || !COCKROACH_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
   // Older records store the aliases the web report's conditionRows accepts
@@ -514,8 +518,18 @@ export default function ServiceReportDocument({ data, token }) {
   const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
   const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
   const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
+  // Cockroach treatment-program dashboard (cockroach-report-v2.js): the
+  // headline + body + reviewed narrative are the document's summary, and
+  // the program position prints as its own line.
+  const cockroachV2 = data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
   const summaryParagraphs = [];
-  if (termiteV2Summary) {
+  if (cockroachV2) {
+    summaryParagraphs.push(String(cockroachV2.status.label).replace(/\.$/, '') + '.');
+    if (cockroachV2.statusSummary) summaryParagraphs.push(cockroachV2.statusSummary);
+    const narrative = cleanVisitSummary(cockroachV2.aiSummary?.body || '');
+    if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
+    if (cockroachV2.whatsNext?.title) summaryParagraphs.push(`${cockroachV2.whatsNext.title}.`);
+  } else if (termiteV2Summary) {
     summaryParagraphs.push(String(termiteV2Summary.status.label).replace(/\.$/, '') + '.');
     if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
     const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
@@ -529,7 +543,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = termiteV2Summary ? '' : (reconciledResult
+  const summaryBody = (termiteV2Summary || cockroachV2) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
@@ -982,6 +996,24 @@ export default function ServiceReportDocument({ data, token }) {
                 {mowing.bandLabel ? ` · target ${mowing.bandLabel}` : ''}
                 {mowing.status === 'in_range' ? ' (in range)' : ''}
               </Bullet>
+            )}
+            {cockroachV2 && cockroachV2.speciesLabel && cockroachV2.activityLevel && (
+              <Bullet><strong>Activity:</strong> {cockroachV2.speciesLabel} — {cockroachV2.activityLevel}</Bullet>
+            )}
+            {cockroachV2 && Array.isArray(cockroachV2.locations) && cockroachV2.locations.length > 0 && (
+              <Bullet><strong>{cockroachV2.status?.key === 'clear' ? 'Inspected' : 'Activity noted'}:</strong> {cockroachV2.locations.join(', ')}</Bullet>
+            )}
+            {cockroachV2 && Array.isArray(cockroachV2.evidence) && cockroachV2.evidence.length > 0 && (
+              <Bullet><strong>Evidence observed:</strong> {cockroachV2.evidence.join(', ')}</Bullet>
+            )}
+            {cockroachV2 && Array.isArray(cockroachV2.conditions) && cockroachV2.conditions.length > 0 && (
+              <Bullet><strong>Conducive conditions:</strong> {cockroachV2.conditions.join(', ')}</Bullet>
+            )}
+            {cockroachV2 && Array.isArray(cockroachV2.work) && cockroachV2.work.length > 0 && (
+              <Bullet><strong>Work completed:</strong> {cockroachV2.work.map((w) => w.title).join('; ')}</Bullet>
+            )}
+            {cockroachV2 && Array.isArray(cockroachV2.help?.items) && cockroachV2.help.items.length > 0 && (
+              <Bullet><strong>How you can help:</strong> {cockroachV2.help.items.map((h) => h.text).join(' ')}</Bullet>
             )}
             {findings.map((finding) => (
               <Bullet key={finding.fieldKey || finding.customerLabel}>

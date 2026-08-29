@@ -5,6 +5,7 @@ const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { cockroachSnapshotOf } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -1553,6 +1554,8 @@ function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
   delete data.termiteNextMonitoringVisit;
+  delete data.cockroachNextTreatmentVisit;
+  delete data.cockroachUpcomingRoachVisits;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4392,6 +4395,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let sameLineNextAppointment = null;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
+  // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
+  // the first upcoming ROACH-FAMILY appointment (the next treatment of the
+  // program) and how many roach-family visits are still ahead — the program
+  // position ("treatment 1 of 2") reads from these when the catalog does
+  // not fix the package size. Both consumed by attachCockroachReportV2.
+  let cockroachNextTreatmentVisit;
+  let cockroachUpcomingRoachVisits;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4556,6 +4566,47 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         if (isBait) { baitRow = row; break; }
       }
       termiteNextMonitoringVisit = toNextAppointment(baitRow);
+    }
+
+    // Cockroach treatment program (owner 2026-08-29: the first treatment
+    // ALWAYS references the next treatment date). Same identity discipline
+    // as the termite pick: the canonical completion-profile resolver decides
+    // roach-family rows (typed `cockroach` pointer, or a roach service key),
+    // name tokens judge only rows with no resolvable profile; a failed
+    // resolution skips the row. Runs only where the value can render
+    // (live view, gate on, cockroach typed primary).
+    if (
+      opts.mode === 'live'
+      && process.env.COCKROACH_REPORT_V2 === 'true'
+      && cockroachSnapshotOf(service)
+    ) {
+      const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      const verdictByIdentity = new Map();
+      let firstRoachRow = null;
+      let roachCount = 0;
+      for (const row of rows) {
+        const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
+        let isRoach = verdictByIdentity.get(identity);
+        if (isRoach === undefined) {
+          let profile = null;
+          let resolutionFailed = false;
+          try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
+          if (resolutionFailed) isRoach = false;
+          else if (profile?.findingsType || profile?.projectType) {
+            isRoach = /roach/i.test(String(profile.findingsType || profile.projectType || ''))
+              || /roach/i.test(String(profile.serviceKey || ''));
+          } else if (profile?.serviceKey) isRoach = /roach/i.test(String(profile.serviceKey));
+          else isRoach = /roach/i.test(String(row?.service_type || ''));
+          verdictByIdentity.set(identity, isRoach);
+        }
+        if (isRoach) {
+          roachCount += 1;
+          if (!firstRoachRow) firstRoachRow = row;
+        }
+      }
+      cockroachNextTreatmentVisit = toNextAppointment(firstRoachRow);
+      cockroachUpcomingRoachVisits = roachCount;
     }
   } catch { /* best-effort */ }
 
@@ -5037,6 +5088,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
     termiteNextMonitoringVisit,
+    // Present (possibly null) ONLY when the live cockroach pick ran — the
+    // attach composer reads presence as "schedule resolved" (pdf/static
+    // never carry the keys, so the permanent record neither promises nor
+    // disclaims a date).
+    ...(cockroachNextTreatmentVisit !== undefined ? { cockroachNextTreatmentVisit } : {}),
+    ...(cockroachUpcomingRoachVisits !== undefined ? { cockroachUpcomingRoachVisits } : {}),
     // Visit stage for a bait-station snapshot, from the completion profile
     // (termite_installation_setup also freezes termite_bait_station):
     // 'installation' keeps the typed record; 'monitoring' may render the
