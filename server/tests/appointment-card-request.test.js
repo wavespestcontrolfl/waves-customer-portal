@@ -253,37 +253,57 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('direct rodent series: auto-secure stamps the resolved setup obligation on the series anchor (codex #3591 r28)', async () => {
+  test('direct rodent series owing the $99 setup is NEVER auto-secured from a saved card — it takes the ask rail so the plan page discloses the fee (pre-push codex P0 on #3591 r30)', async () => {
     const plans = require('../services/secure-appointment-plans');
-    // The resolver re-reads the row by id and names the SERIES ANCHOR (the
-    // funnel's visit fragment carries neither provenance nor parent id).
-    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupStamp').mockResolvedValueOnce({ amount: 99, anchorId: 'parent-1' });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
     try {
       mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
       const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
-      expect(res.action).toBe('auto_secured');
       expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }));
-      const stamp = touches('scheduled_services')
-        .map((t) => t.chain.calls)
-        .find((calls) => calls.some(([op, patch]) => op === 'update' && patch && patch.pending_setup_fee === 99));
-      expect(stamp).toBeDefined();
-      expect(stamp.some(([op, w]) => op === 'where' && w && w.id === 'parent-1')).toBe(true);
-      // whereNull-guarded: never overwrites an obligation already stamped.
-      expect(stamp.some(([op, col]) => op === 'whereNull' && col === 'pending_setup_fee')).toBe(true);
+      // No enrollment, no satisfied row, no undisclosed pending_setup_fee.
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      const satisfied = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'insert' && patch && patch.status === 'satisfied'));
+      expect(satisfied).toHaveLength(0);
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+      // The ask went out instead: a PENDING request row + the /secure link,
+      // whose plan page discloses and freezes the setup before any stamp.
+      expect(res.requested).toBe(true);
+      const pending = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'insert' && patch && patch.status === 'pending'));
+      expect(pending).toHaveLength(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     } finally {
       spy.mockRestore();
     }
   });
 
-  test('no obligation (0) → no scheduled_services stamp', async () => {
+  test('no obligation (0) → saved-card auto-secure proceeds, no scheduled_services stamp', async () => {
     const plans = require('../services/secure-appointment-plans');
-    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupStamp').mockResolvedValueOnce({ amount: 0, anchorId: 'svc-1' });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);
     try {
       mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
-      await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      expect(res.action).toBe('auto_secured');
       const stamped = touches('scheduled_services')
         .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
       expect(stamped).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('resolver failure inside auto-secure fails closed: skipped, nothing written', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockRejectedValueOnce(new Error('db down'));
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      expect(res.action).toBe('skipped');
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }

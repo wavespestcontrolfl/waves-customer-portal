@@ -143,17 +143,6 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, { id: 'gone', ...rodentVisit })).rejects.toThrow('not found');
   });
 
-  test('resolveDirectRodentSetupStamp names the SERIES ANCHOR of the authoritative row', async () => {
-    const { resolveDirectRodentSetupStamp } = require('../services/secure-appointment-plans');
-    mockQualifyingKeys = async () => [];
-    setTables({ visit: { ...baseVisit, id: 'child-1', recurring_parent_id: 'parent-1', service_type: 'Rodent Bait Stations' } });
-    await expect(resolveDirectRodentSetupStamp(db, { id: 'child-1', customer_id: 'c1' }))
-      .resolves.toEqual({ amount: Number(RODENT.baitSetupFee), anchorId: 'parent-1' });
-    // Unpersisted preview row (no id): taken as given, anchor null.
-    await expect(resolveDirectRodentSetupStamp(db, rodentVisit))
-      .resolves.toEqual({ amount: Number(RODENT.baitSetupFee), anchorId: null });
-  });
-
   test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {
     mockQualifyingKeys = async () => { throw new Error('db down'); };
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');
@@ -232,6 +221,30 @@ describe('buildSecurePlanContext', () => {
     expect(raised.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
     const first = await buildSecurePlanContext({ request, visitId: 'v1' });
     expect(first.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('direct rodent bait series: at SELECTION a NULL accepted_setup_fee means never disclosed → no setup billed; render still prices live (pre-push codex P0 on #3591 r30)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    // Selection with no stamp (pre-column render, or a page that never
+    // showed the setup): nothing was disclosed, nothing is billed.
+    const undisclosed = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: null }, visitId: 'v1', consumeDisclosure: true });
+    expect(undisclosed.setupFee).toBeNull();
+    expect(undisclosed.prepay.total).toBe(coverage);
+    // A stamped disclosure is consumed at exactly the stamped figure.
+    const stamped = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '79.00' }, visitId: 'v1', consumeDisclosure: true });
+    expect(stamped.setupFee).toEqual({ amount: 79, waivedWithPrepay: false });
+    // The sticky 0 sentinel (page showed no unwaived setup) stays 0.
+    const zero = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: '0.00' }, visitId: 'v1', consumeDisclosure: true });
+    expect(zero.setupFee).toBeNull();
+    // The RENDER path (default) prices live so the first render can
+    // disclose and stamp.
+    const render = await buildSecurePlanContext({ request: { ...request, accepted_setup_fee: null }, visitId: 'v1' });
+    expect(render.setupFee.amount).toBe(Number(RODENT.baitSetupFee));
   });
 
   test('direct rodent bait series, MEMBER (another qualifying service on the account) → no setup fee', async () => {

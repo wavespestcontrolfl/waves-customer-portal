@@ -143,6 +143,10 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
   beforeEach(() => {
     mockQualifyingKeys = async () => ['rodent_bait'];
     setTables({
+      // The render already DISCLOSED and froze the setup (accepted_setup_fee,
+      // migration 20260829000041): only a stamped figure authorizes the fee at
+      // selection (pre-push codex P0 on #3591 r30).
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
       scheduled_services: {
         first: () => ({ ...rodentVisit }),
         select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
@@ -160,6 +164,22 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     const result = await selectSecurePlan({ token: 'tok', plan: 'per_application' });
     expect(result).toEqual({ ok: true, plan: 'per_application' });
     expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: setup });
+  });
+
+  test('a request whose render never stamped accepted_setup_fee (pre-column page, or no plan displayed) bills NO setup on either plan — never disclosed, never charged', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...pendingRequest, accepted_setup_fee: null }) };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    mockDbCalls = [];
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+  });
+
+  test('a lowered stamp is consumed at the stamped figure, never the live constant', async () => {
+    mockTableHandlers.appointment_card_requests = { first: () => ({ ...pendingRequest, accepted_setup_fee: '79.00' }) };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: 79 });
   });
 
   test('prepay_annual mints the setup as its OWN line (never waived by prepay); the term is sliced from coverage money only', async () => {

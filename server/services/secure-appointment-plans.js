@@ -171,7 +171,8 @@ function seriesAnchorId(visit) {
  * RODENT.baitSetupFee when the account has no OTHER qualifying recurring
  * family (rodent never self-waives), else 0. Estimate-origin series made
  * their billing choice at accept (0 here). ONE resolver for every
- * activation path — the /secure plan page, the saved-card auto-secure, and
+ * activation path — the /secure plan page (saved-card auto-secure DEFERS to
+ * it when a setup is owed: nothing undisclosed is ever stamped), and
  * the admin prepay-on-book — so none can activate or prepay the series
  * without the obligation. Lookup failures propagate (callers fail closed).
  */
@@ -208,17 +209,13 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
   return directRodentSetupForRow(database, row);
 }
 
-// The obligation PLUS where it is stamped: always the series anchor
-// (recurring_parent_id || id) of the authoritative row, never the
-// fragment's id — a child stamp strands a fee the completion claim (which
-// reads the parent) never finds.
-async function resolveDirectRodentSetupStamp(database, visit = {}) {
-  const row = await loadAuthoritativeSetupVisit(database, visit);
-  const amount = await directRodentSetupForRow(database, row);
-  return { amount, anchorId: row.recurring_parent_id || row.id || null };
-}
-
-async function deriveSecurePlanContext({ request, visitId }) {
+// consumeDisclosure: the SELECTION path (selectSecurePlan). There a NULL
+// accepted_setup_fee means the setup was never shown on any render of this
+// request — a page rendered before the column shipped (migration
+// 20260829000041 backfills nothing) or a plan page that never displayed —
+// so nothing may be billed (pre-push codex P0 on r30). The render path
+// (default) still prices live: that is the render that discloses + stamps.
+async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = false }) {
   if (!isEnabled('securePlanChoice')) return null;
   const visit = await loadPlanVisit(visitId || request.scheduled_service_id);
   if (!visit || !visit.customer_id) return null;
@@ -293,8 +290,14 @@ async function deriveSecurePlanContext({ request, visitId }) {
     // codex #3591 r15 P1): never above what the customer saw. A row without
     // a stamp (first render, or pre-column rows) prices live.
     const frozenSetupFee = request?.accepted_setup_fee != null ? Number(request.accepted_setup_fee) : NaN;
-    if (unwaivedSetupFee > 0 && Number.isFinite(frozenSetupFee) && frozenSetupFee >= 0) {
-      unwaivedSetupFee = Math.min(unwaivedSetupFee, frozenSetupFee);
+    if (unwaivedSetupFee > 0) {
+      if (Number.isFinite(frozenSetupFee) && frozenSetupFee >= 0) {
+        unwaivedSetupFee = Math.min(unwaivedSetupFee, frozenSetupFee);
+      } else if (consumeDisclosure) {
+        // No stamp at selection = never disclosed → never billed. Only a
+        // stamped accepted_setup_fee authorizes the fee.
+        unwaivedSetupFee = 0;
+      }
     }
   }
   const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
@@ -318,9 +321,9 @@ async function deriveSecurePlanContext({ request, visitId }) {
  * callers that must tell a FAILURE apart from null-by-policy use
  * deriveSecurePlanContext directly.
  */
-async function buildSecurePlanContext({ request, visitId }) {
+async function buildSecurePlanContext({ request, visitId, consumeDisclosure = false }) {
   try {
-    return await deriveSecurePlanContext({ request, visitId });
+    return await deriveSecurePlanContext({ request, visitId, consumeDisclosure });
   } catch (err) {
     logger.warn(`[secure-plans] plan context failed for request ${request?.id || `(send-time probe, visit ${visitId})`}: ${err.message} — rendering card-only`);
     return null;
@@ -390,7 +393,7 @@ async function selectSecurePlan({ token, plan }) {
   });
   if (resolved?.payerId) throw fail('no_longer_needed');
 
-  const context = await buildSecurePlanContext({ request, visitId: visit.id });
+  const context = await buildSecurePlanContext({ request, visitId: visit.id, consumeDisclosure: true });
   if (!context) throw fail('plan_unavailable');
 
   if (plan === 'per_application') {
@@ -756,7 +759,6 @@ module.exports = {
   // formula and one service→incentive-class whitelist across both lanes.
   computeSeriesPrepayPricing,
   resolveDirectRodentSetupObligation,
-  resolveDirectRodentSetupStamp,
   PLAN_CLASS_BY_SERVICE_KEY,
   // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a
   // third copy of the coverage-holding status list is a drift bug waiting

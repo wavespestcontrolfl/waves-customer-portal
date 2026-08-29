@@ -338,6 +338,19 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         .where({ scheduled_service_id: visit.id })
         .first('id');
       if (holdLane) return skip('card_hold_lane');
+      // A DIRECT rodent bait series that owes the non-member $99 setup is
+      // never auto-secured from a saved card (pre-push codex P0 on r30): this
+      // path renders no page, so nothing here disclosed the fee — and the
+      // satisfied row it writes deliberately carries no fee terms. Stamping
+      // pending_setup_fee anyway (the r28 posture) billed the first
+      // completion a fee the customer never saw. Instead the visit takes the
+      // ASK rail: the /secure plan page discloses the setup, freezes it
+      // (accepted_setup_fee) and the per-application choice stamps exactly
+      // the disclosed figure. Resolved BEFORE the enrollment savepoint so a
+      // skip writes nothing; a resolver failure throws → skip (fail closed).
+      const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+      const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
+      if (directRodentSetup > 0) return skip('rodent_setup_undisclosed', { setupFee: directRodentSetup });
       const { enrollConsentedMethod } = require('./autopay-enrollment');
       const enrollment = await enrollConsentedMethod({
         customerId: visit.customer_id,
@@ -356,21 +369,6 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
       }
       deferredEnrollmentEmail = enrollment.sendEnrollmentConfirmation || null;
-      // A DIRECT rodent bait series auto-secured from a saved card never
-      // reaches the plan page that stamps its non-member setup — resolve the
-      // same obligation here and stamp it on the series anchor (whereNull-
-      // guarded), so the first completion mint bills it (codex #3591 r28
-      // P1). A resolver failure rolls back and skips (fail closed).
-      // The resolver re-reads the visit by id (this caller's fragment carries
-      // no provenance) and names the series anchor to stamp (codex r29 P1).
-      const { resolveDirectRodentSetupStamp } = require('./secure-appointment-plans');
-      const directRodentSetup = await resolveDirectRodentSetupStamp(trx, visit);
-      if (directRodentSetup.amount > 0 && directRodentSetup.anchorId) {
-        await trx('scheduled_services')
-          .where({ id: directRodentSetup.anchorId })
-          .whereNull('pending_setup_fee')
-          .update({ pending_setup_fee: directRodentSetup.amount, updated_at: new Date() });
-      }
       const inserted = await trx('appointment_card_requests')
         .insert({
           scheduled_service_id: visit.id,
@@ -507,7 +505,14 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       logger.error(`[appt-card-request] card-hold lane check failed for visit ${visit.id} — request fails closed: ${err.message}`);
       return skip('hold_lookup_failed');
     }
-    if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
+    if (savedMethod) {
+      const secured = await autoSecureFromSavedMethod({ visit, savedMethod, trigger });
+      // An undisclosed rodent setup is the ONE skip that falls through to the
+      // ask below: the /secure plan page is where the fee gets disclosed and
+      // accepted. Every other skip stays terminal exactly as before.
+      if (secured.reason !== 'rodent_setup_undisclosed') return secured;
+      logger.info(`[appt-card-request] saved-card auto-secure deferred for visit ${visit.id} — direct rodent setup ($${secured.setupFee}) needs the plan-page disclosure`);
+    }
 
     // delivery 'none' = the caller wanted ONLY the non-messaging work above
     // (policy exemption + saved-card auto-secure) — the AI call pipeline
