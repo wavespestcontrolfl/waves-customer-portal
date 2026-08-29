@@ -506,7 +506,7 @@ test('the live termite bond lookup runs for a combined visit whose bait snapshot
   }
 });
 
-test('termiteBaitStage: the completion profile decides installation vs monitoring; name tokens only without a profile', async () => {
+test('termiteBaitStage: frozen keys first, else the RECORD\'s frozen service name — never the live linked profile (same resolver as the PDF signature)', async () => {
   const fixtures = {
     ...BASE_FIXTURES,
     services: [
@@ -519,7 +519,7 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
     ],
   };
   const install = await buildReportV1Data(
-    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-install' },
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-install', service_type: 'Termite Bait Station Installation' },
     'token-stage-install',
     makeKnex({ ...fixtures, scheduled_services: [{ id: 'sched-install', customer_id: 'customer-1', service_id: 'svc-install', service_type: 'Termite Bait Station Installation', scheduled_date: '2026-08-27', status: 'completed' }] }),
     LIVE_V2,
@@ -539,12 +539,21 @@ test('termiteBaitStage: the completion profile decides installation vs monitorin
     service_completion_profiles: [...fixtures.service_completion_profiles, { service_key: 'termite_monitoring', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' }],
   };
   const detect = await buildReportV1Data(
-    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-detect' },
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-detect', service_type: 'Termite Monitoring Service' },
     'token-stage-detect',
     makeKnex({ ...detectFixtures, scheduled_services: [{ id: 'sched-detect', customer_id: 'customer-1', service_id: 'svc-detect', service_type: 'Termite Monitoring Service', scheduled_date: '2026-08-27', status: 'completed' }] }),
     LIVE_V2,
   );
   expect(detect.termiteBaitStage).toBe('detection');
+  // a reclassified LIVE profile never moves a legacy record's stage: the
+  // record's own frozen name decides, exactly as the PDF signature does
+  const reclassified = await buildReportV1Data(
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-install', service_type: 'Termite Bait Station Service' },
+    'token-stage-reclassified',
+    makeKnex({ ...fixtures, scheduled_services: [{ id: 'sched-install', customer_id: 'customer-1', service_id: 'svc-install', service_type: 'Termite Bait Station Installation', scheduled_date: '2026-08-27', status: 'completed' }] }),
+    LIVE_V2,
+  );
+  expect(reclassified.termiteBaitStage).toBe('monitoring');
   // the completion-FROZEN key wins over a repointed live profile
   const frozen = await buildReportV1Data(
     {

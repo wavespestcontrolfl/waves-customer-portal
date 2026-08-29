@@ -4,7 +4,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
-const { isTermiteBaitServiceName, termiteBaitSnapshotOf, frozenTermiteServiceKey, stageForServiceKey, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -4917,23 +4917,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // (service_data.completedServiceKey — a permanent report must not
     // change stage when an admin repoints the schedule row or a legacy
     // record loses its link), then the live profile, then name tokens.
-    // FROZEN identity first — completedServiceKey, else the applicable typed
-    // snapshot's own immutable serviceKey (codex P0 #3600 r21) — so a
-    // permanent report token never changes stage when the linked
-    // appointment is reclassified or unlinked; the live profile and name
-    // tokens serve only legacy records that froze neither.
-    termiteBaitStage: termiteBaitSnapshotOf(service)
-      ? (() => {
-        const frozenStage = stageForServiceKey(frozenTermiteServiceKey(service));
-        if (frozenStage) return frozenStage;
-        const fromProfile = stageForServiceKey(laneProfile?.serviceKey || null);
-        if (fromProfile) return fromProfile;
-        const names = `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`;
-        if (/\b(install|installation|setup|set-up)\b/i.test(names)) return 'installation';
-        if (/\bmonitor(?:ing)?\b/i.test(names) && !/\bbait\b/i.test(names)) return 'detection';
-        return 'monitoring';
-      })()
-      : null,
+    // ONE stage resolver for the render path AND the PDF cache signature
+    // (recordStage): frozen completedServiceKey, else the applicable typed
+    // snapshot's own serviceKey, else the record's frozen service_type name
+    // for legacy records that froze neither. Never the live linked profile
+    // — a later reclassification must not change a permanent report token
+    // on one path and not the other (codex P2 #3600 r33 / P0 r21).
+    termiteBaitStage: termiteBaitSnapshotOf(service) ? recordStage(service) : null,
     termiteBonds,
     relatedDocuments,
     visitTimeline,
