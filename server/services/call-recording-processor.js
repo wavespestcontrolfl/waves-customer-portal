@@ -14409,10 +14409,15 @@ const CallRecordingProcessor = {
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
       .where('duration_seconds', '>', 10);
     if (alertPriority) {
-      // Mirrors isUnrecordedCall exactly, incl. the post-call grace: calls
-      // still inside it can't ring yet, so they must not consume the
-      // window ahead of older calls that already can.
+      // Mirrors isUnrecordedCall exactly — incl. the post-call grace (calls
+      // still inside it can't ring yet), recording_sid (a PAN quarantine
+      // clears recording_url but keeps the SID, and recovery returns
+      // pan_quarantined for those rows, so they could otherwise sit in
+      // tier 0 forever) and the pan_detected stamp itself — so nothing
+      // that can never ring consumes the window ahead of calls that can.
       candidates = candidates.orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
+          AND call_log.recording_sid IS NULL
+          AND COALESCE(call_log.transcription_metadata::jsonb ->> 'pan_detected', '') <> 'true'
           AND COALESCE(call_log.answered_by, '') NOT IN (${exemptList})
           AND COALESCE(call_log.call_outcome, '') <> 'voicemail'
           AND call_log.created_at + (call_log.duration_seconds * INTERVAL '1 second') + (? * INTERVAL '1 minute') <= NOW()
