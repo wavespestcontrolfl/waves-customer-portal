@@ -188,6 +188,8 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
+import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
 
@@ -374,8 +376,13 @@ export default function TechHomePage() {
   // pending one, not the dead row. on_site / en_route still show — they
   // ARE the current focus, the En Route CTA is disabled there because the
   // server's PRE_EN_ROUTE gate rejects those.
-  const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
-  const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
+  // Visit groups (visit-group-scope.md §3): rows sharing a visit are ONE
+  // stop — one card, one En Route / On Site tap (the server fans out to the
+  // siblings). Ungrouped rows are their own stop, exactly as before.
+  const stops = groupServicesIntoStops(myServices);
+  const nextVisitStop = nextStopOf(stops);
+  const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
+  const nextStopSummary = stopSummaryLabel(nextVisitStop);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -583,6 +590,17 @@ export default function TechHomePage() {
               <p style={{ fontSize: 12, color: DARK.muted, margin: '4px 0 0' }}>
                 {nextStop.address || nextStop.service_type || 'Service'}
               </p>
+              {nextStopSummary && (
+                <div data-testid="visit-stop-summary" style={{ marginTop: 6 }}>
+                  <p style={{ fontSize: 12, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
+                  {nextVisitStop.services.map((s) => (
+                    <p key={s.id} style={{ fontSize: 12, color: DARK.text, margin: '2px 0 0' }}>
+                      • {s.serviceType || s.service_type || 'Service'}
+                      {TERMINAL_STATUSES_VISIT.has(s.status) ? <span style={{ color: DARK.muted }}> · {String(s.status).replace(/_/g, ' ')}</span> : null}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
             <span style={{
               fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
@@ -1132,6 +1150,9 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
         <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
           {status.replace(/_/g, ' ')}
           {serviceWindowLabel(service) && <span style={{ color: DARK.muted }}> · {serviceWindowLabel(service)}</span>}
+          {service.visit && service.visit.serviceCount > 1 && (
+            <span style={{ color: DARK.muted, textTransform: 'none' }}> · visit of {service.visit.serviceCount}</span>
+          )}
         </p>
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

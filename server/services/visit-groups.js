@@ -974,6 +974,166 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
   }
 }
 
+// ---- Live transitions: one tap moves the whole stop (doc §3) ---------------
+// En Route / Arrived are tapped ONCE per visit. The tapped row is the
+// primary; every eligible sibling (same open visit, non-terminal, same
+// technician) transitions in the SAME transaction through the shared
+// status writer (each row's own CAS still runs). Tracker writers run per
+// sibling after commit with the customer text suppressed — the customer
+// gets exactly one "on the way" / "arrived" text, from the primary — and
+// the visit records the one-shot in visit_effects (tracker_en_route /
+// tracker_arrived), which also starts the membership freeze (canDissolve).
+const LIVE_TRANSITION_FROM = Object.freeze({
+  en_route: ['pending', 'confirmed', 'rescheduled'],
+  on_site: ['pending', 'confirmed', 'rescheduled', 'en_route'],
+});
+
+function siblingEligibleFor(toStatus, siblingStatus) {
+  const allowed = LIVE_TRANSITION_FROM[String(toStatus || '')];
+  return Boolean(allowed && allowed.includes(String(siblingStatus || '')));
+}
+
+/**
+ * Inside the caller's transaction, right after the primary row's own
+ * transitionJobStatus: move every eligible sibling of the primary's visit to
+ * `toStatus`. `primaryVisitId` is the caller's already-loaded row value —
+ * an ungrouped row (the overwhelming case, and every legacy test harness)
+ * issues NO extra query. Returns { visitId, siblingIds, skippedIds }.
+ */
+async function liveTransitionSiblings({
+  trx, primaryId, primaryVisitId, toStatus, transitionedBy, lifecycleAt = new Date(),
+}) {
+  const none = { visitId: null, siblingIds: [], skippedIds: [] };
+  if (!trx || !primaryId || !primaryVisitId || !LIVE_TRANSITION_FROM[String(toStatus || '')]) return none;
+  const primary = await trx('scheduled_services').where({ id: primaryId })
+    .first('id', 'visit_id', 'technician_id');
+  if (!primary || !primary.visit_id) return none;
+  const visit = await trx('service_visits').where({ id: primary.visit_id }).first();
+  if (!visit || String(visit.status) !== 'open') return none;
+  await lockStop(trx, visit.stop_base_key);
+  const siblings = await trx('scheduled_services')
+    .where({ visit_id: visit.id })
+    .whereNot('id', primary.id)
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .forUpdate()
+    .select('id', 'status', 'technician_id', 'actual_start_time', 'check_in_time', 'arrived_at');
+  const { transitionJobStatus } = require('./job-status');
+  const siblingIds = [];
+  const skippedIds = [];
+  for (const s of siblings) {
+    const sameTech = !primary.technician_id || !s.technician_id
+      || String(s.technician_id) === String(primary.technician_id);
+    if (String(s.status) === String(toStatus)) continue; // already there
+    if (!sameTech || !siblingEligibleFor(toStatus, s.status)) { skippedIds.push(s.id); continue; }
+    if (toStatus === 'on_site') {
+      const { buildOnSiteLifecycleUpdates } = require('../utils/service-duration-capture');
+      const updates = buildOnSiteLifecycleUpdates(s, lifecycleAt);
+      if (Object.keys(updates).length) await trx('scheduled_services').where({ id: s.id }).update(updates);
+    }
+    await transitionJobStatus({ jobId: s.id, fromStatus: s.status, toStatus, transitionedBy, trx });
+    siblingIds.push(s.id);
+  }
+  const stampCol = toStatus === 'en_route' ? 'en_route_at' : 'arrived_at';
+  await trx('service_visits').where({ id: visit.id }).whereNull(stampCol).update({ [stampCol]: lifecycleAt });
+  if (skippedIds.length) {
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] visit ${visit.id} ${toStatus}: ${skippedIds.length} sibling(s) not eligible (status/technician) — left as-is: ${skippedIds.join(',')}`);
+  }
+  return { visitId: visit.id, siblingIds, skippedIds };
+}
+
+/**
+ * After the primary's tracker write committed: run the tracker writer for
+ * each sibling with the customer text suppressed, stamp the siblings as
+ * covered by the visit's one text (so no later per-row path re-texts),
+ * and record the visit one-shot in visit_effects. Best-effort per step —
+ * the primary's transition already stands.
+ */
+async function afterLiveTransition({
+  visitId, kind, primaryId, siblingIds = [], actorType = 'tech', actorId = null,
+}) {
+  if (!visitId || !['en_route', 'on_site'].includes(String(kind))) return null;
+  const trackTransitions = require('./track-transitions');
+  const logger = require('./logger');
+  const now = new Date();
+  for (const id of siblingIds) {
+    try {
+      const r = kind === 'en_route'
+        ? await trackTransitions.markEnRoute(id, { actorType, actorId, suppressCustomerSms: true })
+        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, suppressArrivalSms: true });
+      if (!r || !r.ok) logger.warn(`[visit-groups] visit ${visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
+    } catch (err) {
+      logger.warn(`[visit-groups] visit ${visitId} ${kind}: tracker write for sibling ${id} failed: ${err.message}`);
+    }
+  }
+  const smsCol = kind === 'en_route' ? 'track_sms_sent_at' : 'arrival_sms_sent_at';
+  if (siblingIds.length) {
+    try {
+      await db('scheduled_services').whereIn('id', siblingIds).whereNull(smsCol).update({ [smsCol]: now });
+    } catch (err) {
+      logger.warn(`[visit-groups] visit ${visitId} ${kind}: covered-by-visit stamp failed: ${err.message}`);
+    }
+  }
+  const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+  let status = 'suppressed';
+  try {
+    const primary = primaryId
+      ? await db('scheduled_services').where({ id: primaryId }).first(smsCol)
+      : null;
+    // The primary's guard column means "handled", not "delivered": the
+    // arrival guard is claimed even with GATE_TECH_ARRIVED_SMS off, so the
+    // gate is part of the verdict; the en-route guard is only stamped on a
+    // successful Twilio send.
+    const gateOn = kind === 'en_route' || require('../config/feature-gates').isEnabled('techArrivedSms');
+    if (primary && primary[smsCol] && gateOn) status = 'sent';
+    await db('visit_effects')
+      .insert({
+        visit_id: visitId,
+        effect_type: effectType,
+        dedupe_key: `${visitId}:${effectType}`,
+        status,
+        attempts: 1,
+        sent_at: status === 'sent' ? now : null,
+      })
+      .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
+      .ignore();
+  } catch (err) {
+    logger.warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects record failed: ${err.message}`);
+  }
+  return { effectType, status };
+}
+
+/**
+ * Attach a shared `visit` summary to every row of a schedule payload that
+ * carries a visitId (pure; mutates the rows). Consumers (tech home, dispatch
+ * board) render one grouped card from it. Ungrouped rows are untouched.
+ */
+function visitSummariesForRows(rows, {
+  idKey = 'visitId', memberIdKey = 'id', durationKey = 'estimatedDuration', statusKey = 'status',
+} = {}) {
+  const byVisit = new Map();
+  for (const r of rows || []) {
+    const v = r && r[idKey];
+    if (!v) continue;
+    if (!byVisit.has(v)) byVisit.set(v, []);
+    byVisit.get(v).push(r);
+  }
+  for (const [visitId, members] of byVisit) {
+    const live = members.filter((m) => !TERMINAL_ROW_STATUSES.includes(String(m[statusKey] || '')));
+    const summary = {
+      id: visitId,
+      serviceCount: members.length,
+      memberIds: members.map((m) => m[memberIdKey]),
+      primaryId: (live[0] || members[0])[memberIdKey],
+      estimatedDuration: members.reduce((acc, m) => acc + (Number(m[durationKey]) || 0), 0),
+      serviceTypes: members.map((m) => m.serviceType || m.service_type).filter(Boolean),
+      liveCount: live.length,
+    };
+    for (const m of members) m.visit = summary;
+  }
+  return byVisit;
+}
+
 module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
@@ -986,7 +1146,12 @@ module.exports = {
   lockStopForRow,
   openMembers,
   visitActivity,
+  liveTransitionSiblings,
+  afterLiveTransition,
+  visitSummariesForRows,
   _test: {
+    siblingEligibleFor,
+    visitSummariesForRows,
     windowedMembersConnected,
     stopBaseKey,
     windowsOverlap,

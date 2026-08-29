@@ -3664,8 +3664,12 @@ router.get('/', async (req, res, next) => {
         skipWeekends: !!s.skip_weekends,
         weekendShift: s.weekend_shift || null,
         sourceEstimateId: s.source_estimate_id || null,
+        // Visit group identity (visit-group-scope.md §3): rows sharing a
+        // visit render as ONE stop card; `visit` summary attached below.
+        visitId: s.visit_id || null,
       };
     }));
+    require('../services/visit-groups').visitSummariesForRows(enriched);
 
     // Group by technician
     const byTech = {};
@@ -11397,6 +11401,7 @@ router.put('/:id/status', async (req, res, next) => {
       && ['pending', 'confirmed'].includes(fromStatus)
       && DAY_OF_LIFECYCLE_STATUSES.has(toStatus);
 
+    let visitFan = null; // visit-group fan-out (visit-group-scope.md §3)
     try {
       await db.transaction(async (trx) => {
         // Re-validate technician ownership INSIDE the transaction, row-
@@ -11458,6 +11463,12 @@ router.put('/:id/status', async (req, res, next) => {
           // version of it below and owns the stamp.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
         });
+        if (toStatus === 'en_route' || toStatus === 'on_site') {
+            visitFan = await require('../services/visit-groups').liveTransitionSiblings({
+              trx, primaryId: svc.id, primaryVisitId: svc.visit_id, toStatus: toStatus,
+              transitionedBy: req.technicianId,
+            });
+        }
       });
     } catch (err) {
       if (err && err.code === 'TECH_OWNERSHIP_LOST') {
@@ -11577,6 +11588,12 @@ router.put('/:id/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
+        if (result && result.ok && visitFan && visitFan.visitId) {
+          await require('../services/visit-groups').afterLiveTransition({
+            visitId: visitFan.visitId, kind: 'en_route', primaryId: svc.id,
+            siblingIds: visitFan.siblingIds, actorType: 'admin', actorId: req.technicianId,
+          });
+        }
       } catch (e) {
         logger.error(`[en-route] markEnRoute failed: ${e.message}`);
         await recordTrackTransitionFailure({
@@ -11607,6 +11624,12 @@ router.put('/:id/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
+        if (result && result.ok && visitFan && visitFan.visitId) {
+          await require('../services/visit-groups').afterLiveTransition({
+            visitId: visitFan.visitId, kind: 'on_site', primaryId: svc.id,
+            siblingIds: visitFan.siblingIds, actorType: 'admin', actorId: req.technicianId,
+          });
+        }
       } catch (e) {
         logger.error(`[on-site] markOnProperty failed: ${e.message}`);
         await recordTrackTransitionFailure({

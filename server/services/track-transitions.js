@@ -570,7 +570,10 @@ async function markEnRoute(serviceId, opts = {}) {
   // write above, so it must not suppress today's send. A same-day guard
   // (SMS already sent for THIS attempt) still suppresses.
   let smsSent = false;
-  if (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears) {
+  // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
+  // way" text came from the visit's primary row; the visit stamps this row
+  // as covered afterwards (visit-groups.afterLiveTransition).
+  if (!opts.suppressCustomerSms && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
@@ -651,6 +654,7 @@ async function markEnRoute(serviceId, opts = {}) {
     smsSent,
     alreadyEnRoute: false,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
+    ...(opts.suppressCustomerSms ? { smsSuppressed: 'visit' } : {}),
   };
 }
 
