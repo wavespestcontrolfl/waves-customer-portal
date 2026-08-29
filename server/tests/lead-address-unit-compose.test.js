@@ -353,6 +353,12 @@ describe('reaffirmedFilledLeadFields — address', () => {
       expect(address.startsWith('100 Verylongstreetname')).toBe(true);
       expect(address).not.toMatch(/Apt 5/);
     }
+    // A runaway locality after the inline unit is clamped like every other place tail — the street survives.
+    const longTail = `${'Somewhereville '.repeat(20)}Sarasota FL 34236`;
+    const { address: clamped, unitConflict: noConflict } = analyzeLeadAddress(`100 Main St Apt 4 ${longTail}`, 'Apt 4');
+    expect(noConflict).toBe(false);
+    expect(clamped.length).toBeLessThanOrEqual(255);
+    expect(clamped.startsWith('100 Main St, Apt 4, Somewhereville')).toBe(true);
     // Fits → kept verbatim (no reshaping of a comma-free legacy value that is within the bound).
     expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4').address).toBe('100 Main St Apt 4 Sarasota FL 34236');
   });

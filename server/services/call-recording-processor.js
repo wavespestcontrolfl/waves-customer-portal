@@ -14927,7 +14927,10 @@ function wholeLineProtectedParts(street) {
   return {
     line1: rawTokens.slice(0, startRaw).join(' '),
     line2: rawTokens.slice(startRaw, endRaw).join(' ') || null,
-    city: rawTokens.slice(endRaw).join(' ') || null,
+    // Same write-time clamp as splitLeadStreetParts' tail: a runaway
+    // locality must never take the whole budget and drop the street
+    // (codex r9 P2).
+    city: rawTokens.slice(endRaw).join(' ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim() || null,
   };
 }
 
