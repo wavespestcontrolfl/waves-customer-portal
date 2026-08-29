@@ -5164,21 +5164,24 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
 
       // Create recurring instances from the dates precomputed (and locked)
-      // above.
+      // above. Children resolve the CURRENT catalog identity from the
+      // inserted parent (serviceId is optional on this endpoint — a legacy
+      // or stale label must not seed a whole series with a retired name).
+      const childIdentity = await resolveSeriesChildIdentity(trx, svc);
       for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
           window_start: windowStart, window_end: computedEnd,
-          service_type: serviceType, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(serviceType);
-        if (cols.service_id && serviceId) childData.service_id = serviceId;
-        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+        if (cols.service_id && (childIdentity.service_id || serviceId)) childData.service_id = childIdentity.service_id || serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;
         if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
@@ -5245,15 +5248,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
             window_start: windowStart, window_end: computedEnd,
-            service_type: serviceType, status: 'pending',
+            service_type: childIdentity.service_type, status: 'pending',
             time_window: timeWindow, zone, estimated_duration_minutes: duration,
             is_recurring: false,
             recurring_parent_id: svc.id,
             notes: combinedNotes,
           };
-          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(serviceType);
-          if (cols.service_id && serviceId) boosterData.service_id = serviceId;
-          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+          if (cols.service_id && (childIdentity.service_id || serviceId)) boosterData.service_id = childIdentity.service_id || serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
@@ -8986,7 +8989,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
               if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
               if (cols.service_id && childIdentity.service_id) childData.service_id = childIdentity.service_id;
-              if (cols.service_key_snapshot && !childData.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
               if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
@@ -8996,6 +8998,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const dType = discountType !== undefined ? discountType : parent.discount_type;
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
               copyLineDiscountFields(childData, parent, cols);
+              // After the parent-field copy (which writes the parent's own
+              // snapshot, NULL included): a resolved key fills only a gap.
+              if (cols.service_key_snapshot && !childData.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);

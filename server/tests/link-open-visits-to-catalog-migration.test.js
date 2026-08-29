@@ -59,8 +59,10 @@ function seedDb() {
     scheduled_services: [
       // links, snapshot stamped (was NULL)
       { id: 'v1', service_id: null, service_type: 'Quarterly Pest Control Service', status: 'pending', service_key_snapshot: null },
-      // links, case-insensitive; snapshot already set → left alone
-      { id: 'v2', service_id: null, service_type: 'monthly pest control service', status: null, service_key_snapshot: 'keep_me' },
+      // links, case-insensitive; snapshot already names the SAME service → left alone
+      { id: 'v2', service_id: null, service_type: 'monthly pest control service', status: null, service_key_snapshot: 'pest_monthly' },
+      // snapshot names a DIFFERENT service than the label matches — conflict, never linked
+      { id: 'v8', service_id: null, service_type: 'Quarterly Pest Control Service', status: 'pending', service_key_snapshot: 'pest_monthly' },
       // terminal — Invariant 1
       { id: 'v3', service_id: null, service_type: 'Quarterly Pest Control Service', status: 'completed', service_key_snapshot: null },
       // already linked — untouched
@@ -83,7 +85,7 @@ describe('20260829000060 up()', () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     expect(byId(db, 'v1')).toMatchObject({ service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' });
-    expect(byId(db, 'v2')).toMatchObject({ service_id: 'svc-m', service_key_snapshot: 'keep_me' });
+    expect(byId(db, 'v2')).toMatchObject({ service_id: 'svc-m', service_key_snapshot: 'pest_monthly' });
     expect(byId(db, 'v3')).toMatchObject({ service_id: null, service_key_snapshot: null });
     expect(byId(db, 'v4')).toMatchObject({ service_id: 'svc-q' });
     expect(byId(db, 'v5').service_id).toBeNull();
@@ -95,6 +97,30 @@ describe('20260829000060 up()', () => {
       { id: 'v2', service_type: 'monthly pest control service', service_id: 'svc-m', service_key_snapshot: null },
     ]);
     expect(state.ambiguous).toEqual([{ id: 'v6', service_type: 'Palm Care' }]);
+    expect(state.conflicts).toEqual([
+      { id: 'v8', service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_monthly', matched_service_key: 'pest_quarterly' },
+    ]);
+  });
+
+  test('a snapshot assigned between read and write makes the CAS miss (identity re-checked at write time)', async () => {
+    const db = seedDb();
+    const orig = fakeKnex(db);
+    let stamped = false;
+    const wrapped = (t) => {
+      const q = orig(t);
+      const update = q.update;
+      q.update = async (payload) => {
+        if (!stamped && t === 'scheduled_services' && payload.service_id === 'svc-q') {
+          stamped = true;
+          byId(db, 'v1').service_key_snapshot = 'someone_elses_key';
+        }
+        return update(payload);
+      };
+      return q;
+    };
+    wrapped.schema = orig.schema;
+    await migration.up(wrapped);
+    expect(byId(db, 'v1')).toMatchObject({ service_id: null, service_key_snapshot: 'someone_elses_key' });
   });
 
   test('a catalog rename/deactivation between read and write makes the CAS miss', async () => {
@@ -147,7 +173,7 @@ describe('20260829000060 down()', () => {
     byId(db, 'v2').status = 'completed';
     await migration.down(knex);
     expect(byId(db, 'v1')).toMatchObject({ service_id: null, service_key_snapshot: null });
-    expect(byId(db, 'v2')).toMatchObject({ service_id: 'svc-m', service_key_snapshot: 'keep_me' });
+    expect(byId(db, 'v2')).toMatchObject({ service_id: 'svc-m', service_key_snapshot: 'pest_monthly' });
     expect(byId(db, 'v4')).toMatchObject({ service_id: 'svc-q', service_key_snapshot: 'pest_quarterly' }); // never ours
     expect(db.system_settings).toHaveLength(0);
   });

@@ -96,6 +96,18 @@ describe('resolveSeriesChildIdentity', () => {
     );
   });
 
+  test('alias vs exact-name conflict: both spellings active → verbatim unlinked; only the old spelling active → it is the exact match', async () => {
+    const old = { id: 'svc-old-spelling', name: 'General Pest Control Service (Bi-Monthly)', service_key: 'pest_bimonthly_legacy', is_active: true };
+    const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };
+    await expect(resolveSeriesChildIdentity(fakeConn([...CATALOG, old]), parent)).resolves.toEqual(
+      { service_type: 'General Pest Control Service (Bi-Monthly)', service_id: null, service_key: null }
+    );
+    const withoutRenamed = CATALOG.filter((s) => s.id !== 'svc-bm');
+    await expect(resolveSeriesChildIdentity(fakeConn([...withoutRenamed, old]), parent)).resolves.toEqual(
+      { service_type: 'General Pest Control Service (Bi-Monthly)', service_id: 'svc-old-spelling', service_key: 'pest_bimonthly_legacy' }
+    );
+  });
+
   test('fails closed to verbatim + unlinked: unknown label, ambiguous cadence, inactive-only row, ambiguous name, DB failure', async () => {
     const verbatim = (label, pattern = 'quarterly') => ({ service_type: label, service_id: null, service_key: null });
     await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), { service_id: null, service_type: 'Owner Custom Plan' })).resolves.toEqual(verbatim('Owner Custom Plan'));
@@ -142,13 +154,32 @@ describe('admin-schedule child-insert sites (source)', () => {
   });
 
   test('every child-insert site resolves the identity on its own connection and stamps link + snapshot from it', () => {
-    const resolves = src.match(/const childIdentity = await resolveSeriesChildIdentity\((trx|conn), parent\);/g) || [];
-    expect(resolves).toHaveLength(5);
-    expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(5);
+    // 5 parent-driven sites (spawn, visit-count extend, completion
+    // auto-extend, 2 recurring-alert extends) + the POST create path, which
+    // resolves from the freshly inserted parent (`svc`) for its seeded
+    // children AND boosters.
+    const resolves = src.match(/const childIdentity = await resolveSeriesChildIdentity\((trx|conn), (parent|svc)\);/g) || [];
+    expect(resolves).toHaveLength(6);
+    expect(src.match(/service_type: childIdentity\.service_type/g)).toHaveLength(7);
+    expect(src.match(/classifyAppointmentTag\(childIdentity\.service_type\)/g)).toHaveLength(7);
+    expect(src).not.toMatch(/classifyAppointmentTag\(parent\.service_type\)/);
+    // Parent-driven sites: link from the resolver; snapshot fills a gap
+    // AFTER the parent-field copy (which writes the parent's own snapshot).
     expect(src.match(/if \(cols\.service_id && childIdentity\.service_id\) \w+\.service_id = childIdentity\.service_id;/g)).toHaveLength(5);
     expect(src.match(/if \(cols\.service_key_snapshot && !\w+\.service_key_snapshot && childIdentity\.service_key\) \w+\.service_key_snapshot = childIdentity\.service_key;/g)).toHaveLength(5);
-    expect(src.match(/classifyAppointmentTag\(childIdentity\.service_type\)/g)).toHaveLength(5);
-    expect(src).not.toMatch(/classifyAppointmentTag\(parent\.service_type\)/);
+    const spawnCopy = src.indexOf('copyLineDiscountFields(childData, parent, cols);');
+    const spawnStamp = src.indexOf('if (cols.service_key_snapshot && !childData.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;');
+    expect(spawnCopy).toBeGreaterThan(-1);
+    expect(spawnStamp).toBeGreaterThan(spawnCopy);
+    // Create path: resolver link outranks the optional request serviceId;
+    // pricing's primary key outranks the resolver's (it priced the visit).
+    for (const v of ['childData', 'boosterData']) {
+      expect(src).toContain(`if (cols.service_id && (childIdentity.service_id || serviceId)) ${v}.service_id = childIdentity.service_id || serviceId;`);
+      expect(src).toContain(`if (cols.service_key_snapshot) ${v}.service_key_snapshot = pricing.primaryServiceKey || childIdentity.service_key || null;`);
+    }
+    // The only `service_type: serviceType, status: 'pending'` left is the
+    // PARENT insert on the create path — the request's own label.
+    expect(src.match(/service_type:\s*serviceType,\s*status:\s*'pending'/g)).toHaveLength(1);
   });
 
   test('reminder registrations for spawned children carry the resolved label', () => {

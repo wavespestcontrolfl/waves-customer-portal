@@ -17,7 +17,11 @@
  * An ambiguous name (two active rows) never links (fail closed). Where the
  * row has no service_key_snapshot, the matched row's service_key is stamped
  * too — the same pair the edit path stamps together (admin-schedule.js
- * resolvedServiceId + resolvedServiceKey).
+ * resolvedServiceId + resolvedServiceKey). A row whose EXISTING snapshot
+ * names a different service than its label matches is a conflict —
+ * lookupServiceForScheduledService honors the snapshot ahead of the label,
+ * and a service_id would outrank both — so it is never linked (listed in
+ * the state row for the owner instead).
  *
  * Per-row CAS both ways: the forward write re-checks the visit's label,
  * its NULL linkage and — at write time — that the catalog row still
@@ -52,7 +56,7 @@ exports.up = async function up(knex) {
   const cols = ['id', 'service_type', ...(hasSnapshotCol ? ['service_key_snapshot'] : [])];
   const visits = await openVisitStatus(knex('scheduled_services').whereNull('service_id')).select(...cols);
 
-  const state = { linked: [], ambiguous: [] };
+  const state = { linked: [], ambiguous: [], conflicts: [] };
   for (const v of visits) {
     const label = typeof v.service_type === 'string' ? v.service_type.trim().toLowerCase() : '';
     if (!label) continue;
@@ -62,13 +66,25 @@ exports.up = async function up(knex) {
       continue;
     }
     const svc = matches[0];
-    const stampSnapshot = hasSnapshotCol && v.service_key_snapshot == null && !!svc.service_key;
+    // An existing service_key_snapshot is DURABLE identity evidence that
+    // lookupServiceForScheduledService honors ahead of the label — and a
+    // service_id would outrank it. A snapshot naming a different service
+    // than the label matches is a conflict: never re-point the row's
+    // effective identity by linking it; list it for the owner (codex P0).
+    const snapshot = hasSnapshotCol && v.service_key_snapshot != null ? String(v.service_key_snapshot).trim() : '';
+    if (snapshot && snapshot !== String(svc.service_key || '').trim()) {
+      state.conflicts.push({ id: v.id, service_type: v.service_type, service_key_snapshot: v.service_key_snapshot, matched_service_key: svc.service_key || null });
+      continue;
+    }
+    const stampSnapshot = hasSnapshotCol && !snapshot && !!svc.service_key;
     let q = openVisitStatus(
       knex('scheduled_services')
         .where({ id: v.id, service_type: v.service_type })
         .whereNull('service_id')
     ).whereRaw('EXISTS (SELECT 1 FROM services WHERE id = ? AND lower(name) = lower(?) AND is_active = true)', [svc.id, v.service_type]);
-    if (stampSnapshot) q = q.whereNull('service_key_snapshot');
+    // The snapshot is part of the identity the CAS checks either way: still
+    // NULL when this write stamps it, still the matching key when it agreed.
+    if (hasSnapshotCol) q = stampSnapshot ? q.whereNull('service_key_snapshot') : q.where({ service_key_snapshot: v.service_key_snapshot });
     const patch = { service_id: svc.id };
     if (stampSnapshot) patch.service_key_snapshot = svc.service_key;
     const count = await q.update(patch);

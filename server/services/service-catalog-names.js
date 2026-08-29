@@ -142,10 +142,20 @@ async function resolveSeriesChildIdentity(conn, parent) {
     const label = String(parent.service_type || '').trim();
     if (!label) return verbatim;
     const candidate = renamedCatalogName(label) || legacyCatalogName(label, parent.recurring_pattern) || label;
-    const rows = await conn('services')
-      .whereRaw('lower(name) = lower(?)', [candidate])
+    const activeByName = (name) => conn('services')
+      .whereRaw('lower(name) = lower(?)', [name])
       .where({ is_active: true })
       .select('id', 'name', 'service_key');
+    let rows = await activeByName(candidate);
+    if (candidate !== label) {
+      // services.name is not unique and the Service Library can reactivate
+      // an old spelling as its own row: the parent's exact label is evidence
+      // too. Both spellings live → conflicting evidence → verbatim, unlinked.
+      // Only the old spelling lives → it is the exact-name match.
+      const exact = await activeByName(label);
+      if (exact.length && rows.length) return verbatim;
+      if (exact.length) rows = exact;
+    }
     if (rows.length !== 1) return verbatim;
     return { service_type: rows[0].name, service_id: rows[0].id, service_key: rows[0].service_key || null };
   } catch (err) {
