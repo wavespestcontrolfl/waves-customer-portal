@@ -770,7 +770,7 @@ describe('never-re-price guard, r2 regressions', () => {
       customer,
     });
 
-    expect(result.alreadyIncluded).toContain('Rodent Monitoring');
+    expect(result.alreadyIncluded).toContain('Rodent Bait Station');
     expect(result.options.every(o => o.serviceKey !== 'rodent_bait')).toBe(true);
   });
 
@@ -825,7 +825,7 @@ describe('combined pest & rodent ownership', () => {
       customer,
     });
 
-    expect(result.alreadyIncluded).toContain('Rodent Monitoring');
+    expect(result.alreadyIncluded).toContain('Rodent Bait Station');
     expect(result.options.every(o => o.serviceKey !== 'rodent_bait')).toBe(true);
     // The pest half still qualifies exactly as before.
     expect(result.currentServices).toContain('Pest Control');
