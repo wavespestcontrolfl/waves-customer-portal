@@ -4276,13 +4276,26 @@ function scheduledBlogFilePathForPost(post) {
 // reference-style images (`![alt][pic]`) and the definitions that point at
 // a managed path — then lines left empty by the removal are dropped.
 function stripManagedBodyImages(body, slug) {
-  const prefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
   const raw = String(body || '');
-  const isManaged = (src) => String(src || '').startsWith(prefix);
-  const defs = contentGuardrails.markdownReferenceDefinitions(raw);
+  // Publisher-OWNED names only: `/images/blog/<slug>/body-<digits>.webp` —
+  // an authored `body-background.webp` is not ours to remove.
+  const managedRe = new RegExp(`^${ASTRO_HERO_PUBLIC_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/${String(slug).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/body-\\d+\\.webp$`);
+  const isManaged = (src) => managedRe.test(String(src || ''));
+  // Only RENDERED occurrences are stripped: an image-like string inside a
+  // fence, a code span, a comment or an MDX expression is text the reader
+  // sees as written — the rendered view (same line count) decides.
+  const rendered = renderedBodyView(raw).lines;
+  const unmasked = contentGuardrails.blankNonRenderedMarkdown(raw).split('\n');
+  const lineStarts = [0];
+  for (let k = 0; k < raw.length; k += 1) if (raw[k] === '\n') lineStarts.push(k + 1);
+  const lineOf = (pos) => { let lo = 0; let hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
+  const defs = contentGuardrails.markdownReferenceDefinitions(unmasked.join('\n'));
   const removals = [];
   for (const span of contentGuardrails.eachMarkdownLink(raw)) {
     if (!span.isImage) continue;
+    const spanText = raw.slice(span.start, span.end + 1);
+    if (spanText.includes('\n')) continue; // publisher-written images are single-line
+    if (!String(rendered[lineOf(span.start)] || '').includes(spanText)) continue; // not a rendered image
     let src = null;
     if (span.kind === 'inline') src = decodeDestination(contentGuardrails.parseLinkDestination(raw.slice(span.destStart, span.destEnd + 1), { allowEmpty: true }) || '');
     else if (span.kind !== 'malformed') {
@@ -4311,7 +4324,7 @@ function stripManagedBodyImages(body, slug) {
   const destOnly = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
   for (let i = 0; i < lines.length; i += 1) {
     const m = rawLines[i].match(/^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:([ \t]*)(.*)$/);
-    if (m) {
+    if (m && String(unmasked[i] || '').trim() !== '') { // a definition inside code/comment is text
       const label = contentGuardrails.normalizeReferenceLabel(m[1]);
       if (defs.has(label) && isManaged(decodeDestination(defs.get(label)))) {
         // Managed definition: drop the label line AND its continuation

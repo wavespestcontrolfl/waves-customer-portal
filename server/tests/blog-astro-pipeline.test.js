@@ -4538,6 +4538,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     // Multi-line managed definitions (destination on the continuation line, title after) are removed whole (hook P1).
     const multi = '## A\n\nProse.\n\n![gen][pic]\n\n[pic]:\n  </images/blog/x/body-1.webp>\n  "title"\n[photo]: /images/2025/12/photo.webp';
     expect(AstroPublisher.stripManagedBodyImages(multi, 'x')).toBe('## A\n\nProse.\n\n[photo]: /images/2025/12/photo.webp');
+    // Only RENDERED, publisher-OWNED occurrences: code/comments/expressions and authored `body-background.webp` stay (hook P1).
+    const guarded = ['## A', '', 'Prose.', '', '![gen](/images/blog/x/body-1.webp)', '', '```', '![gen](/images/blog/x/body-1.webp)', '```', '', 'Inline `![gen](/images/blog/x/body-2.webp)` code.', '', '<!-- ![gen](/images/blog/x/body-2.webp) -->', '', '![bg](/images/blog/x/body-background.webp)', '', '![other post](/images/blog/y/body-1.webp)'].join('\n');
+    expect(AstroPublisher.stripManagedBodyImages(guarded, 'x')).toBe(['## A', '', 'Prose.', '', '```', '![gen](/images/blog/x/body-1.webp)', '```', '', 'Inline `![gen](/images/blog/x/body-2.webp)` code.', '', '<!-- ![gen](/images/blog/x/body-2.webp) -->', '', '![bg](/images/blog/x/body-background.webp)', '', '![other post](/images/blog/y/body-1.webp)'].join('\n'));
     // Nullable slug → publishAstro's slugify(title) fallback.
     expect(AstroPublisher.stripManagedBodyImagesForPost('P.\n\n![g](/images/blog/ant-trails-in-bradenton/body-1.webp)', { slug: null, title: 'Ant Trails in Bradenton' })).toBe('P.');
     expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
