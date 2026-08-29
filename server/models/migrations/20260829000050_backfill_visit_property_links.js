@@ -37,6 +37,7 @@
  */
 
 const { addressKey } = require('../../services/customer-properties');
+const { stampedAddressDiverges } = require('../../services/stamped-address');
 
 const STATE_KEY = 'migration.20260829000050.state';
 // Same terminal set as 20260825000010 — `rescheduled` can revive.
@@ -65,19 +66,44 @@ function streetZipKey(row) {
   return addressKey({ address_line1: row.address_line1, address_line2: row.address_line2, zip: row.zip });
 }
 
-// Field-level fallbacks, mirroring the dispatch readers' per-column
-// COALESCE(service_address_*, customers.*) (codex #3601 r1 P1): a partial
-// stamp (street only) still keys against the mirror's city/ZIP. The UNIT
-// follows the stamped street when one exists — a stamped street with no
-// unit means "no unit", never the mirror's unit (unit-divergence behavior).
-function visitAddressKey(visit, customer) {
-  const stamped = !!visit.service_address_line1;
+// Inline-unit form the shared stampedLine2Sql recognises ("100 Main St Apt
+// 4") — kept identical to stamped-address.js so JS and SQL agree.
+const INLINE_UNIT_RE = /\s(apt|apartment|unit|ste|suite|#)\.?\s*[a-z0-9-]+\s*$/i;
+
+// The visit's EFFECTIVE address, resolved exactly as the dispatch readers
+// resolve it (codex #3601 r1 + r4 P1): street/city/ZIP are per-column
+// COALESCE(service_address_*, customers.*) (dispatch.js), and the UNIT
+// follows the shared divergence rule of stamped-address.js stampedLine2Sql —
+// a DIVERGENT stamp (different street/ZIP/city) shows only its own unit, a
+// stamp carrying its unit inline keeps its own line2, and a NON-divergent
+// stamp falls back to the customer's unit (phone extractions often omit the
+// unit the customer record already knows).
+function effectiveVisitAddress(visit, customer) {
   const line1 = visit.service_address_line1 || customer.address_line1;
-  const line2 = stamped ? visit.service_address_line2 : customer.address_line2;
+  if (!line1) return null;
+  const stamped = !!visit.service_address_line1;
+  let line2;
+  if (!stamped) {
+    line2 = customer.address_line2;
+  } else if (stampedAddressDiverges({
+    service_address_line1: visit.service_address_line1,
+    service_address_zip: visit.service_address_zip,
+    service_address_city: visit.service_address_city,
+    customer_address_line1: customer.address_line1,
+    customer_zip: customer.zip,
+    customer_city: customer.city,
+  }) || INLINE_UNIT_RE.test(String(visit.service_address_line1))) {
+    line2 = visit.service_address_line2;
+  } else {
+    line2 = visit.service_address_line2 ?? customer.address_line2;
+  }
   const city = visit.service_address_city || customer.city;
   const zip = visit.service_address_zip || customer.zip;
-  if (!line1) return null;
-  return addressKey({ address_line1: line1, address_line2: line2, city, zip });
+  // usedMirror: any component came from the customer mirror → the link CAS
+  // must also assert the mirror is unchanged (codex #3601 r4 P1).
+  const usedMirror = !stamped || !visit.service_address_city || !visit.service_address_zip
+    || (line2 !== visit.service_address_line2);
+  return { line1, line2, city, zip, usedMirror };
 }
 
 // Property ids with a LIVE reference — a live-referenced property is never
@@ -138,8 +164,9 @@ exports.up = async function up(knex) {
   for (const v of visits) {
     const customer = customerById.get(v.customer_id);
     if (!customer) continue;
-    const key = visitAddressKey(v, customer);
-    if (!key) continue;
+    const eff = effectiveVisitAddress(v, customer);
+    if (!eff) continue;
+    const key = addressKey({ address_line1: eff.line1, address_line2: eff.line2, city: eff.city, zip: eff.zip });
     const matches = (byCustomer.get(v.customer_id) || []).filter((p) => p.address_key === key);
     if (matches.length !== 1) continue; // ambiguous → admin picker
     const propertyId = matches[0].id;
@@ -149,7 +176,7 @@ exports.up = async function up(knex) {
     // #3601 r2 P1: a customer merge between the scan and this write can
     // reassign the visit and retire the colliding property; the link must
     // never land on a now-inactive duplicate).
-    const n = await knex('scheduled_services')
+    const linkQuery = knex('scheduled_services')
       .where({
         id: v.id,
         customer_id: v.customer_id,
@@ -163,8 +190,23 @@ exports.up = async function up(knex) {
       .whereExists(function targetProperty() {
         this.select(1).from('customer_properties')
           .where({ id: propertyId, customer_id: v.customer_id, active: true, address_key: key });
-      })
-      .update({ property_id: propertyId });
+      });
+    if (eff.usedMirror) {
+      // The key borrowed from the customer mirror — assert the mirror is
+      // still what we keyed against (codex #3601 r4 P1: a primary change
+      // after the snapshot would leave the target active while dispatch
+      // now resolves a different address).
+      linkQuery.whereExists(function mirrorUnchanged() {
+        this.select(1).from('customers').where({
+          id: v.customer_id,
+          address_line1: customer.address_line1 ?? null,
+          address_line2: customer.address_line2 ?? null,
+          city: customer.city ?? null,
+          zip: customer.zip ?? null,
+        });
+      });
+    }
+    const n = await linkQuery.update({ property_id: propertyId });
     if (n) state.linked[v.id] = propertyId;
   }
 

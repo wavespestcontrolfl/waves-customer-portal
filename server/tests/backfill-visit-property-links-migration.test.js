@@ -18,6 +18,10 @@ const A = { address_line1: '100 Sample Trail', address_line2: null, city: 'Brade
 const B = { address_line1: '110 Sample Trail', address_line2: null, city: 'Bradenton', zip: '34211' };
 const P = { address_line1: '20 Duplicate Way', address_line2: null, city: 'Nokomis', zip: '34275' };
 const P2 = { address_line1: '20 Duplicate Way', address_line2: null, city: 'North Venice', zip: '34275' };
+// Mirror WITH a unit; the customer also owns a unitless second property.
+const U = { address_line1: '300 Condo Blvd', address_line2: 'Unit 7', city: 'Sarasota', zip: '34236' };
+const U0 = { address_line1: '300 Condo Blvd', address_line2: null, city: 'Sarasota', zip: '34236' };
+const V = { address_line1: '55 Other Rd', address_line2: null, city: 'Sarasota', zip: '34236' };
 const prop = (id, customer_id, addr, extra = {}) => ({
   id, customer_id, active: true, is_primary: false, label: 'Home', occupancy_type: 'owner_occupied',
   ...addr, address_key: addressKey(addr), ...extra,
@@ -29,6 +33,7 @@ function seedDb() {
       { id: 'c1', ...A },
       { id: 'c2', ...A },
       { id: 'c3', ...P },
+      { id: 'c4', ...U },
     ],
     customer_properties: [
       prop('p1', 'c1', A, { is_primary: true, label: 'Primary' }),
@@ -42,6 +47,9 @@ function seedDb() {
       prop('p5', 'c3', { ...P2, city: 'N Venice' }, { label: null, occupancy_type: 'unknown' }),
       // Same shape, referenced ONLY by a cancelled visit → history, retire.
       prop('p6', 'c3', { ...P2, city: 'Nokomis FL' }, { label: null, occupancy_type: 'unknown' }),
+      prop('pu-unit', 'c4', U, { is_primary: true, label: 'Condo' }),
+      prop('pu-nounit', 'c4', U0, { label: 'Lobby office' }),
+      prop('pu-other', 'c4', V, { label: 'Other' }),
     ],
     scheduled_services: [
       // stamped address = A → p1
@@ -58,6 +66,10 @@ function seedDb() {
       { id: 'v-nullstatus', customer_id: 'c1', status: null, property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
       // partial stamp (street only, no city/ZIP) keys against the mirror's city/ZIP (codex r1 P1)
       { id: 'v-partial', customer_id: 'c1', status: 'pending', property_id: null, service_address_line1: B.address_line1, service_address_line2: null, service_address_city: null, service_address_zip: null },
+      // NON-divergent stamp with NULL unit → inherits the mirror's unit → the unit property (shared stampedLine2 rule)
+      { id: 'v-unit-inherit', customer_id: 'c4', status: 'pending', property_id: null, service_address_line1: U.address_line1, service_address_line2: null, service_address_city: U.city, service_address_zip: U.zip },
+      // DIVERGENT stamp (different street) with NULL unit → its own (no) unit → the other property
+      { id: 'v-unit-divergent', customer_id: 'c4', status: 'pending', property_id: null, service_address_line1: V.address_line1, service_address_line2: null, service_address_city: V.city, service_address_zip: V.zip },
       // single-property customer → out of scope
       { id: 'v-single', customer_id: 'c2', status: 'pending', property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
       // references p5 so p5 must survive leg B
@@ -97,7 +109,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     };
     const subHit = (sub, r) => (db[sub.table] || []).some((o) => (!sub.joinPropertyId || o.property_id === r.id)
       && (!sub.openOnly || isOpen(o))
-      && sub.filters.every((f) => Object.entries(f).every(([k, v]) => o[k] === v)));
+      && sub.filters.every((f) => Object.entries(f).every(([k, v]) => (o[k] ?? null) === v)));
     const match = (r) => filters.every((f) => Object.entries(f).every(([k, v]) => (r[k] ?? null) === v))
       && ins.every((c) => c.vals.includes(r[c.col]))
       && notIns.every((c) => !c.vals.includes(r[c.col]))
@@ -188,7 +200,9 @@ describe('20260829000050 backfill visit property links', () => {
     expect(visit(db, 'v-mirror').property_id).toBe('p1');
     expect(visit(db, 'v-nullstatus').property_id).toBe('p1');
     expect(visit(db, 'v-partial').property_id).toBe('p2');
-    expect(state(db).linked).toEqual({ 'v-stamped': 'p1', 'v-mirror': 'p1', 'v-nullstatus': 'p1', 'v-partial': 'p2' });
+    expect(visit(db, 'v-unit-inherit').property_id).toBe('pu-unit');
+    expect(visit(db, 'v-unit-divergent').property_id).toBe('pu-other');
+    expect(state(db).linked).toEqual({ 'v-stamped': 'p1', 'v-mirror': 'p1', 'v-nullstatus': 'p1', 'v-partial': 'p2', 'v-unit-inherit': 'pu-unit', 'v-unit-divergent': 'pu-other' });
   });
 
   test('up() leaves no-match, terminal, already-linked and single-property visits alone', async () => {
@@ -208,8 +222,8 @@ describe('20260829000050 backfill visit property links', () => {
     await migration.up(fakeKnex(db));
     expect(visit(db, 'v-stamped').property_id).toBeNull();
     expect(visit(db, 'v-mirror').property_id).toBeNull();
-    // Only the visit whose key is NOT duplicated still links.
-    expect(state(db).linked).toEqual({ 'v-partial': 'p2' });
+    // Only the visits whose keys are NOT duplicated still link.
+    expect(state(db).linked).toEqual({ 'v-partial': 'p2', 'v-unit-inherit': 'pu-unit', 'v-unit-divergent': 'pu-other' });
   });
 
   test('up() retires the unreferenced / terminal-only-referenced duplicates and keeps the live-referenced one', async () => {
@@ -246,7 +260,22 @@ describe('20260829000050 backfill visit property links', () => {
     expect(visit(db, 'v-stamped').property_id).toBeNull();
     expect(visit(db, 'v-mirror').property_id).toBeNull();
     expect(visit(db, 'v-partial').property_id).toBe('p2'); // unaffected target still links
-    expect(Object.keys(state(db).linked)).toEqual(['v-partial']);
+    expect(Object.keys(state(db).linked).sort()).toEqual(['v-partial', 'v-unit-divergent', 'v-unit-inherit']);
+  });
+
+  test('up() link UPDATE re-validates the customer MIRROR when the key borrowed from it', async () => {
+    const db = seedDb();
+    const knex = withRaceAfterFirstSelect(fakeKnex(db), 'scheduled_services', () => {
+      // Admin changed c1's primary/mirror address after the customers snapshot.
+      Object.assign(db.customers.find((c) => c.id === 'c1'), B);
+    });
+    await migration.up(knex);
+    // v-mirror (no stamp) and v-partial (street-only stamp) keyed against the
+    // OLD mirror → CAS misses; the fully stamped visits still link.
+    expect(visit(db, 'v-mirror').property_id).toBeNull();
+    expect(visit(db, 'v-partial').property_id).toBeNull();
+    expect(visit(db, 'v-stamped').property_id).toBe('p1');
+    expect(visit(db, 'v-nullstatus').property_id).toBe('p1');
   });
 
   test('up() retirement UPDATE re-validates atomically (open ref appearing after the scan wins)', async () => {
