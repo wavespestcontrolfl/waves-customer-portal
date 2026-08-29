@@ -21,6 +21,15 @@ const IRRIGATION_SIZING_FIELDS = ['irrigation_run_minutes', 'watering_days', 'ir
 // unrelated turf writers (the assessment's grass-type auto-capture, a
 // chinch note) bump it without touching the premise (codex gh-r32).
 const COUNTY_CONFIRMED_FIELD = 'turf_county';
+// Grass type is a property of the LAWN (its Kc sizes the plan): after a move
+// it describes the former yard until a writer that actually reviewed the
+// current lawn re-establishes it — a turf-profile save that CHANGES the
+// grass, or the assessment auto-capture filling a blank profile. Re-saving
+// the four sizing fields says nothing about the grass (codex #3565 gh-r41).
+const GRASS_CONFIRMED_FIELD = 'turf_grass';
+// The rain-sensor flag describes the former home's controller after a move —
+// confirmed only when the customer re-saves that field itself (gh-r41).
+const RAIN_SENSOR_CONFIRMED_FIELD = 'rain_sensor';
 const RUNTIME_FIELDS = ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'];
 
 function present(v) {
@@ -60,6 +69,18 @@ function countyConfirmedAfterMove(row = {}) {
   return parseConfirmed(row.irrigation_confirmed_fields).includes(COUNTY_CONFIRMED_FIELD);
 }
 
+/** The grass type was re-established for the current home (or no move). */
+function grassConfirmedAfterMove(row = {}) {
+  if (!row.irrigation_home_changed_at) return true;
+  return parseConfirmed(row.irrigation_confirmed_fields).includes(GRASS_CONFIRMED_FIELD);
+}
+
+/** The rain-sensor field was re-saved for the current home (or no move). */
+function rainSensorConfirmedAfterMove(row = {}) {
+  if (!row.irrigation_home_changed_at) return true;
+  return parseConfirmed(row.irrigation_confirmed_fields).includes(RAIN_SENSOR_CONFIRMED_FIELD);
+}
+
 /**
  * Add entries to the customer's confirmation set. ONE atomic union over the
  * row's CURRENT value under the customer-scoped preference lock — the same
@@ -95,4 +116,4 @@ async function confirmIrrigationFields(conn, customerId, fields) {
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
-module.exports = { IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };
+module.exports = { IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };

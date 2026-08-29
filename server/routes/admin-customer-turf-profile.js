@@ -173,11 +173,23 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // turf writer takes it (contract-pinned).
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
     const [saved] = await withTurfProfileFence(db, customerId, async (trx) => {
+      // Prior grass, read under the fence: a save that CHANGES the grass is
+      // an actual review of the current lawn and re-confirms it for the
+      // weekly plan after a move; the form re-sends every loaded field, so
+      // an unchanged value proves nothing (same lesson as the county —
+      // codex #3565 gh-r32/r41).
+      const priorRow = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
       const rows = await trx('customer_turf_profiles')
         .insert(insertRow)
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
+      const grassEdited = typeof fields.grass_type === 'string' && fields.grass_type.trim()
+        && fields.grass_type !== (priorRow ? priorRow.grass_type : null);
+      if (grassEdited) {
+        const { GRASS_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
+        await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
+      }
       // A county the technician EXPLICITLY reviewed on this save
       // (`county_confirmed: true` — the client sets it only when the county
       // field was edited in this session) is their statement about the

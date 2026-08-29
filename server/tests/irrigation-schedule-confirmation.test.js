@@ -76,4 +76,37 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     expect(await confirmIrrigationFields(joined, 'c4', ['turf_county'])).toBe(1);
     expect(calls[0][1]).toMatch(/pg_advisory_xact_lock/);
   });
+
+  test('grass and rain-sensor are home-bound with their OWN ledger entries (codex gh-r41)', () => {
+    const { grassConfirmedAfterMove, rainSensorConfirmedAfterMove, GRASS_CONFIRMED_FIELD, RAIN_SENSOR_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
+    expect(GRASS_CONFIRMED_FIELD).toBe('turf_grass');
+    expect(RAIN_SENSOR_CONFIRMED_FIELD).toBe('rain_sensor');
+    // No move → trusted.
+    expect(grassConfirmedAfterMove({})).toBe(true);
+    expect(rainSensorConfirmedAfterMove({})).toBe(true);
+    const moved = { irrigation_home_changed_at: '2026-08-20T00:00:00Z' };
+    // Moved, nothing re-established → withheld — INCLUDING when every sizing field is confirmed.
+    const sized = { ...moved, irrigation_confirmed_fields: JSON.stringify(['irrigation_run_minutes', 'watering_days', 'irrigation_system_type', 'irrigation_inches_per_week']) };
+    expect(grassConfirmedAfterMove(sized)).toBe(false);
+    expect(rainSensorConfirmedAfterMove(sized)).toBe(false);
+    // Each clears only on its own entry.
+    expect(grassConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_grass']) })).toBe(true);
+    expect(rainSensorConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['turf_grass']) })).toBe(false);
+    expect(rainSensorConfirmedAfterMove({ ...moved, irrigation_confirmed_fields: JSON.stringify(['rain_sensor']) })).toBe(true);
+  });
+
+  test('source pins: the confirm writers for grass and rain-sensor (codex gh-r41)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const prefsPut = fs.readFileSync(path.join(__dirname, '..', 'routes', 'property.js'), 'utf8');
+    // Re-saving the rain-sensor toggle confirms it alongside the sizing fields.
+    expect(prefsPut).toMatch(/\[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor'\]\.filter\(\(f\) => f in updates\)/);
+    const turf = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
+    // A CHANGED grass value confirms; an unchanged form re-send does not.
+    expect(turf).toMatch(/fields\.grass_type !== \(priorRow \? priorRow\.grass_type : null\)/);
+    expect(turf).toMatch(/confirmIrrigationFields\(trx, customerId, \[GRASS_CONFIRMED_FIELD\]\)/);
+    const assess = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
+    // The auto-capture confirms only when it actually SET the grass (blank before).
+    expect(assess).toMatch(/if \(!prior\?\.grass_type\) \{[\s\S]*?confirmIrrigationFields\(trx, customerId, \[GRASS_CONFIRMED_FIELD\]\)/);
+  });
 });

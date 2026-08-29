@@ -659,13 +659,24 @@ router.post('/assess', async (req, res, next) => {
         // the click-to-estimate mint's turf revalidation — every
         // price-bearing turf writer takes the shared fence.
         const { withTurfProfileFence } = require('../services/customer-pricing-ai');
-        await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
-          .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
-          .onConflict('customer_id')
-          .merge({
-            grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
-            updated_at: new Date(),
-          }));
+        await withTurfProfileFence(db, customerId, async (trx) => {
+          const prior = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('grass_type');
+          await trx('customer_turf_profiles')
+            .insert({ customer_id: customerId, grass_type: mergedComposite.grass_type })
+            .onConflict('customer_id')
+            .merge({
+              grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [mergedComposite.grass_type]),
+              updated_at: new Date(),
+            });
+          // The AI read observed the CURRENT lawn: when it actually set the
+          // grass (blank before), that re-establishes it for the weekly plan
+          // after a move (codex #3565 gh-r41). A kept existing value (the
+          // COALESCE branch) proves nothing about the new home.
+          if (!prior?.grass_type) {
+            const { GRASS_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
+            await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);
+          }
+        });
       } catch (grassErr) {
         logger.warn?.(`[lawn-assessment] grass-type auto-capture skipped for ${customerId}: ${grassErr.message}`);
       }

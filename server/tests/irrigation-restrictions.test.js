@@ -190,6 +190,7 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     expect(panel).toMatch(/if \(key === "county"\) setCountyTouched\(true\);/);
     expect(route).not.toMatch(/confirmIrrigationFields\(db,/);
     const assessment = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
-    expect(assessment).not.toMatch(/confirmIrrigationFields|COUNTY_CONFIRMED_FIELD/);
+    // gh-r41: the auto-capture may confirm the GRASS it observed — never the county.
+    expect(assessment).not.toMatch(/COUNTY_CONFIRMED_FIELD/);
   });
 });

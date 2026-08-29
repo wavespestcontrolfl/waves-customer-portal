@@ -334,7 +334,9 @@ router.put('/preferences', async (req, res, next) => {
     // portal autosaves one field per PUT, so confirmation accrues per field
     // — a non-sizing irrigation edit (controller location, notes) and the
     // row-wide updated_at confirm nothing (codex #3565 gh-r20/r21).
-    const confirmedNow = IRRIGATION_SIZING_FIELDS.filter((f) => f in updates);
+    // The rain-sensor toggle is home-bound too — re-saving it after a move
+    // is the customer's statement about the CURRENT controller (gh-r41).
+    const confirmedNow = [...IRRIGATION_SIZING_FIELDS, 'rain_sensor'].filter((f) => f in updates);
 
     // The read-then-upsert holds the customer-scoped preference advisory
     // lock (`property-preferences:<customerId>`): a collective series move

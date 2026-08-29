@@ -39,7 +39,7 @@ const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, 
 const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
-const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
+const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -1251,10 +1251,14 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         firstName: customer.first_name,
         // Grass type is a property of the LAWN: after a move the profile
         // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
-        // changes the target and the hold/run call). Until the schedule is
-        // reconfirmed the plan sizes from the unknown-grass fallback and the
-        // copy says "your lawn", never the old grass by name (codex gh-r40).
-        grassType: scheduleUnconfirmed ? null : resolveGrassType(customer),
+        // changes the target and the hold/run call). Its OWN ledger entry
+        // gates it — re-saving the four sizing fields says nothing about
+        // the grass, so `scheduleUnconfirmed` clearing must not re-enable
+        // the old coefficient (codex gh-r40/r41). Until a turf writer
+        // re-establishes it (grass edit, or auto-capture filling a blank
+        // profile) the plan sizes from the unknown-grass fallback and the
+        // copy says "your lawn".
+        grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
         turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
@@ -1272,9 +1276,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         priorWeekEvents,
         priorWeekPrescribedInches,
         // The rain-sensor flag describes the former home's controller after a
-        // move — the plan must not promise "your rain sensor will skip a run"
-        // for a home we know nothing about (codex gh-r40).
-        rainSensor: !scheduleUnconfirmed && (customer.rain_sensor === true || customer.rain_sensor === 't'),
+        // move — trusted again only when the customer re-saves THAT field
+        // (its own ledger entry; the sizing fields clearing
+        // scheduleUnconfirmed say nothing about the sensor — codex
+        // gh-r40/r41).
+        rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
