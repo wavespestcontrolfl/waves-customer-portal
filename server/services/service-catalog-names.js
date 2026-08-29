@@ -15,7 +15,7 @@
  * tests import, and an unprimed cache simply falls back to the regex map.
  */
 
-const { CADENCE_CONVENTION_RENAMES } = require('../config/service-name-aliases');
+const { CADENCE_CONVENTION_RENAMES, counterpartServiceName, legacyCatalogName } = require('../config/service-name-aliases');
 
 // Migration-owned rename history is always resolvable, primed or not: an
 // unlinked terminal visit (service_id null, completed/cancelled) keeps its
@@ -102,4 +102,137 @@ function __setCatalogNamesForTest(names = []) {
   byLower = new Map([...renameSeed(), ...names.map((n) => [n.trim().toLowerCase(), n.trim()])]);
 }
 
-module.exports = { canonicalCatalogName, refreshCatalogNames, startCatalogNameRefresh, __setCatalogNamesForTest };
+/**
+ * The identity a series CHILD is born with.
+ *
+ * Children used to copy parent.service_type verbatim. Series parents that
+ * went terminal keep the label they closed under (Invariant 1 of the label
+ * backfills, 20260829000010/000040), so a parent stamped before a catalog
+ * rename kept birthing children with the retired name — and the reminder,
+ * invoice and booking copies made from those children inherited it.
+ *
+ * Resolution, fail-closed to the parent's own label + linkage:
+ *  1. Linked parent → the catalog row's CURRENT name (a rename after the
+ *     parent was stamped propagates to every new child), same service_id.
+ *  2. Unlinked parent → the label is bridged to a current name through the
+ *     rename aliases (pre-rename form → current) or the legacy
+ *     (label, cadence) map, then matched against exactly ONE active catalog
+ *     row by name — the child is born linked to it (service_id +
+ *     service_key). No active row, or an ambiguous name (two active rows),
+ *     or the row lookup failing → verbatim label, unlinked: never a name
+ *     the catalog doesn't carry, never a guessed linkage.
+ *
+ * Read on the caller's connection so a series spawn inside a transaction
+ * sees its own snapshot and never waits on a second pool slot.
+ */
+async function resolveSeriesChildIdentity(conn, parent) {
+  const verbatim = {
+    service_type: (parent && parent.service_type) || 'Service',
+    service_id: (parent && parent.service_id) || null,
+    service_key: null,
+  };
+  if (!parent || !conn) return verbatim;
+  try {
+    // SAVEPOINT (nested trx) when the caller handed us a transaction — the
+    // same posture as customerPrefersNoWeekends: a failed optional catalog
+    // read would otherwise leave the caller's trx ABORTED in Postgres
+    // despite the catch below (try/catch in a trx ≠ fail-open), and the
+    // child insert right after it would 25P02 instead of falling back to
+    // the parent label (codex #3604 r4 P1).
+    const read = (dbh) => resolveFromCatalog(dbh, parent, verbatim);
+    return conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
+  } catch (err) {
+    try {
+      require('./logger').warn(`[service-catalog-names] child identity resolution failed for parent ${parent.id || '?'} — using the parent label verbatim: ${err.message}`);
+    } catch { /* logger unavailable in a pure-util context */ }
+    return verbatim;
+  }
+}
+
+async function resolveFromCatalog(conn, parent, verbatim) {
+  {
+    // Inside a transaction the chosen catalog row is share-locked through
+    // the child insert: the Service Library renames with a plain UPDATE and
+    // shares no lock with this read, so without it a rename landing between
+    // this SELECT and the insert would stamp the retired name next to the
+    // renamed row's id (codex #3604 r5 P2). The savepoint that runs this
+    // read releases into the outer transaction, which keeps the lock.
+    const stable = (q) => (conn.isTransaction && typeof q.forShare === 'function' ? q.forShare() : q);
+    if (parent.service_id) {
+      const row = await stable(conn('services').where({ id: parent.service_id })).first('id', 'name', 'service_key');
+      return row && row.name
+        ? { service_type: row.name, service_id: row.id, service_key: row.service_key || null }
+        : verbatim;
+    }
+    // DURABLE snapshot evidence outranks any label bridging — exactly as
+    // lookupServiceForScheduledService orders it (id → service_key_snapshot
+    // → name). An unlinked parent whose snapshot names service A while its
+    // label maps to B must never birth a B-linked child carrying A's
+    // snapshot (codex #3604 r2 P0). Snapshot naming no active row → verbatim.
+    const snapshotKey = String(parent.service_key_snapshot || '').trim();
+    if (snapshotKey) {
+      const byKey = await stable(conn('services')
+        .where({ service_key: snapshotKey, is_active: true }))
+        .select('id', 'name', 'service_key');
+      return byKey.length === 1 && byKey[0].name
+        ? { service_type: byKey[0].name, service_id: byKey[0].id, service_key: byKey[0].service_key || null }
+        : verbatim;
+    }
+    const label = String(parent.service_type || '').trim();
+    if (!label) return verbatim;
+    // Bridge the label to a catalog name:
+    //  - cadence-qualified pre-rename labels ("Lawn Care Program Service
+    //    (Quarterly)") are the population 000010 relabels with the qualifier
+    //    preserved and canonicalCatalogName resolves by BASE — the catalog
+    //    never carries the qualifier, so the base is what is looked up
+    //    (codex #3604 r6 P1);
+    //  - the rename bridge is BIDIRECTIONAL (counterpartServiceName), the
+    //    same contract service-completion-profiles uses: with 000010 rolled
+    //    back while this code is deployed, a parent stamped with the new
+    //    spelling must resolve to the restored old row (r6 P1). In the
+    //    normal direction the counterpart is the retired spelling, which
+    //    no active row carries, so the exact-name branch below decides.
+    // The FULL label is bridged first — several renamed names carry their
+    // own parenthetical ("General Pest Control Service (Bi-Monthly)"); only
+    // a label no alias knows falls back to its base.
+    const bridge = (l) => counterpartServiceName(l) || legacyCatalogName(l, parent.recurring_pattern) || null;
+    let base = label;
+    let candidate = bridge(label);
+    if (!candidate) {
+      const qualified = /^(.*\S)(\s*\([^()]*\))$/.exec(label);
+      if (qualified) {
+        base = qualified[1];
+        candidate = bridge(base);
+      }
+    }
+    if (!candidate) candidate = base;
+    // services.name is not unique and the Service Library can reactivate an
+    // old spelling as its own row: the parent's exact label is evidence too.
+    // Both spellings are read in ONE statement so the decision comes from
+    // one catalog snapshot (a rename committing between two reads could
+    // otherwise link from a stale row — r2 P2). Both live → conflicting
+    // evidence → verbatim, unlinked. Only the old spelling lives → it is the
+    // exact-name match.
+    const names = candidate.toLowerCase() === base.toLowerCase() ? [candidate] : [candidate, base];
+    const rows = await stable(conn('services')
+      .whereRaw(`lower(name) IN (${names.map(() => 'lower(?)').join(', ')})`, names)
+      .where({ is_active: true }))
+      .select('id', 'name', 'service_key');
+    const mapped = rows.filter((r) => String(r.name).toLowerCase() === candidate.toLowerCase());
+    const exact = names.length === 2 ? rows.filter((r) => String(r.name).toLowerCase() === base.toLowerCase()) : [];
+    if (mapped.length && exact.length) return verbatim;
+    const hit = mapped.length ? mapped : exact;
+    if (hit.length !== 1) return verbatim;
+    return { service_type: hit[0].name, service_id: hit[0].id, service_key: hit[0].service_key || null };
+  }
+}
+
+module.exports = {
+  canonicalCatalogName,
+  refreshCatalogNames,
+  startCatalogNameRefresh,
+  resolveSeriesChildIdentity,
+  __setCatalogNamesForTest,
+};

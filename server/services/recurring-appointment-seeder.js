@@ -8,6 +8,7 @@ const {
 } = require('../utils/datetime-et');
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
+const { resolveSeriesChildIdentity } = require('./service-catalog-names');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -408,7 +409,11 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       scheduled_date: nextDateStr,
       window_start: parent.window_start || null,
       window_end: opts.windowEnd ?? (parent.window_end || null),
-      service_type: opts.serviceType || parent.service_type || 'Service',
+      // An explicit caller label wins; otherwise the CURRENT catalog identity
+      // resolved by seedFollowUpsForParent (opts.childIdentity) — never the
+      // parent label verbatim, which a terminal parent keeps retired by the
+      // label backfills' Invariant 1.
+      service_type: opts.serviceType || (opts.childIdentity && opts.childIdentity.service_type) || parent.service_type || 'Service',
       status: opts.childStatus || 'pending',
       notes: opts.childNotes || parent.notes || null,
       time_window: parent.time_window || null,
@@ -474,6 +479,14 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'state',
       'zip',
     ]);
+    // Resolved identity outranks the parent's copied link AND snapshot (the
+    // parent may be unlinked, linked to a row since renamed, or carry a
+    // stale snapshot that must not ride into the child — codex #3604 r5
+    // P1). Cols-guarded downstream like the rest of the row.
+    if (opts.childIdentity) {
+      if (opts.childIdentity.service_id) row.service_id = opts.childIdentity.service_id;
+      if (opts.childIdentity.service_key) row.service_key_snapshot = opts.childIdentity.service_key;
+    }
     rows.push(row);
   }
 
@@ -1150,8 +1163,16 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 
   const existingDates = await existingSeriesDates(conn, parent, columns);
   const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
+  // Canonical child creator for public booking + estimate conversion: the
+  // follow-ups are born with the CURRENT catalog identity (fail-closed to
+  // the parent's own label + link inside the resolver). Resolved against
+  // the EFFECTIVE cadence — public booking inserts the parent without a
+  // recurring_pattern and supplies it only through opts.pattern, and the
+  // legacy (label, cadence) bridge needs that evidence (codex #3604 r3 P1).
+  const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, { ...parent, recurring_pattern: pattern });
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
+    childIdentity,
     pattern,
     skipWeekends,
     stampSkipWeekends,

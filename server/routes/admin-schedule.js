@@ -53,6 +53,7 @@ const {
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
+const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -5163,21 +5164,29 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
 
       // Create recurring instances from the dates precomputed (and locked)
-      // above.
+      // above. Children resolve the CURRENT catalog identity from the
+      // inserted parent (serviceId is optional on this endpoint — a legacy
+      // or stale label must not seed a whole series with a retired name).
+      // Only when something will actually be inserted: a one-off booking
+      // takes no catalog read here, and a failed read inside `trx` must not
+      // be able to poison an unrelated parent insert (codex #3604 r3 P2).
+      const childIdentity = (plannedChildDates.length || plannedBoosterDates.length)
+        ? await resolveSeriesChildIdentity(trx, svc)
+        : null;
       for (const nextDateStr of plannedChildDates) {
         const childData = {
           customer_id: customerId, technician_id: resolvedTechId,
           scheduled_date: nextDateStr,
           window_start: windowStart, window_end: computedEnd,
-          service_type: serviceType, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: timeWindow, zone, estimated_duration_minutes: duration,
           is_recurring: true, recurring_pattern: recurringPattern,
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
-        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(serviceType);
-        if (cols.service_id && serviceId) childData.service_id = serviceId;
-        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+        if (cols.service_id && (childIdentity.service_id || serviceId)) childData.service_id = childIdentity.service_id || serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
         if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
@@ -5244,15 +5253,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
             customer_id: customerId, technician_id: resolvedTechId,
             scheduled_date: boosterDate,
             window_start: windowStart, window_end: computedEnd,
-            service_type: serviceType, status: 'pending',
+            service_type: childIdentity.service_type, status: 'pending',
             time_window: timeWindow, zone, estimated_duration_minutes: duration,
             is_recurring: false,
             recurring_parent_id: svc.id,
             notes: combinedNotes,
           };
-          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(serviceType);
-          if (cols.service_id && serviceId) boosterData.service_id = serviceId;
-          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.appointment_type) boosterData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+          if (cols.service_id && (childIdentity.service_id || serviceId)) boosterData.service_id = childIdentity.service_id || serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = childIdentity.service_key || pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
@@ -8962,13 +8971,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (nextDateStr <= etDateString()) continue;
             if (seenChildDates.has(nextDateStr)) continue;
             seenChildDates.add(nextDateStr);
+            // Children resolve the CURRENT catalog identity at insert — never
+            // the parent label verbatim (a terminal parent keeps its retired
+            // label by the backfills' Invariant 1).
+            const childIdentity = await resolveSeriesChildIdentity(trx, parent);
             const childData = {
               customer_id: parent.customer_id,
               technician_id: recurringTemplateTechnicianId(parent),
               scheduled_date: nextDateStr,
               window_start: parent.window_start,
               window_end: parent.window_end,
-              service_type: parent.service_type,
+              service_type: childIdentity.service_type,
               status: 'pending',
               time_window: parent.time_window,
               zone: parent.zone,
@@ -8979,8 +8992,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             try {
               const cols = await db('scheduled_services').columnInfo();
               if (cols.recurring_parent_id) childData.recurring_parent_id = parent.id;
-              if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(parent.service_type);
-              if (cols.service_id && parent.service_id) childData.service_id = parent.service_id;
+              if (cols.appointment_type) childData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
+              if (cols.service_id && childIdentity.service_id) childData.service_id = childIdentity.service_id;
               if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
@@ -8990,6 +9003,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               const dType = discountType !== undefined ? discountType : parent.discount_type;
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
               copyLineDiscountFields(childData, parent, cols);
+              // After the parent-field copy (which writes the parent's own
+              // snapshot): a successful resolution stamps ITS key — a stale
+              // parent snapshot must not ride into the child (codex r5 P1).
+              if (cols.service_key_snapshot && childIdentity.service_key) childData.service_key_snapshot = childIdentity.service_key;
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
@@ -9040,7 +9057,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 customerId: parent.customer_id,
                 date: nextDateStr,
                 windowStart: parent.window_start,
-                serviceType: parent.service_type,
+                serviceType: childIdentity.service_type,
               });
             }
             if (parentAddons.length > 0 && childRow?.id) {
@@ -10806,13 +10823,14 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     blackoutDates: extendBlackoutDates,
   });
   for (const nd of extendDates) {
+    const childIdentity = await resolveSeriesChildIdentity(trx, parent);
     const data = {
       customer_id: parent.customer_id,
       technician_id: recurringTemplateTechnicianId(parent),
       scheduled_date: nd,
       window_start: parent.window_start,
       window_end: parent.window_end,
-      service_type: parent.service_type,
+      service_type: childIdentity.service_type,
       status: 'pending',
       time_window: parent.time_window,
       zone: parent.zone,
@@ -10825,16 +10843,17 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     // carry the flag that would auto-extend past the count just set. The
     // ongoing top-up is the mirror case and stamps the flag on.
     if (cols.recurring_ongoing) data.recurring_ongoing = !!ongoingSeries;
-    if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+    if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
     if (cols.recurring_interval_days && parent.recurring_interval_days != null) data.recurring_interval_days = parent.recurring_interval_days;
     if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
-    if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+    if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
     const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(trx, parent.id, parent);
     copyLineDiscountFields(data, extensionPriceParent, cols);
+    if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
@@ -10891,7 +10910,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
       customerId: parent.customer_id,
       date: nd,
       windowStart: parent.window_start,
-      serviceType: parent.service_type,
+      serviceType: childIdentity.service_type,
     });
   }
   if (result.added.length < need) {
@@ -11108,12 +11127,13 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
         } else if (!stillOngoing) {
           logger.info(`[recurring] Auto-extend skipped for parent=${parentId} — series stopped while the completion was processing`);
         } else {
+          const childIdentity = await resolveSeriesChildIdentity(conn, parent);
           const nextData = {
             customer_id: parent.customer_id,
             technician_id: recurringTemplateTechnicianId(parent),
             scheduled_date: nextStr,
             window_start: parent.window_start, window_end: parent.window_end,
-            service_type: parent.service_type, status: 'pending',
+            service_type: childIdentity.service_type, status: 'pending',
             time_window: parent.time_window, zone: parent.zone,
             estimated_duration_minutes: parent.estimated_duration_minutes,
             is_recurring: true, recurring_pattern: parent.recurring_pattern,
@@ -11122,10 +11142,11 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
           if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
-          if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
-          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
+          if (cols.service_id && childIdentity.service_id) nextData.service_id = childIdentity.service_id;
+          if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(childIdentity.service_type);
           const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parentId, parent);
           copyLineDiscountFields(nextData, extensionPriceParent, cols);
+          if (cols.service_key_snapshot && childIdentity.service_key) nextData.service_key_snapshot = childIdentity.service_key;
           copyAppointmentDiscountFields(nextData, parent, cols);
           copyBillToFields(nextData, parent, cols);
           copyStampedServiceAddressFields(nextData, parent, cols);
@@ -11190,7 +11211,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               customerId: parent.customer_id,
               scheduledDate: nextStr,
               windowStart: parent.window_start,
-              serviceType: parent.service_type,
+              serviceType: childIdentity.service_type,
               dueAddons: parentAddons.length > 0 ? dueAddons : [],
             };
           }
@@ -15752,20 +15773,22 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // the next cadence step.
         if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
+        const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
           technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,
           estimated_duration_minutes: parent.estimated_duration_minutes,
           is_recurring: true, recurring_pattern: parent.recurring_pattern,
           recurring_parent_id: parentId,
         };
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -15774,12 +15797,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd });
+        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -15828,21 +15851,23 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // candidate must not double-book an adjacent day.
         if (await seriesCandidateDateClashes(trx, parent, nd)) continue;
         seen.add(nd);
+        const childIdentity = await resolveSeriesChildIdentity(trx, parent);
         const data = {
           customer_id: parent.customer_id,
           technician_id: recurringTemplateTechnicianId(parent),
           scheduled_date: nd,
           window_start: parent.window_start, window_end: parent.window_end,
-          service_type: parent.service_type, status: 'pending',
+          service_type: childIdentity.service_type, status: 'pending',
           time_window: parent.time_window, zone: parent.zone,
           estimated_duration_minutes: parent.estimated_duration_minutes,
           is_recurring: true, recurring_pattern: parent.recurring_pattern,
           recurring_parent_id: parentId,
         };
         if (cols.recurring_ongoing) data.recurring_ongoing = true;
-        if (cols.service_id && parent.service_id) data.service_id = parent.service_id;
+        if (cols.service_id && childIdentity.service_id) data.service_id = childIdentity.service_id;
         const extensionPriceParent = await resolveSeriesExtensionPriceTemplate(conn, parent.id, parent);
         copyLineDiscountFields(data, extensionPriceParent, cols);
+        if (cols.service_key_snapshot && childIdentity.service_key) data.service_key_snapshot = childIdentity.service_key;
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
@@ -15851,12 +15876,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         // extension writer (owner ruling 2026-08-27; pre-push P0): fixed pest
         // plans renew through these office paths, not the auto-extend.
         applyStoredVisitFinancials(data, cols, extensionPriceParent, dueAddons, parentAddons, storedDiscountScope);
-        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
+        if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(childIdentity.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
         if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
-        spawned.push({ id: row?.id, date: nd });
+        spawned.push({ id: row?.id, date: nd, serviceType: childIdentity.service_type });
         inserted++;
         created++;
       }
@@ -15975,7 +16000,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       customerId: parent.customer_id,
       scheduledDate: row.date,
       windowStart: parent.window_start,
-      serviceType: parent.service_type,
+      serviceType: row.serviceType || parent.service_type,
       source: 'recurring_alert_action',
     });
     // A series cancel can take the per-parent lock right after our commit
