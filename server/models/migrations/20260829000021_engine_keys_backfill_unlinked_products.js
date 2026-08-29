@@ -21,9 +21,10 @@
  *   - rodent_sanitation (3 tiers), termite_bond (3 terms), trap_only_retainer
  *     (PR B): one engine key, several rows — the linker refuses multi-claims.
  *
- * Ownership-recorded: only a NULL engine_keys array is set (an admin-stamped
- * array is never overwritten), and flea_tick's key is APPENDED only if
- * absent; down() removes exactly what up() added.
+ * Ownership-recorded and NULL-only, exactly as 20260825000011: a row whose
+ * engine_keys an admin already stamped is never modified — not overwritten,
+ * not appended to (the array is admin-owned data). down() clears exactly the
+ * arrays up() set, compare-and-set, under the same table lock.
  */
 const STATE_KEY = 'migration.20260829000021.state';
 const SEEDS = [
@@ -49,9 +50,11 @@ exports.up = async function up(knex) {
   for (const seed of SEEDS) {
     const row = await knex('services').where({ service_key: seed.service_key }).first('id', 'engine_keys');
     if (!row) continue;
-    const current = parseKeys(row.engine_keys);
-    const missing = seed.add.filter((k) => !current.includes(k));
-    if (!missing.length) continue;
+    // NULL-only: an admin-stamped array is owner data and is never modified
+    // (pre-push codex P1) — the seed applies only where nothing was stamped.
+    if (row.engine_keys != null) continue;
+    const current = [];
+    const missing = seed.add;
     // Refuse to create a second ACTIVE claimant (the runtime resolver only
     // competes among is_active rows; an archived historical mapping must not
     // suppress the live one — pre-push codex P1).

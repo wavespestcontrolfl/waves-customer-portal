@@ -95,12 +95,11 @@ describe('20260829000021 engine_keys backfill', () => {
     expect(db.services.find((r) => r.service_key === 'palm_injection').engine_keys).toBeNull(); // refused
     expect(JSON.parse(db.system_settings[0].value).applied).toEqual([]);
   });
-  test('appends to an existing admin array instead of overwriting it', async () => {
+  test('an admin-stamped array is owner data — never modified, not even appended to', async () => {
     const db = { services: [svc('palm_injection', { engine_keys: ['admin_custom'] })], system_settings: [] };
     await backfill.up(fakeKnex(db));
-    expect(db.services[0].engine_keys).toEqual(['admin_custom', 'palm_injection']);
-    await backfill.down(fakeKnex(db));
     expect(db.services[0].engine_keys).toEqual(['admin_custom']);
+    expect(JSON.parse(db.system_settings[0].value).applied).toEqual([]);
   });
   test('an archived historical claimant does not suppress the live mapping', async () => {
     const db = { services: [svc('palm_injection'), svc('palm_treatment', { is_active: false, is_archived: true, engine_keys: ['palm_injection'] })], system_settings: [] };
