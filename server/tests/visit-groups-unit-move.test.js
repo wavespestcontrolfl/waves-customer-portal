@@ -39,8 +39,12 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue({}) }));
+jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
+jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]) }));
 
 const db = require('../models/db');
+const AppointmentReminders = require('../services/appointment-reminders');
+const { findConflictingVisits } = require('../services/scheduling/occupancy');
 const { moveVisitAsUnit, _test: { shiftClock } } = require('../services/visit-groups');
 
 const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', technician_id: 't1', window_start: '09:00', window_end: '11:00' };
@@ -48,10 +52,11 @@ const member = (id, over = {}) => ({ id, status: 'confirmed', technician_id: 't1
 const SERVICE = { id: 'a', visit_id: 'v1' };
 
 function fakeRebooker(behaviour = {}) {
-  return { reschedule: jest.fn(async (id, date, win, reason, by, opts) => {
-    if (behaviour[id] === 'throw') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
+  const impl = async (id, date, win, reason, by, opts) => {
+    if (behaviour[id] === 'throw' && reason !== 'visit_move_rollback') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
     return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts };
-  }) };
+  };
+  return { reschedule: jest.fn(impl), rescheduleSeries: jest.fn(impl) };
 }
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
@@ -97,6 +102,9 @@ describe('moveVisitAsUnit', () => {
     expect(sCall[5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, expect: { scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00' } });
     expect(sCall[5].expectOccurrenceIds).toBeUndefined();
     for (const call of rebooker.reschedule.mock.calls) expect(call[5].excludeServiceIds.sort()).toEqual(['a', 'b']);
+    // every moved SIBLING gets its reminder row synced (notice suppressed); the primary's is the caller's job
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false });
     // parent retarget AFTER the moves: both stop keys locked in sorted order, patch from the landed rows, lifecycle reset + tracker effects re-armed on the date change, technician carried
     const rawKeys = db.__rawCalls.map((a) => a[1][1]);
     const pairIdx = rawKeys.findIndex((k, i) => k === 'p1:2026-08-30' && rawKeys[i + 1] === 'p1:2026-09-02');
@@ -159,6 +167,60 @@ describe('moveVisitAsUnit', () => {
     const rebooker = { reschedule: jest.fn(async (id) => ({ success: true, warnings: id === 'b' ? ['b overlaps another job'] : [] })) };
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(out.warnings).toEqual(['b overlaps another job']);
+  });
+
+  test('no-op requires the END and the explicit technician to match too — a technician-only resubmit still moves', async () => {
+    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
+    const rebooker = fakeRebooker();
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(out.visitMove.alreadyAtTarget).toBeUndefined();
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
+    const out2 = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '09:00-10:30' });
+    expect(out2.visitMove.alreadyAtTarget).toBeUndefined(); // end changed 10:00 → 10:30
+  });
+
+  test('an explicit series caller (primaryViaSeries) sends the primary through rescheduleSeries; siblings through reschedule', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { primaryViaSeries: true } });
+    expect(rebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    expect(rebooker.rescheduleSeries.mock.calls[0][0]).toBe('a');
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(rebooker.reschedule.mock.calls[0][0]).toBe('b');
+    expect(rebooker.reschedule.mock.calls[0][5].primaryViaSeries).toBeUndefined();
+  });
+
+  test('customer-initiated: a sibling target that clashes fails BEFORE anything moves; a residual sibling failure rolls the primary back and 409s', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'customer_self_serve' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_SLOT_TAKEN', memberId: 'b' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    jest.clearAllMocks();
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rb = fakeRebooker({ b: 'throw' });
+    await expect(moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'customer_self_serve' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b' });
+    // primary moved, sibling failed, primary rolled back to its original slot
+    const calls = rb.reschedule.mock.calls;
+    expect(calls.map((c) => [c[0], c[1], c[3]])).toEqual([['a', '2026-09-02', undefined], ['b', '2026-09-02', undefined], ['a', '2026-08-30', 'visit_move_rollback']]);
+    expect(calls[2][2]).toBe('09:00-10:00');
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+  });
+
+  test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },
+      { id: 'late', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' },
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    const detach = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.visit_id === null);
+    expect(detach.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['late']]]));
+    expect(out.warnings.some((w) => /joined this stop during the move/.test(w))).toBe(true);
   });
 
   test('a stop key that changes between the peek and the lock is retried', async () => {

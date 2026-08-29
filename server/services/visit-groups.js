@@ -1608,9 +1608,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             const targetEnd = isPrimary ? (win.end || shiftClock(m.window_end, delta)) : shiftClock(m.window_end, delta);
             window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
           }
-          const alreadyAtTarget = dateOnly(m.scheduled_date) === newDateStr && (!win.start || !m.window_start || m.window_start === targetStart);
+          const targetEnd = win.start && m.window_start
+            ? (isPrimary ? (win.end || shiftClock(m.window_end, delta)) : shiftClock(m.window_end, delta))
+            : (m.window_end || null);
+          const norm = (v) => (v ? String(v).slice(0, 5) : null);
+          const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
+          // No-op only when EVERY requested field already holds (codex r2):
+          // date, start AND end (normalized), and the explicit technician.
+          const alreadyAtTarget = dateOnly(m.scheduled_date) === newDateStr
+            && (!win.start || !m.window_start || (norm(m.window_start) === norm(targetStart) && norm(m.window_end) === norm(targetEnd)))
+            && techMatches;
           return {
             id: m.id, isPrimary, window, alreadyAtTarget,
+            startHHMM: norm(targetStart) || norm(m.window_start) || null,
+            original: { date: dateOnly(m.scheduled_date), window: m.window_start ? `${norm(m.window_start)}-${norm(m.window_end) || norm(m.window_start)}` : null },
             // Per-member fence from the LOCKED row (codex r1): the caller's
             // expect / expectAnchor / expectOccurrenceIds pin the primary only.
             expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null },
@@ -1640,20 +1651,67 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const failed = [];
   const warnings = [];
   let primaryResult = null;
-  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, ...siblingBase } = options;
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, ...siblingBase } = options;
   const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...plan.memberIds].map(String))];
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
+  // A customer-initiated move is ALL-OR-NOTHING (codex r2): the customer
+  // is told the grouped appointment moved, so every member must. Sibling
+  // targets are probed for occupancy BEFORE anything moves; a residual
+  // race is rolled back and surfaced as a 409.
+  const customerInitiated = /^customer/i.test(String(initiatedBy || ''));
+  if (customerInitiated && !options.overlapAdvisory) {
+    const { findConflictingVisits } = require('./scheduling/occupancy');
+    for (const target of ordered.filter((x) => !x.isPrimary && x.window && typeof x.window === 'string')) {
+      const [ws, we] = target.window.split('-');
+      const clash = await findConflictingVisits({ db, date: newDateStr, windowStart: ws, windowEnd: we, excludeServiceIds, excludeStatuses: ['cancelled', 'completed'] });
+      if (clash && clash.length) {
+        throw Object.assign(new Error('That time does not work for every service in this visit — please pick another time'), { statusCode: 409, code: 'VISIT_MEMBER_SLOT_TAKEN', memberId: target.id, isOperational: true });
+      }
+    }
+  }
+  const rollback = async () => {
+    for (const id of [...moved].reverse()) {
+      const t = plan.targets.find((x) => String(x.id) === String(id));
+      try {
+        await rebooker.reschedule(id, t.original.date, t.original.window, 'visit_move_rollback', initiatedBy, {
+          ...siblingBase, visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', excludeServiceIds, allowLive: true,
+        });
+      } catch (err) {
+        logger.error(`[visit-groups] unit move rollback of ${id} failed: ${err.message}`);
+      }
+    }
+  };
   for (const target of ordered) {
     const memberOpts = target.isPrimary
       ? { ...options, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds }
       : { ...siblingBase, expect: target.expect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
     try {
-      const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
+      // Explicit series scope (a direct rescheduleSeries caller) is
+      // preserved for the primary regardless of the collective gate (r2).
+      const r = target.isPrimary && options.primaryViaSeries
+        ? await rebooker.rescheduleSeries(target.id, newDate, target.window, reason, initiatedBy, memberOpts)
+        : await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
+      else {
+        // Callers sync reminders for the tapped row only (r2): every moved
+        // sibling gets its reminder row synced here, notice suppressed —
+        // the visit's one reminder text is the primary's. A sibling's own
+        // series move (seriesMoveId) is finished by the series-effects
+        // reconciler like any other committed series_moves row.
+        try {
+          await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, { sendNotification: false });
+        } catch (remErr) {
+          logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
+        }
+      }
     } catch (err) {
       if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
+      if (customerInitiated) {
+        await rollback();
+        throw Object.assign(new Error('That time does not work for every service in this visit — please pick another time'), { statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', memberId: target.id, isOperational: true, cause: err.message });
+      }
       failed.push({ id: target.id, reason: err.message, code: err.code || null });
       logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${err.message}`);
     }
@@ -1669,6 +1727,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .select('id', 'scheduled_date', 'window_start', 'window_end');
+      // A row that joined the visit AFTER the plan snapshot (the old stop
+      // lock was released between plan and move — codex r2) is not part of
+      // this move: detach it in place so it never trails a parent that
+      // points at the new stop.
+      const late = rows.filter((r) => !plan.memberIds.map(String).includes(String(r.id)) && dateOnly(r.scheduled_date) !== newDateStr);
+      if (late.length) {
+        await t('scheduled_services').whereIn('id', late.map((r) => r.id)).update({ visit_id: null });
+        warnings.push(`${late.length} service(s) joined this stop during the move and were left at the old time — check the schedule`);
+        logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detached late joiner(s) ${late.map((r) => r.id).join(',')}`);
+      }
       const landed = rows.filter((r) => dateOnly(r.scheduled_date) === newDateStr);
       if (!landed.length) return;
       const starts = landed.map((r) => r.window_start).filter(Boolean).sort();

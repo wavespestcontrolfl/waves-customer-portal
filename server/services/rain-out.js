@@ -599,6 +599,9 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // stop, not just the anchor — omitting it silently routed recurring
       // siblings down the single-visit path (codex P1).
       'is_recurring',
+      // Visit group: a route batch moves a grouped stop ONCE, through its
+      // first member; later members of the same visit are skipped.
+      'visit_id',
     );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
@@ -1706,7 +1709,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // Shared across the whole rain-out: the first slow NWS pair degrades
   // forecast decoration for every remaining stop's SMS.
   const forecastHealth = { degraded: false };
+  // Visit groups moved by an earlier member of this batch (codex #3609 r2):
+  // the unit move already carried every member (rows, reminders, series),
+  // so later members are recorded as covered — no second move, no second
+  // notice, no second count.
+  const coveredVisits = new Set();
   for (const job of orderedJobs) {
+    if (job.visit_id && coveredVisits.has(String(job.visit_id))) {
+      results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
+      continue;
+    }
     let newWindow;
     if (job.id === serviceId) {
       newWindow = target.window;
@@ -1822,6 +1834,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
+        if (moveResult?.visitMove?.visitId) coveredVisits.add(String(moveResult.visitMove.visitId));
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.

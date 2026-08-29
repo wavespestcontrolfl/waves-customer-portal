@@ -1383,7 +1383,10 @@ class SmartRebooker {
     // re-enters here with visitPolicy:'single' and proceeds as a series.
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
-        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy,
+        // The caller asked for a SERIES move explicitly: the primary re-enters
+        // rescheduleSeries regardless of the collective choke-point gate.
+        options: { ...options, primaryViaSeries: true },
       });
       if (unit) return unit;
     }
