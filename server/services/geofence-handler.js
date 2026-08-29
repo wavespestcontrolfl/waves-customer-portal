@@ -36,6 +36,11 @@ async function markOnPropertyFromGeofence(scheduledServiceId, eventTime = new Da
   let canonical = null;
   try {
     canonical = await trackTransitions.markOnProperty(scheduledServiceId, opts);
+    // A grouped stop that did not fully sync is NOT success (codex #3603
+    // r6): record the transition-failure alert so the office sees it.
+    await require('./track-transition-alerts').recordTrackTransitionResultFailure({
+      jobId: scheduledServiceId, action: 'mark_on_property', actorId: opts.actingTechId || null, result: canonical,
+    });
   } catch (err) {
     logger.error(`[geofence-handler] markOnProperty failed for job ${scheduledServiceId}: ${err.message}`);
   }

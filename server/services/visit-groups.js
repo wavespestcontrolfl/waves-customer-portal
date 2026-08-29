@@ -1052,6 +1052,10 @@ async function claimVisitNotification(row, kind) {
       await lockStop(t, visit.stop_base_key);
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate().first('id', 'visit_id');
       if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return 'detached';
+      // Fresh row ⇒ owner. Existing row: a `failed` (retryable provider
+      // miss) is RECLAIMED — that is the retry the ledger promised (codex
+      // r6); sent / suppressed / claimed (in flight, or an orphan for the
+      // office) ⇒ taken.
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
@@ -1062,7 +1066,8 @@ async function claimVisitNotification(row, kind) {
           claimed_at: new Date(),
         })
         .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
-        .ignore()
+        .merge({ status: 'claimed', claimed_at: new Date() })
+        .where('visit_effects.status', '=', 'failed')
         .returning('id');
       return rows && rows.length ? 'owner' : 'taken';
     });
@@ -1131,10 +1136,16 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         .first('id', 'visit_id', 'technician_id', 'status');
       if (!lockedPrimary
           || String(lockedPrimary.visit_id || '') !== String(visit.id)
-          || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')
-          || String(lockedPrimary.status) !== toStatus) {
-        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}, status=${lockedPrimary && lockedPrimary.status}) — skipped`);
+          || String(lockedPrimary.technician_id || '') !== String(primary.technician_id || '')) {
+        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary no longer leads visit ${visit.id} (visit=${lockedPrimary && lockedPrimary.visit_id}) — skipped`);
         return null;
+      }
+      if (String(lockedPrimary.status) !== toStatus) {
+        // Still a member but its operational status lags the tracker (an
+        // automatic caller's best-effort status sync failed): NOT benign —
+        // nothing moved, the caller must report the stop incomplete (r6).
+        logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id}: primary status ${lockedPrimary.status} lags target ${toStatus} — incomplete`);
+        return { incomplete: 'primary_status_lagging' };
       }
       const siblings = await t('scheduled_services')
         .where({ visit_id: visit.id })
@@ -1142,6 +1153,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .forUpdate()
         .select('id', 'status', 'technician_id', 'track_state', 'source_action', 'customer_confirmed',
+          'customer_id', 'property_id', 'scheduled_date',
           'actual_start_time', 'check_in_time', 'arrived_at');
       const { transitionJobStatus } = require('./job-status');
       const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
@@ -1155,6 +1167,16 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
         // so a null here is an inconsistency to surface, not a wildcard.
         if (String(s.technician_id || '') !== String(primary.technician_id || '')) {
           skipped.push({ id: s.id, reason: 'technician' });
+          continue;
+        }
+        // Stop identity revalidated on the LOCKED row (codex r6): a
+        // reschedule that committed before its post-commit detach seam ran
+        // still carries the old visit_id — never advance a row that is no
+        // longer physically at this stop.
+        if (dateOnly(s.scheduled_date) !== dateOnly(visit.scheduled_date)
+            || String(s.customer_id) !== String(visit.customer_id)
+            || String(s.property_id || '') !== String(visit.property_id || '')) {
+          skipped.push({ id: s.id, reason: 'stop_changed' });
           continue;
         }
         if (String(s.status) !== toStatus) {
@@ -1187,6 +1209,7 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
     return { ok: false, visitId: primary.visit_id, reason: err.message, siblingIds: [], trackerIds: [], skipped: [] };
   }
   if (!fan) return null;
+  if (fan.incomplete) return { ok: false, visitId: primary.visit_id, reason: fan.incomplete, siblingIds: [], trackerIds: [], skipped: [] };
 
   // Tracker writes for lagging siblings — customer text suppressed (the one
   // text came from the primary). _visitSibling stops the tracker from

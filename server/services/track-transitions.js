@@ -378,6 +378,100 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
   return fan;
 }
 
+/**
+ * The en-route customer text for ONE row, with the visit-scoped claim in
+ * front of it (codex #3603 r4–r6). Shared by the fresh flip and the
+ * idempotent re-entry of a grouped row whose guard is still NULL (a prior
+ * claim error / provider failure), so "the next signal retries" is true.
+ * `attemptAt` is THIS attempt's en_route_at — every guard write is fenced
+ * to it plus the schedule tuple and tracker state.
+ */
+async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}, attemptAt }) {
+  let smsSent = false;
+  // Classification for the visit effect ledger (codex #3603 r2): a
+  // deterministic suppression (opt-out / covered sibling / already handled)
+  // must read differently from a provider failure ('retry').
+  let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
+  let visitClaim = null;
+  const guardOpen = !svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears;
+  const attemptFence = {
+    id: serviceId,
+    track_state: 'en_route',
+    en_route_at: attemptAt,
+    scheduled_date: svc.scheduled_date ?? null,
+  };
+  if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling && guardOpen) {
+    // Claimed under the stop lock with membership verified (r5): 'detached'
+    // means this row is no longer in the visit — it texts as a plain row.
+    visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
+    if (visitClaim === 'taken') {
+      smsOutcome = 'covered';
+      try {
+        // Fenced to THIS attempt (r6): a live reschedule that reset the
+        // row's guards for a new attempt must not be stamped covered.
+        await db('scheduled_services').where({ ...attemptFence, visit_id: svc.visit_id })
+          .whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+      } catch (err) {
+        logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
+      }
+    } else if (visitClaim === 'error') {
+      // Unknown claim state: never send, leave the guard NULL so the next
+      // signal retries; the wrapper reports the stop incomplete.
+      smsOutcome = 'claim_error';
+    }
+  }
+  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
+  // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
+  // way" text came from the visit's primary row; the visit stamps this row
+  // as covered afterwards (visit-groups.fanOutLiveTransition).
+  if (!opts.suppressCustomerSms && mayText && guardOpen) {
+    try {
+      const tech = svc.technician_id
+        ? await db('technicians').where({ id: svc.technician_id }).first('name')
+        : null;
+      const techName = tech?.name || 'Your Waves technician';
+      const trackToken = svc.track_view_token;
+
+      const etaMinutes = await resolveEnRouteEtaMinutes({
+        technicianId: svc.technician_id,
+        customerId: svc.customer_id,
+        serviceId: svc.id,
+      });
+
+      const result = await TwilioService.sendTechEnRoute(
+        svc.customer_id,
+        techName,
+        etaMinutes,
+        trackToken,
+        {
+          operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
+        },
+      );
+
+      smsOutcome = result && result.success ? 'sent' : (result && result.suppressed ? 'suppressed' : 'retry');
+      if (result && result.success) {
+        smsSent = true;
+        try {
+          // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
+          // the schedule tuple), not just track_state — a same-day reschedule
+          // can rewind the row and a FRESH attempt can reach en_route while
+          // this Twilio call was in flight. The SMS did go out; if the guard
+          // write misses, the fresh attempt re-sending is intended.
+          await db('scheduled_services').where(attemptFence).update({ track_sms_sent_at: new Date() });
+        } catch (guardErr) {
+          // The text DID go out — keep 'sent'; the guard stamp failure is its
+          // own log line (codex r5).
+          logger.error(`[track-transitions] en-route SMS guard stamp failed for ${serviceId}: ${guardErr.message}`);
+        }
+      }
+    } catch (err) {
+      logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
+      if (smsOutcome !== 'sent') smsOutcome = 'retry';
+    }
+  }
+  return { smsSent, smsOutcome, visitClaim };
+}
+
 async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
@@ -524,11 +618,21 @@ async function markEnRouteCore(serviceId, opts = {}) {
     if (svc.track_state === 'en_route') {
       emitCustomerTrackRefresh(svc, 'en_route', svc.en_route_at || new Date());
     }
+    // Grouped row already en route with its guard still NULL (a prior claim
+    // error or provider failure): the re-entry IS the retry (codex r6) —
+    // reclaim and send, fenced to the existing attempt's en_route_at.
+    let retry = { smsSent: false, smsOutcome: undefined, visitClaim: null };
+    if (svc.visit_id && svc.track_state === 'en_route' && !svc.track_sms_sent_at
+        && !opts._visitSibling && !opts.suppressCustomerSms) {
+      retry = await claimAndSendEnRoute({ svc, serviceId, opts, attemptAt: svc.en_route_at });
+    }
     return {
       ok: true,
       state: svc.track_state,
       enRouteAt: svc.en_route_at,
-      smsSent: false,
+      smsSent: retry.smsSent,
+      ...(retry.smsOutcome ? { smsOutcome: retry.smsOutcome } : {}),
+      visitNotificationOwner: retry.visitClaim === 'owner',
       alreadyEnRoute: svc.track_state === 'en_route',
       _row: svc,
     };
@@ -618,103 +722,8 @@ async function markEnRouteCore(serviceId, opts = {}) {
   // A stale guard from the aborted earlier attempt was cleared in the flip
   // write above, so it must not suppress today's send. A same-day guard
   // (SMS already sent for THIS attempt) still suppresses.
-  let smsSent = false;
-  // Classification for the visit effect ledger (codex #3603 r2): a
-  // deterministic suppression (opt-out / covered sibling / already handled)
-  // must read differently from a provider failure ('retry').
-  let smsOutcome = opts.suppressCustomerSms ? 'suppressed' : 'already_handled';
-  // Visit-scoped claim BEFORE the per-row sender (codex #3603 r4): two
-  // members signalled concurrently must not both text — only the claim
-  // owner sends; the other stamps itself covered.
-  let visitClaim = null;
-  if (svc.visit_id && !opts.suppressCustomerSms && !opts._visitSibling
-      && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
-    // Claimed under the stop lock with membership verified (r5): 'detached'
-    // means this row is no longer in the visit — it texts as a plain row.
-    visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'en_route');
-    if (visitClaim === 'taken') {
-      smsOutcome = 'covered';
-      try {
-        await db('scheduled_services').where({ id: serviceId, visit_id: svc.visit_id })
-          .whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
-      } catch (err) {
-        logger.error(`[track-transitions] covered stamp failed for ${serviceId}: ${err.message}`);
-      }
-    } else if (visitClaim === 'error') {
-      // Unknown claim state: never send, leave the guard NULL so the next
-      // signal retries; the wrapper reports the stop incomplete.
-      smsOutcome = 'claim_error';
-    }
-  }
-  const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
-  // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
-  // way" text came from the visit's primary row; the visit stamps this row
-  // as covered afterwards (visit-groups.fanOutLiveTransition).
-  if (!opts.suppressCustomerSms && mayText
-      && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
-    try {
-      const tech = svc.technician_id
-        ? await db('technicians').where({ id: svc.technician_id }).first('name')
-        : null;
-      const techName = tech?.name || 'Your Waves technician';
-      const trackToken = svc.track_view_token;
-
-      // Best-effort live ETA from tech_status → customer geocode.
-      // Returns null when tech GPS is stale/missing or the customer
-      // address isn't geocoded — SMS still fires without the ETA line.
-      const etaMinutes = await resolveEnRouteEtaMinutes({
-        technicianId: svc.technician_id,
-        customerId: svc.customer_id,
-        serviceId: svc.id,
-      });
-
-      const result = await TwilioService.sendTechEnRoute(
-        svc.customer_id,
-        techName,
-        etaMinutes,
-        trackToken,
-        {
-          // Send-window operator provenance: a tech/admin manually marking
-          // a late visit en route chose the moment and the customer notice
-          // is the time-sensitive point of the tap — the tech is literally
-          // driving there. Geofence/system transitions stay fenced.
-          operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
-        },
-      );
-
-      smsOutcome = result && result.success ? 'sent' : (result && result.suppressed ? 'suppressed' : 'retry');
-      // sendTechEnRoute can return undefined (opt-out path), falsy results,
-      // or { success, sid }. Only mark sent on a positive signal.
-      if (result && result.success) {
-        // Attempt-scoped guard stamp: matching THIS flip's en_route_at (and
-        // the schedule tuple), not just track_state — a same-day reschedule
-        // can rewind the row and a FRESH attempt can reach en_route while
-        // this Twilio call was in flight, and a state-only match would
-        // stamp the old attempt's guard onto the new attempt, suppressing
-        // its notification. The SMS did go out; if the guard write misses,
-        // the fresh attempt re-sending is the intended behavior.
-        smsSent = true;
-        try {
-          await db('scheduled_services')
-            .where({
-              id: serviceId,
-              track_state: 'en_route',
-              en_route_at: now,
-              scheduled_date: svc.scheduled_date ?? null,
-            })
-            .update({ track_sms_sent_at: new Date() });
-        } catch (guardErr) {
-          // The text DID go out — keep 'sent'; the guard stamp failure is its
-          // own log line (codex r5).
-          logger.error(`[track-transitions] en-route SMS guard stamp failed for ${serviceId}: ${guardErr.message}`);
-        }
-      }
-    } catch (err) {
-      logger.error(`[track-transitions] en-route SMS failed: ${err.message}`);
-      if (smsOutcome !== 'sent') smsOutcome = 'retry';
-      // Leave track_sms_sent_at NULL so a retap can retry.
-    }
-  }
+  const sendResult = await claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears, attemptAt: now });
+  const { smsSent, smsOutcome, visitClaim } = sendResult;
 
   // One-time "introducing the app" email for a new recurring customer's first
   // visit — fired here so it lands exactly when "watch your tech arrive live"
@@ -1079,8 +1088,14 @@ async function markOnProperty(serviceId, opts = {}) {
     } else if (visitClaim === 'taken') {
       arrivalSms = 'covered';
       try {
-        await db('scheduled_services').where({ id: serviceId, visit_id: svc.visit_id })
-          .whereNull('arrival_sms_sent_at').update({ arrival_sms_sent_at: new Date() });
+        // Fenced to THIS arrival attempt (r6): same predicate shape as the
+        // arrival guard claim — tracker state, schedule tuple, arrived_at.
+        const fence = db('scheduled_services')
+          .where({ id: serviceId, visit_id: svc.visit_id, track_state: 'on_property', scheduled_date: svc.scheduled_date ?? null })
+          .whereNull('arrival_sms_sent_at');
+        if (claimArrivedAt == null) fence.whereNull('arrived_at');
+        else fence.whereRaw(`date_trunc('milliseconds', arrived_at) = date_trunc('milliseconds', ?::timestamptz)`, [new Date(claimArrivedAt)]);
+        await fence.update({ arrival_sms_sent_at: new Date() });
       } catch (err) {
         logger.error(`[track-transitions] arrival covered stamp failed for ${serviceId}: ${err.message}`);
       }

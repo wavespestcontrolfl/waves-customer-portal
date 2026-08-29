@@ -55,7 +55,7 @@ const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification 
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
 const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', ...over });
-const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30' };
+const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1' };
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
 
@@ -73,12 +73,12 @@ describe('fanOutLiveTransition', () => {
       scheduled_services: {
         first: lockedPrimary(),
         select: () => [
-          { id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
-          { id: 's2', status: 'on_site', technician_id: 't1', track_state: 'on_property' },   // not eligible for en_route
-          { id: 's3', status: 'pending', technician_id: 't2', track_state: 'scheduled' },     // other tech
-          { id: 's4', status: 'pending', technician_id: null, track_state: 'scheduled' },     // UNASSIGNED ≠ wildcard (codex r1)
-          { id: 's5', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },    // status there, tracker lagging
-          { id: 's6', status: 'pending', technician_id: 't1', track_state: 'scheduled', source_action: 'ai_call_outbound_review', customer_confirmed: false }, // office review
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's2', status: 'on_site', technician_id: 't1', track_state: 'on_property' },   // not eligible for en_route
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's3', status: 'pending', technician_id: 't2', track_state: 'scheduled' },     // other tech
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's4', status: 'pending', technician_id: null, track_state: 'scheduled' },     // UNASSIGNED ≠ wildcard (codex r1)
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's5', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },    // status there, tracker lagging
+          { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's6', status: 'pending', technician_id: 't1', track_state: 'scheduled', source_action: 'ai_call_outbound_review', customer_confirmed: false }, // office review
         ],
       },
     };
@@ -115,7 +115,7 @@ describe('fanOutLiveTransition', () => {
   test('on_site: arrival lifecycle written per moved sibling; effect status follows the primary send outcome', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
+      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
     };
     const out = await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorId: 't1', smsOutcome: 'gate_off', notificationOwner: true });
     expect(out.siblingIds).toEqual(['s1']);
@@ -134,7 +134,7 @@ describe('fanOutLiveTransition', () => {
   });
 
   test('a visit that is not open never fans out', async () => {
-    db.__script = { service_visits: { first: () => ({ ...VISIT, status: 'closing' }) }, scheduled_services: { select: () => [{ id: 's1', status: 'pending', technician_id: 't1' }] } };
+    db.__script = { service_visits: { first: () => ({ ...VISIT, status: 'closing' }) }, scheduled_services: { select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'pending', technician_id: 't1' }] } };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
     expect(out).toBe(null);
     expect(transitionJobStatus).not.toHaveBeenCalled();
@@ -161,7 +161,7 @@ describe('fanOutLiveTransition', () => {
   test('a covered-stamp write failure is surfaced as ok:false', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { first: lockedPrimary(), select: () => [{ id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
+      scheduled_services: { first: lockedPrimary(), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
     };
     const origDb = db.getMockImplementation();
     db.mockImplementation((table) => {
@@ -179,8 +179,8 @@ describe('fanOutLiveTransition', () => {
     db.__script = {
       service_visits: { first: () => VISIT },
       scheduled_services: { first: lockedPrimary(), select: () => [
-        { id: 's1', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
-        { id: 's2', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's2', status: 'en_route', technician_id: 't1', track_state: 'scheduled' },
       ] },
     };
     trackTransitions.markEnRoute.mockResolvedValueOnce({ ok: false, reason: 'concurrent_update' }).mockRejectedValueOnce(new Error('pool timeout'));
@@ -193,20 +193,39 @@ describe('fanOutLiveTransition', () => {
   test('on_site siblings carry the audit actor separately from the acting tech', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ id: 's1', status: 'on_site', technician_id: 't1', track_state: 'en_route' }] },
+      scheduled_services: { first: lockedPrimary({ status: 'on_site' }), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'on_site', technician_id: 't1', track_state: 'en_route' }] },
     };
     await fanOutLiveTransition({ primary: { ...PRIMARY, status: 'on_site' }, kind: 'on_site', actorType: 'admin', actorId: 'admin-1' });
     expect(trackTransitions.markOnProperty).toHaveBeenCalledWith('s1', expect.objectContaining({ actorType: 'admin', actorId: 'admin-1', _visitSibling: true }));
   });
 
+  test('a sibling whose stop tuple changed (reschedule committed, detach seam not yet run) is skipped', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [
+        { scheduled_date: '2026-09-02', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p9', id: 's2', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' },
+      ] },
+    };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.siblingIds).toEqual([]);
+    expect(out.skipped.map((x) => x.reason)).toEqual(['stop_changed', 'stop_changed']);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+  });
+
+  test('a primary whose operational status lags the tracker is reported incomplete, not benign', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary({ status: 'confirmed' }), select: () => [] } };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out).toMatchObject({ ok: false, reason: 'primary_status_lagging', visitId: 'v1' });
+  });
+
   test.each([
     ['detached (split committed under the lock)', { visit_id: 'v2' }],
     ['reassigned technician', { technician_id: 't9' }],
-    ['not at the target status', { status: 'confirmed' }],
   ])('primary revalidated under the stop lock — %s ⇒ no fan-out', async (_label, over) => {
     db.__script = {
       service_visits: { first: () => VISIT },
-      scheduled_services: { first: lockedPrimary(over), select: () => [{ id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' }] },
+      scheduled_services: { first: lockedPrimary(over), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled' }] },
     };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
     expect(out).toBe(null);
@@ -225,6 +244,9 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
     expect(db.__rawCalls[0][1]).toEqual(['visit.stop', 'p1:2026-08-30']);
     const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
     expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0 });
+    // a `failed` row is RECLAIMED (the retry); sent/suppressed/claimed are taken
+    const merge = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'merge');
+    expect(merge.values).toMatchObject({ status: 'claimed' });
     db.__script.visit_effects = { returning: () => [] };
     expect(await claimVisitNotification(ROW, 'on_site')).toBe('taken');
   });
