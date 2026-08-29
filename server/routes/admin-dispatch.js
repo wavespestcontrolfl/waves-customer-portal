@@ -4524,6 +4524,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
+    // attached to a non-dissolved visit must complete through the visit
+    // sheet — legacy per-row completion alongside the packet worker would
+    // double records and side effects. Inert until GATE_VISIT_GROUPS
+    // stamping ships (no row carries a visit_id today). The check reads
+    // the CURRENT visit status, so an admin "Separate these services"
+    // (dissolve) restores per-row completion immediately.
+    {
+      // One atomic re-read (not the svc snapshot above) so a group
+      // attachment that landed after the load is still seen, and lookup
+      // errors propagate (fail closed) instead of silently allowing a
+      // duplicate completion. An orphaned visit pointer also blocks —
+      // dissolution NULLs child visit_id in the same transaction, so an
+      // orphan means something is mid-flight or broken, never "go ahead".
+      const membership = await db('scheduled_services as ss')
+        .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+        .where('ss.id', req.params.serviceId)
+        .first('ss.visit_id', 'sv.status as visit_status');
+      if (membership && membership.visit_id
+          && String(membership.visit_status || '') !== 'dissolved') {
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: membership.visit_id,
+        });
+      }
+    }
+
     // This endpoint can mint reports, invoices, inventory deductions, and
     // customer messages. Technicians may only perform that write for their
     // own assigned visit; admins retain office-wide dispatch authority.
@@ -5245,6 +5273,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Visit-group membership re-check, now that the durable claim is
+    // committed (codex r2 P0). Stamping (visit-groups.js) locks the row
+    // FOR UPDATE and then refuses rows with a live claim, so taking the
+    // same row lock here and re-reading membership closes every
+    // interleaving: either stamping saw our claim and refused, or we see
+    // its committed stamp here and stop before any side effect.
+    if (claim.action === 'proceed') {
+      const groupedNow = await db.transaction(async (trx) => {
+        const lockedRow = await trx('scheduled_services')
+          .where({ id: svc.id }).forUpdate().first('visit_id');
+        if (!lockedRow || !lockedRow.visit_id) return null;
+        const parent = await trx('service_visits')
+          .where({ id: lockedRow.visit_id }).first('id', 'status');
+        return (!parent || String(parent.status) !== 'dissolved') ? lockedRow.visit_id : null;
+      });
+      if (groupedNow) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error('visit_grouped'),
+        ).catch(() => {});
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: groupedNow,
+        });
+      }
+    }
 
     // Deferred photo-caption banned-copy gate (captions were sanitized above).
     // Run only after replay/conflict handling so idempotent retries of an
