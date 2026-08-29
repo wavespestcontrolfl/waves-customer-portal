@@ -2402,6 +2402,21 @@ function propertyFieldOverLimit(body) {
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
 // surface calls this (the property writes below were already admin-only).
+// Canonical WaveGuard-qualifying service families on an account (the same
+// loader estimate conversion feeds into priorQualifyingServices). The admin
+// estimator's CLIENT_FALLBACK engine reads this to decide the rodent
+// bait-station setup waiver from an OTHER qualifying family, never from the
+// account-level tier/rate (codex #3591 r13 P1: a rodent-only Bronze account
+// still owes the setup on a second rodent quote, exactly as generateEstimate
+// decides).
+router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, next) => {
+  try {
+    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id);
+    res.json({ keys: Array.isArray(keys) ? keys : [] });
+  } catch (err) { next(err); }
+});
+
 router.get('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const customerProperties = require('../services/customer-properties');

@@ -22,8 +22,20 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
-// rodent_bait joined the qualifying families 2026-08-29 (owner directive).
+// rodent_bait joined the qualifying families 2026-08-29 (owner directive) —
+// but its membership follows the LIVE pricing_config.rodent_waveguard flag
+// (db-bridge syncs WAVEGUARD.qualifyingServices from it), so every reader
+// goes through liveWaveGuardServiceFamilies() rather than this literal
+// (codex #3591 r13 P1): an operator flipping tier_qualifier off must stop
+// booking-time and nightly alignment from enrolling/upgrading on rodent.
 const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait'];
+function liveWaveGuardServiceFamilies() {
+  let rodentQualifies = true;
+  try {
+    rodentQualifies = require('./pricing-engine/discount-engine').serviceCountsTowardWaveGuardTier('rodent_bait');
+  } catch { rodentQualifies = true; }
+  return WAVEGUARD_SERVICE_FAMILIES.filter((family) => family !== 'rodent_bait' || rodentQualifies);
+}
 // admin-manual-booking-resend: the admin "resend booking link" for a ONE-TIME
 // accepted estimate (admin-estimates.js — it sends the estimate_accepted_onetime
 // SMS template). It must carry one-time semantics like estimate-accept, or a
@@ -620,9 +632,13 @@ function detectWaveGuardPlanKeys(row = {}) {
 
 function serviceFamilyKey(planKey) {
   const key = String(planKey || '');
-  for (const family of WAVEGUARD_SERVICE_FAMILIES) {
+  for (const family of liveWaveGuardServiceFamilies()) {
     if (key === family || key.startsWith(`${family}_`)) return family;
   }
+  // A rodent plan key while the live flag is OFF is not a tier family at
+  // all — dropping it here keeps uniqueServiceFamilies/representativePlanKeys
+  // (and every tier count built on them) in step with the pricing engine.
+  if (key === 'rodent_bait' || key.startsWith('rodent_bait_')) return null;
   return key || null;
 }
 
@@ -1521,6 +1537,7 @@ module.exports = {
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
   serviceFamilyKey,
+  liveWaveGuardServiceFamilies,
   serviceRowCountsTowardWaveGuard,
   tierLabelStatus,
   syncCustomerWaveGuardPlanFromScheduledServices,

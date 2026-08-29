@@ -14,6 +14,7 @@ import {
   applyServerRodentWaveguardPricingConfig,
   calculateEstimate,
   rodentBaitBracketForFootprint,
+  rodentBaitPolicyNote,
 } from "./estimateEngine";
 
 function rodentInput(overrides = {}) {
@@ -99,8 +100,10 @@ describe("rodent bait — non-member setup waiver uses membership evidence", () 
     expect(setupRow(calculateEstimate(rodentInput({ isRecurringCustomer: true })))).toMatchObject({ price: 99 });
   });
 
-  it("an active WaveGuard member on the matched account waives it", () => {
-    expect(setupRow(calculateEstimate(rodentInput({ existingWaveGuardMember: true })))).toBeUndefined();
+  it("an OTHER qualifying family on the matched account waives it (canonical evidence, not tier/rate)", () => {
+    expect(setupRow(calculateEstimate(rodentInput({ existingOtherQualifyingService: true })))).toBeUndefined();
+    // The old account-level signal is no evidence on its own (rodent-only Bronze).
+    expect(setupRow(calculateEstimate(rodentInput({ existingWaveGuardMember: true })))).toMatchObject({ price: 99 });
   });
 
   it("another qualifying service on the SAME estimate waives it", () => {
@@ -112,5 +115,23 @@ describe("rodent bait — non-member setup waiver uses membership evidence", () 
     expect(setupRow(calculateEstimate(rodentInput()))).toMatchObject({ price: 79.5 });
     applyServerRodentSetupFeePricingConfig({ value: 0 });
     expect(setupRow(calculateEstimate(rodentInput()))).toBeUndefined();
+  });
+});
+
+describe("rodent bait — estimator policy note derives from the emitted result (codex #3591 r13 P2)", () => {
+  it("standalone non-member: qualifying + discountable + setup applies", () => {
+    expect(rodentBaitPolicyNote(calculateEstimate(rodentInput())))
+      .toBe("WaveGuard qualifying service — tier discount applies; $99 setup applies (no other qualifying service)");
+  });
+  it("with another qualifier the setup reads waived; live flags and fee flow through", () => {
+    expect(rodentBaitPolicyNote(calculateEstimate(rodentInput({ svcPest: true, pestFrequency: "quarterly" }))))
+      .toMatch(/\$99 setup waived/);
+    applyServerRodentWaveguardPricingConfig({ tier_qualifier: false, exclude_from_pct_discount: true });
+    applyServerRodentSetupFeePricingConfig({ value: 0 });
+    expect(rodentBaitPolicyNote(calculateEstimate(rodentInput())))
+      .toBe("Not counted toward the WaveGuard tier — excluded from the tier %; no setup fee");
+  });
+  it("no rodent row → the priced-separately note", () => {
+    expect(rodentBaitPolicyNote({})).toMatch(/priced separately/);
   });
 });

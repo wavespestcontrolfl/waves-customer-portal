@@ -654,6 +654,26 @@ export function rodentBaitWaveguardFlags() {
   return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
+// Estimator panel note for the rodent bait row, derived from the EMITTED
+// result (row-level tier/discount posture + whether the setup line fired)
+// and the live setup fee — never the migration-default literals (codex
+// #3591 r13 P2): staff read the policy the estimate they are about to send
+// actually follows.
+export function rodentBaitPolicyNote(E = {}) {
+  const row = (E?.recurring?.services || []).find((s) => s?.service === 'rodent_bait');
+  if (!row) return 'Not included in WaveGuard bundle discount — priced separately';
+  const setupLine = (E?.oneTime?.items || []).find((i) => i?.service === 'rodent_bait_setup');
+  const counts = row.countsTowardWaveGuardTier !== false && row.tierQualifier !== false;
+  const discountable = row.discountable !== false && row.excludeFromPctDiscount !== true;
+  const fee = Number(RODENT_BAIT.setupFee) || 0;
+  const feeText = fee > 0
+    ? (setupLine
+      ? `$${fee} setup applies (no other qualifying service)`
+      : `$${fee} setup waived (another qualifying service / member)`)
+    : 'no setup fee';
+  return `${counts ? 'WaveGuard qualifying service' : 'Not counted toward the WaveGuard tier'} — ${discountable ? 'tier discount applies' : 'excluded from the tier %'}; ${feeText}`;
+}
+
 // Zero is the documented "fee disabled" value; a missing row keeps the
 // in-code default (same as db-bridge).
 export function applyServerRodentSetupFeePricingConfig(config) {
@@ -3502,11 +3522,17 @@ export function calculateEstimate(inputs) {
     // P1). The estimator passes existingWaveGuardMember from the matched
     // customer's active tier (the same evidence that unlocks loyalty).
     const rbSetupFee = rodentBaitSetupFee();
-    const existingMemberWaives = inputs.existingWaveGuardMember === true;
+    // Waiver evidence = an OTHER qualifying family already on the account
+    // (existingOtherQualifyingService — the estimator derives it from the
+    // canonical qualifying-service loader, the same identities
+    // generateEstimate reads as priorQualifyingServices minus rodent_bait;
+    // codex #3591 r13 P1), never the account-level tier/rate: a rodent-only
+    // Bronze account owes the setup on a second rodent quote.
+    const existingOtherQualifierWaives = inputs.existingOtherQualifyingService === true;
     // "Sole qualifier" = no OTHER qualifying service on the estimate (rodent
     // never self-waives, whether or not it counts toward the tier).
     const otherQualifiersOnEstimate = ac - (rbCountsTowardTier ? 1 : 0);
-    if (otherQualifiersOnEstimate === 0 && !existingMemberWaives && rbSetupFee > 0) {
+    if (otherQualifiersOnEstimate === 0 && !existingOtherQualifierWaives && rbSetupFee > 0) {
       hasOT = true;
       otItems.push({
         service: 'rodent_bait_setup',

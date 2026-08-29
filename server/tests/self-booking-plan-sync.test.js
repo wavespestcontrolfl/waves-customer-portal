@@ -194,6 +194,16 @@ describe('self-booking plan sync helpers', () => {
 
     expect(uniqueServiceFamilies(detected)).toEqual(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub']);
     expect(inferTierFromServiceCount(uniqueServiceFamilies(detected).length)).toBe('Platinum');
+    // rodent_bait is a tier family only while the live flag is on (codex #3591 r13 P1).
+    expect(uniqueServiceFamilies(['pest_control_quarterly', 'rodent_bait'])).toEqual(['pest_control', 'rodent_bait']);
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      expect(uniqueServiceFamilies(['pest_control_quarterly', 'rodent_bait'])).toEqual(['pest_control']);
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
     expect(representativePlanKeys(detected)).toEqual([
       'pest_control_quarterly',
       'lawn_care_6week',

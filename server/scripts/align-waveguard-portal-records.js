@@ -50,6 +50,7 @@ const {
   resolveTreeShrubRecurringPlan,
   isCommercialServiceRow,
   isNonBaitRodentServiceRow,
+  liveWaveGuardServiceFamilies,
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
@@ -197,9 +198,12 @@ function detectServiceKeys(row = {}) {
 
 function serviceFamilyKey(serviceKey) {
   const key = String(serviceKey || '');
-  for (const family of ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait']) {
+  // Live family list (codex #3591 r13 P1): rodent_bait is a family only
+  // while pricing_config.rodent_waveguard.tier_qualifier is on.
+  for (const family of liveWaveGuardServiceFamilies()) {
     if (key === family || key.startsWith(`${family}_`)) return family;
   }
+  if (key === 'rodent_bait' || key.startsWith('rodent_bait_')) return null;
   return serviceKey;
 }
 

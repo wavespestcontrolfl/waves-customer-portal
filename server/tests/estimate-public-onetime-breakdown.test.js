@@ -7393,6 +7393,9 @@ describe('public estimate one-time breakdown', () => {
     // Prepay: the setup rides the prepay invoice as its own line (never waived by prepay).
     expect(html).toContain('data-prepay-setup-due="99"');
     expect(html).toContain('<span>Bait Station Setup</span><strong>$99.00</strong>');
+    // Booking-step script (pay-per-application summary/total) carries the
+    // combined setup share too (codex #3591 r13 P1).
+    expect(html).toContain('const STANDARD_INVOICE_SETUP_DUE = 99;');
   });
 
   test('pay-per-application invoice copy matches setup and first application charges', () => {

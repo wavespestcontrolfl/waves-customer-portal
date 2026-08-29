@@ -41,6 +41,7 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  rodentBaitPolicyNote,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
@@ -8937,9 +8938,7 @@ export default function EstimateToolViewV2({
                               />{" "}
                             </TierGridV2>{" "}
                             <div className="text-11 text-ink-secondary mt-1">
-                              {R.rodBait
-                                ? "WaveGuard qualifying service — tier discount applies; $99 setup waived for members"
-                                : "Not included in bundle discount — priced separately"}
+                              {rodentBaitPolicyNote(E)}
                             </div>{" "}
                           </div>
                         )}

@@ -6571,7 +6571,7 @@ ${shellQuestionsBar()}
   const CARD_CONFIRM_TITLE = ${JSON.stringify(pageCopy.cardConfirmTitle)};
   const CARD_CONFIRM_SUB = ${JSON.stringify(pageCopy.cardConfirmSub)};
   const ANNUAL_PREPAY_INVOICE_TOTAL = ${JSON.stringify(prepayInvoiceTotal)};
-  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
+  const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(standardSetupDue)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
   const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

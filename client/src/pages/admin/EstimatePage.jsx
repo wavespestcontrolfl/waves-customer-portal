@@ -18,6 +18,7 @@ import {
   applyServerRodentSetupFeePricingConfig,
   applyServerRodentWaveguardPricingConfig,
   calculateEstimate,
+  rodentBaitPolicyNote,
   collectMarginReviewNotes,
   fmt,
   fmtInt,
@@ -1308,6 +1309,9 @@ function EstimateToolView() {
   /* ── v2 Property Lookup — AI property search + satellite review in one call ── */
   const [enrichedProfile, setEnrichedProfile] = useState(null);
   const [existingCustomerMatch, setExistingCustomerMatch] = useState(null);
+  // Canonical qualifying families on the matched account (admin endpoint →
+  // loadExistingQualifyingServiceKeys). null = not loaded / failed.
+  const [existingQualifyingKeys, setExistingQualifyingKeys] = useState(null);
 
   /* ── Live lawn pricing config → client fallback engine ────── */
   // The fallback engine (calculateEstimate, used when there is no enriched
@@ -1331,6 +1335,10 @@ function EstimateToolView() {
   // defaults BY DESIGN (db-bridge's kill-value pattern) — it resets to
   // them and counts as a successful load.
   const pricingConfigReadyRef = useRef(Promise.resolve(false));
+  // Rodent rows are readiness-gated only when rodent bait is selected
+  // (codex #3591 r13 P1): a selective failure on any of the three rows must
+  // block a rodent fallback quote rather than price it on defaults.
+  const rodentConfigOkRef = useRef(false);
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1391,6 +1399,7 @@ function EstimateToolView() {
       // Tier-count / bundle-% posture must follow the same live row the
       // server's WaveGuard maps follow (codex #3591 r12 P1).
       if (rodentWaveguardRow.ok && rodentWaveguardRow.data) applyServerRodentWaveguardPricingConfig(rodentWaveguardRow.data);
+      rodentConfigOkRef.current = rodentBracketsRow.ok && rodentSetupRow.ok && rodentWaveguardRow.ok;
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
@@ -1625,6 +1634,14 @@ function EstimateToolView() {
           );
           if (match) {
             setExistingCustomerMatch(match);
+            // Canonical qualifying families for the rodent setup waiver
+            // (codex #3591 r13 P1). Best-effort: a failed load leaves null
+            // and the waiver falls back to Silver+ evidence only.
+            setExistingQualifyingKeys(null);
+            fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((body) => { if (body && Array.isArray(body.keys)) setExistingQualifyingKeys(body.keys); })
+              .catch(() => {});
             // The match flips isRecurringCustomer (loyalty pricing) below —
             // a generate started between the property autofill and this
             // point must not mount a result priced without it.
@@ -1644,6 +1661,7 @@ function EstimateToolView() {
             }));
           } else {
             setExistingCustomerMatch(null);
+            setExistingQualifyingKeys(null);
           }
         }
       } catch {
@@ -2291,6 +2309,10 @@ function EstimateToolView() {
       alert("Live pricing configuration could not be loaded — retry in a moment. (Quotes are blocked rather than priced on possibly-stale floor settings.)");
       return;
     }
+    if (form.svcRodentBait && !rodentConfigOkRef.current) {
+      alert("Live rodent bait pricing (brackets, setup fee, WaveGuard flags) could not be loaded — retry in a moment. (Rodent quotes are blocked rather than priced on possibly-stale configuration.)");
+      return;
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -2343,12 +2365,17 @@ function EstimateToolView() {
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
-      // Membership evidence for the rodent setup waiver — the matched
-      // account's ACTIVE WaveGuard tier (same test that unlocks loyalty
-      // pricing above), never the generic recurring-customer toggle.
-      existingWaveGuardMember: !!(existingCustomerMatch
-        && existingCustomerMatch.tier && existingCustomerMatch.tier !== "null"
-        && existingCustomerMatch.tier !== "Commercial" && Number(existingCustomerMatch.monthlyRate) > 0),
+      // Evidence for the rodent setup waiver = an OTHER qualifying family on
+      // the matched account (canonical loader), matching generateEstimate's
+      // priorQualifyingServices-minus-rodent decision. When the keys did not
+      // load, only a Silver+ tier is accepted: two or more qualifying
+      // families necessarily include one that is not rodent (codex #3591
+      // r13 P1 — a rodent-only Bronze account must still owe the setup).
+      existingOtherQualifyingService: Array.isArray(existingQualifyingKeys)
+        ? existingQualifyingKeys.some((k) => k !== "rodent_bait")
+        : !!(existingCustomerMatch
+          && ["Silver", "Gold", "Platinum"].includes(String(existingCustomerMatch.tier || ""))
+          && Number(existingCustomerMatch.monthlyRate) > 0),
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -5343,9 +5370,7 @@ function EstimateToolView() {
                               />{" "}
                             </TierGrid>{" "}
                             <div style={sModNote}>
-                              {R.rodBait
-                                ? "WaveGuard qualifying service — tier discount applies; $99 setup waived for members"
-                                : "Not included in WaveGuard bundle discount — priced separately"}
+                              {rodentBaitPolicyNote(E)}
                             </div>{" "}
                           </div>
                         )}

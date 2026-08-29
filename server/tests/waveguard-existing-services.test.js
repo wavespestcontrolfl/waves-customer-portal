@@ -87,6 +87,24 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
     expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care', 'rodent_bait']);
   });
 
+  test('rodent bait qualification follows the LIVE tier_qualifier flag (codex #3591 r13 P1)', async () => {
+    const constants = require('../services/pricing-engine/constants');
+    const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      expect(toQualifyingKeys('Rodent Bait Stations')).toEqual([]);
+      const db = fakeDb({
+        customer: { id: 'c1', waveguard_tier: 'Silver' },
+        scheduledRows: [{ id: 'pest', service_type: 'Quarterly Pest Control' }, { id: 'rodent', service_type: 'Rodent Bait Stations' }],
+      });
+      expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control']);
+    } finally {
+      constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
+    expect(toQualifyingKeys('Rodent Bait Stations')).toEqual(['rodent_bait']);
+  });
+
   test('rodent-trapping- and palm-only rows never feed qualifying keys (bait stations DO, since 2026-08-29)', async () => {
     const db = fakeDb({
       customer: { id: 'c1', waveguard_tier: 'Gold' },

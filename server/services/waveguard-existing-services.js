@@ -120,9 +120,20 @@ function toQualifyingKeys(raw) {
   // \b-anchored rodent token; pest-primary combined names ("Pest & Rodent
   // Bait...") stay pest-only, and trapping/exclusion rows (no bait token)
   // still never qualify.
+  // Gated on the LIVE flag (codex #3591 r13 P1): pricing_config.
+  // rodent_waveguard.tier_qualifier=false removes rodent_bait from the
+  // engine's WAVEGUARD.qualifyingServices — this classifier must stop
+  // returning it too, or alignment keeps enrolling on a family the pricing
+  // engine no longer recognizes.
   const w = s.replace(/[_-]+/g, ' ');
-  if (isRodentLedText(w) && /bait|station|monitor/.test(w)) keys.add('rodent_bait');
+  if (isRodentLedText(w) && /bait|station|monitor/.test(w) && rodentBaitQualifiesLive()) keys.add('rodent_bait');
   return [...keys];
+}
+
+function rodentBaitQualifiesLive() {
+  try {
+    return require('./pricing-engine/discount-engine').serviceCountsTowardWaveGuardTier('rodent_bait');
+  } catch { return true; }
 }
 
 function toQualifyingKey(raw) {
