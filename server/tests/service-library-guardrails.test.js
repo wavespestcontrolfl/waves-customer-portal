@@ -41,6 +41,7 @@ function countQuery(count) {
 function servicesQuery(before, after) {
   const query = {
     where: jest.fn(() => query),
+    forUpdate: jest.fn(() => query),
     first: jest.fn(async () => before),
     update: jest.fn(() => ({
       returning: jest.fn(async () => [after]),

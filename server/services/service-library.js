@@ -561,13 +561,25 @@ function refreshAfterCatalogWrite(row) {
  * Soft-delete (deactivate)
  */
 async function deactivateService(id, { audit } = {}) {
-  const before = await db('services').where({ id }).first();
-  if (!before) return null;
-  const references = await getServiceReferences(before);
-  if (references?.blocking_total > 0) {
-    throw conflictError('Service is still referenced and cannot be archived', { references });
-  }
+  // Reference guard and archive write share ONE transaction with the catalog
+  // row locked (codex #3581). What the lock guarantees: concurrent archives
+  // of the same row serialize, and the check + write see one consistent
+  // snapshot instead of a pre-check that could go stale before the UPDATE.
+  // What it does NOT guarantee: a writer that inserts a reference WITHOUT
+  // reading this row under the same lock (name-based bookings, add-ons) can
+  // still land after the check — full atomicity would need an advisory lock
+  // taken by every reference writer, which is out of this change's scope.
+  // Residual exposure is bounded: catalog resolution only links rows with
+  // is_active = true (slot-reservation, estimate-converter), so an archived
+  // row cannot be newly LINKED; a text-only late reference is a display
+  // label, not a lane.
   return db.transaction(async (trx) => {
+    const before = await trx('services').where({ id }).forUpdate().first();
+    if (!before) return null;
+    const references = await getServiceReferences(before, trx);
+    if (references?.blocking_total > 0) {
+      throw conflictError('Service is still referenced and cannot be archived', { references });
+    }
     const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
     if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
     return row;
