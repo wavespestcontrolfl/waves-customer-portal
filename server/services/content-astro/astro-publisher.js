@@ -2076,7 +2076,10 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   // rebase / human merge rather than validated on a copy the merge will
   // not ship.
   if (mergeBaseSha) {
-    const [onBase, atFork] = await Promise.all([gh.getFile(found.path), gh.getFile(found.path, mergeBaseSha)]);
+    // The base side is read AT the captured tip (same posture as the
+    // unchanged-asset reads): a push landing after the capture is the tip
+    // comparison's transient retry, not a deterministic withhold (GH r30).
+    const [onBase, atFork] = await Promise.all([gh.getFile(found.path, baseSha || undefined), gh.getFile(found.path, mergeBaseSha)]);
     if ((onBase?.sha || null) !== (atFork?.sha || null)) {
       return { ok: false, reason: `${found.path} changed on the default branch since ${branch} was cut (${(atFork?.sha || 'absent').slice(0, 9)} → ${(onBase?.sha || 'absent').slice(0, 9)}) — the merged body cannot be validated from the PR head; rebase or merge by hand` };
     }
@@ -2285,7 +2288,14 @@ function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
     // carrying its own list marker opens a new item likewise.
     if (i > 0 && ((depths && (depths[i] || 0) !== (depths[i - 1] || 0))
       || (inList && !!inList[i] !== !!inList[i - 1])
-      || LIST_MARKER_PREFIX_RE.test(l))) atBoundary = true;
+      || LIST_MARKER_PREFIX_RE.test(l))) {
+      atBoundary = true;
+      // …and a leaf block cannot outlive its container: leaving the quote
+      // or starting a sibling item ENDS an active HTML block, and this line
+      // is processed as the first line of the new context (GH r30).
+      inBlock = false;
+      closeRe = null;
+    }
     if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
     if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
     const core = l.replace(LIST_MARKER_PREFIX_RE, '');

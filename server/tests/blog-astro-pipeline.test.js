@@ -4940,6 +4940,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       return null;
     });
     expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    // The divergence read of the post itself is pinned to the captured base
+    // tip (GH r30) — a push after the capture is the tip comparison's
+    // transient retry, never a deterministic withhold.
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/drywood-frass-venice.mdx', 'main-tip-1');
   });
 
   test('bodyImageRefs: an image used as a link label is scanned; an angle destination keeps its edge whitespace (GH r21)', async () => {
@@ -5449,6 +5453,17 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
     // A same-line close ends the block on its own line.
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
+  });
+
+  test('bodyImageRefs: leaving a container (or a sibling list item) TERMINATES an active raw HTML block in .md — the image outside renders (GH r30)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    // The div opens inside the quote; the unquoted line leaves the quote —
+    // the block ends there and the image renders.
+    const quote = '> <div>\n> ![in](/images/blog/x/body-1.webp)\n![out](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(quote, { mdx: false }).map((r) => r.alt)).toEqual(['out']);
+    // A sibling list item ends the block opened by the previous item.
+    const list = '- <div>\n  ![in](/images/blog/x/body-1.webp)\n- ![next](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(list, { mdx: false }).map((r) => r.alt)).toEqual(['next']);
   });
 
   test('bodyImageRefs: entering a blockquote or list item is a block boundary in .md — `Intro` then `> <span>` opens a raw HTML block inside the quote (GH r29)', () => {

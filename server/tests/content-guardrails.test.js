@@ -4786,6 +4786,20 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
+  test('opensDefinitelyHidden: `open={false}` renders a CLOSED details; a literal style expression hides; `open="false"` stays a truthy boolean attribute (GH r30)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    const closed = keep('<details open={false}><summary>Peek</summary>![h](/x.webp)</details>');
+    expect(closed).toContain('Peek'); // first direct summary of a closed details stays visible
+    expect(closed).not.toContain('![h]');
+    // HTML semantics: a STRING value is a truthy boolean attribute — open.
+    expect(keep('<details open="false"><summary>S</summary>![v](/x.webp)</details>')).toContain('![v]');
+    // An unprovable expression counts as open (certainty walker never blanks possibly-visible text).
+    expect(keep('<details open={isOpen}><summary>S</summary>![v](/x.webp)</details>')).toContain('![v]');
+    // Literal MDX style expression with a quoted keyword.
+    expect(keep("<div style={{ display: 'none' }}>![h2](/x.webp)</div>")).not.toContain('![h2]');
+    expect(keep('<div style={{ visibility: "hidden" }}>![h3](/x.webp)</div>')).not.toContain('![h3]');
+  });
+
   test('markdownReferenceDefinitions: a definition directly after a completed Setext heading is at a block start (GH r29)', () => {
     const defs = guardrails.markdownReferenceDefinitions('Heading\n===\n[pic]: /x.webp');
     expect(defs.get('pic')).toBe('/x.webp');

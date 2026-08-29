@@ -130,23 +130,39 @@ const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalis
 // ATTRIBUTION (excluding text costs an exemption) but backwards here:
 // erasing styled copy would delete a first-party marker and GRANT the
 // exemption. Only certainties qualify (Codex).
+// `open={false}` (or {0}/{null}/{undefined}/{''}) is statically NOT open:
+// Astro/JSX omits a false boolean attribute, so the <details> renders
+// closed (GH r30). A STRING value (`open="false"`) is a truthy boolean
+// attribute in HTML and stays open; only a falsy literal MDX expression
+// counts as absent. An expression we cannot prove ({isOpen}) counts as
+// open here — the certainty walker must never blank possibly-visible text.
+const FALSY_EXPR_RE = /^\{\s*(?:false|0|null|undefined|''|"")\s*\}$/i;
+function hasTrueOpenAttr(attrs) {
+  const m = /(?:^|\s)open(?:\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>/]+))?(?=[\s>/]|$)/i.exec(attrs || '');
+  if (!m) return false;
+  if (m[1] === undefined) return true; // bare `open`
+  return !FALSY_EXPR_RE.test(m[1].trim());
+}
+
 function opensDefinitelyHidden(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
   if (ariaM) {
     const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
     if (v !== 'false') return true;
   }
-  return /style\s*=\s*(?:["'`{])[^"'`]*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(a);
+  // A literal MDX style expression hides just as certainly as a string:
+  // style={{ display: 'none' }} — the value may quote the keyword (GH r30).
+  return /style\s*=\s*(?:["'`{])[\s\S]*?(?:display\s*:\s*['"`]?\s*none|visibility\s*:\s*['"`]?\s*hidden)/i.test(a);
 }
 
 function opensHiddenContent(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   // aria-hidden in ANY form except a literal false.
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
