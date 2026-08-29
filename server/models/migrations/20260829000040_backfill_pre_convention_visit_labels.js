@@ -5,8 +5,8 @@
  * the older generation of labels stamped before those names existed —
  * unlinked legacy series ("Quarterly Pest Control", "Lawn Care", "General
  * Pest Control (Quarterly)", …) and linked rows whose snapshot predates the
- * current catalog name. Prod pre-read 2026-08-29: 214 unlinked + 10 linked
- * open rows across ~65 customers.
+ * current catalog name. Prod pre-read 2026-08-29: 214 unlinked + 11 linked
+ * open rows across ~65 customers, every one with a reminder row.
  *
  * Same invariants as 20260829000010:
  *  1. Historical immutability — only OPEN visits relabel (NULL status is
@@ -16,7 +16,7 @@
  *     with the observed labels AND the population identity (cadence /
  *     linkage) recorded in a system_settings state row, so down() never
  *     reverses a row the owner re-cadenced or linked in the meantime
- *     (GH codex #3599 P2).
+ *     (GH codex #3599 r1 P2).
  *
  * Leg A (unlinked): a (label, recurring_pattern) pair maps to exactly one
  *   current catalog name; the pair is the cadence evidence, so no guess is
@@ -26,23 +26,29 @@
  *   services.name — but ONLY for labels on the known-stale whitelist, so a
  *   deliberate custom label is never clobbered. The whitelist is further
  *   filtered AT RUN TIME against the active catalog: a whitelisted label
- *   that is itself a current catalog name (e.g. a live "General Pest
- *   Control" row) is a linkage conflict, not a stale snapshot, and is left
- *   for the owner (GH codex #3599 P2). Rows whose label is any other valid
- *   catalog name contradicting their service_id are likewise excluded —
- *   flagged to the owner in the audit instead.
+ *   that is itself a current catalog name is a linkage conflict, not a
+ *   stale snapshot, and is left for the owner (GH codex #3599 r1 P2; prod
+ *   pre-read: no collision today — insurance against a future catalog
+ *   edit). Rows whose label is any other valid catalog name contradicting
+ *   their service_id are likewise excluded — flagged in the audit instead.
  *
- * Reminder fanout (GH codex #3599 P1): appointment_reminders.service_type
- *   is the label the customer appointment page PREFERS
- *   (appointment-public.js resolveServiceLabel) and the 72h/24h senders
- *   render, so a relabeled visit's reminder row — plus same-slot sibling
- *   rows, where the merger stores the combined label on the EARLIER
- *   visit's row — swaps the same component, exactly as 000010 does. The
- *   swap is component-wise (whole old name at list/edge boundaries), so a
- *   merged "A & B" label keeps its other component; down() reverses the
- *   component on the CURRENT value under the completed-history invariant
- *   (a reminder whose component visit completed since keeps the new
- *   label in agreement with the visit).
+ * Snapshot fanout (GH codex #3599 r1 P1 + r2 P1/P2) — the same three
+ *   customer-facing copies 000010 sweeps, each by the same mechanism:
+ *   - appointment_reminders.service_type: the label the public appointment
+ *     page PREFERS (appointment-public.js resolveServiceLabel) and the
+ *     72h/24h senders render. The visit's own row plus same-slot siblings
+ *     (the merger stores the combined label on the EARLIER visit's row)
+ *     swap component-wise, so a merged "A & B" keeps its other component.
+ *   - self_booked_appointments.service_type: /api/booking/status/:code
+ *     renders its own copy; exact-or-qualified swap.
+ *   - Pre-minted DRAFT/SCHEDULED invoices for the visit: completion reuses
+ *     them and a schedule-queued invoice delivers its stored labels later
+ *     (invoice-email.js renders invoice.service_type). Title / service_type
+ *     / line-item snapshots swap under an updated_at::text CAS; invoices on
+ *     a frozen (non-open) payer statement are an issued document and stay.
+ *   down() reverses each on the CURRENT value under the completed-history
+ *   invariant: a copy whose component visit completed since keeps the new
+ *   label in agreement with the visit.
  *
  * Deliberately out of scope: backfilling service_id linkage on legacy rows
  * (would activate per-service closeout/report requirements — separate
@@ -57,6 +63,7 @@ const STATE_KEY = 'migration.20260829000040.state';
 
 // Copied from 20260829000010 (migrations are frozen artifacts — no import).
 const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+const MUTABLE_INVOICE_STATUSES = ['draft', 'scheduled'];
 
 // (stale label, recurring_pattern) → current catalog name. The pattern is
 // load-bearing: "Pest Control" alone is ambiguous, "Pest Control" +
@@ -98,53 +105,202 @@ async function activeCatalogNames(knex) {
   return new Set(rows.map((r) => r.name).filter((n) => typeof n === 'string'));
 }
 
-// Component-wise swap on possibly-merged reminder labels ("A & B",
-// "A, B, and C") — same contract as 000010's relabelReminderServiceType:
-// the FULL old name is matched at list-delimiter/edge boundaries (an
-// optional "(Qualifier)" rides along), so it swaps whether it stands alone
-// or inside a merged list, while a longer name that merely starts with it
-// never matches. Returns null when nothing changes.
-function relabelReminderComponent(value, fromName, toName) {
+// ---- label helpers (copied from 000010; same matching contracts) --------
+
+// Exact label OR its cadence-qualified form ("<name> (Quarterly)"),
+// qualifier preserved. Null when the value is not this label.
+function swapRenamedPrefix(value, fromName, toName) {
+  const s = String(value || '');
+  if (!(s === fromName || s.startsWith(`${fromName} (`))) return null;
+  return toName + s.slice(fromName.length);
+}
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Component-wise swap on a possibly-combined label: the FULL old name is
+// matched at list-delimiter/edge boundaries (an optional "(Qualifier)"
+// rides along), so it swaps whether it stands alone or inside a merged
+// list, while a longer name that merely starts with it never matches.
+function swapComponent(value, fromName, toName, boundary) {
   if (typeof value !== 'string' || !value) return null;
-  if (value === fromName || value.startsWith(`${fromName} (`)) {
-    return toName + value.slice(fromName.length);
-  }
-  const escaped = fromName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const boundary = '(?:,\\s+and\\s+|,\\s+|\\s+&\\s+)';
-  const re = new RegExp(`(^|${boundary})${escaped}(\\s*\\([^()]*\\))?(?=$|${boundary})`, 'g');
+  const whole = swapRenamedPrefix(value, fromName, toName);
+  if (whole) return whole;
+  const re = new RegExp(`(^|${boundary})${escapeRe(fromName)}(\\s*\\([^()]*\\))?(?=$|${boundary})`, 'g');
   const next = value.replace(re, (m, pre, qualifier) => pre + toName + (qualifier || ''));
   return next === value ? null : next;
 }
 
+// Reminder labels merge with " & " / ", " / ", and ".
+const REMINDER_BOUNDARY = '(?:,\\s+and\\s+|,\\s+|\\s+&\\s+)';
+function relabelReminderComponent(value, fromName, toName) {
+  return swapComponent(value, fromName, toName, REMINDER_BOUNDARY);
+}
+// Invoice titles / line descriptions also combine with " + " and " — ".
+const TITLE_BOUNDARY = '(?:\\s+\\+\\s+|\\s+—\\s+|,\\s+and\\s+|,\\s+|\\s+&\\s+)';
+function swapRenamedTitle(value, fromName, toName) {
+  return swapComponent(value, fromName, toName, TITLE_BOUNDARY);
+}
+
+function parseLineItems(raw) {
+  let items = raw;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  return Array.isArray(items) ? items : null;
+}
+
+// Forward swap on an invoice snapshot's title, service_type, and line-item
+// descriptions/categories; returns the patch plus a `changed` map so the
+// rollback is restricted to exactly what up() touched.
+function relabelInvoiceSnapshot(inv, fromName, toName) {
+  const patch = {};
+  const changed = { title: false, service_type: false, items: [] };
+  const nextTitle = swapRenamedTitle(inv.title, fromName, toName);
+  if (nextTitle) { patch.title = nextTitle; changed.title = true; }
+  const nextServiceType = swapRenamedPrefix(inv.service_type, fromName, toName);
+  if (nextServiceType) { patch.service_type = nextServiceType; changed.service_type = true; }
+  const items = parseLineItems(inv.line_items);
+  if (items) {
+    let itemsChanged = false;
+    const next = items.map((item, i) => {
+      if (!item || typeof item !== 'object') return item;
+      const out = { ...item };
+      const rec = { i, description: false, category: false };
+      const nd = swapRenamedTitle(out.description, fromName, toName);
+      if (nd) { out.description = nd; rec.description = true; itemsChanged = true; }
+      const nc = swapRenamedPrefix(out.category, fromName, toName);
+      if (nc) { out.category = nc; rec.category = true; itemsChanged = true; }
+      if (rec.description || rec.category) changed.items.push(rec);
+      return out;
+    });
+    if (itemsChanged) patch.line_items = JSON.stringify(next);
+  }
+  return Object.keys(patch).length ? { patch, changed } : null;
+}
+
+// Inverse restricted to a recorded `changed` map.
+function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
+  const patch = {};
+  if (changed.title) {
+    const t = swapRenamedTitle(inv.title, fromName, toName);
+    if (t) patch.title = t;
+  }
+  if (changed.service_type) {
+    const st = swapRenamedPrefix(inv.service_type, fromName, toName);
+    if (st) patch.service_type = st;
+  }
+  const items = parseLineItems(inv.line_items);
+  if (items && Array.isArray(changed.items) && changed.items.length) {
+    let itemsChanged = false;
+    const next = items.map((item, i) => {
+      const rec = changed.items.find((r) => r && r.i === i);
+      if (!rec || !item || typeof item !== 'object') return item;
+      const out = { ...item };
+      if (rec.description) {
+        const nd = swapRenamedTitle(out.description, fromName, toName);
+        if (nd) { out.description = nd; itemsChanged = true; }
+      }
+      if (rec.category) {
+        const nc = swapRenamedPrefix(out.category, fromName, toName);
+        if (nc) { out.category = nc; itemsChanged = true; }
+      }
+      return out;
+    });
+    if (itemsChanged) patch.line_items = JSON.stringify(next);
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
+// Frozen (non-open) payer statements among these invoices' links — their
+// lines render from invoices.service_type, so relabeling would change an
+// issued document. Deliberately lock-free (000010 exemplar).
+async function frozenPayerStatementIds(knex, invoices) {
+  const stmtIds = [...new Set(invoices.map((inv) => inv.payer_statement_id).filter(Boolean))];
+  if (!stmtIds.length || !(await knex.schema.hasTable('payer_statements'))) return new Set();
+  const rows = await knex('payer_statements').whereIn('id', stmtIds).select('id', 'status');
+  return new Set(rows.filter((r) => r.status !== 'open').map((r) => r.id));
+}
+
+function invoiceCas(knex, inv) {
+  const q = knex('invoices').where({ id: inv.id }).whereIn('status', MUTABLE_INVOICE_STATUSES);
+  return inv.updated_at_cas == null
+    ? q.whereNull('updated_at')
+    : q.whereRaw('updated_at::text = ?', [inv.updated_at_cas]);
+}
+
+const INVOICE_COLS = ['id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id'];
+
+// ---- snapshot fanout ---------------------------------------------------
+
 const REMINDER_COLS = ['id', 'service_type', 'customer_id', 'appointment_time', 'scheduled_service_id'];
 
-// Fan a (from → to) visit relabel out to the reminder registrations of the
-// given visit ids and their same-slot siblings. Each record carries its
-// COMPONENT visit (the relabeled visit that put it in the sweep) so down()
-// can honor the completed-history invariant per reminder.
-async function relabelReminders(knex, visitIds, fromName, toName, state) {
-  if (!visitIds.length) return;
-  const linked = await knex('appointment_reminders')
-    .whereIn('scheduled_service_id', visitIds)
-    .select(...REMINDER_COLS);
-  const targets = new Map(linked.map((r) => [r.id, { rem: r, sourceVisitId: r.scheduled_service_id || null }]));
-  for (const rem of linked) {
-    if (rem.customer_id == null || rem.appointment_time == null) continue;
-    const siblings = await knex('appointment_reminders')
-      .where({ customer_id: rem.customer_id, appointment_time: rem.appointment_time })
+// Fan one (from → to) visit relabel out to the customer-facing copies of
+// the given visits. Each record carries its COMPONENT visit(s) so down()
+// can honor the completed-history invariant per copy.
+async function fanOutSnapshots(knex, { from, to, visits }, state) {
+  const visitIds = visits.map((v) => v.id);
+
+  if (await knex.schema.hasTable('appointment_reminders')) {
+    const linked = await knex('appointment_reminders')
+      .whereIn('scheduled_service_id', visitIds)
       .select(...REMINDER_COLS);
-    for (const sib of siblings) {
-      if (!targets.has(sib.id)) targets.set(sib.id, { rem: sib, sourceVisitId: rem.scheduled_service_id || null });
+    const targets = new Map(linked.map((r) => [r.id, { rem: r, sourceVisitId: r.scheduled_service_id || null }]));
+    for (const rem of linked) {
+      if (rem.customer_id == null || rem.appointment_time == null) continue;
+      const siblings = await knex('appointment_reminders')
+        .where({ customer_id: rem.customer_id, appointment_time: rem.appointment_time })
+        .select(...REMINDER_COLS);
+      for (const sib of siblings) {
+        if (!targets.has(sib.id)) targets.set(sib.id, { rem: sib, sourceVisitId: rem.scheduled_service_id || null });
+      }
+    }
+    for (const { rem, sourceVisitId } of targets.values()) {
+      const next = relabelReminderComponent(rem.service_type, from, to);
+      if (next === null) continue;
+      const count = await knex('appointment_reminders')
+        .where({ id: rem.id, service_type: rem.service_type })
+        .update({ service_type: next, updated_at: knex.fn.now() });
+      if (count) state.reminders.push({ id: rem.id, prior: rem.service_type, written: next, from, to, visit_id: sourceVisitId });
     }
   }
-  for (const { rem, sourceVisitId } of targets.values()) {
-    const next = relabelReminderComponent(rem.service_type, fromName, toName);
-    if (next === null) continue;
-    const count = await knex('appointment_reminders')
-      .where({ id: rem.id, service_type: rem.service_type })
-      .update({ service_type: next, updated_at: knex.fn.now() });
-    if (count) {
-      state.reminders.push({ id: rem.id, prior: rem.service_type, written: next, from: fromName, to: toName, visit_id: sourceVisitId });
+
+  // Self-booking snapshots — a booking can link several visits; down()
+  // gates on ALL of them still being open.
+  const bookingToVisits = new Map();
+  for (const v of visits) {
+    if (!v.self_booking_id) continue;
+    if (!bookingToVisits.has(v.self_booking_id)) bookingToVisits.set(v.self_booking_id, []);
+    bookingToVisits.get(v.self_booking_id).push(v.id);
+  }
+  if (bookingToVisits.size && (await knex.schema.hasTable('self_booked_appointments'))) {
+    const sbRows = await knex('self_booked_appointments')
+      .whereIn('id', [...bookingToVisits.keys()])
+      .select('id', 'service_type');
+    for (const sb of sbRows) {
+      const next = swapRenamedPrefix(sb.service_type, from, to);
+      if (!next) continue;
+      const count = await knex('self_booked_appointments')
+        .where({ id: sb.id, service_type: sb.service_type })
+        .update({ service_type: next });
+      if (count) state.selfBookings.push({ id: sb.id, from, to, visit_ids: bookingToVisits.get(sb.id) });
+    }
+  }
+
+  // Pre-minted DRAFT/SCHEDULED invoices for the relabeled visits.
+  if (await knex.schema.hasTable('invoices')) {
+    const drafts = await knex('invoices')
+      .whereIn('scheduled_service_id', visitIds)
+      .whereIn('status', MUTABLE_INVOICE_STATUSES)
+      .select(...INVOICE_COLS, knex.raw('updated_at::text AS updated_at_cas'));
+    const frozen = await frozenPayerStatementIds(knex, drafts);
+    for (const inv of drafts) {
+      if (inv.payer_statement_id && frozen.has(inv.payer_statement_id)) continue;
+      const result = relabelInvoiceSnapshot(inv, from, to);
+      if (!result) continue;
+      const count = await invoiceCas(knex, inv).update({ ...result.patch, updated_at: knex.fn.now() });
+      if (count) state.invoices.push({ id: inv.id, changed: result.changed, from, to, visit_id: inv.scheduled_service_id });
     }
   }
 }
@@ -153,14 +309,14 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('scheduled_services'))) return;
   if (!(await knex.schema.hasTable('services'))) return;
 
-  const state = { unlinked: [], linked: [], reminders: [] };
+  const state = { unlinked: [], linked: [], reminders: [], selfBookings: [], invoices: [] };
   const catalog = await activeCatalogNames(knex);
-  // (from → to) → relabeled visit ids, for the reminder fanout below.
-  const relabeled = new Map();
-  const noteRelabel = (from, to, id) => {
-    const key = `${from} ${to}`;
-    if (!relabeled.has(key)) relabeled.set(key, { from, to, ids: [] });
-    relabeled.get(key).ids.push(id);
+  // (from → to) → relabeled visits, for the snapshot fanout below.
+  const groups = new Map();
+  const noteRelabel = (from, to, visit) => {
+    const key = JSON.stringify([from, to]);
+    if (!groups.has(key)) groups.set(key, { from, to, visits: [] });
+    groups.get(key).visits.push(visit);
   };
 
   // Leg A — unlinked legacy rows, mapped by (label, cadence).
@@ -171,7 +327,7 @@ exports.up = async function up(knex) {
       knex('scheduled_services')
         .whereNull('service_id')
         .where({ service_type: stale, recurring_pattern: pattern })
-    ).select('id');
+    ).select('id', 'self_booking_id');
 
     for (const r of rows) {
       // CAS scoped to id + observed label + population predicate: a row
@@ -183,7 +339,7 @@ exports.up = async function up(knex) {
       ).update({ service_type: target });
       if (count) {
         state.unlinked.push({ id: r.id, from: stale, to: target, pattern });
-        noteRelabel(stale, target, r.id);
+        noteRelabel(stale, target, r);
       }
     }
   }
@@ -198,7 +354,7 @@ exports.up = async function up(knex) {
         .join('services as sv', 'sv.id', 'ss.service_id')
         .whereIn('ss.service_type', staleLabels)
         .whereRaw('ss.service_type <> sv.name')
-    ).select('ss.id', 'ss.service_type', 'ss.service_id', 'sv.name as catalog_name')
+    ).select('ss.id', 'ss.service_type', 'ss.service_id', 'ss.self_booking_id', 'sv.name as catalog_name')
     : [];
 
   for (const r of linkedRows) {
@@ -208,17 +364,11 @@ exports.up = async function up(knex) {
     ).update({ service_type: r.catalog_name });
     if (count) {
       state.linked.push({ id: r.id, from: r.service_type, to: r.catalog_name, service_id: r.service_id });
-      noteRelabel(r.service_type, r.catalog_name, r.id);
+      noteRelabel(r.service_type, r.catalog_name, r);
     }
   }
 
-  // Reminder registrations render their own service_type (and the public
-  // appointment page prefers it over the visit row) — sweep them too.
-  if (relabeled.size && (await knex.schema.hasTable('appointment_reminders'))) {
-    for (const { from, to, ids } of relabeled.values()) {
-      await relabelReminders(knex, ids, from, to, state);
-    }
-  }
+  for (const group of groups.values()) await fanOutSnapshots(knex, group, state);
 
   if (await knex.schema.hasTable('system_settings')) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
@@ -237,13 +387,14 @@ exports.down = async function down(knex) {
   } catch {
     return; // unreadable state — leave data as-is rather than guess
   }
+  const list = (v) => (Array.isArray(v) ? v : []);
 
   // Reverse only rows still carrying exactly what up() wrote AND still in
   // the population up() matched (same cadence / linkage — an owner who
   // re-cadenced or linked the row since has taken it over), and only while
   // still open (a visit completed under the new label is history). A
   // record missing its identity fields is skipped: never guess.
-  for (const rec of state.unlinked || []) {
+  for (const rec of list(state.unlinked)) {
     if (!rec || typeof rec.pattern !== 'string') continue;
     await openVisitStatus(
       knex('scheduled_services')
@@ -251,7 +402,7 @@ exports.down = async function down(knex) {
         .whereNull('service_id')
     ).update({ service_type: rec.from });
   }
-  for (const rec of state.linked || []) {
+  for (const rec of list(state.linked)) {
     if (!rec || rec.service_id == null) continue;
     await openVisitStatus(
       knex('scheduled_services')
@@ -259,17 +410,24 @@ exports.down = async function down(knex) {
     ).update({ service_type: rec.from });
   }
 
-  const reminderRecs = Array.isArray(state.reminders) ? state.reminders : [];
+  // Completed-history invariant for every snapshot copy: one whose
+  // component visit completed since up() keeps the new label in agreement
+  // with the visit. Row-locked so a concurrent completion serializes.
+  const reminderRecs = list(state.reminders);
+  const sbRecs = list(state.selfBookings);
+  const invoiceRecs = list(state.invoices);
+  const componentVisitIds = [...new Set([
+    ...reminderRecs.map((r) => r && r.visit_id),
+    ...sbRecs.flatMap((r) => (r && Array.isArray(r.visit_ids) ? r.visit_ids : [])),
+    ...invoiceRecs.map((r) => r && r.visit_id),
+  ].filter(Boolean))];
+  const terminal = new Set();
+  if (componentVisitIds.length) {
+    const visits = await knex('scheduled_services').whereIn('id', componentVisitIds).forUpdate().select('id', 'status');
+    for (const v of visits) if (TERMINAL_VISIT_STATUSES.includes(v.status)) terminal.add(v.id);
+  }
+
   if (reminderRecs.length && (await knex.schema.hasTable('appointment_reminders'))) {
-    // Completed-history invariant applies to reminders too: a reminder
-    // whose component visit completed since up() keeps the new label in
-    // agreement with the visit.
-    const visitIds = [...new Set(reminderRecs.map((r) => r && r.visit_id).filter(Boolean))];
-    const terminal = new Set();
-    if (visitIds.length) {
-      const visits = await knex('scheduled_services').whereIn('id', visitIds).select('id', 'status');
-      for (const v of visits) if (TERMINAL_VISIT_STATUSES.includes(v.status)) terminal.add(v.id);
-    }
     // Reverse in the opposite order to the forward passes so a merged label
     // touched by two (from → to) pairs unwinds cleanly.
     for (const rec of [...reminderRecs].reverse()) {
@@ -285,6 +443,39 @@ exports.down = async function down(knex) {
       await knex('appointment_reminders')
         .where({ id: rec.id, service_type: current.service_type })
         .update({ service_type: restored, updated_at: knex.fn.now() });
+    }
+  }
+
+  if (sbRecs.length && (await knex.schema.hasTable('self_booked_appointments'))) {
+    for (const rec of sbRecs) {
+      if (!rec || typeof rec.from !== 'string' || typeof rec.to !== 'string') continue;
+      const visitIds = Array.isArray(rec.visit_ids) ? rec.visit_ids : [];
+      if (!visitIds.length || visitIds.some((id) => terminal.has(id))) continue;
+      const current = await knex('self_booked_appointments').where({ id: rec.id }).first('id', 'service_type');
+      if (!current) continue;
+      const restored = swapRenamedPrefix(current.service_type, rec.to, rec.from);
+      if (!restored) continue;
+      await knex('self_booked_appointments')
+        .where({ id: rec.id, service_type: current.service_type })
+        .update({ service_type: restored });
+    }
+  }
+
+  if (invoiceRecs.length && (await knex.schema.hasTable('invoices'))) {
+    const invoices = await knex('invoices')
+      .whereIn('id', invoiceRecs.map((r) => r && r.id).filter(Boolean))
+      .whereIn('status', MUTABLE_INVOICE_STATUSES)
+      .select(...INVOICE_COLS, knex.raw('updated_at::text AS updated_at_cas'));
+    const frozen = await frozenPayerStatementIds(knex, invoices);
+    const byId = new Map(invoiceRecs.filter(Boolean).map((r) => [r.id, r]));
+    for (const inv of invoices) {
+      const rec = byId.get(inv.id);
+      if (!rec || !rec.changed || typeof rec.from !== 'string' || typeof rec.to !== 'string') continue;
+      if (rec.visit_id && terminal.has(rec.visit_id)) continue;
+      if (inv.payer_statement_id && frozen.has(inv.payer_statement_id)) continue;
+      const patch = rollbackInvoiceSnapshot(inv, rec.changed, rec.to, rec.from);
+      if (!patch) continue;
+      await invoiceCas(knex, inv).update({ ...patch, updated_at: knex.fn.now() });
     }
   }
 

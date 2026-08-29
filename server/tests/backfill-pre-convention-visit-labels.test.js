@@ -3,9 +3,12 @@
  * Asserts the two population contracts (cadence-mapped unlinked rows,
  * whitelist-gated linked sync with the run-time live-catalog exclusion),
  * Invariant 1 (terminal rows untouched), the fail-closed skip when a
- * mapping target is missing from the active catalog, the reminder fanout
- * (own row + same-slot sibling, component-wise on merged labels), and the
- * identity-checked CAS down() reversal.
+ * mapping target is missing from the active catalog, the snapshot fanout
+ * (reminder own-row + same-slot sibling component-wise, self-booking
+ * exact-or-qualified, draft/scheduled invoice title/service_type/line
+ * items under the updated_at CAS with frozen statements skipped), and the
+ * identity-checked CAS down() reversal under the completed-history
+ * invariant for every copy.
  *
  * Purpose-built fake knex: this migration's only grouped-where callback is
  * the open-visit-status predicate, so the fake evaluates where(fn) as
@@ -21,16 +24,16 @@ function fakeKnex(db, { missingTables = [] } = {}) {
   const knex = (tableExpr) => {
     const table = String(tableExpr).split(' ')[0];
     const filters = [];
-    let joined = null; // { table, fk } — only services-on-service_id is used
+    let joined = null; // { table } — only services-on-service_id is used
     let openOnly = false;
     let rawNeq = false; // ss.service_type <> sv.name
-    let inClause = null;
+    const inClauses = [];
     const rows = () => db[table] || [];
     const isOpen = (r) => r.status == null || !TERMINAL.includes(r.status);
     const svcById = (id) => (db.services || []).find((s) => s.id === id);
     const match = (r) => {
       if (openOnly && !isOpen(r)) return false;
-      if (inClause && !inClause.vals.includes(r[inClause.col.replace(/^ss\./, '')])) return false;
+      for (const c of inClauses) if (!c.vals.includes(r[c.col.replace(/^ss\./, '')])) return false;
       if (rawNeq) {
         const sv = svcById(r.service_id);
         if (!sv || r.service_type === sv.name) return false;
@@ -46,19 +49,20 @@ function fakeKnex(db, { missingTables = [] } = {}) {
         return q;
       },
       whereNull(col) { filters.push({ [col]: null }); return q; },
-      whereIn(col, vals) { inClause = { col, vals }; return q; },
-      whereRaw(sql) {
-        if (!/service_type <> sv\.name/.test(sql)) throw new Error(`fake whereRaw: unsupported ${sql}`);
-        rawNeq = true;
-        return q;
+      whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
+      whereRaw(sql, bindings) {
+        if (/service_type <> sv\.name/.test(sql)) { rawNeq = true; return q; }
+        if (/^updated_at::text = \?$/.test(sql)) { filters.push({ updated_at: bindings[0] }); return q; }
+        throw new Error(`fake whereRaw: unsupported ${sql}`);
       },
+      forUpdate() { return q; },
       async select(...cols) {
         return rows().filter(match).map((r) => {
           if (!cols.length) return { ...r };
           const out = {};
           cols.forEach((c) => {
             const [expr, , alias] = String(c).split(' ');
-            const key = expr.replace(/^(ss|sv)\./, '');
+            const key = expr.replace(/^(ss|sv)\./, '').replace(/::text$/, '');
             const fromJoin = expr.startsWith('sv.');
             out[alias || key] = fromJoin ? svcById(r.service_id)?.[key] : r[key];
           });
@@ -83,6 +87,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
   };
   knex.schema = { hasTable: async (t) => !missingTables.includes(t) && !!db[t] };
   knex.fn = { now: () => 'NOW' };
+  knex.raw = (sql) => sql; // only used as `updated_at::text AS updated_at_cas`
   return knex;
 }
 
@@ -102,25 +107,25 @@ function seedDb() {
     ],
     scheduled_services: [
       // Leg A hits
-      { id: 'u1', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'pending' },
-      { id: 'u2', service_id: null, service_type: 'Pest Control', recurring_pattern: 'monthly', status: null },
+      { id: 'u1', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: 'sb-1' },
+      { id: 'u2', service_id: null, service_type: 'Pest Control', recurring_pattern: 'monthly', status: null, self_booking_id: null },
       // wrong cadence for its label — mapping pair doesn't exist, untouched
-      { id: 'u3', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'custom', status: 'pending' },
+      { id: 'u3', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'custom', status: 'pending', self_booking_id: null },
       // terminal — Invariant 1, untouched
-      { id: 'u4', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'completed' },
+      { id: 'u4', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'completed', self_booking_id: 'sb-4' },
       // mapping whose target is missing from the catalog — fail closed
-      { id: 'u5', service_id: null, service_type: 'Lawn Care Service', recurring_pattern: 'bimonthly', status: 'pending' },
-      // Leg B hit: whitelist label, syncs from catalog
-      { id: 'l1', service_id: 'svc-q', service_type: 'Pest Control', recurring_pattern: 'quarterly', status: 'confirmed' },
+      { id: 'u5', service_id: null, service_type: 'Lawn Care Service', recurring_pattern: 'bimonthly', status: 'pending', self_booking_id: null },
+      // Leg B hit: whitelist label, syncs from catalog; shares booking sb-1 with u1
+      { id: 'l1', service_id: 'svc-q', service_type: 'Pest Control', recurring_pattern: 'quarterly', status: 'confirmed', self_booking_id: 'sb-1' },
       // linkage conflict: label is a valid catalog name — NOT whitelisted, untouched
-      { id: 'l2', service_id: 'svc-q', service_type: 'Semiannual Pest Control Service', recurring_pattern: 'quarterly', status: 'pending' },
+      { id: 'l2', service_id: 'svc-q', service_type: 'Semiannual Pest Control Service', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // linked, label already equals catalog name — untouched
-      { id: 'l3', service_id: 'svc-m', service_type: 'Monthly Pest Control Service', recurring_pattern: 'monthly', status: 'pending' },
+      { id: 'l3', service_id: 'svc-m', service_type: 'Monthly Pest Control Service', recurring_pattern: 'monthly', status: 'pending', self_booking_id: null },
       // whitelisted label that is ALSO a live catalog name, contradicting
       // its service_id — linkage conflict, owner-managed, untouched
-      { id: 'l4', service_id: 'svc-q', service_type: 'General Pest Control', recurring_pattern: 'quarterly', status: 'pending' },
+      { id: 'l4', service_id: 'svc-q', service_type: 'General Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // whitelisted label that exists only as an INACTIVE catalog row — still stale, syncs
-      { id: 'l5', service_id: 'svc-m', service_type: 'Pest Control Service', recurring_pattern: 'monthly', status: 'pending' },
+      { id: 'l5', service_id: 'svc-m', service_type: 'Pest Control Service', recurring_pattern: 'monthly', status: 'pending', self_booking_id: 'sb-5' },
     ],
     appointment_reminders: [
       // u1's own registration — plain stale label
@@ -137,12 +142,40 @@ function seedDb() {
       // linkage-conflict visit's registration — untouched
       { id: 'r-l4', scheduled_service_id: 'l4', customer_id: 'c4', appointment_time: 'T4', service_type: 'General Pest Control', updated_at: 'orig' },
     ],
+    self_booked_appointments: [
+      // linked from BOTH u1 (Quarterly Pest Control → …) and l1 (Pest
+      // Control → …); its label matches u1's stale name, qualifier kept
+      { id: 'sb-1', service_type: 'Quarterly Pest Control (Quarterly)' },
+      // linked only from terminal u4 — never in the sweep
+      { id: 'sb-4', service_type: 'Quarterly Pest Control' },
+      // linked from l5 but carries a label that isn't l5's stale name — untouched
+      { id: 'sb-5', service_type: 'Owner Custom Booking Label' },
+    ],
+    invoices: [
+      // draft for u1: title + service_type + one line item swap
+      { id: 'i-u1', scheduled_service_id: 'u1', status: 'draft', title: 'Quarterly Pest Control — first visit', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig',
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }]) },
+      // SENT invoice for u1 — history, untouched
+      { id: 'i-u1-sent', scheduled_service_id: 'u1', status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      // scheduled invoice for l1 on a FROZEN payer statement — issued document, untouched
+      { id: 'i-l1-frozen', scheduled_service_id: 'l1', status: 'scheduled', title: 'Pest Control', service_type: 'Pest Control', payer_statement_id: 'ps-closed', updated_at: 'orig', line_items: '[]' },
+      // scheduled invoice for l5 on an OPEN statement — swaps
+      { id: 'i-l5', scheduled_service_id: 'l5', status: 'scheduled', title: 'Lawn + Pest Control Service', service_type: 'Pest Control Service', payer_statement_id: 'ps-open', updated_at: 'orig', line_items: null },
+      // draft for an untouched visit — untouched
+      { id: 'i-l4', scheduled_service_id: 'l4', status: 'draft', title: 'General Pest Control', service_type: 'General Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+    ],
+    payer_statements: [
+      { id: 'ps-closed', status: 'issued' },
+      { id: 'ps-open', status: 'open' },
+    ],
     system_settings: [],
   };
 }
 
 const byId = (db, id) => db.scheduled_services.find((r) => r.id === id);
 const rem = (db, id) => db.appointment_reminders.find((r) => r.id === id);
+const sb = (db, id) => db.self_booked_appointments.find((r) => r.id === id);
+const inv = (db, id) => db.invoices.find((r) => r.id === id);
 const readState = (db) => JSON.parse(db.system_settings.find((r) => r.key === STATE_KEY).value);
 
 describe('20260829000040 backfill up()', () => {
@@ -198,12 +231,62 @@ describe('20260829000040 backfill up()', () => {
     });
   });
 
-  test('skips the reminder fanout without the appointment_reminders table', async () => {
+  test('fans the relabel out to self-booking snapshots (exact-or-qualified) and records every linked visit', async () => {
     const db = seedDb();
-    await migration.up(fakeKnex(db, { missingTables: ['appointment_reminders'] }));
+    await migration.up(fakeKnex(db));
+
+    expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control Service (Quarterly)');
+    expect(sb(db, 'sb-4').service_type).toBe('Quarterly Pest Control'); // only a terminal visit links it
+    expect(sb(db, 'sb-5').service_type).toBe('Owner Custom Booking Label'); // label ≠ the visit's stale name
+
+    const state = readState(db);
+    // sb-1 is linked from u1 (Quarterly Pest Control → …) and l1 (Pest
+    // Control → …); only the u1 pass matched its label.
+    expect(state.selfBookings).toEqual([
+      { id: 'sb-1', from: 'Quarterly Pest Control', to: 'Quarterly Pest Control Service', visit_ids: ['u1'] },
+    ]);
+  });
+
+  test('fans the relabel out to draft/scheduled invoices: title, service_type, line items; skips sent + frozen-statement invoices', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+
+    const iu1 = inv(db, 'i-u1');
+    expect(iu1.title).toBe('Quarterly Pest Control Service — first visit');
+    expect(iu1.service_type).toBe('Quarterly Pest Control Service');
+    expect(JSON.parse(iu1.line_items)).toEqual([
+      { description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service', amount: 100 },
+      { description: 'Fuel surcharge', category: 'fee', amount: 5 },
+    ]);
+    expect(iu1.updated_at).toBe('NOW');
+    expect(inv(db, 'i-u1-sent').service_type).toBe('Quarterly Pest Control'); // sent = history
+    expect(inv(db, 'i-l1-frozen').service_type).toBe('Pest Control'); // frozen statement
+    expect(inv(db, 'i-l5').title).toBe('Lawn + Monthly Pest Control Service');
+    expect(inv(db, 'i-l5').service_type).toBe('Monthly Pest Control Service');
+    expect(inv(db, 'i-l4').service_type).toBe('General Pest Control'); // untouched visit
+
+    const state = readState(db);
+    expect(state.invoices.map((r) => r.id).sort()).toEqual(['i-l5', 'i-u1']);
+    expect(state.invoices.find((r) => r.id === 'i-u1')).toEqual({
+      id: 'i-u1',
+      changed: { title: true, service_type: true, items: [{ i: 0, description: true, category: true }] },
+      from: 'Quarterly Pest Control',
+      to: 'Quarterly Pest Control Service',
+      visit_id: 'u1',
+    });
+  });
+
+  test('skips a snapshot fanout whose table is missing, still relabels visits', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db, { missingTables: ['appointment_reminders', 'self_booked_appointments', 'invoices'] }));
     expect(byId(db, 'u1').service_type).toBe('Quarterly Pest Control Service');
     expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control');
-    expect(readState(db).reminders).toEqual([]);
+    expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control (Quarterly)');
+    expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control');
+    const state = readState(db);
+    expect(state.reminders).toEqual([]);
+    expect(state.selfBookings).toEqual([]);
+    expect(state.invoices).toEqual([]);
   });
 
   test('no-ops without the scheduled_services table', async () => {
@@ -263,6 +346,40 @@ describe('20260829000040 down()', () => {
     expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control & Mosquito Control');
     expect(rem(db, 'r-l1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
     expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Quarterly Pest Control Service, and Lawn Care');
+  });
+
+  test('reverses self-booking and invoice snapshots only while their component visits are open, unedited, and not frozen', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    // Clean reversal path first: everything still open + untouched.
+    await migration.down(knex);
+    expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control (Quarterly)');
+    const iu1 = inv(db, 'i-u1');
+    expect(iu1.title).toBe('Quarterly Pest Control — first visit');
+    expect(iu1.service_type).toBe('Quarterly Pest Control');
+    expect(JSON.parse(iu1.line_items)[0]).toEqual({ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 });
+    expect(inv(db, 'i-l5').title).toBe('Lawn + Pest Control Service');
+    expect(inv(db, 'i-l5').service_type).toBe('Pest Control Service');
+  });
+
+  test('keeps self-booking and invoice snapshots whose component visit completed, whose invoice was edited, or whose statement froze since up()', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    byId(db, 'u1').status = 'completed'; // sb-1 + i-u1 keep the new label
+    inv(db, 'i-l5').updated_at = 'edited-since'; // CAS mismatch → kept
+    db.payer_statements.find((p) => p.id === 'ps-open').status = 'issued'; // froze since → kept anyway
+
+    await migration.down(knex);
+
+    expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control Service (Quarterly)');
+    expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control Service');
+    expect(inv(db, 'i-u1').title).toBe('Quarterly Pest Control Service — first visit');
+    expect(inv(db, 'i-l5').service_type).toBe('Monthly Pest Control Service');
+    expect(inv(db, 'i-l5').title).toBe('Lawn + Monthly Pest Control Service');
   });
 
   test('down is a no-op without a state row', async () => {
