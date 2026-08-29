@@ -1622,6 +1622,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (frozen && members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status)))) {
           throw Object.assign(new Error('Cannot move this stop: a grouped service is already underway and the visit has an issued link or records — finish or separate it first'), { statusCode: 409, code: 'VISIT_FROZEN_LIVE_MOVE_UNSUPPORTED', isOperational: true });
         }
+        // A frozen visit's primary must not WIDEN into a series move (the
+        // collective choke point turns a date move of a cadence visit into
+        // one): the all-or-nothing rollback compensates this visit only, so
+        // a widened series would stay shifted behind a "nothing was moved"
+        // refusal (local audit). Staff move the visit only (seriesPolicy
+        // single) or separate the services first.
+        if (frozen && primary.is_recurring === true && options.seriesPolicy !== 'single'
+          && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true' && newDateStr !== dateOnly(primary.scheduled_date)) {
+          throw Object.assign(new Error('Cannot move this stop with its series: the visit has an issued link or records — move this visit only, or separate the services first'), { statusCode: 409, code: 'VISIT_FROZEN_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+        }
         // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
         // its per-run change budget from an unlocked pre-read; the member
         // count that actually moves is decided here, under the stop lock,
@@ -2092,6 +2102,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       await t('service_visits').where({ id: plan.visitId }).update(patch);
     });
   } catch (err) {
+    if (plan.frozen) {
+      // Frozen visit: the detach seam cannot separate members from a parent
+      // that still names the old stop, so a failed retarget is not
+      // recoverable later — roll the members back and refuse (local audit).
+      const stuck = await rollbackMoved();
+      throw Object.assign(
+        new Error(`Cannot move this stop: the visit record could not be retargeted (${err.message}) — the visit has an issued link or records, so the move was undone${stuck.length ? `; ${stuck.length} service(s) could NOT be moved back (${stuck.join(', ')}) — check the schedule` : ''}`),
+        { statusCode: 409, code: 'VISIT_PARENT_RETARGET_FAILED', isOperational: true, rolledBack: moved.filter((id) => !stuck.includes(id)), rollbackFailed: stuck },
+      );
+    }
     // Staff surface: the members moved; the office is told the visit
     // record lagged (warning + dispatch alert via the caller's warnings).
     parentRetargetFailed = true;

@@ -336,7 +336,10 @@ export default function AppointmentPage() {
         // Grouped: the server reports the VISIT's state after the fan-out —
         // a dispatch-owned sibling can stay pending, so the pill follows the
         // answer a reload would give, not an assumed "Confirmed".
-        setData((prev) => (prev ? { ...prev, confirmed: body.confirmed !== false } : prev));
+        // confirmable is cleared either way: the tap did its work (a
+        // dispatch-owned sibling that stays pending is the office's, not a
+        // reason to keep offering the button).
+        setData((prev) => (prev ? { ...prev, confirmed: body.confirmed !== false, confirmable: false } : prev));
         return;
       }
       // The visit changed under us (cancelled, moved, started) — reload so

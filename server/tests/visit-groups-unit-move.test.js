@@ -653,6 +653,37 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(db.__calls.some((c) => c.op === 'update')).toBe(false);
   });
 
+  test('a frozen visit whose parent cannot be retargeted after the members moved is rolled back and refused; a frozen primary never widens into a series move', async () => {
+    let reads = 0;
+    db.__script = script({ members: [member('a'), member('b')] });
+    db.__script.service_visits.first = (ops) => {
+      if (ops.some((o) => o[0] === 'max')) return { max: 0 };
+      reads += 1;
+      return reads <= 3 ? FROZEN : { ...FROZEN, status: 'dissolved' }; // plan reads (peek, locked, activity) open+frozen; the retarget read finds it dissolved
+    };
+    const rebooker = fakeRebooker();
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_PARENT_RETARGET_FAILED', rolledBack: ['a', 'b'], rollbackFailed: [] });
+    expect(rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0])).toEqual(['b', 'a']);
+    // series widening refused up front on a frozen visit (gate on, cadence primary, date change, no explicit single scope)
+    const prevGate = process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
+      const rb = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_SERIES_MOVE_UNSUPPORTED' });
+      expect(rb.reschedule).not.toHaveBeenCalled();
+      // explicit this-visit-only scope proceeds
+      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
+      const out = await moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { seriesPolicy: 'single' } });
+      expect(out.visitMove.moved).toEqual(['a', 'b']);
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; else process.env.GATE_ADMIN_COLLECTIVE_MOVE = prevGate;
+    }
+  });
+
   test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     const rebooker = { reschedule: jest.fn(async (id, date, win, reason) => {
