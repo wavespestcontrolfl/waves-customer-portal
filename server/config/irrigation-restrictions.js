@@ -39,13 +39,15 @@ const DEFAULT_POLICY = Object.freeze({
 
 // Service-area cities → county, for customers whose turf profile carries no
 // county. Only cities that sit wholly in one county; a city that straddles
-// counties (Lakewood Ranch, Longboat Key, Englewood) is deliberately absent
-// → unknown → no plan (fail closed) until an address-level lane exists.
+// counties (Lakewood Ranch, Longboat Key, Englewood — and the Sarasota
+// POSTAL city, which reaches Manatee County through shared ZIP 34243) is
+// deliberately absent → unknown → no plan (fail closed) until an
+// address-level lane exists (codex gh-r38).
 const CITY_COUNTY = Object.freeze({
   bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
   'anna maria': 'Manatee', 'holmes beach': 'Manatee',
   'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
-  sarasota: 'Sarasota', venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
+  venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
   osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
   'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
 });

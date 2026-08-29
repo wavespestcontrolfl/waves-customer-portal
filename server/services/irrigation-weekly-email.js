@@ -978,7 +978,7 @@ async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   return !!row;
 }
 
-async function findEligibleCustomers({ now = new Date() } = {}) {
+async function findEligibleCustomers({ now = new Date(), customerId = null } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
   return db('customers as c')
@@ -1015,6 +1015,10 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     // them reached 3 of 23 recurring-lawn customers; the other 20 simply
     // never opened the portal's Property Preferences form.
     .where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+    // One-customer re-read (the sweep revalidates each candidate at its
+    // turn — codex gh-r38): same query, same columns, so the fresh row can
+    // never disagree in shape with the audience load.
+    .where((q) => { if (customerId) q.where('c.id', customerId); })
     .select(
       'c.id',
       'c.first_name',
@@ -1159,10 +1163,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     sent: 0,
     deduped: 0,
     blocked: 0,
-    skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
+    skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, no_longer_eligible: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
-    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0, window_closed: 0 },
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0, window_closed: 0, home_moved: 0 },
   };
   // Plan mode only inside the plan week's MONDAY MORNING window (the cron
   // runs ~7 a.m. ET; PLAN_WINDOW_END_HOUR_ET closes it): a retry later on
@@ -1179,10 +1183,25 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   // Plan-week horizon: the Sunday after the completed week (ET).
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
-  for (const customer of candidates) {
+  for (let customer of candidates) {
     if (summary.attempted >= maxSendAttempts) {
       summary.skipped.capped += 1;
       continue;
+    }
+    // The audience row was loaded once at sweep start; with per-customer
+    // weather + provider calls a late candidate's row can be HOURS stale —
+    // an address change in between would send the former home's exact
+    // legal/controller plan (codex gh-r38). Re-read this customer through
+    // the SAME query at their turn; a customer no longer eligible (moved
+    // out of evidence, opted out, deleted) is skipped, and an unreadable
+    // re-read keeps the loaded row (the queue-transition stamp check below
+    // still guards the plan path).
+    try {
+      const fresh = await findEligibleCustomers({ now: startedAt, customerId: customer.id });
+      if (!fresh.length) { summary.skipped.no_longer_eligible += 1; continue; }
+      customer = fresh[0];
+    } catch (err) {
+      logger.warn(`[irrigation-weekly-email] candidate re-read failed for ${customer.id}: ${err.message}`);
     }
     // Hoisted so the catch can discard a pre-send snapshot when the send throws.
     let snapshotArgs = null;
@@ -1194,6 +1213,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     // transition: the plan is withheld (an actionable plan must never go
     // out after the cutoff), counted window_closed.
     let windowClosedAtQueue = false;
+    // The home moved between this customer's re-read and the queue
+    // transition (a fresh irrigation_home_changed_at stamp): the decided
+    // plan sized the FORMER home — withhold it (codex gh-r38).
+    let homeMovedAtQueue = false;
     // THIS customer's clock reading: the window verdict and the snapshot's
     // planAsOf come from it, not from the sweep's start time.
     const planAsOf = tick();
@@ -1423,6 +1446,17 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             // Re-read the clock at dispatch: a plan decided inside the
             // window must not leave after it (codex gh-r33).
             if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
+            // Re-read the move stamp at dispatch: an address change since
+            // this customer's re-read means the decision sized the former
+            // home — abort the plan (codex gh-r38). An unreadable check
+            // proceeds (the claim renewal below is the correctness gate).
+            try {
+              const row = await db('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+              const stampAt = (v) => (v ? new Date(v).getTime() : null);
+              if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) { homeMovedAtQueue = true; return false; }
+            } catch (err) {
+              logger.warn(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id}: ${err.message}`);
+            }
             claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
             return claimRenewal === true;
           }
@@ -1472,6 +1506,17 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // library aborted before dispatch — nothing to stamp, and the discard
       // is the new owner's to make (codex gh-r20).
       if (result.aborted) {
+        if (homeMovedAtQueue) {
+          // The plan was decided for the former home: discard its unsent
+          // snapshot and send nothing this run — every loaded input (county,
+          // coordinates, schedule) is about the old premise, so no template
+          // built from them is safe. The move stamp itself already routes
+          // the customer to the reconfirm flow.
+          summary.plan.home_moved += 1;
+          logger.warn(`[irrigation-weekly-email] home moved before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+          continue;
+        }
         if (claimRenewal === null) {
           // Unreadable renewal even after retries: NOT evidence of another
           // owner. Fail closed on the send, but say so — this customer's

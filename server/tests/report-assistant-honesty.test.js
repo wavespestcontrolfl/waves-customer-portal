@@ -154,6 +154,10 @@ describe('watering questions answer with the weekly plan when the report carries
     for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?']) {
       expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
     }
+    // gh-r38: controller phrasing without the word "water" is a watering question too.
+    for (const q of ['How long should I run each zone?', 'How many minutes per zone?']) {
+      expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
     // Unrelated questions keep their routing.
     expect(answerServiceReportQuestion({ question: 'When can my dog go outside?', data })).not.toMatch(/check the rain/);
   });

@@ -112,6 +112,9 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ city: 'Parrish' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties
+    // gh-r38: the Sarasota POSTAL city reaches Manatee through shared ZIP 34243 — city alone proves nothing.
+    expect(resolveRestrictionCounty({ city: 'Sarasota' })).toBeNull();
+    expect(resolveRestrictionCounty({ city: 'Sarasota', zip: '34239' })).toBe('Sarasota'); // an unambiguous ZIP still resolves
     expect(resolveRestrictionCounty({})).toBeNull();
     // Stale profile (same guard as the plan engine): profile city ≠ customer
     // city → the profile's county is dropped; the current city decides.

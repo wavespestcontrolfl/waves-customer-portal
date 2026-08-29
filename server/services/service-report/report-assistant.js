@@ -453,7 +453,11 @@ function answerServiceReportQuestion({
 
   const weekPlan = data?.reportV2?.water?.weekPlan;
   const aftercare = data?.reportV2?.aftercare;
-  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q);
+  // Controller phrasing without the word "water" — "How long should I run
+  // each zone?", "how many minutes per zone" — is a watering question too
+  // (codex gh-r38); the safety-intent guard above still wins.
+  const zoneRuntimeIntent = /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|how long|long|time)\b/.test(q);
+  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
   // Aftercare: "should I water after today's treatment?" answers with the
   // label instruction, plus the reduced plan when a watering-in is credited.
   if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {

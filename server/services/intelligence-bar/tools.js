@@ -1053,6 +1053,14 @@ async function updateCustomer(customerId, updates) {
       if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
         await lockCustomerComms(trx, customerId);
       }
+      // Prefs advisory lock BEFORE the customer row lock — one global order
+      // with the merge/address/turf paths; this edit reaches the fan-out's
+      // move stamp (advisory) after the row lock otherwise (codex #3565
+      // gh-r38).
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.
