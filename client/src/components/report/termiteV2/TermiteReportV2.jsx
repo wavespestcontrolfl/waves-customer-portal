@@ -208,7 +208,10 @@ export function TermiteStationRecord({ stationMap }) {
   const collapsed = [...checked, ...onFile];
   const summaryParts = [];
   if (checked.length) {
-    summaryParts.push(`${exceptions.length ? '' : 'All '}${checked.length} ${exceptions.length ? 'other ' : ''}station${checked.length === 1 ? '' : 's'} checked — no activity observed`);
+    // "All" only when every station on the visit was checked clean — never
+    // beside exceptions OR on-file (unchecked) stations (codex P2 #3600 r17).
+    const every = !exceptions.length && !onFile.length;
+    summaryParts.push(`${every ? 'All ' : ''}${checked.length} ${exceptions.length ? 'other ' : ''}station${checked.length === 1 ? '' : 's'} checked — no activity observed`);
   }
   if (onFile.length) {
     summaryParts.push(`${onFile.length} station${onFile.length === 1 ? '' : 's'} on file — not checked this visit`);

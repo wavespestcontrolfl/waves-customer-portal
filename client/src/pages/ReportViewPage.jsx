@@ -680,10 +680,17 @@ export function visitWorkSummary(data = {}, fallback = '') {
     : null;
   if (termiteMetrics) {
     const inspected = termiteMetrics.find((m) => m?.label === 'Stations inspected')?.value;
-    const serviced = Number(termiteMetrics.find((m) => m?.label === 'Stations serviced')?.value);
+    const servicedRaw = termiteMetrics.find((m) => m?.label === 'Stations serviced')?.value;
+    const serviced = Number(servicedRaw);
+    // The builder emits a non-numeric "Performed" when bait/station work is
+    // documented without a reliable count (fail-soft station sync) — keep
+    // it as count-neutral wording, never drop it (codex P2 #3600 r17).
+    let servicedPart = null;
+    if (Number.isFinite(serviced) && serviced > 0) servicedPart = `${serviced} station${serviced === 1 ? '' : 's'} serviced`;
+    else if (servicedRaw && !Number.isFinite(serviced)) servicedPart = 'bait service performed';
     const parts = [
       inspected ? `${inspected} stations inspected` : null,
-      Number.isFinite(serviced) && serviced > 0 ? `${serviced} station${serviced === 1 ? '' : 's'} serviced` : null,
+      servicedPart,
     ].filter(Boolean);
     if (parts.length) return parts.join(' · ');
   }

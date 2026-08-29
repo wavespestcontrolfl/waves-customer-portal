@@ -301,6 +301,23 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(screen.queryByText(/checked — no activity observed/)).toBeNull();
   });
 
+  it('a partial sync (checked + on-file, no exceptions) never says "All N checked"', async () => {
+    const mixed = JSON.parse(JSON.stringify(termiteReportV2));
+    mixed.stationMap.stations = mixed.stationMap.stations.map((st, i) => ({ ...st, status: i < 4 ? 'ok' : null }));
+    renderReport(mixed);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('4 stations checked — no activity observed · 10 stations on file — not checked this visit')).toBeInTheDocument();
+    expect(screen.queryByText(/All 4/)).toBeNull();
+  });
+
+  it('the work cell keeps a non-numeric "Performed" serviced metric as count-neutral wording', async () => {
+    const performed = JSON.parse(JSON.stringify(termiteReportV2));
+    performed.termiteReportV2.metrics = performed.termiteReportV2.metrics.map((m) => (m.label === 'Stations serviced' ? { ...m, value: 'Performed' } : m));
+    renderReport(performed);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('12 of 14 stations inspected · bait service performed')).toBeInTheDocument();
+  });
+
   it('hides Needs attention on a clean visit', async () => {
     const clean = JSON.parse(JSON.stringify(termiteReportV2));
     clean.stationMap.stations = clean.stationMap.stations.map((st) => ({ ...st, status: 'ok' }));
