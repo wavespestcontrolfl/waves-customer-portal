@@ -130,23 +130,84 @@ const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalis
 // ATTRIBUTION (excluding text costs an exemption) but backwards here:
 // erasing styled copy would delete a first-party marker and GRANT the
 // exemption. Only certainties qualify (Codex).
+// `open={false}` (or {0}/{null}/{undefined}/{''}) is statically NOT open:
+// Astro/JSX omits a false boolean attribute, so the <details> renders
+// closed (GH r30). A STRING value (`open="false"`) is a truthy boolean
+// attribute in HTML and stays open; only a falsy literal MDX expression
+// counts as absent. An expression we cannot prove ({isOpen}) counts as
+// open here — the certainty walker must never blank possibly-visible text.
+const FALSY_EXPR_RE = /^\{\s*(?:false|0|null|undefined|''|"")\s*\}$/i;
+// A spread ({...props}) can carry `open`, so its presence makes the final
+// value unprovable — and the certainty walker must then treat the element
+// as OPEN (never blank possibly-visible text, #3593 r1). JSX evaluates
+// attributes in order (last wins): only a spread AFTER the last literal
+// `open` can override it; a spread with no literal `open` at all is
+// unprovable likewise.
+const SPREAD_RE = /\{\s*\.\.\./;
+function hasTrueOpenAttr(attrs) {
+  const a = String(attrs || '');
+  const re = /(?:^|\s)open(?:\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>/]+))?(?=[\s>/]|$)/gi;
+  let m = null;
+  let last = null;
+  while ((m = re.exec(a)) !== null) last = m;
+  if (!last) return SPREAD_RE.test(a); // no literal `open`: a spread may add one
+  if (SPREAD_RE.test(a.slice(last.index + last[0].length))) return true; // later spread may override
+  if (last[1] === undefined) return true; // bare `open`
+  return !FALSY_EXPR_RE.test(last[1].trim());
+}
+
 function opensDefinitelyHidden(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
   if (ariaM) {
     const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
     if (v !== 'false') return true;
   }
-  return /style\s*=\s*(?:["'`{])[^"'`]*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(a);
+  return hiddenStyleValue(a);
+}
+
+// The hidden-style test is bounded to the PARSED value of the LAST style
+// attribute (JSX: last wins) and the keywords are token-bounded — a
+// `title="display:none example"` or `display: 'nonetheless'` is not hidden
+// (#3593 r1). String and literal-expression values both count; the value
+// may quote the keyword (style={{ display: 'none' }}, GH r30).
+const HIDDEN_STYLE_KEYWORD_RE = /(?:^|[^a-z0-9_-])display\s*:\s*['"`]?\s*none(?![a-z0-9_-])|(?:^|[^a-z0-9_-])visibility\s*:\s*['"`]?\s*hidden(?![a-z0-9_-])/i;
+function hiddenStyleValue(attrs) {
+  const a = String(attrs || '');
+  const re = /(?:^|\s)style\s*=\s*/gi;
+  let m = null;
+  let last = null;
+  while ((m = re.exec(a)) !== null) last = m;
+  if (!last) return false;
+  const v = a.slice(last.index + last[0].length);
+  const ch = v[0];
+  let val = '';
+  if (ch === '"' || ch === "'" || ch === '`') {
+    const end = v.indexOf(ch, 1);
+    val = end === -1 ? v.slice(1) : v.slice(1, end);
+  } else if (ch === '{') {
+    let d = 0;
+    let j = 0;
+    for (; j < v.length; j += 1) {
+      const c = v[j];
+      if (c === '"' || c === "'" || c === '`') { const q = c; j += 1; while (j < v.length && v[j] !== q) j += v[j] === '\\' ? 2 : 1; continue; }
+      if (c === '{') d += 1;
+      else if (c === '}') { d -= 1; if (d === 0) break; }
+    }
+    val = v.slice(1, j);
+  } else {
+    val = (v.match(/^[^\s>]*/) || [''])[0];
+  }
+  return HIDDEN_STYLE_KEYWORD_RE.test(val);
 }
 
 function opensHiddenContent(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !hasTrueOpenAttr(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   // aria-hidden in ANY form except a literal false.
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
