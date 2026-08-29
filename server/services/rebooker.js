@@ -927,6 +927,20 @@ class SmartRebooker {
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    try {
+      return await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+    } catch (err) {
+      // The single-row CAS found the row grouped AFTER the pre-read (codex
+      // #3609 r13 P2): re-enter once so the fresh read routes through the
+      // unit mover (whole-visit move) instead of moving the lone member.
+      if (err && err.code === 'VISIT_MEMBERSHIP_CHANGED' && !options._membershipRetried) {
+        return this.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, _membershipRetried: true });
+      }
+      throw err;
+    }
+  }
+
+  async rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
     const allowedStatuses = options.allowLive === true
@@ -955,6 +969,16 @@ class SmartRebooker {
       });
       if (unit) return unit;
     }
+    // Membership fence (codex #3609 r13 P2): the row read above was
+    // ungrouped, so this request takes the single-row path — but
+    // createOrJoinVisit can group it between that read and the move
+    // transaction, and normal callers do not carry membership in `expect`.
+    // Pin visit_id IS NULL in the CAS below; a miss that finds the row
+    // grouped surfaces VISIT_MEMBERSHIP_CHANGED and reschedule() re-enters
+    // through the unit mover. A caller that fenced membership itself, or
+    // an explicit single-row member move, keeps its own contract.
+    const membershipFenced = options.visitPolicy !== 'single' && !service.visit_id
+      && !Object.prototype.hasOwnProperty.call(options.expect || {}, 'visit_id');
     if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
@@ -1263,6 +1287,9 @@ class SmartRebooker {
         // operator lock/move is caught atomically here, not just by a prior read.
         // .where({}) is a no-op, so callers that omit it are unaffected.
         .where(options.expect || {})
+        // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
+        // (knex renders null as IS NULL); see membershipFenced above.
+        .where(membershipFenced ? { visit_id: null } : {})
         // When the occupancy gate derived its span FROM the duration (null
         // stored end), pin that duration in the CAS: a concurrent
         // duration-only edit (admin editor commits exactly that) would
@@ -1279,6 +1306,15 @@ class SmartRebooker {
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
         });
       if (updated === 0) {
+        if (membershipFenced) {
+          const now = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
+          if (now && now.visit_id) {
+            throw Object.assign(new Error('Cannot reschedule — the service was grouped into a visit concurrently'), {
+              statusCode: 409,
+              code: 'VISIT_MEMBERSHIP_CHANGED',
+            });
+          }
+        }
         throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
           statusCode: 409,
         });
@@ -1349,16 +1385,23 @@ class SmartRebooker {
       logger.error(`[rebooker] call follow-up shift failed for ${serviceId}: ${err.message}`);
     }
 
-    // Check escalation
-    const count = await db('reschedule_log')
-      .where({ scheduled_service_id: serviceId })
-      .count('* as count').first();
+    // Check escalation — best-effort, post-commit: the move is already
+    // committed, so a failure here must not be reported as a failed move
+    // (a grouped unit move would otherwise abort with its primary landed —
+    // codex #3609 r13 P1).
+    try {
+      const count = await db('reschedule_log')
+        .where({ scheduled_service_id: serviceId })
+        .count('* as count').first();
 
-    if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
-      const customer = await db('customers').where({ id: service.customer_id }).first();
-      logger.warn(`Service ${serviceId} for ${customer.first_name} ${customer.last_name} has been rescheduled ${count.count} times — needs manual review`);
-      await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
-        .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
+        const customer = await db('customers').where({ id: service.customer_id }).first();
+        logger.warn(`Service ${serviceId} for ${customer ? `${customer.first_name} ${customer.last_name}` : service.customer_id} has been rescheduled ${count.count} times — needs manual review`);
+        await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
+          .then(log => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      }
+    } catch (escErr) {
+      logger.warn(`[rebooker] escalation check failed for ${serviceId} (move already committed): ${escErr.message}`);
     }
 
     // This writer moves the visit with a direct UPDATE, not

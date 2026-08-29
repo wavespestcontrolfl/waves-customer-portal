@@ -774,3 +774,51 @@ describe('seriesOccurrenceWindow — REBOOKER_NULL_END_OCCUPANCY=off outranks th
     expect(out).toEqual({ start: '10:00', end: '11:00' });
   });
 });
+
+describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
+  test('an ungrouped pre-read pins visit_id IS NULL in the CAS; an explicit single-row member move does not', async () => {
+    let { trxScheduled } = wireRescheduleMocks(service());
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin');
+    expect(trxScheduled.where).toHaveBeenCalledWith({ visit_id: null });
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin', { visitPolicy: 'single' });
+    expect(trxScheduled.where).not.toHaveBeenCalledWith({ visit_id: null });
+    // a caller that fences membership itself keeps its own contract
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    await SmartRebooker.reschedule('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin', { expect: { visit_id: 'v1' } });
+    expect(trxScheduled.where).not.toHaveBeenCalledWith({ visit_id: null });
+  });
+
+  test('a CAS miss that finds the row grouped surfaces VISIT_MEMBERSHIP_CHANGED; a plain miss keeps the generic 409', async () => {
+    let { trxScheduled } = wireRescheduleMocks(service());
+    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: 'v9' } : undefined));
+    await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+    ({ trxScheduled } = wireRescheduleMocks(service()));
+    trxScheduled.update.mockResolvedValue(0);
+    trxScheduled.first.mockImplementation(async () => (trxScheduled.update.mock.calls.length ? { visit_id: null } : undefined));
+    const err = await SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin').catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409 });
+    expect(err.code).toBeUndefined();
+  });
+
+  test('reschedule() re-enters ONCE on VISIT_MEMBERSHIP_CHANGED so the fresh read routes through the unit mover', async () => {
+    const once = jest.spyOn(SmartRebooker, 'rescheduleOnce')
+      .mockRejectedValueOnce(Object.assign(new Error('grouped'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' }))
+      .mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v9' } });
+    try {
+      const out = await SmartRebooker.reschedule('svc-1', TARGET, null, 'rain', 'admin', { allowLive: false });
+      expect(out).toEqual({ success: true, visitMove: { visitId: 'v9' } });
+      expect(once).toHaveBeenCalledTimes(2);
+      expect(once.mock.calls[1][5]).toMatchObject({ allowLive: false, _membershipRetried: true });
+      // a second membership change is NOT retried again (no unbounded loop)
+      once.mockRejectedValueOnce(Object.assign(new Error('grouped'), { code: 'VISIT_MEMBERSHIP_CHANGED' }))
+        .mockRejectedValueOnce(Object.assign(new Error('grouped again'), { code: 'VISIT_MEMBERSHIP_CHANGED' }));
+      await expect(SmartRebooker.reschedule('svc-1', TARGET, null, 'rain', 'admin')).rejects.toThrow('grouped again');
+      expect(once).toHaveBeenCalledTimes(4);
+    } finally {
+      once.mockRestore();
+    }
+  });
+});

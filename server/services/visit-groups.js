@@ -1623,6 +1623,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
           }
         }
+        // Caller-supplied member guard (codex r13 P1): auto-dispatch's
+        // apply-time HARD guards (72h reminder freeze, technician capability,
+        // live status) are evaluated for the tapped row only; the caller
+        // re-validates EVERY locked member here — under the stop lock, before
+        // the first write — or the grouped automatic move is refused.
+        if (typeof options.memberGuard === 'function') {
+          await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id });
+        }
         const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
         const validateSibling = (m, start, end) => {
           try {
@@ -1711,7 +1719,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const failed = [];
   const warnings = [];
   let primaryResult = null;
-  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, ...siblingBase } = options;
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, ...siblingBase } = options;
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};
@@ -1725,6 +1733,27 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     return { scheduled_date: newDateStr, window_start: t.window.start || null };
   };
   for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) landedState[t.id] = targetTuple(t);
+  // Did this member's row land at its planned target (same visit, target
+  // date, planned window bounds where the plan asserts them, planned tech)?
+  // Read fresh from the root connection; a read failure reports NOT landed
+  // (the caller then treats the move as failed — the conservative answer).
+  const memberLandedAt = async (t) => {
+    try {
+      const row = await db('scheduled_services').where({ id: t.id })
+        .first('scheduled_date', 'window_start', 'window_end', 'visit_id', 'technician_id');
+      if (!row || String(row.visit_id || '') !== String(plan.visitId)) return false;
+      if (dateOnly(row.scheduled_date) !== newDateStr) return false;
+      const want = targetTuple(t);
+      const norm = (v) => (v ? String(v).slice(0, 5) : null);
+      if (want.window_start !== undefined && norm(row.window_start) !== norm(want.window_start)) return false;
+      if (want.window_end !== undefined && norm(row.window_end) !== norm(want.window_end)) return false;
+      if (options.technicianId !== undefined && String(row.technician_id || '') !== String(options.technicianId || '')) return false;
+      return true;
+    } catch (readErr) {
+      logger.warn(`[visit-groups] unit move landed-check for ${t.id} failed: ${readErr.message}`);
+      return false;
+    }
+  };
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
   for (const target of ordered) {
     // The primary keeps the caller's own fence; a caller that supplied none
@@ -1767,6 +1796,28 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
       : { ...siblingBase, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+    // Callers sync reminders for the tapped row only (r2): every moved
+    // sibling gets its reminder row synced here, notice suppressed — the
+    // visit's one reminder text is the primary's. A sibling's own series
+    // move (seriesMoveId) is finished by the series-effects reconciler like
+    // any other committed series_moves row.
+    const syncSiblingReminder = async () => {
+      try {
+        // expectSchedule fences this sync against a NEWER move that landed
+        // after the row moved (codex r3): a stale pass never overwrites it.
+        // keepPendingConfirmation: nobody sends a replacement notice for a
+        // sibling, so a still-pending creation confirmation stays pending
+        // (delivered by the deferred sendConfirmation) instead of being
+        // superseded and re-armed after the fact (codex r6/r7).
+        await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
+          sendNotification: false,
+          keepPendingConfirmation: true,
+          expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
+        });
+      } catch (remErr) {
+        logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
+      }
+    };
     try {
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
@@ -1777,29 +1828,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
-      else {
-        // Callers sync reminders for the tapped row only (r2): every moved
-        // sibling gets its reminder row synced here, notice suppressed —
-        // the visit's one reminder text is the primary's. A sibling's own
-        // series move (seriesMoveId) is finished by the series-effects
-        // reconciler like any other committed series_moves row.
-        try {
-          // expectSchedule fences this sync against a NEWER move that landed
-          // after the row moved (codex r3): a stale pass never overwrites it.
-          // keepPendingConfirmation: nobody sends a replacement notice for a
-          // sibling, so a still-pending creation confirmation stays pending
-          // (delivered by the deferred sendConfirmation) instead of being
-          // superseded and re-armed after the fact (codex r6/r7).
-          await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
-            sendNotification: false,
-            keepPendingConfirmation: true,
-            expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
-          });
-        } catch (remErr) {
-          logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
-        }
-      }
+      else await syncSiblingReminder();
     } catch (err) {
+      // The rebooker COMMITS its move transaction and then runs post-commit
+      // work (tech_status clear, follow-up shift, escalation, legacy
+      // activation) that can reject after the row landed (codex r13 P1).
+      // "Threw" therefore does not mean "did not move": re-read the row and
+      // reconcile — a member that sits at its planned target is a committed
+      // move (parent retarget + seams must still run for it); only a row
+      // still at its old placement is a real failure.
+      if (await memberLandedAt(target)) {
+        moved.push(target.id);
+        landedState[target.id] = targetTuple(target);
+        warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
+        logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
+        if (target.isPrimary) primaryResult = { success: true, newDate };
+        else await syncSiblingReminder();
+        continue;
+      }
       if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
       failed.push({ id: target.id, reason: err.message, code: err.code || null });
       logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${err.message}`);

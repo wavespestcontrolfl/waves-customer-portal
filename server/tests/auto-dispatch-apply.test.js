@@ -4,11 +4,14 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({ reschedule: jest.fn().mockResolvedValue({ success: true }) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue() }));
+jest.mock('../services/auto-dispatch/route-tiers', () => ({ loadReminderFreeze: jest.fn().mockResolvedValue({ failed: false, frozen: new Set() }) }));
 
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const AppointmentReminders = require('../services/appointment-reminders');
-const { applyAutoDispatchMove } = require('../services/auto-dispatch/apply');
+const { applyAutoDispatchMove, makeMemberGuard } = require('../services/auto-dispatch/apply');
+const routeTiers = require('../services/auto-dispatch/route-tiers');
+const { classifyServiceCategory } = require('../services/auto-dispatch/service-category');
 
 const SERVICE = {
   id: 's1', status: 'confirmed', scheduled_date: '2026-08-04',
@@ -227,4 +230,73 @@ test('the remaining per-run budget is handed to the unit move as maxUnitSize', a
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false, remainingChanges: 4 });
   expect(SmartRebooker.reschedule.mock.calls[0][5].maxUnitSize).toBe(4);
+});
+
+describe('grouped member guard (codex #3609 r13 P1)', () => {
+  const fakeTrx = ({ siblings = [], caps = [] } = {}) => {
+    const calls = [];
+    const trx = jest.fn((table) => {
+      calls.push(table);
+      const api = { where: () => api, whereIn: () => api, select: async () => (table === 'scheduled_services' ? siblings : caps) };
+      return api;
+    });
+    trx.__calls = calls;
+    return trx;
+  };
+  const primary = { id: 's1', status: 'confirmed' };
+
+  test('applyAutoDispatchMove hands the unit mover a member guard', async () => {
+    const queue = [
+      readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+      { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    ];
+    db.mockImplementation(() => queue.shift());
+    await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
+    expect(typeof SmartRebooker.reschedule.mock.calls[0][5].memberGuard).toBe('function');
+  });
+
+  test('no siblings ⇒ nothing to check; a non-live sibling (customer reschedule request) refuses', async () => {
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
+    const trx = fakeTrx();
+    await expect(guard({ trx, members: [primary] })).resolves.toBeUndefined();
+    expect(trx).not.toHaveBeenCalled();
+    await expect(guard({ trx, members: [primary, { id: 's2', status: 'rescheduled' }] }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+  });
+
+  test('route tiers on: a sibling inside its 72h reminder band, or an unreadable check, refuses (fail closed); tiers off never queries it', async () => {
+    const members = [primary, { id: 's2', status: 'pending' }, { id: 's3', status: 'confirmed' }];
+    const on = makeMemberGuard({ service: SERVICE, best: BEST, config: { routeTiersEnabled: true }, techChanged: false });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
+    const trx = fakeTrx();
+    await expect(on({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3' });
+    // queried on the caller's TRANSACTION for the SIBLINGS only
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date));
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: true, frozen: new Set() });
+    await expect(on({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' });
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    await expect(on({ trx, members })).resolves.toBeUndefined();
+    routeTiers.loadReminderFreeze.mockClear();
+    const off = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
+    await expect(off({ trx, members })).resolves.toBeUndefined();
+    expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
+  });
+
+  test('technician reassignment: the chosen tech DEACTIVATED for a sibling category refuses; missing/qualified passes; unchanged tech never reads capabilities', async () => {
+    const lawn = classifyServiceCategory('Lawn Fertilization');
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const best = { ...BEST, technician_id: 't9' };
+    const guard = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: true });
+    let trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: false }] });
+    await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    expect(trx.__calls).toEqual(['scheduled_services', 'technician_capabilities']);
+    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [] });
+    await expect(guard({ trx, members })).resolves.toBeUndefined();
+    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: true }] });
+    await expect(guard({ trx, members })).resolves.toBeUndefined();
+    const same = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: false });
+    trx = fakeTrx();
+    await expect(same({ trx, members })).resolves.toBeUndefined();
+    expect(trx).not.toHaveBeenCalled();
+  });
 });

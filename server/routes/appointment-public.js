@@ -302,6 +302,33 @@ function calendarWindowStart(svc, visitInfo) {
   return visitInfo?.visit?.windowStart || hhmm(svc?.window_start);
 }
 
+// Grouped stop ⇒ the calendar identity is the VISIT, not the member row
+// (the ungrouped key is unchanged so existing customers' events still
+// update in place).
+function calendarUid(svc, visitInfo) {
+  return visitInfo?.visit && svc?.visit_id ? `visit-group-${svc.visit_id}` : `visit-${svc?.id}`;
+}
+
+// One shared event must name every service at the stop, whichever member's
+// link produced it (the last import wins the SUMMARY otherwise).
+function calendarSummaryLabel(ownLabel, visitInfo) {
+  const names = visitInfo?.visit?.services;
+  if (Array.isArray(names) && names.length > 1) return [...new Set(names.filter(Boolean))].join(' + ') || ownLabel;
+  return ownLabel;
+}
+
+// The already-confirmed grouped anchor is re-read FOR UPDATE (codex r13 P2):
+// transitionJobStatus updates a row WITHOUT the stop advisory lock (its
+// terminal seam runs post-commit), so only the row lock serializes a staff
+// cancel/start against this fan-out verdict — a cancel that commits first
+// is seen (status != confirmed → CHANGED); one that arrives later waits.
+function readConfirmedAnchorLocked(trx, svc) {
+  return trx('scheduled_services')
+    .where({ id: svc.id })
+    .forUpdate()
+    .first('visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start');
+}
+
 // Locked re-read guard for the already-confirmed grouped fan-out (codex r12
 // P1): the pre-lock loadByToken/slotMatchesShown pass proves nothing about
 // the row AFTER a concurrent move, so under the stop lock the row must still
@@ -543,7 +570,8 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     // Grouped visit: the event starts at the STOP's canonical start, the
     // same window the page promised — a later member's link must not file a
     // calendar event that disagrees with its own page (codex r12).
-    const start = calendarWindowStart(svc, await visitServicesFor(svc));
+    const visitInfo = await visitServicesFor(svc);
+    const start = calendarWindowStart(svc, visitInfo);
 
     // ET wall-clock -> real instants, so the event lands correctly in any
     // device timezone. The event spans the customer-quoted 2-hour arrival
@@ -552,7 +580,7 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     if (!startAt || Number.isNaN(startAt.getTime())) return res.status(404).json({ error: 'Not found' });
     const endAt = new Date(startAt.getTime() + ARRIVAL_PROMISE_MINUTES * 60000);
 
-    const serviceLabel = await resolveServiceLabel(svc);
+    const serviceLabel = calendarSummaryLabel(await resolveServiceLabel(svc), visitInfo);
     const lines = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
@@ -561,8 +589,11 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
       'METHOD:PUBLISH',
       'BEGIN:VEVENT',
       // Stable per visit: re-downloading updates the same event instead of
-      // stacking duplicates in the customer's calendar.
-      `UID:visit-${svc.id}@wavespestcontrol.com`,
+      // stacking duplicates in the customer's calendar. Grouped stop: ONE
+      // identity for every member's link (codex r12/r13) — importing two
+      // members' files updates one event instead of stacking two at the
+      // same time.
+      `UID:${calendarUid(svc, visitInfo)}@wavespestcontrol.com`,
       `DTSTAMP:${icsStamp(new Date())}`,
       `DTSTART:${icsStamp(startAt)}`,
       `DTEND:${icsStamp(endAt)}`,
@@ -642,9 +673,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // confirms siblings at a slot nobody was shown.
       if (svc.visit_id) {
         const ok = await underStopLock(svc, async (trx) => {
-          const cur = await trx('scheduled_services')
-            .where({ id: svc.id })
-            .first('visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start');
+          const cur = await readConfirmedAnchorLocked(trx, svc);
           if (!confirmedRowStillShown(cur, svc, req.body)) {
             throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
           }
@@ -817,6 +846,9 @@ router._test = {
   visitServicesFor,
   confirmGroupedSiblings,
   calendarWindowStart,
+  calendarUid,
+  calendarSummaryLabel,
+  readConfirmedAnchorLocked,
   confirmedRowStillShown,
 };
 

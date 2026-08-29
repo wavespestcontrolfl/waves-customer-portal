@@ -408,3 +408,39 @@ describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
     expect(calendarWindowStart({ window_start: '10:00:00' }, { visit: { windowStart: null } })).toBe('10:00');
   });
 });
+
+describe('grouped calendar identity + locked anchor read (codex #3609 r13)', () => {
+  const { calendarUid, calendarSummaryLabel, readConfirmedAnchorLocked } = appointmentRouter._test;
+
+  test('one UID per grouped STOP (any member link), the row UID when ungrouped', () => {
+    const grouped = { visit: { serviceCount: 2, services: ['Pest Control', 'Lawn Fertilization'] } };
+    expect(calendarUid({ id: 'a', visit_id: 'v1' }, grouped)).toBe('visit-group-v1');
+    expect(calendarUid({ id: 'b', visit_id: 'v1' }, grouped)).toBe('visit-group-v1');
+    expect(calendarUid({ id: 'a', visit_id: null }, {})).toBe('visit-a');
+    expect(calendarUid({ id: 'a', visit_id: 'v1' }, {})).toBe('visit-a'); // lookup failed ⇒ row identity, never a half-built group key
+  });
+
+  test('the shared event names EVERY service at the stop, deduped; a lone service keeps its own label', () => {
+    expect(calendarSummaryLabel('Pest Control', { visit: { services: ['Pest Control', 'Lawn Fertilization'] } })).toBe('Pest Control + Lawn Fertilization');
+    expect(calendarSummaryLabel('Pest Control', { visit: { services: ['Pest Control', 'Pest Control'] } })).toBe('Pest Control');
+    expect(calendarSummaryLabel('Pest Control', { visit: { services: ['Pest Control'] } })).toBe('Pest Control');
+    expect(calendarSummaryLabel('Pest Control', {})).toBe('Pest Control');
+  });
+
+  test('the already-confirmed anchor is re-read FOR UPDATE with the slot/membership projection (P2)', async () => {
+    const ops = [];
+    const api = {
+      where: (w) => { ops.push(['where', w]); return api; },
+      forUpdate: () => { ops.push(['forUpdate']); return api; },
+      first: async (...cols) => { ops.push(['first', cols]); return { status: 'confirmed' }; },
+    };
+    const trx = jest.fn(() => api);
+    expect(await readConfirmedAnchorLocked(trx, { id: 'a' })).toEqual({ status: 'confirmed' });
+    expect(trx).toHaveBeenCalledWith('scheduled_services');
+    expect(ops).toEqual([
+      ['where', { id: 'a' }],
+      ['forUpdate'],
+      ['first', ['visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start']],
+    ]);
+  });
+});

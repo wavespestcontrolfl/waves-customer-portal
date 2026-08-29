@@ -17,7 +17,7 @@ jest.mock('../models/db', () => {
       leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
       max() { chain._ops.push(['max', ...arguments]); return chain; },
-      first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops) : null); },
+      first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops, cols) : null); },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       count() { chain._ops.push(['count', ...arguments]); return chain; },
@@ -420,5 +420,84 @@ describe('moveVisitAsUnit', () => {
     await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+});
+
+describe('moveVisitAsUnit — codex #3609 r13', () => {
+  const LANDED_COLS = ['scheduled_date', 'window_start', 'window_end', 'visit_id', 'technician_id'];
+  // Like `script` above, plus scheduled_services.first answering the
+  // post-error LANDED re-read (its 5-column projection) from `landedRows`.
+  const script = ({ members, landed = null, landedRows = {} }) => ({
+    service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : VISIT) },
+    scheduled_services: {
+      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+        : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
+          : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+      first: (ops, cols) => {
+        if (cols.length !== LANDED_COLS.length || !LANDED_COLS.every((c) => cols.includes(c))) return null;
+        const w = ops.find((o) => o[0] === 'where' && o[1] && o[1].id);
+        return (w && landedRows[w[1].id]) || null;
+      },
+    },
+  });
+  const landedRow = (over = {}) => ({ scheduled_date: '2026-09-02', window_start: '09:00:00', window_end: '10:00:00', visit_id: 'v1', technician_id: 't1', ...over });
+
+  test('memberGuard runs under the plan lock on EVERY locked member and its refusal aborts before any write (P1)', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rebooker = fakeRebooker();
+    const memberGuard = jest.fn(async () => { throw Object.assign(new Error('grouped service b is frozen'), { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'b' }); });
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch', options: { memberGuard } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 'b' });
+    expect(memberGuard).toHaveBeenCalledTimes(1);
+    const arg = memberGuard.mock.calls[0][0];
+    expect(arg.members.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(arg).toMatchObject({ primaryId: 'a', visitId: 'v1' });
+    expect(typeof arg.trx).toBe('function');
+    // the guard ran AFTER the stop lock (a trx.raw lock call precedes it) and nothing was written
+    expect(db.__rawCalls.length).toBeGreaterThan(0);
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.op === 'update')).toBe(false);
+    // a passing guard lets the move proceed; siblings never receive the guard in their own single-row options
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')] });
+    const ok = jest.fn(async () => {});
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch', options: { memberGuard: ok } });
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
+    expect(rebooker.reschedule.mock.calls[1][5].memberGuard).toBeUndefined();
+  });
+
+  test('primary rejected AFTER its move committed (post-commit rebooker work) is reconciled as MOVED: siblings follow, parent retargets, warning carried (P1)', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow() }, landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' },
+    ] });
+    const rebooker = fakeRebooker({ a: 'throw' });
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.success).toBe(true);
+    expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    expect(out.warnings.some((w) => /the tapped service moved but its post-move cleanup failed: member a boom/.test(w))).toBe(true);
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
+    // the sibling's contract carries the primary at its LANDED target
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect[0]).toMatchObject({ id: 'a', scheduled_date: '2026-09-02' });
+    const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.scheduled_date);
+    expect(patch.values).toMatchObject({ scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' });
+  });
+
+  test('a primary that rejected and did NOT land still rethrows with nothing changed; a landed sibling that rejected counts as moved and gets its reminder sync', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow({ scheduled_date: '2026-08-30' }) } });
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+    // landed on the date but a different window / another tech / another visit ⇒ not landed either
+    for (const over of [{ window_start: '11:00:00' }, { technician_id: 't2' }, { visit_id: 'v2' }]) {
+      db.__calls.length = 0;
+      db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow(over) } });
+      await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't1' } })).rejects.toThrow('member a boom');
+    }
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landedRows: { b: landedRow() } });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    expect(out.warnings.some((w) => /service b moved but its post-move cleanup failed/.test(w))).toBe(true);
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T09:00', expect.objectContaining({ sendNotification: false }));
   });
 });

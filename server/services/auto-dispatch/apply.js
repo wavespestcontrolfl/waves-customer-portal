@@ -15,6 +15,8 @@ const db = require('../../models/db');
 const SmartRebooker = require('../rebooker');
 const logger = require('../logger');
 const { toDateStr } = require('./dates');
+const routeTiers = require('./route-tiers');
+const { classifyServiceCategory } = require('./service-category');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -86,6 +88,54 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
   return payload;
 }
 
+/**
+ * Grouped-visit member guard for the unit mover (codex #3609 r13 P1): the
+ * apply-time HARD guards are evaluated for the tapped row only — the 72h
+ * reminder freeze is queried by that one id, the candidate technician's
+ * capability by that row's category, and revalidatePlacement reads that one
+ * row. A grouped move drags every sibling through the same reschedule, so
+ * each locked member must pass the same guards or the automatic move is
+ * refused before the first write. Runs INSIDE the unit mover's plan
+ * transaction, under the stop lock, on the FOR UPDATE member rows.
+ *   - status: live pending/confirmed only ('rescheduled' is a customer
+ *     request the mover would otherwise treat as movable)
+ *   - reminder freeze (route tiers on): any sibling inside the sendable
+ *     band, or an unreadable check, refuses (fail closed)
+ *   - technician reassignment: the chosen tech must not be DEACTIVATED for
+ *     a sibling's service category (the scorer's hard filter)
+ */
+function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
+  const refuse = (memberId, why) => Object.assign(
+    new Error(`Cannot auto-move this stop: grouped service ${memberId} ${why}`),
+    { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId, isOperational: true },
+  );
+  return async ({ trx, members }) => {
+    const siblings = (members || []).filter((m) => String(m.id) !== String(service.id));
+    if (!siblings.length) return;
+    for (const m of siblings) {
+      if (!['pending', 'confirmed'].includes(String(m.status || ''))) throw refuse(m.id, `is ${m.status}`);
+    }
+    if (config.routeTiersEnabled === true) {
+      const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), new Date());
+      if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
+      const frozen = siblings.find((m) => freeze.frozen.has(m.id));
+      if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
+    }
+    if (techChanged && best.technician_id) {
+      const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id)).select('id', 'service_type');
+      const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+      if (categories.length) {
+        const caps = await trx('technician_capabilities')
+          .where({ technician_id: best.technician_id }).whereIn('service_category', categories)
+          .select('service_category', 'active');
+        const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
+        const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
+        if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+      }
+    }
+  };
+}
+
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
@@ -96,6 +146,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const techChanged = !!best.technician_id
     && String(best.technician_id) !== String(service.technician_id || '');
   if (techChanged) options.technicianId = best.technician_id;
+  // Every grouped member re-passes the apply-time hard guards under the
+  // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
+  options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
   // reschedule() reloads it but only guards status — if staff locked/excluded it
@@ -275,4 +328,4 @@ async function unitMoveSize(service) {
   }
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize };
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard };
