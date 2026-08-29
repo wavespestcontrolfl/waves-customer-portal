@@ -2653,8 +2653,13 @@ function leadAddressCompareKey(v) {
   // as its composed restatement ("100 Main St, Apt 4, Sarasota FL 34236"),
   // or a restated address never records successor ownership (codex r10 P1).
   const { street, unit } = splitLeadStreetParts(raw);
-  const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!streetKey) return '';
+  const rawStreetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!rawStreetKey) return '';
+  // Every inline unit run inside the street is rewritten to its canonical
+  // unit key ("apt 4" / "#4" / "apt # 4" / "unit 4" → "{u:4}", "bldg 2 apt
+  // 4" → "{u:bldg 2 unit 4}"), so a comma-free legacy value keys the same
+  // as any equivalent spelling of itself (#3608 codex r6 P1).
+  const { streetKey, unitKeys } = canonicalizeInlineUnits(rawStreetKey);
   const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
   // A comma-free full address is stored WHOLE (its inline unit stays inside
   // the street); a later restatement of that same line carries the unit
@@ -2662,36 +2667,49 @@ function leadAddressCompareKey(v) {
   // the street already embeds the same door, the appended unit adds no
   // identity — collapse to the street key so the two compare equal and
   // successor ownership is recorded (#3608 codex r4 P1).
-  if (unitK && streetEmbedsUnitKey(streetKey, unitK)) return streetKey;
+  if (unitK && unitKeys.includes(unitK)) return streetKey;
   return unitK ? `${streetKey}|${unitK}` : streetKey;
 }
 
-// True when a (lower-cased, punctuation-free) street key carries an inline
-// unit anywhere whose unit key equals unitK — every spelling the shared
-// parser supports: "apt 4", "#4", "# 4", "apt #4", and multipart units
-// ("bldg 2 apt 4") compared as ONE span, not pair-by-pair (#3608 codex r5).
-function streetEmbedsUnitKey(streetKey, unitK) {
-  const { normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+// Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
+// street key to "{u:<canonical unit key>}" and list the keys found. A run
+// is consecutive "<designator> <value>" pairs — a designator may be followed
+// by a separated hash then the value ("apt # 4") — or a lone "#4" / "# 4";
+// compared whole through the shared normalizeUnitLine / unitLineValueKey,
+// so "Apt 4" never equals "Bldg 2 Apt 4" (different door, same rule as the
+// composer's dedupe) while Apt / Unit / Suite / hash spellings do
+// (#3608 codex r5 + r6).
+function canonicalizeInlineUnits(streetKey) {
+  const {
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, isStateZipPair,
+  } = require('../utils/address-normalizer');
   const tokens = String(streetKey || '').split(' ').filter(Boolean);
-  const isDesignator = (t) => t === '#' || UNIT_DESIGNATORS.has(t);
+  // 'fl' is also the floor designator — "fl 34236" is the state tail.
+  const isDesignator = (t, next) => UNIT_DESIGNATORS.has(t) && !isStateZipPair(t, next || '');
+  const isHashValue = (t) => t.length > 1 && t.startsWith('#');
+  const out = [];
+  const unitKeys = [];
   let i = 0;
   while (i < tokens.length) {
-    if (!(tokens[i].startsWith('#') || isDesignator(tokens[i]))) { i += 1; continue; }
-    // One MAXIMAL inline-unit run: consecutive "<designator> <value>" pairs
-    // ("bldg 2 apt 4") or a lone "#4" — compared whole, so "Apt 4" never
-    // matches inside "Bldg 2 Apt 4" (a different door, same rule as the
-    // composer's dedupe).
+    const t = tokens[i];
+    if (!(isDesignator(t, tokens[i + 1]) || t === '#' || isHashValue(t))) { out.push(t); i += 1; continue; }
     const run = [];
     let j = i;
     while (j < tokens.length) {
-      if (tokens[j].length > 1 && tokens[j].startsWith('#') && !isDesignator(tokens[j])) { run.push(tokens[j]); j += 1; continue; }
-      if (isDesignator(tokens[j]) && j + 1 < tokens.length) { run.push(tokens[j], tokens[j + 1]); j += 2; continue; }
+      const c = tokens[j];
+      if (isHashValue(c)) { run.push(c); j += 1; continue; }
+      if (c === '#' && j + 1 < tokens.length) { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (isDesignator(c, tokens[j + 1]) && j + 2 < tokens.length && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
+      if (isDesignator(c, tokens[j + 1]) && j + 1 < tokens.length && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
       break;
     }
-    if (run.length && unitLineValueKey(normalizeUnitLine(run.join(' '))) === unitK) return true;
-    i = Math.max(j, i + 1);
+    if (!run.length) { out.push(t); i += 1; continue; }
+    const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
+    unitKeys.push(key);
+    out.push(`{u:${key}}`);
+    i = j;
   }
-  return false;
+  return { streetKey: out.join(' '), unitKeys };
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED

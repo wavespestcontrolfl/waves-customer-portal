@@ -260,9 +260,19 @@ describe('reaffirmedFilledLeadFields — address', () => {
       ['100 Main St Apt #4 Sarasota FL 34236', 'Unit 4'],
       ['100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Bldg 2 Apt 4'],
       ['100 Main St Suite 200-A Sarasota FL 34236', 'Ste 200-A'],
+      ['100 Main St Apt # 4 Sarasota FL 34236', 'Unit 4'],
     ]) {
       expect(leadAddressCompareKey(composeLeadAddress(line, unit))).toBe(leadAddressCompareKey(line));
     }
+    // Equivalent unit spellings INSIDE the whole-line street key the same.
+    const spellings = ['100 Main St Apt 4 Sarasota FL 34236', '100 Main St #4 Sarasota FL 34236', '100 Main St Unit 4 Sarasota FL 34236', '100 Main St Apt # 4 Sarasota FL 34236', '100 Main St # 4 Sarasota FL 34236'];
+    for (const v of spellings) expect(leadAddressCompareKey(v)).toBe(leadAddressCompareKey(spellings[0]));
+    expect(leadAddressCompareKey(spellings[0])).toBe('100 main st {u:4} sarasota fl 34236');
+    expect(leadAddressCompareKey(composeLeadAddress('100 Main St #4 Sarasota FL 34236', '#4'))).toBe(leadAddressCompareKey(spellings[0]));
+    expect(leadAddressCompareKey('100 Main St Apt 5 Sarasota FL 34236')).not.toBe(leadAddressCompareKey(spellings[0]));
+    expect(leadAddressCompareKey('100 Main St Bldg 2 Apt 4 Sarasota FL 34236')).toBe('100 main st {u:bldg 2 unit 4} sarasota fl 34236');
+    const lockedAlias = { address: '100 Main St Apt 4 Sarasota FL 34236', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St #4 Sarasota FL 34236', '#4'), city: 'Sarasota', zip: '34236' }, lockedAlias).address).toBe(lockedAlias.address);
     expect(leadAddressCompareKey(composeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4'))).not.toBe(leadAddressCompareKey('100 Main St Bldg 2 Apt 4 Sarasota FL 34236'));
   });
 
