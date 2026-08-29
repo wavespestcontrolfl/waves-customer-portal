@@ -127,7 +127,7 @@ t.string('currency').notNullable().defaultTo('unknown'); // CHECK (currency IN (
 t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; nullable: a paid path MAY qualify without a valid binding — it then can only ever be decided payment=OWNER_MANUAL_PAYMENT (§6.3) and never reaches an automated reservation (fail-closed there); when present, the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
-t.text('legal_terms_hash');                       // sha256 of the canonicalized agreement/attestation text the investigator fetched (URL kept in `investigation.legal_terms_url`); REQUIRED when legal_attestation=true (§6.3 validity: true + null hash ⇒ INVALID); part of every dimension's inputs hash and approval snapshot; the runner re-fetches and re-hashes the agreement IMMEDIATELY before any accept/sign step and refuses on mismatch (attempt `outcome='terms_changed'`, approval invalidated reason 'terms_changed', placement → awaiting_owner with a fresh card showing the diff)
+t.text('legal_terms_hash');                       // sha256 of the canonicalized agreement/attestation text the investigator fetched (URL kept in `investigation.legal_terms_url`); REQUIRED when legal_attestation=true (§6.3 validity: true + null hash ⇒ INVALID); part of every dimension's inputs hash and approval snapshot; the runner re-fetches and re-hashes the agreement IMMEDIATELY before any accept/sign step and refuses on mismatch (attempt `outcome='terms_changed'`, approval invalidated reason 'terms_changed', placement → awaiting_owner with a fresh card showing the diff — and, in the SAME transaction, the newly fetched canonical terms are persisted through a trusted path revision: `legal_terms_hash` + `investigation.legal_terms_url` updated, `revision_payment`/`revision_communication`/`revision_execution` bumped as the hash is an input of each, so the replacement card and any approval created from it bind the NEW hash and the next attempt's re-fetch matches)
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
 t.boolean('baseline').notNullable().defaultTo(false); // existing-backlink import placeholder (§4): descriptive only, never executable
 t.string('provider_override');                    // per-path OWNER override of policy.preferred_provider (CHECK against the provider enum); written ONLY by an audited owner edit — the benchmark/learning job writes its recommendation to `investigation.provider_recommendation` (advisory) and never switches providers itself; claim uses COALESCE(path.provider_override, policy.preferred_provider); payment steps ignore it (deterministic_runner only)
@@ -170,7 +170,7 @@ t.timestamp('superseded_at');
 // re-decide; it writes the paid term from the purchase's snapshot ONLY when the settlement is a charge
 // (`charged` / `reconciled_charged` / `manual_charged`) — `reconciled_not_charged` completes the repoint and frees a
 // new generation but never grants a term. After a restart the sweep finds every
-// placement with a non-null pending_path_id and no open purchase and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
+// placement with a non-null pending_path_id, no open purchase AND no active or ambiguous execution/communication attempt (`submitting`/`sending`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` unreconciled) and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
 // different path. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
 // Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
 // identity match the approval.
@@ -220,7 +220,7 @@ t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum EXCEPT
 t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_* row (and a row with `floor_waiver_id` additionally needs that waiver valid), not for the row's existence; the referenced approval's `dimension` AND `instance_key` must equal this row's (enforced in the approval transaction)
 t.uuid('floor_waiver_id');             // → seo_link_floor_waivers when this dimension was decided under a floor waiver (§6.3 1b); `level` still holds the UNDERLYING decision — never OWNER_OVERRIDE — and the claim checks the waiver's validity in addition to the level
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
-t.string('instance_key').notNullable().defaultTo('-:1'); // the ACTION INSTANCE this row governs: `${kind}:${generation}` — kind '-' = initial acquisition/send, a renewal's renewal_period_key, or 'followup'; generation starts at 1 and the bridge opens `${kind}:${n+1}` when the previous instance ended in a NON-successful terminal outcome (`failed`/`skipped`/`send_error` reconciled as not sent) and a retry is warranted (re-investigation or owner "retry") — each new instance is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances; a successful instance (`placed`/`sent`) never gets a successor of the same kind
+t.string('instance_key').notNullable().defaultTo('-:1'); // the ACTION INSTANCE this row governs: `${kind}:${generation}` — kind '-' = initial acquisition/send, a renewal's renewal_period_key, or 'followup'; generation starts at 1 and the bridge opens `${kind}:${n+1}` when the previous instance ended in a NON-successful terminal outcome (`failed`/`skipped`/`send_error` reconciled as not sent) and a retry is warranted (re-investigation or owner "retry") — OR when the Judge records a VERIFIED LOSS of a successfully acquired placement (the retained `lost-link-recovery.js` reopen): the reopen starts a new recovery cycle with a fresh, unsatisfied instance for every dimension (`-:${n+1}`), so the replacement draft/acquisition needs its own decision and approval — each new instance is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances; a successful instance (`placed`/`sent`) never gets a successor of the same kind
 t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
 t.unique(['prospect_id', 'dimension', 'instance_key']);
 ```
@@ -653,9 +653,7 @@ preferred_provider           = 'deterministic_runner'   (CHECK against the provi
 **Payment and communication are independent authorities.** The decision returns a SET of
 required authorities, one per dimension the path touches: `payment` (when
 `payment_required`), `communication` (when the path is an outreach/content type), and
-`execution` (every non-outreach type: free/account/claim/membership/human-step — an outreach
-placement carries an execution row ONLY as the `accept_terms` instance when
-`legal_attestation=true`, §3.3b: the function then emits BOTH the communication decision AND
+`execution` — derived from the path's REQUIRED ACTIONS, not its label: every non-outreach type (free/account/claim/membership/human-step) AND any outreach/content path whose flags require execution steps (`account_required=true`, a form/`content_submission` submit, or `legal_attestation=true` → the `accept_terms` instance): such a path carries communication (the message) AND an `acquire` execution row (account creation + submit), each decided and approved separately — a send approval is never permission to create an account or submit a form; the legal case, §3.3b: the function then emits BOTH the communication decision AND
 an execution decision for that instance — `OWNER_LEGAL` when
 `policy.legal_attestation_requires_owner` (default true), else the normal execution rules
 (`AUTO_ACCOUNT`/`AUTO_FREE` per policy, the acceptance still bound to `legal_terms_hash`) —
@@ -774,7 +772,14 @@ listing-style paths) and, for signup-lane paths, **one placement per GBP locatio
 preserved), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
 `source` = the domain's first-touch source, `link_type` = the path's lane) if none exists
 for that **(domain, page, location_key)** — the same triple `findPlacementRow` matches and the
-unique key enforces, so a second GBP location is never suppressed by the first — runs the
+unique key enforces, so a second GBP location is never suppressed by the first — with the
+path's `fee_scope` (investigator output, CHECK IN ('per_location','account_wide'); required when
+`payment_required`) deciding how payment is modelled: `account_wide` (one membership/association
+fee covering every profile on the shared account) creates ONE purchase and ONE payment
+authority instance on the FIRST placement and links every sibling to it via
+`seo_link_prospects.payment_group_id` (the purchase/duplicate guard and renewal are keyed by
+the group; siblings' payment dimension is satisfied by the group's settled purchase and never
+reserves), while `per_location` keeps a purchase per placement — runs the
 §6.3 decision, stamps `authority` on the **placement**
 (the path only receives the informational `authority_last_decided`, which does not bump its
 revision — so approval never invalidates itself), and then **recomputes the registry aggregate across ALL of the domain's placements** (§3.1):
@@ -815,7 +820,7 @@ inferred).** Every paid step, auto or owner-approved, is a row:
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
-t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase_kind IN ('initial','renewal')) — each renewal is its own separately authorized purchase
+t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase_kind IN ('initial','renewal','reacquisition')) — each renewal / reacquisition is its own separately authorized purchase
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial; CHECK ((purchase_kind = 'initial' AND renewal_period_key IS NULL) OR (purchase_kind = 'renewal' AND renewal_period_key ~ '^[0-9]{4}(-[0-9]{2})?$')) — a renewal can never carry a null/empty key, so idempotency keys, approvals and instance keys never collapse onto ':renewal:null:'
 t.jsonb('terms_snapshot').notNullable();            // IMMUTABLE copy taken at reservation and re-confirmed at submitting from the checkout page: renewal_period, renewal_cost_cents, term_start (as displayed), term_end / paid_through (computed from term_start + renewal_period), auto_renew_disabled, legal terms shown — renewal scheduling reads ONLY this row, never the (mutable, supersedable) path
@@ -855,7 +860,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   for `(prospect_id, purchase_kind, renewal_period_key)` — any `path_id`, superseded or not —
   is in `reserved`, `submitting`, `close_pending`, `ambiguous`, `charged`,
   `reconciled_charged` or `manual_charged` → no new reservation (409) — a manually recorded
-  initial purchase or renewal blocks a second one exactly like an automated charge
+  initial purchase or renewal blocks a second one exactly like an automated charge. A verified
+  loss that requires paying AGAIN (deleted one-time listing, restoration fee) is a third
+  `purchase_kind='reacquisition'` keyed to the loss cycle (`${prospect_id}:reacquisition:${loss_event_id}:${generation}`, its own payment instance and approval, never `initial`), so a legitimate re-fee is representable while the settled-`initial` duplicate guard stays absolute
   (regression test: manual settlement, then a reservation attempt for the same
   placement/period ⇒ 409). Supersession (§3.2) carries settled
   purchases with the placement; it never frees a second `initial`. A placement that
@@ -901,7 +908,11 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   never an automated purchase: its payment dimension is `OWNER_MANUAL_PAYMENT`.
 - **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
   final total is `0` (waived/discounted fee), the row is `voided` with
-  `outcome='no_payment_required'` BEFORE any mint (no card exists), the placement proceeds
+  `outcome='no_payment_required'` BEFORE any mint (no card exists), and — atomically in that
+  same transaction — the placement's payment authority instance is marked `satisfied_at`
+  with `satisfied_reason='no_payment_required'` (no generation is opened; a $0 total is a
+  successful terminal outcome for the payment dimension, not a failure) so later
+  irreversible steps see the payment prerequisite as met; the placement proceeds
   through the free-path steps (the worker completes the checkout without a card), and the
   investigator re-marks the path's `payment_required`/cost on its next pass. `final_cents=0`
   never enters `submitting`.
@@ -1300,7 +1311,7 @@ Implementations, in order:
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
 Provider selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
-for non-credentialed, non-payment steps only, restricted to live `BrowserAgentProvider` implementations that support the current action (CHECK on both columns: never `hermes` or `human`, which hold no execution-capable worker token; an unsupported choice falls through to the next preference, then the runner); **credentialed steps (account creation, email
+for non-credentialed, non-payment steps only — with ONE precedence above both during a live §10 benchmark: `seo_link_benchmark_cohorts (placement_id, provider, benchmark_id)`, an explicit audited cohort assignment the claim predicate honours (disjoint cohorts by placement; the owner override and global preference are untouched, exactly as §10 promises) — restricted to live `BrowserAgentProvider` implementations that support the current action (CHECK on both columns: never `hermes` or `human`, which hold no execution-capable worker token; an unsupported choice falls through to the next preference, then the runner); **credentialed steps (account creation, email
 verification, login, authenticated resume) and payment steps always resolve to
 `deterministic_runner`** regardless of preference — a `ready_for_credentials` / `ready_for_payment`
 hand-off is therefore always picked up by the runner, never re-offered to the provider
