@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
+  applyServerRodentWaveguardPricingConfig,
   calculateEstimate,
   rodentBaitBracketForFootprint,
 } from "./estimateEngine";
@@ -34,6 +35,33 @@ const setupRow = (E) => (E.oneTime?.items || []).find((s) => s.service === "rode
 afterEach(() => {
   applyServerRodentBaitBracketsPricingConfig(null);
   applyServerRodentSetupFeePricingConfig(null);
+  applyServerRodentWaveguardPricingConfig(null);
+});
+
+describe("rodent bait — live WaveGuard flags drive tier count and bundle % (codex #3591 r12 P1)", () => {
+  const pestPlusRodent = () => rodentInput({ svcPest: true, pestFrequency: "quarterly" });
+
+  it("defaults: rodent counts toward the tier (pest + rodent = Silver) and takes the bundle %", () => {
+    const E = calculateEstimate(pestPlusRodent());
+    expect(E.recurring.waveGuardTier).toBe("Silver");
+    expect(rodentRow(E)).not.toMatchObject({ discountable: false });
+  });
+
+  it("tier_qualifier=false: rodent no longer counts (pest + rodent = Bronze) and the standalone setup still fires", () => {
+    applyServerRodentWaveguardPricingConfig({ tier_qualifier: false, exclude_from_pct_discount: false });
+    const E = calculateEstimate(pestPlusRodent());
+    expect(E.recurring.waveGuardTier).toBe("Bronze");
+    expect(rodentRow(E)).toMatchObject({ countsTowardWaveGuardTier: false });
+    // Pest is another qualifier → setup still waived; rodent alone → owed.
+    expect(setupRow(E)).toBeUndefined();
+    expect(setupRow(calculateEstimate(rodentInput()))).toMatchObject({ price: 99 });
+  });
+
+  it("exclude_from_pct_discount=true: the rodent row is carved out of the bundle %", () => {
+    applyServerRodentWaveguardPricingConfig({ tier_qualifier: true, exclude_from_pct_discount: true });
+    const E = calculateEstimate(pestPlusRodent());
+    expect(rodentRow(E)).toMatchObject({ discountable: false, excludeFromPctDiscount: true });
+  });
 });
 
 describe("rodent bait — client fallback prices from the live ladder", () => {

@@ -355,6 +355,12 @@ function serviceKeysForEstimateSection(section = {}) {
       if (text.includes('mosquito')) keys.add('mosquito');
       if (text.includes('tree') || text.includes('shrub')) keys.add('tree_shrub');
       if (text.includes('termite')) keys.add('termite_bait');
+      // Rodent bait stations count toward the WaveGuard tier since
+      // 2026-08-29 (codex #3591 r12 P2): pest + rodent is already Silver,
+      // so the lawn cross-sell must pick the multi-service copy rather than
+      // promising "Silver / 10%". Bait/station-led rodent text only —
+      // trapping/exclusion never count.
+      if (text.includes('rodent') && (text.includes('bait') || text.includes('station'))) keys.add('rodent_bait');
       return;
     }
     if (Array.isArray(value)) {

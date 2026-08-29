@@ -612,6 +612,28 @@ describe('OneTimeModeToggle labels', () => {
 });
 
 describe('estimateAddServiceOffer', () => {
+  it('pest + rodent bait is already Silver — the lawn offer takes the multi-service copy, never "Silver / 10%" (codex #3591 r12 P2)', () => {
+    const offer = estimateAddServiceOffer([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [
+        { service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 },
+        { service: 'rodent_bait', label: 'Rodent Bait Stations', perTreatment: 89, visitsPerYear: 4 },
+      ] }],
+    }], 'recurring');
+    expect(offer).toEqual(expect.objectContaining({ serviceKey: 'lawn_care' }));
+    expect(offer.body).not.toMatch(/Silver|10%/);
+    // Rodent trapping is not a plan service and must not move the copy.
+    const trapping = estimateAddServiceOffer([{
+      key: 'bundle', label: 'Recurring services', isRecurring: true, memberKeys: ['pest_control'],
+      frequencies: [{ perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perTreatment: 107, visitsPerYear: 4 }] }],
+      services: [{ name: 'Rodent Trapping' }],
+    }], 'recurring');
+    expect(trapping.body).toMatch(/Silver|10%|next/);
+  });
+
   it('uses member keys from collapsed bundle sections', () => {
     expect(estimateAddServiceOffer([{
       key: 'bundle',

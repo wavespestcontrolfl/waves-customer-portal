@@ -168,7 +168,7 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     const createArgs = mockInvoiceCreate.mock.calls[0][0];
     expect(createArgs.lineItems).toEqual([
       expect.objectContaining({ unit_price: coverage, quantity: 1, category: 'Annual prepay' }),
-      expect.objectContaining({ unit_price: setup, quantity: 1, description: 'Bait Station Setup — one-time' }),
+      expect.objectContaining({ unit_price: setup, quantity: 1, description: 'Bait Station Setup — one-time setup fee' }),
     ]);
     expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({
       coverageServiceType: 'Quarterly Rodent Bait Station Service',

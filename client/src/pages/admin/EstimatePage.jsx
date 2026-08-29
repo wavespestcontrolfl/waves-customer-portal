@@ -16,6 +16,7 @@ import {
   applyServerTermiteMonitoringPricingConfig,
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
+  applyServerRodentWaveguardPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -1357,7 +1358,7 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
@@ -1365,6 +1366,7 @@ function EstimateToolView() {
         fetchConfigRow("termite_monitoring"),
         fetchConfigRow("rodent_bait_brackets"),
         fetchConfigRow("rodent_setup_fee"),
+        fetchConfigRow("rodent_waveguard"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
@@ -1386,6 +1388,9 @@ function EstimateToolView() {
       // leaves the in-code default in place.
       if (rodentBracketsRow.ok && rodentBracketsRow.data) applyServerRodentBaitBracketsPricingConfig(rodentBracketsRow.data);
       if (rodentSetupRow.ok && rodentSetupRow.data) applyServerRodentSetupFeePricingConfig(rodentSetupRow.data);
+      // Tier-count / bundle-% posture must follow the same live row the
+      // server's WaveGuard maps follow (codex #3591 r12 P1).
+      if (rodentWaveguardRow.ok && rodentWaveguardRow.data) applyServerRodentWaveguardPricingConfig(rodentWaveguardRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;

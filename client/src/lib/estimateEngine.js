@@ -586,11 +586,17 @@ const RODENT_BAIT_DEFAULTS = {
   ],
   extension: { perSqFt: 1000, stationsPerStep: 1, perVisitPerStep: 10 },
   setupFee: 99,
+  // pricing_config.rodent_waveguard (admin-editable): tier-counted and
+  // bundle-%-discountable by default (owner 2026-08-29).
+  tierQualifier: true,
+  excludeFromPctDiscount: false,
 };
 let RODENT_BAIT = {
   brackets: RODENT_BAIT_DEFAULTS.brackets.map((b) => ({ ...b })),
   extension: { ...RODENT_BAIT_DEFAULTS.extension },
   setupFee: RODENT_BAIT_DEFAULTS.setupFee,
+  tierQualifier: RODENT_BAIT_DEFAULTS.tierQualifier,
+  excludeFromPctDiscount: RODENT_BAIT_DEFAULTS.excludeFromPctDiscount,
 };
 
 export function applyServerRodentBaitBracketsPricingConfig(config) {
@@ -621,8 +627,31 @@ export function applyServerRodentBaitBracketsPricingConfig(config) {
         : RODENT_BAIT_DEFAULTS.extension.perVisitPerStep,
     },
     setupFee: RODENT_BAIT.setupFee,
+    tierQualifier: RODENT_BAIT.tierQualifier,
+    excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount,
   };
   return { ...RODENT_BAIT, brackets: RODENT_BAIT.brackets.map((b) => ({ ...b })) };
+}
+
+// The live WaveGuard posture (codex #3591 r12 P1): the server's qualifying
+// and %-exclusion maps follow pricing_config.rodent_waveguard, so a
+// CLIENT_FALLBACK save must count/discount rodent exactly as generateEstimate
+// would. Booleans only; anything else keeps the current value.
+export function applyServerRodentWaveguardPricingConfig(config) {
+  RODENT_BAIT = {
+    ...RODENT_BAIT,
+    tierQualifier: typeof config?.tier_qualifier === 'boolean'
+      ? config.tier_qualifier
+      : (config == null ? RODENT_BAIT_DEFAULTS.tierQualifier : RODENT_BAIT.tierQualifier),
+    excludeFromPctDiscount: typeof config?.exclude_from_pct_discount === 'boolean'
+      ? config.exclude_from_pct_discount
+      : (config == null ? RODENT_BAIT_DEFAULTS.excludeFromPctDiscount : RODENT_BAIT.excludeFromPctDiscount),
+  };
+  return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
+}
+
+export function rodentBaitWaveguardFlags() {
+  return { tierQualifier: RODENT_BAIT.tierQualifier, excludeFromPctDiscount: RODENT_BAIT.excludeFromPctDiscount };
 }
 
 // Zero is the documented "fee disabled" value; a missing row keeps the
@@ -3442,9 +3471,15 @@ export function calculateEstimate(inputs) {
   // on the estimate (mirrors the server; existing-customer priors are only
   // known server-side).
   if (R.rodBait) {
-    ac++;
+    // Live WaveGuard posture (pricing_config.rodent_waveguard via
+    // applyServerRodentWaveguardPricingConfig): tier count and bundle %
+    // follow the flags the server's maps follow (codex #3591 r12 P1).
+    const rbFlags = rodentBaitWaveguardFlags();
+    const rbCountsTowardTier = rbFlags.tierQualifier !== false;
+    const rbDiscountable = rbFlags.excludeFromPctDiscount !== true;
+    if (rbCountsTowardTier) ac++;
     ra += R.rodBait.annual;
-    lineItems.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', ann: R.rodBait.annual, discountable: true });
+    lineItems.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', ann: R.rodBait.annual, discountable: rbDiscountable });
     wgServices.push({
       name: 'Rodent Bait Stations',
       service: 'rodent_bait',
@@ -3455,6 +3490,8 @@ export function calculateEstimate(inputs) {
       // the canonical rodentBaitLineBillsMonthly gate reads this row as a
       // legacy monthly plan and suppresses per-application provenance.
       perApplicationBilled: true,
+      ...(rbDiscountable ? {} : { discountable: false, excludeFromPctDiscount: true }),
+      ...(rbCountsTowardTier ? {} : { countsTowardWaveGuardTier: false, tierQualifier: false }),
     });
     // Setup only for NON-members: no other qualifying service on this
     // estimate AND no ACTIVE WaveGuard membership on the matched account.
@@ -3466,7 +3503,10 @@ export function calculateEstimate(inputs) {
     // customer's active tier (the same evidence that unlocks loyalty).
     const rbSetupFee = rodentBaitSetupFee();
     const existingMemberWaives = inputs.existingWaveGuardMember === true;
-    if (ac === 1 && !existingMemberWaives && rbSetupFee > 0) {
+    // "Sole qualifier" = no OTHER qualifying service on the estimate (rodent
+    // never self-waives, whether or not it counts toward the tier).
+    const otherQualifiersOnEstimate = ac - (rbCountsTowardTier ? 1 : 0);
+    if (otherQualifiersOnEstimate === 0 && !existingMemberWaives && rbSetupFee > 0) {
       hasOT = true;
       otItems.push({
         service: 'rodent_bait_setup',

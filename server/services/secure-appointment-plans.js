@@ -526,7 +526,7 @@ async function selectSecurePlan({ token, plan }) {
           category: 'Annual prepay',
         },
         ...(setupAmount > 0 ? [{
-          description: 'Bait Station Setup — one-time',
+          description: 'Bait Station Setup — one-time setup fee',
           quantity: 1,
           unit_price: setupAmount,
           category: 'Setup fee',

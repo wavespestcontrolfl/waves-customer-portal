@@ -5543,7 +5543,7 @@ const EstimateConverter = {
               unit_price: annualAmount,
             },
             ...(prepayRodentSetupAmount > 0 ? [{
-              description: 'Bait Station Setup — one-time',
+              description: 'Bait Station Setup — one-time setup fee',
               quantity: 1,
               unit_price: prepayRodentSetupAmount,
             }] : [])],

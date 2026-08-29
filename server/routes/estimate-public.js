@@ -11274,7 +11274,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             }
             if (acceptedRodentSetupAmount > 0) {
               lineItems.push({
-                description: 'Bait Station Setup — one-time',
+                description: 'Bait Station Setup — one-time setup fee',
                 quantity: 1,
                 unit_price: acceptedRodentSetupAmount,
               });
