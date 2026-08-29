@@ -163,7 +163,7 @@ t.timestamp('superseded_at');
 // old submission_url gone/redirected/renamed to the new one, or the same form under a new URL). In that case it inserts
 // the new path and, in the SAME transaction, marks the matched old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
 // repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
-// purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`) OR ANY attempt in `submitting`/`sending`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` that is not yet reconciled — lease state is irrelevant (the shipped sender clears `claimed_at` before calling Gmail, so post-report ambiguity has no lease; the unresolved external action is what pins):
+// purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`) OR ANY attempt in `submitting`/`sending`/`mutating`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` that is not yet reconciled — lease state is irrelevant (the shipped sender clears `claimed_at` before calling Gmail, so post-report ambiguity has no lease; the unresolved external action is what pins):
 // that placement stays PINNED to the old path: the old path is marked `superseded_by` = new path immediately (so no
 // NEW work can start on it), and the placement records `pending_path_id` = new path (durable FK on seo_link_prospects,
 // nullable) instead of being repointed; purchases/reconciliation are explicitly permitted to complete against a
@@ -172,7 +172,7 @@ t.timestamp('superseded_at');
 // re-decide; it writes the paid term from the purchase's snapshot ONLY when the settlement is a charge
 // (`charged` / `reconciled_charged` / `manual_charged`) — `reconciled_not_charged` completes the repoint and frees a
 // new generation but never grants a term. After a restart the sweep finds every
-// placement with a non-null pending_path_id, no open purchase AND no active or ambiguous execution/communication attempt (`submitting`/`sending`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` unreconciled) and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
+// placement with a non-null pending_path_id, no open purchase AND no active or ambiguous execution/communication attempt (`submitting`/`sending`/`mutating`/`submit_ambiguous`/`send_error`/`mutation_ambiguous` unreconciled) and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
 // different path. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
 // Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
 // identity match the approval.
