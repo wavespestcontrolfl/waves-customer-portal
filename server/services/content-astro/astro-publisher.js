@@ -2039,10 +2039,19 @@ function scanBodySections(body, { title = '' } = {}) {
     // under a paragraph is a nested break, not its underline.
     const setext = paraStart >= 0 && topLevel(paraStart) && topLevel(i) ? line.match(/^ {0,3}(-+|=+)[ \t]*$/) : null;
     if (setext) {
-      const text = rendered.slice(paraStart, i).join(' ').replace(/\s+/g, ' ').trim();
+      const text = rendered.slice(paraStart, i).join(' ').replace(/!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?/g, ' ').replace(/\s+/g, ' ').trim();
+      // Images in the heading text were recorded on the section being
+      // closed while its lines were read as prose — they belong to the
+      // section the heading opens (same as an ATX heading's images).
+      const moved = [];
+      for (let k = paraStart; k < i; k += 1) for (const ref of refsByLine.get(k) || []) moved.push(ref.src);
+      if (moved.length) {
+        for (const src of moved) { const at = cur.images.indexOf(src); if (at >= 0) cur.images.splice(at, 1); }
+        cur.hasImage = cur.images.length > 0;
+      }
       paraStart = -1;
       sections.push(cur);
-      cur = setext[1][0] === '-' ? { heading: text, start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
+      cur = setext[1][0] === '-' ? { heading: text, start: i, images: [...moved], hasImage: moved.length > 0 } : { heading: cur.heading, start: i, sub: true, images: [...moved], hasImage: moved.length > 0 };
       continue;
     }
     // A standalone thematic break (`---`, `***`, `- - -`) is a divider, never
@@ -2616,11 +2625,23 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // Reused body pictures are pinned to the blob they were judged on; a
   // generated path must still be free. Any conflict is transient: the
   // branch is dropped and the runner retries against the live repo.
+  // …and the post itself: an existing route must still carry the SHA the
+  // draft was merged against (the tree write replaces it unconditionally),
+  // and the destination path of a new post / legacy .md→.mdx migration
+  // must still be absent — otherwise a concurrent default-branch edit
+  // would be overwritten and auto-merged.
   {
     const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
+    if (existingFile) {
+      const onBranch = await gh.getFile(existingFile.path, branch);
+      if (!onBranch || onBranch.sha !== existingFile.file?.sha) conflicts.push(`${existingFile.path} (post changed: expected ${existingFile.file?.sha}, found ${onBranch?.sha || 'missing'})`);
+    }
+    if (!existingFile || existingFile.path !== filePath) {
+      if (await gh.getFile(filePath, branch)) conflicts.push(`${filePath} (appeared since the route was resolved)`);
+    }
     if (conflicts.length) {
-      await dropUnreferencedBranch(branch, 'a body-image lock mismatch');
-      throw new Error(`body images for ${slug} changed since they were resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+      await dropUnreferencedBranch(branch, 'a pre-commit lock mismatch');
+      throw new Error(`${slug} changed since it was resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
     }
   }
   // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero

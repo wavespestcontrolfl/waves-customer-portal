@@ -4234,6 +4234,43 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-3.webp']);
   });
 
+  test('bodyImageSlots: an image in a setext H2 heading belongs to the section it opens, not the intro (GH r16)', () => {
+    const body = ['Intro prose.', '', '![inspection](/images/blog/x/body-1.webp) Inspection', '---', '', 'Inspection prose.', '', '## B', '', 'B prose.'].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.map((sec) => [sec.heading, !!sec.hasImage, sec.images])).toEqual([['T', false, []], ['Inspection', true, ['/images/blog/x/body-1.webp']], ['B', false, []]]);
+    expect(bodyImageSlots(body, 1, { title: 'T' }).map((sl) => sl.heading)).toEqual(['B']);
+  });
+
+  test('update lane: the pre-commit lock covers the existing post SHA and the destination path of a legacy migration (GH r16)', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n',
+    );
+    const committed = committedStub(['public/images/blog/pest-control/drywood-frass-venice/hero.webp']);
+    // Existing legacy .md read on main with sha 'live-sha'; on the fresh branch it already moved.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.md') return { content: liveMd, sha: ref ? 'moved' : 'live-sha' };
+      return committed(path);
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/drywood-frass-venice\.md \(post changed: expected live-sha, found moved\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
+    // Migration destination (.mdx) that appeared on the branch is a conflict too.
+    gh.deleteRef.mockClear();
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.md') return { content: liveMd, sha: 'live-sha' };
+      if (ref && path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: 'x', sha: 'new' };
+      return committed(path);
+    });
+    thrown = undefined;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/drywood-frass-venice\.mdx \(appeared since the route was resolved\)/);
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);
