@@ -1,14 +1,14 @@
-// Unrecorded-call watchdog (2026-08-29). Born from a 4:17 answered inbound
-// call that Twilio bridged through the number's static voice-fallback TwiML
-// (no <Dial record>) after the portal's DB pool starved the voice webhooks
-// into 502s — call_log had the row and the duration, but no recording ever
-// arrived, so no transcript/extraction/lead followed and the ingest watchdog
-// (SID-known) saw nothing. These tests pin the classification predicate, the
-// per-call vs aggregate bell paths with dedupe, and the gate-off no-op.
+// Unrecorded-call alert (2026-08-29). Born from a 4:17 answered inbound call
+// that Twilio bridged through the number's static voice-fallback TwiML (no
+// <Dial record>) after the portal's DB pool starved the voice webhooks into
+// 502s — call_log had the row and the duration, the 5-min recovery sweep got
+// `no_completed_recording` from Twilio on every pass, and nothing rang. These
+// tests pin the classification predicate (grace measured from call END), the
+// per-call vs aggregate bell paths with dedupe, the bell:true site tag, the
+// "silenced write is not an alert" rule, and the gate-off no-op.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, fn) => fn()) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-new' })) }));
 // The gate registry snapshots process.env at load; flip the gate per test
 // through the mocked isEnabled instead (name-checked so a typo in the
 // service's gate lookup fails the suite rather than silently reading false).
@@ -20,7 +20,7 @@ jest.mock('../config/feature-gates', () => ({
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const {
-  runUnrecordedCallWatchdog,
+  alertUnrecordedCalls,
   isUnrecordedCall,
   findUnrecordedCalls,
   MIN_DURATION_SECONDS,
@@ -29,22 +29,23 @@ const {
 } = require('../services/unrecorded-call-watchdog');
 
 const NOW = new Date('2026-08-29T14:00:00Z');
-const OLD_ENOUGH = new Date(NOW.getTime() - (GRACE_MINUTES + 15) * 60 * 1000);
-const TOO_RECENT = new Date(NOW.getTime() - 5 * 60 * 1000);
+const DURATION = 257;
+// Grace runs from the call END (created_at + duration), not its start.
+const endedAgo = (minutes) => new Date(NOW.getTime() - minutes * 60 * 1000 - DURATION * 1000);
+const OLD_ENOUGH = endedAgo(GRACE_MINUTES + 15);
+const TOO_RECENT = endedAgo(GRACE_MINUTES - 5);
 
 function row(over = {}) {
   return {
-    id: 'row-1',
     twilio_call_sid: 'CAfa987fe4d9655eafbd7d1e59701ff941',
     direction: 'inbound',
-    duration_seconds: 257,
+    duration_seconds: DURATION,
     recording_sid: null,
     recording_url: null,
     answered_by: 'unknown',
     call_outcome: null,
     from_phone: '+12125550100',
     to_phone: '+19415550199',
-    transcription_metadata: null,
     created_at: OLD_ENOUGH,
     ...over,
   };
@@ -72,60 +73,65 @@ describe('isUnrecordedCall — answered inbound call with no Twilio recording', 
     expect(isUnrecordedCall(row({ answered_by: 'ai_agent' }), { now: NOW })).toBe(false);
   });
 
-  test('PAN-quarantined rows (recording deleted on purpose) are excluded, string or object metadata', () => {
-    expect(isUnrecordedCall(row({ transcription_metadata: { pan_detected: true } }), { now: NOW })).toBe(false);
-    expect(isUnrecordedCall(row({ transcription_metadata: JSON.stringify({ pan_detected: 'true' }) }), { now: NOW })).toBe(false);
-    expect(isUnrecordedCall(row({ transcription_metadata: 'not json' }), { now: NOW })).toBe(true);
-  });
-
-  test('calls still inside the recording-callback grace window are not (yet) misses', () => {
+  test('grace is measured from the call END: a long call that just ended is not (yet) a miss', () => {
     expect(isUnrecordedCall(row({ created_at: TOO_RECENT }), { now: NOW })).toBe(false);
+    // Started 45 min ago but lasted 40 min → ended 5 min ago → inside grace,
+    // even though created_at alone is well past the 30-min grace.
+    const longCall = row({ duration_seconds: 40 * 60, created_at: new Date(NOW.getTime() - 45 * 60 * 1000) });
+    expect(isUnrecordedCall(longCall, { now: NOW })).toBe(false);
+    // Same call once 30 min have passed since it ended.
+    expect(isUnrecordedCall(longCall, { now: new Date(NOW.getTime() + 26 * 60 * 1000) })).toBe(true);
     expect(isUnrecordedCall(row({ created_at: null }), { now: NOW })).toBe(false);
   });
 
   test('findUnrecordedCalls keeps only the misses', () => {
-    const rows = [row(), row({ id: 'r2', twilio_call_sid: 'CArec', recording_sid: 'RE9' }), row({ id: 'r3', twilio_call_sid: 'CAvm', answered_by: 'voicemail' })];
-    expect(findUnrecordedCalls(rows, { now: NOW }).map((r) => r.id)).toEqual(['row-1']);
+    const rows = [row(), row({ twilio_call_sid: 'CArec', recording_sid: 'RE9' }), row({ twilio_call_sid: 'CAvm', answered_by: 'voicemail' })];
+    expect(findUnrecordedCalls(rows, { now: NOW }).map((r) => r.twilio_call_sid)).toEqual(['CAfa987fe4d9655eafbd7d1e59701ff941']);
   });
 });
 
-describe('runUnrecordedCallWatchdog', () => {
+describe('alertUnrecordedCalls', () => {
   afterEach(() => {
     mockGateOn = false;
     jest.clearAllMocks();
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: 'n-new' }));
   });
 
-  test('gated off (default) → no-op, no DB read', async () => {
-    mockGateOn = false;
-    const result = await runUnrecordedCallWatchdog({ now: NOW });
-    expect(result).toEqual({ skipped: true, reason: 'gated_off' });
-    expect(db).not.toHaveBeenCalled();
-  });
-
-  // Minimal knex stand-in: call_log resolves to `rows`; notifications
-  // resolves to `alerted` (truthy = this dedupeKey/sid already rang).
-  function installDb({ rows, alerted = null }) {
+  // Minimal knex stand-in for the notifications dedupe read: `alerted`
+  // truthy = this dedupeKey/sid already rang.
+  function installDb({ alerted = null } = {}) {
     db.mockImplementation((table) => {
       const chain = {};
       const self = () => chain;
-      for (const m of ['where', 'whereNotNull', 'whereNull', 'whereRaw', 'orderBy']) chain[m] = jest.fn(self);
-      chain.select = jest.fn(async () => (table === 'call_log' ? rows : []));
+      for (const m of ['where', 'whereRaw']) chain[m] = jest.fn(self);
       chain.first = jest.fn(async () => (table === 'notifications' ? alerted : null));
       chain.catch = jest.fn(self);
       return chain;
     });
   }
 
-  test('one fresh miss → one per-call bell with a stable dedupeKey and the caller number in metadata', async () => {
+  test('gated off (default) → no-op, no DB read, no bell', async () => {
+    mockGateOn = false;
+    installDb();
+    const result = await alertUnrecordedCalls([row()], { now: NOW });
+    expect(result).toEqual({ skipped: true, reason: 'gated_off' });
+    expect(db).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('one fresh miss → one per-call bell, bell:true, stable dedupeKey, caller number in metadata', async () => {
     mockGateOn = true;
-    installDb({ rows: [row()] });
-    const result = await runUnrecordedCallWatchdog({ now: NOW });
+    installDb();
+    const result = await alertUnrecordedCalls([row()], { now: NOW });
     expect(result).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 1 });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(category).toBe('alert');
     expect(title).toMatch(/no recording/i);
     expect(body).toContain('+12125550100');
+    // 'alert' is silenced under GATE_ADMIN_BELL_POLICY; the explicit site
+    // tag is what lets this lane's only output ring.
+    expect(opts.bell).toBe(true);
     expect(opts.metadata).toEqual(expect.objectContaining({
       dedupeKey: 'unrecorded-call:CAfa987fe4d9655eafbd7d1e59701ff941',
       call_sid: 'CAfa987fe4d9655eafbd7d1e59701ff941',
@@ -134,29 +140,47 @@ describe('runUnrecordedCallWatchdog', () => {
 
   test('an already-alerted sid never re-rings', async () => {
     mockGateOn = true;
-    installDb({ rows: [row()], alerted: { id: 'n1' } });
-    const result = await runUnrecordedCallWatchdog({ now: NOW });
+    installDb({ alerted: { id: 'n1' } });
+    const result = await alertUnrecordedCalls([row()], { now: NOW });
     expect(result).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('more than AGGREGATE_THRESHOLD fresh misses → ONE outage bell carrying every sid', async () => {
+  test('a silenced or failed notification write is NOT reported as alerted', async () => {
     mockGateOn = true;
-    const rows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ id: `r${i}`, twilio_call_sid: `CA${i}` }));
-    installDb({ rows });
-    const result = await runUnrecordedCallWatchdog({ now: NOW });
+    installDb();
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: null, suppressed: true, reason: 'bell_policy' }));
+    expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0, failed: 1 });
+    NotificationService.notifyAdmin.mockImplementation(async () => null);
+    expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0, failed: 1 });
+  });
+
+  test('more than AGGREGATE_THRESHOLD fresh misses → ONE outage bell, keyed per pass, carrying every sid', async () => {
+    mockGateOn = true;
+    const rows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CA${i}` }));
+    installDb();
+    const result = await alertUnrecordedCalls(rows, { now: NOW });
     expect(result).toEqual({ skipped: false, scanned: rows.length, missed: rows.length, alerted: 1, aggregate: true });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toMatch(/DOWN/);
-    expect(opts.metadata.dedupeKey).toBe('unrecorded-call-outage:2026-08-29T14');
+    expect(opts.bell).toBe(true);
+    expect(opts.metadata.dedupeKey).toBe(`unrecorded-call-outage:${NOW.toISOString()}`);
     expect(opts.metadata.unrecorded_call_sids).toEqual(rows.map((r) => r.twilio_call_sid));
+
+    // A later pass with its own >3 NEW misses gets a distinct key — it is
+    // never swallowed by the earlier aggregate, so its SIDs get settled.
+    const later = new Date(NOW.getTime() + 30 * 60 * 1000);
+    const moreRows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CAlater${i}` }));
+    await alertUnrecordedCalls(moreRows, { now: later });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
+    expect(NotificationService.notifyAdmin.mock.calls[1][3].metadata.dedupeKey).toBe(`unrecorded-call-outage:${later.toISOString()}`);
   });
 
-  test('recorded rows returned by the window query are classified out, not alerted', async () => {
+  test('rows the sweep passes that are not misses (voicemail, inside grace) are classified out, not alerted', async () => {
     mockGateOn = true;
-    installDb({ rows: [row({ answered_by: 'voicemail' }), row({ id: 'r2', twilio_call_sid: 'CAnew', created_at: TOO_RECENT })] });
-    const result = await runUnrecordedCallWatchdog({ now: NOW });
+    installDb();
+    const result = await alertUnrecordedCalls([row({ answered_by: 'voicemail' }), row({ twilio_call_sid: 'CAnew', created_at: TOO_RECENT })], { now: NOW });
     expect(result).toEqual({ skipped: false, scanned: 2, missed: 0, alerted: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });

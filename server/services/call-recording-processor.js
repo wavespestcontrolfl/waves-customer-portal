@@ -14360,8 +14360,11 @@ const CallRecordingProcessor = {
   },
 
   async recoverMissingRecentRecordings() {
+    // The extra columns feed the unrecorded-call alert below (the row's
+    // identity + timing; nothing the recovery itself needs).
     const rows = await db('call_log')
-      .select('twilio_call_sid')
+      .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
+        'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
       .where(function () {
         this.whereNull('recording_url').orWhere('recording_url', '');
@@ -14411,6 +14414,26 @@ const CallRecordingProcessor = {
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
+
+    // Twilio has no recording either (2026-08-29: a 4:17 call bridged by
+    // the number's static voice-fallback TwiML after a webhook 502 sat in
+    // this sweep as `no_completed_recording` on every pass, silently).
+    // Ring the admin bell for answered calls past their recording grace —
+    // AFTER the lookups, on this pass's own results, so a recording
+    // recovered above can never race the alert. Best-effort: the alert
+    // must never break the recovery sweep.
+    const noRecordingSids = new Set(results.filter((r) => r.reason === 'no_completed_recording').map((r) => r.callSid));
+    if (noRecordingSids.size) {
+      try {
+        const { alertUnrecordedCalls } = require('./unrecorded-call-watchdog');
+        const alert = await alertUnrecordedCalls(rows.filter((r) => noRecordingSids.has(r.twilio_call_sid)));
+        if (!alert.skipped && (alert.missed > 0 || alert.alerted > 0)) {
+          logger.warn(`[unrecorded-call] scanned=${alert.scanned} missed=${alert.missed} alerted=${alert.alerted}${alert.aggregate ? ' (aggregate)' : ''}${alert.failed ? ` failed=${alert.failed}` : ''}`);
+        }
+      } catch (alertErr) {
+        logger.error(`[unrecorded-call] alert step failed: ${alertErr.message}`);
+      }
+    }
     return { checked: sweepRows.length, recovered, results };
   },
 

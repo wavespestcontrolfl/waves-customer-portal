@@ -6156,28 +6156,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // Unrecorded-call watchdog — every 30 min (own minutes: :13/:43), ring an
-  // admin bell for any answered inbound call whose Twilio recording never
-  // arrived. The ingest watchdog above can't see this case: the SID is
-  // known to call_log, only the audio is missing. Born 2026-08-29 (pool
-  // exhaustion → webhook 502 → static voice-fallback bridged a 4:17 call
-  // unrecorded → no transcript/extraction/lead).
-  // Dark behind GATE_UNRECORDED_CALL_WATCHDOG; writes only admin bells.
-  // See server/services/unrecorded-call-watchdog.js.
-  // =========================================================================
-  cron.schedule('13,43 * * * *', async () => {
-    try {
-      const { runUnrecordedCallWatchdog } = require('./unrecorded-call-watchdog');
-      const result = await runUnrecordedCallWatchdog();
-      if (!result.skipped && (result.missed > 0 || result.alerted > 0)) {
-        logger.warn(`[unrecorded-call-watchdog] scanned=${result.scanned} missed=${result.missed} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
-      }
-    } catch (err) {
-      logger.error(`Unrecorded-call watchdog tick failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // Call booking-miss watchdog — every 30 min (offset from the ingest
   // watchdog), ring an admin bell for any call whose V2 extraction confirmed
   // a concrete appointment slot that never became a scheduled_services row
