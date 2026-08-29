@@ -1371,6 +1371,7 @@ async function publishAstro(postId) {
       body,
       existingFile: liveFile ? { path: filePath, file: liveFile } : null,
       brief: {},
+      mdx: false, // this lane writes a flat `.md`
       // Fresh hero bytes, or the committed hero's repo path when reused —
       // derived from the frontmatter's RELATIVE src (buildFrontmatter turns
       // the stored absolute hub URL of a merged post back into it).
@@ -2035,7 +2036,7 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
     // validated normally.
     const live = await resolveExistingAstroFile(found.path);
     if (live?.file?.content) {
-      try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { legacyHeroSrcs = []; }
+      try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src, { mdx: !/\.md$/i.test(String(live.path || found.path)) }); } catch (_) { legacyHeroSrcs = []; }
     }
   } else if (filePath) {
     // Scheduler lane: publishAstro writes a known flat `.md` path — read
@@ -2079,7 +2080,9 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   try { parsed = fm.parse(found.file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
   const body = String(parsed?.content || '');
   const heroSrc = String(parsed?.data?.hero_image?.src || '');
-  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs });
+  // Validated as the file on the branch RENDERS: a `.md` post's raw HTML
+  // blocks hide the Markdown inside them (an image there is literal text).
+  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)) });
   if (!valid.ok) return { ok: false, reason: valid.reason };
   if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
   const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
@@ -2205,6 +2208,45 @@ function blankJsxAndExpressions(text) {
   return contentGuardrails.blankExpressions(out.join(''));
 }
 
+// CommonMark HTML blocks (spec 4.6) — the `.md` (remark) case only. In a
+// legacy `.md` post a line opening a block-level HTML element (type 6:
+// `<div>`, `<figure>`, `<p>`, … — or any complete tag alone on a line
+// that does not interrupt a paragraph, type 7) starts an HTML BLOCK that
+// runs to the next blank line, and EVERYTHING in it is raw HTML: a
+// `![alt](/x.webp)` inside `<div>…</div>` is literal text on the page, not
+// a picture (GH r24). `.mdx` has no HTML blocks — JSX children are parsed
+// as Markdown and such an image renders — so this masks only when the
+// caller says the file is `.md`. Type 1 (`<script>`/`<style>`/`<pre>`/
+// `<textarea>`) runs to its closing tag. Input is the shared stripper's
+// output (quote markers and list indent already removed, code/comments/
+// <pre> blanked, newlines preserved).
+const HTML_BLOCK_TYPE1_RE = /^<(script|pre|style|textarea)(?:\s|>|$)/i;
+const HTML_BLOCK_TYPE6_RE = /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>|$)/i;
+const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+function blankMarkdownHtmlBlocks(text) {
+  const lines = String(text || '').split('\n');
+  let closeRe = null; // type 1: ends on the line carrying the closing tag
+  let inBlock = false; // types 6/7: end at a blank line
+  let prevBlank = true;
+  const blankLine = (l) => ' '.repeat(l.length);
+  return lines.map((l) => {
+    const blank = l.trim() === '';
+    if (closeRe) { const done = closeRe.test(l); if (done) closeRe = null; prevBlank = blank; return blankLine(l); }
+    if (inBlock) { if (blank) { inBlock = false; prevBlank = true; return l; } return blankLine(l); }
+    const t1 = l.match(HTML_BLOCK_TYPE1_RE);
+    if (t1) {
+      closeRe = new RegExp(`</${t1[1]}>`, 'i');
+      const done = closeRe.test(l);
+      if (done) closeRe = null;
+      prevBlank = false;
+      return blankLine(l);
+    }
+    if (HTML_BLOCK_TYPE6_RE.test(l) || (prevBlank && HTML_BLOCK_TYPE7_RE.test(l))) { inBlock = true; prevBlank = false; return blankLine(l); }
+    prevBlank = blank;
+    return l;
+  }).join('\n');
+}
+
 // Rendered view of the body plus each line's blockquote depth: shared
 // stripper (code, spans, comments, <pre>; quote markers and list indent
 // removed) → link destinations / reference definitions / titles blanked with
@@ -2214,8 +2256,12 @@ function blankJsxAndExpressions(text) {
 // section scanner which blocks are list content; `defs` are the body's link
 // reference definitions, read BEFORE link blanking removes them, so a
 // reference-style image (`![alt][label]`) resolves to its destination.
-function renderedBodyView(body) {
-  const { text, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+// `mdx` (default true — autonomous posts publish as .mdx): false for a
+// legacy `.md` file, whose CommonMark HTML blocks are raw text
+// (blankMarkdownHtmlBlocks); callers pass the TARGET file's extension.
+function renderedBodyView(body, { mdx = true } = {}) {
+  const { text: stripped, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped);
   // Children of a container a reader DEFINITELY never sees (<script>,
   // <template>, <div hidden>, aria-hidden, display:none, closed <details>,
   // …) are blanked by the guardrails' certainty-only walker. The
@@ -2232,17 +2278,17 @@ function renderedBodyView(body) {
   );
   return { text: rendered, lines: rendered.split('\n'), depths, inList: inList || [], defs };
 }
-function renderedBodyLines(body) {
-  return renderedBodyView(body).lines;
+function renderedBodyLines(body, opts = {}) {
+  return renderedBodyView(body, opts).lines;
 }
 
-function bodyImageRefs(body) {
-  const { text, defs } = renderedBodyView(body);
+function bodyImageRefs(body, opts = {}) {
+  const { text, defs } = renderedBodyView(body, opts);
   return imageRefsInText(text, defs);
 }
 
-function countBodyImages(body) {
-  return bodyImageRefs(body).length;
+function countBodyImages(body, opts = {}) {
+  return bodyImageRefs(body, opts).length;
 }
 
 function headingKey(text) {
@@ -2271,7 +2317,7 @@ const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\
 // paragraph of an eligible section (no image yet, not a FAQ/summary-style
 // section). Fenced code is never split. The intro (text before the first
 // heading) is the fallback slot when too few sections qualify.
-function scanBodySections(body, { title = '' } = {}) {
+function scanBodySections(body, { title = '', mdx = true } = {}) {
   const lines = String(body || '').split('\n');
   // ALL structure (headings, blank lines, paragraph openers, images) is read
   // off the rendered view — fenced/indented code, code spans, comments and
@@ -2284,7 +2330,7 @@ function scanBodySections(body, { title = '' } = {}) {
   // land outside the quote or break the list). A top-level block with 1–3
   // leading spaces is still top-level (CommonMark). Raw lines feed the
   // lead text.
-  const { text: renderedText, lines: rendered, depths, inList, defs } = renderedBodyView(body);
+  const { text: renderedText, lines: rendered, depths, inList, defs } = renderedBodyView(body, { mdx });
   const topLevel = (i) => (depths[i] || 0) === 0 && !inList[i];
   const refsByLine = new Map();
   for (const ref of imageRefsInText(renderedText, defs)) {
@@ -2376,8 +2422,8 @@ function sectionContextKey(heading, lead) {
   return `${headingKey(heading)}|${headingKey(lead).slice(0, 120)}`;
 }
 
-function bodyImageSlots(body, wanted, { title = '' } = {}) {
-  const { sections } = scanBodySections(body, { title });
+function bodyImageSlots(body, wanted, { title = '', mdx = true } = {}) {
+  const { sections } = scanBodySections(body, { title, mdx });
   const eligible = sections.filter((sec) => !sec.intro && !sec.sub && !sec.hasImage
     && sec.lastProse != null && !BODY_IMAGE_SKIP_HEADING_RE.test(sec.heading));
   const picked = [];
@@ -2416,7 +2462,7 @@ function insertBodyImages(body, placements) {
 // picture) AND it sat under the same H2 heading — a rewritten or reordered
 // article must not inherit an accurate-but-unrelated picture. Returns the
 // live alt, or null (regenerate).
-function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lead = '' } = {}) {
+function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lead = '', mdx = true } = {}) {
   const content = existingFile?.file?.content;
   if (!content) return null;
   let liveBody;
@@ -2426,7 +2472,7 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
     liveBody = parsed?.content ?? String(content);
     liveTitle = String(parsed?.data?.title || '').trim();
   } catch { liveBody = String(content); }
-  const ref = bodyImageRefs(liveBody).find((r) => r.src === src);
+  const ref = bodyImageRefs(liveBody, { mdx }).find((r) => r.src === src);
   if (!ref?.alt) return null;
   // The intro pseudo-section is named by the TITLE; the live side must use
   // the live file's title, not the new draft's, or a retitled article
@@ -2452,7 +2498,7 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
 // instead of parking the refresh. Any OTHER hero ref (another post's hero,
 // a changed or invented `/hero.*` path) is validated normally: the
 // grandfather covers what already ships, never what the refresh introduces.
-async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [] }) {
+async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [], mdx = true }) {
   // A raw <img> is outside the writer's plain-Markdown subset: it renders a
   // picture the Markdown scan cannot see, so it can neither count toward the
   // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
@@ -2472,7 +2518,7 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
   for (const src of (Array.isArray(legacyHeroSrcs) ? legacyHeroSrcs : []).map((v) => String(v || ''))) {
     if (src && isHeroRef(src)) grandfathered.set(src, (grandfathered.get(src) || 0) + 1);
   }
-  const refs = bodyImageRefs(body).filter((r) => {
+  const refs = bodyImageRefs(body, { mdx }).filter((r) => {
     const src = String(r.src || '');
     const left = grandfathered.get(src) || 0;
     if (left > 0) { grandfathered.set(src, left - 1); return false; }
@@ -2500,10 +2546,10 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
 
 // The exact hero reference OCCURRENCES the LIVE body embeds (legacy
 // convention) → refresh grandfathers that many of each src and nothing else.
-function legacyHeroRefs(body, heroSrc) {
+function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
   const hero = String(heroSrc || '');
   const out = [];
-  for (const r of bodyImageRefs(body)) {
+  for (const r of bodyImageRefs(body, { mdx })) {
     const src = String(r.src || '');
     if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) out.push(src);
   }
@@ -2512,10 +2558,13 @@ function legacyHeroRefs(body, heroSrc) {
 
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
-async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [] }) {
+// `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
+// and a legacy `.md` refresh written back in place) — decides whether raw
+// HTML blocks hide the Markdown inside them (renderedBodyView).
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
   const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
   if (!bodyImagesEnabled()) return none;
-  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs });
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2574,9 +2623,13 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
 
   const have = valid.distinct;
   const need = BODY_IMAGE_MIN - have;
-  if (need <= 0) return { ...none, pinned };  // nothing allocated → nothing superseded
+  // Nothing to generate — but the draft may have DROPPED references to
+  // publisher-managed pictures (a refresh that replaces body-1/body-2 with
+  // two authored images): those files are still publicly addressable and
+  // hold managed names, so the sweep runs here too (GH r24).
+  if (need <= 0) return { ...none, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
 
-  const slots = bodyImageSlots(body, need, { title: frontmatter?.title });
+  const slots = bodyImageSlots(body, need, { title: frontmatter?.title, mdx });
   if (slots.length < need) {
     const err = new Error(`autonomous blog body images: only ${slots.length} of ${need} insertion slot(s) found for ${slug} — the body needs at least ${need} prose section(s) without an image`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2602,17 +2655,19 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // match is by SECTION, not by name order, so a rewritten first section
   // never causes the second section's still-valid picture to be dropped.
   const managedPrefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+  // The LIVE file keeps its own flavour (a legacy .md migrating to .mdx).
+  const liveMdx = existingFile?.path ? !/\.md$/i.test(String(existingFile.path)) : mdx;
   const reusedBySlot = new Map(); // slot index → { src, repoPath, alt, hash, sha }
   const taken = new Set();
   if (existingFile?.file?.content) {
     let liveBody = '';
     try { liveBody = String(fm.parse(existingFile.file.content)?.content ?? existingFile.file.content); } catch { liveBody = String(existingFile.file.content); }
-    const liveManaged = [...new Set(bodyImageRefs(liveBody).map((r) => String(r.src || '')).filter((src) => src.startsWith(managedPrefix) && !draftSrcs.has(src)))];
+    const liveManaged = [...new Set(bodyImageRefs(liveBody, { mdx: liveMdx }).map((r) => String(r.src || '')).filter((src) => src.startsWith(managedPrefix) && !draftSrcs.has(src)))];
     for (let k = 0; k < slots.length; k++) {
       const slot = slots[k];
       for (const src of liveManaged) {
         if (taken.has(src)) continue;
-        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
+        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead, mdx: liveMdx });
         // A reused alt is customer-facing copy too: it must clear the same
         // guardrails as a generated alt (no fallback → regenerate) and it
         // joins the compliance second pass below.
@@ -2726,15 +2781,25 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   }
 
   const nextBody = insertBodyImages(body, placements);
-  if (countBodyImages(nextBody) < BODY_IMAGE_MIN) {
+  if (countBodyImages(nextBody, { mdx }) < BODY_IMAGE_MIN) {
     const err = new Error(`autonomous blog body images: ${slug} still has fewer than ${BODY_IMAGE_MIN} body images after insertion`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
-  // Superseded = every publisher-managed asset of this post — the whole
-  // directory listing, not just occupied names met below the first free
-  // one — that this run neither reused nor referenced.
-  const kept = new Set([...draftSrcs, ...images.map((img) => img.src)].map((src) => `public${src}`));
+  // Deletions carry their own pins (checked by bodyImageCommitConflicts: a
+  // path already gone on the branch is simply dropped from the deletion
+  // list; a path whose blob changed is a conflict).
+  return { body: nextBody, files, images, newAlts, pinned, ...(await supersededBodyImages({ slug, kept: new Set([...draftSrcs, ...images.map((img) => img.src)]), superseded, files })) };
+}
+
+// Superseded = every publisher-managed asset of this post — the whole
+// directory listing, not just occupied names met below the first free one
+// — that the run neither reused nor referenced (`kept` = public srcs the
+// next body carries; `superseded` = occupied names met during allocation,
+// pinned to the blob seen; `files` = paths being generated this run).
+// Returns { deletes, deletePins } for the commit.
+async function supersededBodyImages({ slug, kept, superseded = [], files = [] }) {
+  const keptPaths = new Set([...kept].map((src) => `public${src}`));
   const managed = new Map(superseded.map((d) => [d.repoPath, d]));
   if (typeof gh.listDir === 'function') {
     let entries = [];
@@ -2748,11 +2813,8 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
       if (!managed.has(repoPath)) managed.set(repoPath, { repoPath, sha: e.sha || null });
     }
   }
-  const deletes = [...managed.values()].filter((d) => !kept.has(d.repoPath) && !files.some((f) => f.path === d.repoPath));
-  // Deletions carry their own pins (checked by bodyImageCommitConflicts: a
-  // path already gone on the branch is simply dropped from the deletion
-  // list; a path whose blob changed is a conflict).
-  return { body: nextBody, files, images, newAlts, pinned, deletes: deletes.map((d) => d.repoPath), deletePins: Object.fromEntries(deletes.map((d) => [d.repoPath, d.sha])) };
+  const deletes = [...managed.values()].filter((d) => !keptPaths.has(d.repoPath) && !files.some((f) => f.path === d.repoPath));
+  return { deletes: deletes.map((d) => d.repoPath), deletePins: Object.fromEntries(deletes.map((d) => [d.repoPath, d.sha])) };
 }
 
 // Paths a body-image commit depends on, re-checked on the FRESH branch just
@@ -2969,6 +3031,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // same narrow second pass as the hero alt.
   const bodyImages = await resolveBodyImages({
     frontmatter, slug, body, existingFile, brief,
+    mdx: true, // filePath is always `.mdx` here (a legacy `.md` migrates)
     // Fresh hero bytes, or the committed hero's repo path when it was reused.
     siblings: [{ label: 'hero', buffer: hero.buffer, repoPath: hero.buffer ? null : (String(hero.src || '').startsWith('/') ? `public${hero.src}` : null) }],
   });
@@ -3303,6 +3366,9 @@ async function publishRefresh(draft, brief = {}) {
   // a no-op while the live body is short of the minimum (hero references
   // do not count).
   let liveShortOfImages = false;
+  // The refresh writes the resolved file back IN PLACE — a legacy `.md`
+  // stays `.md`, so its raw HTML blocks hide the Markdown inside them.
+  const refreshMdx = !/\.md$/i.test(String(filePath || ''));
   if (refreshBlogTarget && bodyImagesEnabled()) {
     // The SAME contract resolveBodyImages enforces — every reference
     // committed, ≥ minimum distinct sources, distinct PICTURES (dHash) —
@@ -3311,7 +3377,7 @@ async function publishRefresh(draft, brief = {}) {
     // silently completing as no_changes). A read error propagates.
     const hero = String(nextFrontmatter?.hero_image?.src || '');
     const getLive = (path) => gh.getFile(path);
-    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero) });
+    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero, { mdx: refreshMdx }), mdx: refreshMdx });
     if (!valid.ok || valid.distinct < BODY_IMAGE_MIN) liveShortOfImages = true;
     else {
       const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc: hero, getFile: getLive });
@@ -3398,7 +3464,8 @@ async function publishRefresh(draft, brief = {}) {
       existingFile: { path: filePath, file: existing },
       brief,
       siblings: heroSrc.startsWith('/') ? [{ label: 'hero', repoPath: `public${heroSrc}` }] : [],
-      legacyHeroSrcs: legacyHeroRefs(oldBody, heroSrc),
+      legacyHeroSrcs: legacyHeroRefs(oldBody, heroSrc, { mdx: refreshMdx }),
+      mdx: refreshMdx,
     });
     if (refreshImages.newAlts.length) {
       await assertComplianceClear({
@@ -4733,6 +4800,8 @@ module.exports = {
     NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
+    blankMarkdownHtmlBlocks,
+    supersededBodyImages,
     fetchImageBuffer,
     parseImageDataUrl,
     defaultHeroForCategory,

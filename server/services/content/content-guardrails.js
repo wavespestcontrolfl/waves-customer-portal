@@ -303,7 +303,11 @@ function isInterruptingBlock(line) {
 // code/comment-stripped text (a definition inside a fence is code).
 // Labels honour backslash escapes (`[body\]shot]`); matching keeps the raw
 // escaped text on both sides (CommonMark does not unescape labels).
-const REF_DEFINITION_LABEL_RE = /^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:[ \t]*/;
+// A definition may be the FIRST thing in a list item (`- [pic]: /x.webp`,
+// `1. [pic]: /x.webp`): the marker (1–4 spaces after it — five or more
+// make the rest indented code) is captured so the block-start rule can
+// treat the line as a new container (GH r24).
+const REF_DEFINITION_LABEL_RE = /^[ \t]*(?:((?:[-*+]|\d{1,9}[.)]))[ \t]{1,4})?\[((?:[^\]\\\n]|\\.)+)\]:[ \t]*/;
 // The WHOLE remainder must be a destination plus an optional quoted or
 // parenthesized title — trailing junk (`/dest.webp trailing-junk`) makes the
 // line an ordinary paragraph in CommonMark, so its label defines nothing and
@@ -359,11 +363,18 @@ function normalizeReferenceLabel(label) {
 // `depths` / `inList` (per line, from blankNonRenderedMarkdownWithDepths):
 // a container transition — entering/leaving a blockquote or a list item —
 // starts a new block too (`Intro\n> [pic]: /x.webp` defines `pic`).
-function definitionMayStartAt(lines, i, lastDefinitionEnd, { depths = null, inList = null } = {}) {
+// `marker`: the line carries its own list-item marker (`- [pic]: /x`), so
+// it opens a NEW list item — a new block even between two adjacent items
+// that share depth and list membership (`- Intro` then `- [pic]: /x`,
+// GH r24). A bullet or a `1.` item may interrupt the paragraph before it;
+// an ordered item starting at any other number may not (CommonMark 5.2),
+// and is then paragraph text.
+function definitionMayStartAt(lines, i, lastDefinitionEnd, { depths = null, inList = null, marker = null } = {}) {
   if (i === 0 || lastDefinitionEnd === i - 1) return true;
   const prev = lines[i - 1];
   if (prev.trim() === '' || isInterruptingBlock(prev)) return true;
   if (depths && (depths[i] || 0) !== (depths[i - 1] || 0)) return true;
+  if (marker) return !/^\d/.test(marker) || parseInt(marker, 10) === 1;
   if (inList && !!inList[i] !== !!inList[i - 1]) return true;
   return false;
 }
@@ -374,7 +385,7 @@ function markdownReferenceDefinitions(str, { depths = null, inList = null } = {}
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
-    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList })) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
     let rest = lines[i].slice(m[0].length);
     if (rest.trim() === '') {
       // Continuation line: consumed ONLY when it is a valid destination —
@@ -390,7 +401,7 @@ function markdownReferenceDefinitions(str, { depths = null, inList = null } = {}
     // A title-only line after a destination-only line belongs to the
     // definition too (the blanker consumes it likewise).
     if (DESTINATION_ONLY_RE.test(rest) && lines[i + 1] !== undefined && LINK_TITLE_ONLY_RE.test(lines[i + 1])) { i += 1; lastDefinitionEnd = i; }
-    const label = normalizeReferenceLabel(m[1]);
+    const label = normalizeReferenceLabel(m[2]);
     if (!label || defs.has(label)) continue;
     defs.set(label, dest);
   }
@@ -411,7 +422,7 @@ function blankReferenceDefinitions(str, { depths = null, inList = null } = {}) {
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
-    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList })) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
     const rest = lines[i].slice(m[0].length);
     let destLine = -1;
     let destText = '';

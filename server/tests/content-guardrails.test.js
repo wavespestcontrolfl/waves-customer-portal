@@ -4728,6 +4728,19 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /q.webp', { depths: [0, 1], inList: [false, false] }).keys()]).toEqual(['pic']);
     expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /l.webp', { depths: [0, 0], inList: [false, true] }).keys()]).toEqual(['pic']);
     expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /n.webp', { depths: [0, 0], inList: [false, false] }).keys()]).toEqual([]);
+    // A definition may OPEN a list item — the marker makes a new block even between two adjacent items that share
+    // depth and list membership; a bullet or `1.` item interrupts the paragraph before it, `2.` cannot; a continuation
+    // line inside the same item is paragraph text; five spaces after the marker make the rest indented code (GH r24).
+    expect([...guardrails.markdownReferenceDefinitions('- Intro\n- [pic]: /x.webp', { depths: [0, 0], inList: [true, true] }).entries()]).toEqual([['pic', '/x.webp']]);
+    expect([...guardrails.markdownReferenceDefinitions('- Intro\n  - [nested]: /n.webp').keys()]).toEqual(['nested']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n- [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n1. [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n1) [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n2. [pic]: /x.webp').keys()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('\n2. [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('- item\n  [pic]: /x.webp').keys()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('-     [code]: /x.webp').keys()]).toEqual([]);
+    expect(guardrails.blankLinkDefinitionsAndTitles('- Intro\n- [pic]: /x.webp\n\n![a][pic]', { keepReferenceTails: true })).toBe('- Intro\n                \n\n![a][pic]');
     // A definition cannot interrupt a paragraph: only at a block start (first line / after blank / heading / break / another definition) (GH r20).
     expect([...guardrails.markdownReferenceDefinitions('Intro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /ok.webp\n[two]: /two.webp\n## H\n[after-heading]: /h.webp\n---\n[after-break]: /b.webp').keys()]).toEqual(['ok', 'two', 'after-heading', 'after-break']);
     expect(guardrails.blankLinkDefinitionsAndTitles('Intro prose\n[pic]: /images/blog/x/body-1.webp')).toBe('Intro prose\n[pic]: /images/blog/x/body-1.webp');

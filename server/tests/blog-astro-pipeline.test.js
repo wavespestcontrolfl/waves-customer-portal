@@ -5327,4 +5327,85 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
     expect(gh.createBranch).not.toHaveBeenCalled();
   });
+
+  test('bodyImageRefs: a reference definition that OPENS a list item (`- [pic]: …`) defines its label — the reference image renders and is validated (GH r24)', () => {
+    const body = '- Intro\n- [pic]: /images/blog/x/body-1.webp\n\n![Pellets][pic]\n\n1. [one]: /images/blog/x/body-2.webp\n\n![Sill][one]';
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([['Pellets', '/images/blog/x/body-1.webp'], ['Sill', '/images/blog/x/body-2.webp']]);
+    // A continuation line inside the item is paragraph text — no definition, no image.
+    expect(AstroPublisher._internals.bodyImageRefs('- item\n  [pic]: /images/blog/x/body-1.webp\n\n![a][pic]')).toEqual([]);
+  });
+
+  test('bodyImageRefs: a legacy .md renders CommonMark HTML blocks as raw text — Markdown images inside them do not count; .mdx parses JSX children as Markdown and they do (GH r24)', () => {
+    const { bodyImageRefs, blankMarkdownHtmlBlocks } = AstroPublisher._internals;
+    const body = [
+      '<div>![a](/images/blog/x/body-1.webp)</div>', '',            // type 6, one line
+      '<figure>', '![b](/images/blog/x/body-2.webp)', '',           // type 6, runs to the blank line
+      '![c](/images/blog/x/body-3.webp)', '',                        // after the blank → rendered
+      '<span>', '![d](/images/blog/x/body-4.webp)', '</span>', '',  // type 7 (complete tag alone, after a blank)
+      'Prose <span>![e](/images/blog/x/body-5.webp)</span>', '',    // inline HTML inside a paragraph → rendered
+      'Prose', '<span>', '![f](/images/blog/x/body-6.webp)', '',    // type 7 cannot interrupt a paragraph → rendered
+      '<script>', 'const s = "![g](/images/blog/x/body-7.webp)";', '</script>', '', // type 1 runs to its closing tag
+      '<div>', '', '![h](/images/blog/x/body-8.webp)',              // block ends at the blank line → rendered
+    ].join('\n');
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([1, 2, 3, 4, 5, 6, 8].map((n) => `/images/blog/x/body-${n}.webp`));
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.src)).toEqual([3, 5, 6, 8].map((n) => `/images/blog/x/body-${n}.webp`));
+    // Newline-preserving so line indices still address the original text.
+    expect(blankMarkdownHtmlBlocks(body).split('\n')).toHaveLength(body.split('\n').length);
+    // A reference definition inside an HTML block defines nothing in .md.
+    expect(bodyImageRefs('<div>\n[pic]: /images/blog/x/body-1.webp\n\n![a][pic]', { mdx: false })).toEqual([]);
+  });
+
+  test('assertBodyImagesAtHead: a .md head whose two images sit inside raw HTML blocks withholds; the same body in .mdx passes (GH r24)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const wrapped = fmModule.stringify(liveFm, '## A\n\nProse.\n\n<div>![a](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)</div>\n\n## B\n\n<figure>\n![b](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n</figure>\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    const rig = (ext) => gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === `src/content/blog/shrub-diseases-sarasota-fl.${ext}`) return { content: wrapped, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
+    rig('md');
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, ...refresh });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\) on content\/refresh-x, minimum 2/);
+    rig('mdx');
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toMatchObject({ ok: true, reason: null });
+  });
+
+  test('refresh lane: a draft that replaces every managed picture with authored ones needs no generation — the dropped body-N assets are still swept (GH r24)', async () => {
+    const { compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n![Managed one](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## Oleander\n\nOleander prose.\n\n![Managed two](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'authored-a': await webp(1), 'authored-b': await webp(2), 'body-1': await webp(3), 'body-2': await webp(4) };
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(authored-a|authored-b|body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.listDir.mockResolvedValue(['body-1', 'body-2'].map((n) => ({ type: 'file', name: `${n}.webp`, path: `public/images/blog/shrub-diseases-sarasota-fl/${n}.webp`, sha: n })));
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draftBody = liveBody
+      .replace('![Managed one](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)', '![Authored one](/images/blog/shrub-diseases-sarasota-fl/authored-a.webp)')
+      .replace('![Managed two](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)', '![Authored two](/images/blog/shrub-diseases-sarasota-fl/authored-b.webp)');
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: draftBody };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', 'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp']);
+    // The swept blobs are pinned: each was re-read on the fresh branch before the commit.
+    for (const n of ['body-1', 'body-2']) expect(gh.getFile).toHaveBeenCalledWith(`public/images/blog/shrub-diseases-sarasota-fl/${n}.webp`, expect.stringMatching(/^content\/refresh-/));
+  });
+
 });
