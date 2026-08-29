@@ -11,9 +11,13 @@
  * not offered (every quote ends at a real product). Combo rows and the
  * trap-only retainer wait on their own rulings.
  *
- * Column default false; the seed below flips exactly the ruled keys and
- * records which rows it flipped so down() clears ONLY those (an admin who
- * later selects/deselects a row is never overridden).
+ * Column default false; the seed below flips exactly the ruled keys ONCE and
+ * records the ids it touched. A re-run never re-flips a recorded row (an
+ * admin who deselected it keeps that choice), and down() is a documented
+ * no-op: the additive column is inert to older code, and clearing "still
+ * true" rows could not tell the seed's value from an admin re-selection
+ * (pre-push codex P1) — the same contract as the engine_keys parent
+ * migration. The state row is retained so reruns stay idempotent.
  */
 const STATE_KEY = 'migration.20260829000020.state';
 
@@ -53,40 +57,33 @@ exports.up = async function up(knex) {
       t.boolean('public_quote_selectable').notNullable().defaultTo(false);
     });
   }
+  // Rows already seeded by a previous run are never touched again — an
+  // admin who deselected one keeps that choice.
+  let prior = [];
+  const hasState = await knex.schema.hasTable('system_settings');
+  if (hasState) {
+    const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+    try { prior = row ? (JSON.parse(row.value).seededIds || []) : []; } catch { prior = []; }
+  }
   // Seed: only ACTIVE, non-archived rows still at the default flip; record ids.
   const rows = await knex('services')
     .whereIn('service_key', SELECTABLE_KEYS)
     .where({ is_active: true, is_archived: false, public_quote_selectable: false })
     .select('id', 'service_key');
-  const ids = rows.map((r) => r.id);
+  const ids = rows.map((r) => r.id).filter((id) => !prior.includes(id));
   if (ids.length) {
     await knex('services').whereIn('id', ids).where({ public_quote_selectable: false })
       .update({ public_quote_selectable: true, updated_at: knex.fn.now() });
   }
-  if (await knex.schema.hasTable('system_settings')) {
-    let prior = [];
-    const row = await knex('system_settings').where({ key: STATE_KEY }).first();
-    try { prior = row ? (JSON.parse(row.value).seededIds || []) : []; } catch { prior = []; }
+  if (hasState) {
     await knex('system_settings').where({ key: STATE_KEY }).del();
     await knex('system_settings').insert({ key: STATE_KEY, value: JSON.stringify({ seededIds: [...new Set([...prior, ...ids])] }) });
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('services'))) return;
-  let seededIds = [];
-  if (await knex.schema.hasTable('system_settings')) {
-    const row = await knex('system_settings').where({ key: STATE_KEY }).first();
-    try { seededIds = row ? (JSON.parse(row.value).seededIds || []) : []; } catch { seededIds = []; }
-    await knex('system_settings').where({ key: STATE_KEY }).del();
-  }
-  // Clear ONLY rows this migration flipped and that still read true; the
-  // column itself stays (a later re-run re-seeds; dropping would destroy
-  // admin selections made in between).
-  if (seededIds.length && (await knex.schema.hasColumn('services', 'public_quote_selectable'))) {
-    await knex('services').whereIn('id', seededIds).where({ public_quote_selectable: true })
-      .update({ public_quote_selectable: false, updated_at: knex.fn.now() });
-  }
-};
+// Documented no-op (see header): the column is additive and inert to older
+// code, and the seed's value cannot be told apart from an admin
+// re-selection. The state row is kept so a later up() stays idempotent.
+exports.down = async function down() {};
 
 exports.SELECTABLE_KEYS = SELECTABLE_KEYS;

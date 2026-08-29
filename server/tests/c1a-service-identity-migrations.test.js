@@ -65,14 +65,18 @@ describe('20260829000020 public_quote_selectable', () => {
     expect(by('trap_only_retainer_standard')).toBe(false); // PR B
     expect(JSON.parse(db.system_settings[0].value).seededIds.sort()).toEqual(['id-rodent_inspection', 'id-wdo_inspection']);
   });
-  test('down() clears only seeded rows that still read true; an admin selection survives', async () => {
+  test('a re-run never re-flips a row an admin deselected; down() is a no-op that keeps admin choices', async () => {
     const db = { services: [svc('wdo_inspection'), svc('fire_ant'), svc('pest_re_service')], system_settings: [] };
     await selectable.up(fakeKnex(db));
-    db.services.find((r) => r.service_key === 'pest_re_service').public_quote_selectable = true; // admin choice after up()
-    await selectable.down(fakeKnex(db));
+    db.services.find((r) => r.service_key === 'wdo_inspection').public_quote_selectable = false; // admin deselects
+    db.services.find((r) => r.service_key === 'pest_re_service').public_quote_selectable = true; // admin selects
+    await selectable.up(fakeKnex(db));
     expect(db.services.find((r) => r.service_key === 'wdo_inspection').public_quote_selectable).toBe(false);
+    expect(db.services.find((r) => r.service_key === 'fire_ant').public_quote_selectable).toBe(true);
+    await selectable.down(fakeKnex(db));
+    expect(db.services.find((r) => r.service_key === 'fire_ant').public_quote_selectable).toBe(true);
     expect(db.services.find((r) => r.service_key === 'pest_re_service').public_quote_selectable).toBe(true);
-    expect(db.system_settings).toHaveLength(0);
+    expect(db.system_settings).toHaveLength(1); // state retained for idempotent reruns
   });
   test('every seeded key names a product a NEW customer buys — no follow-on/internal keys', () => {
     const banned = /re_service|_setup|cartridge|followup|guarantee|renewal|membership|general_appointment|lawn_inspection|trap_only|combo|pest_termite_bait|rodent_monitoring|termite_active_/;
