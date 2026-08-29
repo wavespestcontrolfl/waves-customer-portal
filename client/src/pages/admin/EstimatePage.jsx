@@ -5306,7 +5306,7 @@ function EstimateToolView() {
                                   ? `Up to ${R.rodBait.stations} stations`
                                   : `${R.rodBaitSize} property`}
                                 price={R.rodBait
-                                  ? `$${R.rodBait.perVisit}/visit`
+                                  ? `$${R.rodBait.perVisit}/application`
                                   : `$${R.rodBaitMo}/mo`}
                                 recommended
                               />{" "}

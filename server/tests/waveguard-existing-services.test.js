@@ -78,18 +78,21 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
       customer: { id: 'c1', waveguard_tier: 'Silver' },
       scheduledRows: [
         { id: 'combo', service_type: 'Quarterly Pest + Lawn' },
-        { id: 'non-tier', service_type: 'Rodent Bait Stations' },
+        // Rodent bait qualifies since 2026-08-29 (owner directive).
+        { id: 'rodent', service_type: 'Rodent Bait Stations' },
       ],
     });
 
     expect(toQualifyingKeys('Quarterly Pest + Lawn')).toEqual(['pest_control', 'lawn_care']);
-    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care']);
+    expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control', 'lawn_care', 'rodent_bait']);
   });
 
-  test('rodent- and palm-only rows never feed qualifying keys', async () => {
+  test('rodent-trapping- and palm-only rows never feed qualifying keys (bait stations DO, since 2026-08-29)', async () => {
     const db = fakeDb({
       customer: { id: 'c1', waveguard_tier: 'Gold' },
       scheduledRows: [
+        // Rodent-led but NOT a bait/station/monitoring program — the
+        // one-time rodent service label stays a non-qualifier.
         { id: 'rodent', service_type: 'Rodent Pest Control' },
         { id: 'palm', service_type: 'Palm Tree Injections' },
       ],
@@ -126,9 +129,13 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
 describe('toQualifyingKeys rodent/palm exclusions', () => {
   test('rodent-led names never qualify as pest coverage', () => {
     // rodent_general_one_time's canonical label leads with rodent — it is a
-    // rodent service (non-qualifier), not pest coverage.
+    // rodent service, not pest coverage. Bait-station rows qualify as
+    // rodent_bait since 2026-08-29 (owner directive); non-bait rodent
+    // labels still qualify as nothing.
     expect(toQualifyingKeys('Rodent Pest Control')).toEqual([]);
-    expect(toQualifyingKeys('Quarterly Rodent Bait Station Service')).toEqual([]);
+    expect(toQualifyingKeys('Quarterly Rodent Bait Station Service')).toEqual(['rodent_bait']);
+    expect(toQualifyingKeys('rodent_bait_quarterly')).toEqual(['rodent_bait']);
+    expect(toQualifyingKeys('Rodent Trapping')).toEqual([]);
   });
 
   test('pest-primary combined names keep pest coverage', () => {

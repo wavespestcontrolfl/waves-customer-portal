@@ -156,7 +156,7 @@ Rules in v4.3:
    - `palm_injection`: $10/palm/yr for Gold+ members
    - `rodent_bait` left this list 2026-08-29 (owner directive): it now
      tier-counts AND takes the tier %. Footprint-bracket pricing,
-     $79–$129 per quarterly visit with an up-to-N station allowance
+     $79–$129 per application (quarterly) with an up-to-N station allowance
      (ladder extends +1 station/+$10 per 1,000 sf above 6,750);
      commercial uses the same brackets but stays flat. A $99 one-time
      setup applies only to non-WaveGuard members (no other qualifying

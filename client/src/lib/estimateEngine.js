@@ -2638,7 +2638,7 @@ export function calculateEstimate(inputs) {
       perVisit: rbBracket.perVisit,
       visitsPerYear: 4,
       annual: rbAnnual,
-      detail: `Up to ${rbBracket.stations} stations · $${rbBracket.perVisit}/quarterly visit`,
+      detail: `Up to ${rbBracket.stations} stations · $${rbBracket.perVisit} per application (quarterly)`,
     };
   }
 

@@ -51,13 +51,16 @@ describe('estimate converter annual prepay amount', () => {
     const qualifyingCount = countTierQualifyingRecurringServices([
       { service: 'pest_control', name: 'Pest Control' },
       { service: 'palm_injection', name: 'Palm Injection', waveGuardDiscountEligible: false },
-      { service: 'rodent_bait', name: 'Rodent Bait Stations', waveGuardDiscountEligible: false },
+      // Rodent bait tier-counts since 2026-08-29 (owner directive) — the
+      // dedupe and non-qualifier (palm) exclusions still apply.
+      { service: 'rodent_bait', name: 'Rodent Bait Stations' },
       { service: 'lawn_care', name: 'Lawn Care', discountable: false, discountEligible: false },
       { service: 'lawn_care', name: 'Duplicate Lawn Care' },
     ]);
 
-    expect(qualifyingCount).toBe(2);
-    expect(determineTier(qualifyingCount, true)).toEqual(expect.objectContaining({ tier: 'Silver' }));
+    expect(qualifyingCount).toBe(3);
+    expect(determineTier(qualifyingCount, true)).toEqual(expect.objectContaining({ tier: 'Gold' }));
+    expect(determineTier(2, true)).toEqual(expect.objectContaining({ tier: 'Silver' }));
     expect(determineTier(0, true)).toEqual(expect.objectContaining({ tier: 'Bronze' }));
     expect(determineTier(0, false)).toEqual(expect.objectContaining({ tier: 'none' }));
   });

@@ -3596,6 +3596,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         discountable: key === 'lawn_care' ? true : (item.discountable ?? item.discount?.discountable),
         discountEligible: key === 'lawn_care' ? true : item.discountEligible,
         excludeFromPctDiscount: item.excludeFromPctDiscount,
+        // Billing-unit marker (2026-08-29): new rodent bait lines bill per
+        // application; legacy lines never carry it and stay monthly-billed.
+        ...(item.perApplicationBilled === true ? { perApplicationBilled: true } : {}),
         // Carry the engine line's taxability so the annual-prepay blended rate
         // (resolveCommercialPrepayTaxRate) taxes the taxable commercial pest /
         // mosquito / termite / rodent share — engine-backed (quote-wizard) accepts

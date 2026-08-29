@@ -992,14 +992,15 @@ describe('buildRenderFlags — estimate-wide tier UI gate (derived from per-sect
     expect(flags.showPestRecurringAddOns).toBe(false);
   });
 
-  test('palm-only and rodent-only estimates keep the tier UI off', () => {
+  test('palm-only estimates keep the tier UI off; rodent-only turns it on (WaveGuard member since 2026-08-29)', () => {
     expect(buildRenderFlags({}, [sectionWith('palm_injection')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
-    expect(buildRenderFlags({}, [sectionWith('rodent_bait')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+    expect(buildRenderFlags({}, [sectionWith('rodent_bait')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
   });
 
-  test('a bundle with an eligible service turns the tier UI on; an excluded-only bundle does not', () => {
+  test('a bundle with an eligible service turns the tier UI on; a palm-only bundle does not', () => {
     expect(buildRenderFlags({}, [sectionWith('bundle', ['tree_shrub', 'palm_injection'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
-    expect(buildRenderFlags({}, [sectionWith('bundle', ['palm_injection', 'rodent_bait'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+    expect(buildRenderFlags({}, [sectionWith('bundle', ['palm_injection', 'rodent_bait'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
+    expect(buildRenderFlags({}, [sectionWith('bundle', ['palm_injection'])], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
   });
 });
 
@@ -1011,14 +1012,15 @@ describe('sectionTierEligibleFromKeys — per-section badge (single source of tr
     },
   );
 
-  test('palm / rodent single sections are NOT eligible (key not in allow-list)', () => {
+  test('palm single sections are NOT eligible; rodent bait is (WaveGuard member since 2026-08-29)', () => {
     expect(sectionTierEligibleFromKeys(true, ['palm_injection'])).toBe(false);
-    expect(sectionTierEligibleFromKeys(true, ['rodent_bait'])).toBe(false);
+    expect(sectionTierEligibleFromKeys(true, ['rodent_bait'])).toBe(true);
   });
 
   test('a bundle keeps the badge iff it contains an eligible service', () => {
     expect(sectionTierEligibleFromKeys(true, ['tree_shrub', 'palm_injection'])).toBe(true);   // T&S + Palm → badge (P2a/P2b)
-    expect(sectionTierEligibleFromKeys(true, ['palm_injection', 'rodent_bait'])).toBe(false);  // excluded-only bundle → no badge (Codex round-5)
+    expect(sectionTierEligibleFromKeys(true, ['palm_injection', 'rodent_bait'])).toBe(true);   // rodent qualifies since 2026-08-29
+    expect(sectionTierEligibleFromKeys(true, ['palm_injection'])).toBe(false);                 // excluded-only bundle → no badge
   });
 
   test('one-time (non-recurring) sections never badge', () => {

@@ -212,8 +212,13 @@ function recurringQuoteLines(estimate) {
 // carry perApp/perVisit too, but commercial is exempt from the
 // per-application unit rule and bills monthly (AGENTS.md).
 const MONTHLY_BILLED_SERVICE_KEYS = new Set([
-  // rodent_bait left this set 2026-08-29 (owner directive): bracket pricing
-  // bills per quarterly application like the other recurring programs.
+  // rodent_bait left this set 2026-08-29 (owner directive): NEW bracket
+  // pricing bills per quarterly application like the other recurring
+  // programs. LEGACY monthly-billed rodent rows are still refused
+  // per-application provenance by rodentBaitLineBillsMonthly below — the
+  // row-level perApplicationBilled marker (stamped only by the new engine/
+  // mapper) is the design signal, since legacy display rows carry a
+  // perTreatment figure too.
   'commercial_rodent_bait',
   // Rider folded into the bait line at conversion, never a standalone charge —
   // listing it separately would double-count the hardware uplift.
@@ -221,8 +226,16 @@ const MONTHLY_BILLED_SERVICE_KEYS = new Set([
   'commercial_termite_bait',
 ]);
 
+// Legacy rodent bait plans bill monthly; 2026-08-29+ rows bill per
+// application and carry the explicit perApplicationBilled marker.
+function rodentBaitLineBillsMonthly(line = {}) {
+  return String(line.service || '').trim() === 'rodent_bait'
+    && line.perApplicationBilled !== true;
+}
+
 function perApplicationForLine(line) {
   if (MONTHLY_BILLED_SERVICE_KEYS.has(String(line.service || '').trim())) return null;
+  if (rodentBaitLineBillsMonthly(line)) return null;
   // A line qualifies only when it carries an EXPLICIT per-application signal
   // (perApp, or the perVisit that palm/mosquito shapes use) — monthly-billed
   // station lines deliberately emit neither, and that absence is the design
@@ -2393,6 +2406,7 @@ module.exports._internals = {
   isPublicCommercialQuote,
   publicQuotePestLabel,
   perApplicationForLine,
+  rodentBaitLineBillsMonthly,
   MONTHLY_BILLED_SERVICE_KEYS,
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,

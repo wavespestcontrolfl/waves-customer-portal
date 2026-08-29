@@ -874,6 +874,9 @@ function mapV1ToLegacyShape(v1Result) {
       annual: Number(rbLI.annual) || null,
       stations: Number(rbLI.stations) || null,
       detail: rbLI.detail || null,
+      // Billing-unit marker — new rows bill per application; legacy
+      // monthly-billed rodent rows never carry it.
+      perApplicationBilled: true,
     });
   }
   // Recurring Foam — standalone recurring line (cadence-discounted). Stays in

@@ -426,7 +426,7 @@ function buildRows() {
   add('rodent_bait_program', () => rangeRow({
     key: 'rodent_bait_program',
     name: 'Rodent Bait Station Program',
-    unit: 'per visit',
+    unit: 'per application',
     // Footprint brackets (owner 2026-08-29): lot size, roof type, and the
     // retired post-exclusion modifier no longer move the price — one sweep
     // over the footprint axis covers the full ladder.
@@ -434,7 +434,7 @@ function buildRows() {
       FOOTPRINTS_SQFT.map((f) => ({ f })),
       ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
       (r) => r.perVisit),
-    notes: `Billed per quarterly visit (${Number(constants.RODENT.baitVisitsPerYear) || 4} service visits per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
+    notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
   }));
 
   add('rodent_trapping', () => rangeRow({

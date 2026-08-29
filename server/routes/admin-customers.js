@@ -715,7 +715,10 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // of the canonical monthly-billed key set. Resolved key covers
         // name-only legacy rows (r3).
         if (resolvedServiceKey.startsWith('commercial_')) return true;
-        const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
+        const { MONTHLY_BILLED_SERVICE_KEYS, rodentBaitLineBillsMonthly } = require('./public-quote')._internals;
+        // Legacy rodent bait plans bill monthly; 2026-08-29+ rows carry the
+        // perApplicationBilled marker and bill per application instead.
+        if (rodentBaitLineBillsMonthly({ ...line, service: resolvedServiceKey })) return true;
         return MONTHLY_BILLED_SERVICE_KEYS.has(resolvedServiceKey);
       } catch { return false; }
     })()

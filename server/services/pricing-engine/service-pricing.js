@@ -3583,8 +3583,16 @@ function priceCommercialRodentBait(property = {}, options = {}) {
   // price; the cost-buildup pricer is retired for rodent bait. A higher
   // risk-type cadence keeps the same per-visit price × more visits. The
   // commercial discount posture is unchanged: flat, never WaveGuard.
-  const { stations, perVisit, extended } = rodentBaitBracketFor(footprint);
-  const annual = roundMoney(perVisit * rodentVisits);
+  const { stations, perVisit: bracketPerVisit, extended } = rodentBaitBracketFor(footprint);
+  const bracketAnnual = roundMoney(bracketPerVisit * rodentVisits);
+  // Armed floor replay (saved-estimate re-pricing only — floors disarmed
+  // for fresh pricing, owner 2026-08-17): a pre-realignment commercial
+  // quote clamped to the $900 account minimum must reproduce its quoted
+  // figure, never drift to the (lower) bracket buildup.
+  const minApplied = bracketAnnual < cfg.minAnnual;
+  const armed = options.floorsArmed === true;
+  const annual = armed ? Math.max(cfg.minAnnual, bracketAnnual) : bracketAnnual;
+  const perVisit = roundMoney(annual / rodentVisits);
   const monthly = roundMoney(annual / 12);
   return {
     service: 'commercial_rodent_bait',
@@ -3599,7 +3607,7 @@ function priceCommercialRodentBait(property = {}, options = {}) {
     excludeFromPctDiscount: true,
     quoteRequired: false,
     requiresManualReview: false,
-    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''} · up to ${stations} stations · $${perVisit}/visit.`,
+    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''} · up to ${stations} stations · $${perVisit} per application.`,
     disclaimer: 'Estimated from property data — final price confirmed on site.',
     frequency: rodentVisits,
     visitsPerYear: rodentVisits,
@@ -3611,7 +3619,8 @@ function priceCommercialRodentBait(property = {}, options = {}) {
     internalPerVisitRevenue: perVisit,
     perVisit,
     pricingBasis: 'RODENT_BAIT_BRACKET',
-    minApplied: false,
+    minApplied,
+    ...(armed ? { legacyFloorArmed: true } : {}),
     taxable: cfg.taxable,
     taxCategory: cfg.taxCategory,
     commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
@@ -4854,9 +4863,14 @@ function priceRodentBait(property, options = {}) {
     perApp: perVisit,
     perVisit,
     visitsPerYear,
+    // Billing-unit marker (2026-08-29): distinguishes new per-application
+    // rows from legacy monthly-billed rodent plans in every downstream
+    // billing-unit gate (public-quote perApplicationForLine, admin-customers
+    // schedule lines).
+    perApplicationBilled: true,
     footprintUsed,
     bracketExtended: extended,
-    detail: `Up to ${stations} stations · $${perVisit}/quarterly visit`,
+    detail: `Up to ${stations} stations · $${perVisit} per application (quarterly)`,
     costs: {
       materialPerVisit,
       laborPerVisit: Math.round(laborPerVisitCost * 100) / 100,
