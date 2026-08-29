@@ -9,6 +9,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-new' })) }));
+// The alert step runs under the cron-lock advisory lock; pass-through here,
+// overridden per test to simulate a lease held by another pod.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, fn) => fn()) }));
 // The gate registry snapshots process.env at load; flip the gate per test
 // through the mocked isEnabled instead (name-checked so a typo in the
 // service's gate lookup fails the suite rather than silently reading false).
@@ -18,6 +21,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
+const cronLock = require('../utils/cron-lock');
 const NotificationService = require('../services/notification-service');
 const {
   alertUnrecordedCalls,
@@ -95,6 +99,7 @@ describe('alertUnrecordedCalls', () => {
     mockGateOn = false;
     jest.clearAllMocks();
     NotificationService.notifyAdmin.mockImplementation(async () => ({ id: 'n-new' }));
+    cronLock.runExclusive.mockImplementation(async (_name, fn) => fn());
   });
 
   // Minimal knex stand-in for the notifications dedupe read: `alerted`
@@ -160,6 +165,18 @@ describe('alertUnrecordedCalls', () => {
     expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0 });
   });
 
+  test('the alert step is serialized under the unrecorded-call-alert advisory lock; a held lease skips the pass', async () => {
+    mockGateOn = true;
+    installDb();
+    await alertUnrecordedCalls([row()], { now: NOW });
+    expect(cronLock.runExclusive).toHaveBeenCalledWith('unrecorded-call-alert', expect.any(Function));
+    // Lease held by another pod → nothing read, nothing rung; the next sweep re-evaluates.
+    jest.clearAllMocks();
+    cronLock.runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+    expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: true, reason: 'lease_held' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('an already-alerted sid never re-rings', async () => {
     mockGateOn = true;
     installDb({ alerted: { id: 'n1' } });
@@ -192,9 +209,9 @@ describe('alertUnrecordedCalls', () => {
     expect(opts.dedupeKey).toMatch(/^unrecorded-call-outage:[0-9a-f]{16}$/);
     expect(opts.metadata.unrecorded_call_sids).toEqual(rows.map((r) => r.twilio_call_sid).sort());
 
-    // Same fresh set on a concurrent pod (different `now`) → SAME key, so
-    // notifyAdmin's lock dedupes it; a later pass with NEW misses → a
-    // different key, never swallowed by the earlier aggregate.
+    // Same fresh set → SAME key (the set hash is deterministic regardless of
+    // row order or `now`); a later pass with NEW misses → a different key,
+    // never swallowed by the earlier aggregate.
     await alertUnrecordedCalls([...rows].reverse(), { now: new Date(NOW.getTime() + 7000) });
     expect(NotificationService.notifyAdmin.mock.calls[1][3].dedupeKey).toBe(opts.dedupeKey);
     const moreRows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CAlater${i}` }));
