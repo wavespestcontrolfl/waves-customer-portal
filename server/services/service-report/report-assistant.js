@@ -441,6 +441,15 @@ function answerServiceReportQuestion({
 } = {}) {
   const q = String(question || '').toLowerCase();
 
+  // This week's watering plan, when the report carries one, answers any
+  // watering question first — never re-entry or generic copy under the
+  // plan shown on the same page (codex #3565 gh-r29). Without a plan the
+  // existing routing (irrigation → re-entry) stands.
+  const weekPlan = data?.reportV2?.water?.weekPlan;
+  if (weekPlan?.title && /\b(water|watering|irrigat\w*|sprinklers?|run ?time|minutes|zones?)\b/.test(q)) {
+    return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');
+  }
+
   if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside|irrigation)\b/.test(q)) {
     return answerReentry({ data });
   }

@@ -225,10 +225,15 @@ function homesDiffer(a, b) {
   };
   const pa = premise(a);
   const pb = premise(b);
+  const za = zip5(a?.zip);
+  const zb = zip5(b?.zip);
+  // ZIP is authoritative when both sides have one (postal city names alias —
+  // Bradenton / Lakewood Ranch share 34211, same rule as placeCorroborates);
+  // city decides only when a ZIP compare is unavailable (codex gh-r29).
+  const placeDiffers = (za && zb) ? za !== zb : addressMatchKey(a?.city) !== addressMatchKey(b?.city);
   return pa.street !== pb.street
     || pa.unit !== pb.unit
-    || zip5(a?.zip) !== zip5(b?.zip)
-    || addressMatchKey(a?.city) !== addressMatchKey(b?.city);
+    || placeDiffers;
 }
 
 async function propagateCustomerAddressChange({ before, after }, conn = db) {

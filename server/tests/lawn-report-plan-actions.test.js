@@ -55,3 +55,15 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     expect(NEUTRAL_AFTERCARE_WITH_PLAN).not.toMatch(/normal schedule/);
   });
 });
+
+describe('generic moisture card defers to the plan (codex gh-r29)', () => {
+  const cats = [{ key: 'water_moisture_stress', status: 'watch', customerExplanation: 'Mixed read.' }];
+  const card = (water, extra = {}) => buildLawnInsightCards({ categories: cats, water, grassLabel: 'lawn', ...extra }).find((c) => c.category === 'water');
+  test('no "keep your current schedule" / "ease back a cycle" under a plan', () => {
+    expect(card({ status: 'balanced', scheduleOnFile: true }).customerAction).toMatch(/Keep your current watering schedule/);
+    expect(card({ status: 'balanced', scheduleOnFile: true, weekPlan: PLAN }).customerAction).toMatch(/Follow this week’s watering plan below/);
+    expect(card({ status: 'balanced', overwatering: true }).customerAction).toMatch(/ease back an irrigation cycle/);
+    expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }).customerAction).toMatch(/follow this week’s watering plan below rather than adding cycles/);
+    expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/^Water in today’s application as directed first.*this week’s watering plan below already accounts for it/);
+  });
+});

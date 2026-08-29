@@ -107,3 +107,19 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Englewood' })).toBe('Manatee'); // unmapped city → profile county kept
   });
 });
+
+describe('resolveRestrictionCounty covers the whole service area (codex gh-r29)', () => {
+  const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+  const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
+  test('a service-area ZIP the tax map omits (Cortez 34215) still resolves; the tax map stays authoritative where it speaks', () => {
+    expect(resolveRestrictionCounty({ zip: '34215' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ zip: '34216', city: 'Anna Maria' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ zip: '34243', city: 'Sarasota' })).toBe('Manatee'); // tax map
+    expect(SERVICE_AREA_COUNTY_ZIPS.Manatee).toContain('34215');
+  });
+  test('a ZIP shared across county lines never decides jurisdiction on its own (city map / fail closed)', () => {
+    // 34223 (Englewood) sits in both the Sarasota and Charlotte service-area sets and not in the tax map.
+    expect(resolveRestrictionCounty({ zip: '34223', city: 'Englewood' })).toBe(null);
+    expect(resolveRestrictionCounty({ zip: '34223', city: 'Venice' })).toBe('Sarasota'); // whole-county city map
+  });
+});

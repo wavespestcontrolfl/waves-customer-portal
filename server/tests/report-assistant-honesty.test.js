@@ -146,3 +146,19 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     expect(reconcile(longSentence).todaysResult).not.toContain('…');
   });
 });
+
+describe('watering questions answer with the weekly plan when the report carries one (codex #3565 gh-r29)', () => {
+  const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
+  test('plan present → the plan, before re-entry / trend routing', () => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: plan } } };
+    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?']) {
+      expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
+    // Unrelated questions keep their routing.
+    expect(answerServiceReportQuestion({ question: 'When can my dog go outside?', data })).not.toMatch(/check the rain/);
+  });
+  test('no plan → existing routing (irrigation → re-entry) is unchanged', () => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
+    expect(answerServiceReportQuestion({ question: 'What is my irrigation plan?', data })).not.toMatch(/This week:/);
+  });
+});

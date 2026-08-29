@@ -610,6 +610,10 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: '#4' })).toBe(false);
     expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: 'Apt 7' })).toBe(true);
     expect(homesDiffer(BEFORE, { ...BEFORE, zip: '34211-1234' })).toBe(false);
+    // gh-r29: postal-city aliases on the same ZIP are the same home; city decides only without a ZIP compare.
+    expect(homesDiffer({ ...BEFORE, city: 'Bradenton', zip: '34211' }, { ...BEFORE, city: 'Lakewood Ranch', zip: '34211' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, city: 'Bradenton', zip: '' }, { ...BEFORE, city: 'Sarasota', zip: '' })).toBe(true);
+    expect(homesDiffer({ ...BEFORE, zip: '34211' }, { ...BEFORE, zip: '34236' })).toBe(true);
     // gh-r23: suffix spelling is a correction, never a move.
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main Street' }, { ...BEFORE, address_line1: '123 Main St' })).toBe(false);
     expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St' }, { ...BEFORE, address_line1: '123 Main Ave' })).toBe(true);

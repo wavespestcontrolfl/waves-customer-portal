@@ -116,15 +116,24 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       // "Keep your current watering schedule" requires a schedule ON FILE —
       // for profiles without one it invented guidance and contradicted the
       // add-your-schedule CTA (codex P2 r23).
-      customerAction: damp
-        // A label-required watering-in must not collide with ease-back
-        // advice — name the exception instead (codex P1 r32).
-        ? (waterInRequired
-          ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-          : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-        : (water && water.scheduleOnFile
-          ? 'Keep your current watering schedule unless we flag a change.'
-          : 'We’ll keep watching moisture balance at upcoming visits.'),
+      // With a weekly plan on the card the plan is the sole watering
+      // instruction — never "keep your current schedule" / "ease back a
+      // cycle" beside a hold or run plan (codex #3565 gh-r29).
+      customerAction: hasPlan
+        ? (damp
+          ? (waterInRequired
+            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings — this week’s watering plan below already accounts for it.'
+            : 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.')
+          : 'Follow this week’s watering plan below; we’ll keep watching moisture balance at upcoming visits.')
+        : damp
+          // A label-required watering-in must not collide with ease-back
+          // advice — name the exception instead (codex P1 r32).
+          ? (waterInRequired
+            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
+            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
+          : (water && water.scheduleOnFile
+            ? 'Keep your current watering schedule unless we flag a change.'
+            : 'We’ll keep watching moisture balance at upcoming visits.'),
       nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }

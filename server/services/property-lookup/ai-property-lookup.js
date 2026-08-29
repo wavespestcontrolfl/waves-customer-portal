@@ -137,25 +137,14 @@ const COUNTY_ADDRESS_CITY_HINTS = new Set([
   ...CHARLOTTE_CITY_NAMES,
   ...HILLSBOROUGH_CITY_NAMES,
 ]);
-const MANATEE_ZIPS = new Set([
-  '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
-  '34210', '34211', '34212', '34215', '34216', '34217', '34218', '34219', '34220',
-  '34221', '34222', '34228', '34243', '34250', '34251', '34264', '34270', '34280',
-  '34281', '34282',
-]);
+// Service-area county ZIP sets: single source in config/county-zips.js
+// (SERVICE_AREA_COUNTY_ZIPS — shared with the watering-restriction resolver).
+const { SERVICE_AREA_COUNTY_ZIPS } = require('../../config/county-zips');
+const MANATEE_ZIPS = new Set(SERVICE_AREA_COUNTY_ZIPS.Manatee);
 const MANATEE_SHARED_ZIPS = new Set(['34202', '34228', '34240', '34243']);
-const SARASOTA_ZIPS = new Set([
-  '34223', '34224', '34228', '34229', '34230', '34231', '34232', '34233', '34234',
-  '34235', '34236', '34237', '34238', '34239', '34240', '34241', '34242', '34243',
-  '34249', '34260', '34272', '34274', '34275', '34276', '34277', '34284', '34285',
-  '34286', '34287', '34288', '34289', '34290', '34291', '34292', '34293', '34295',
-]);
+const SARASOTA_ZIPS = new Set(SERVICE_AREA_COUNTY_ZIPS.Sarasota);
 const SARASOTA_SHARED_ZIPS = new Set(['34223', '34224', '34228', '34229', '34240', '34243', '34275']);
-const CHARLOTTE_ZIPS = new Set([
-  '33921', '33927', '33938', '33946', '33947', '33948', '33949', '33950', '33951',
-  '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983', '34223',
-  '34224',
-]);
+const CHARLOTTE_ZIPS = new Set(SERVICE_AREA_COUNTY_ZIPS.Charlotte);
 const CHARLOTTE_SHARED_ZIPS = new Set(['33921', '33946', '33947', '33955', '34223', '34224']);
 // South-Hillsborough ZIPs (Gibsonton, Lithia, Riverview, Ruskin, Apollo
 // Beach, Sun City Center, Wimauma/Balm). None overlap the other county sets.
