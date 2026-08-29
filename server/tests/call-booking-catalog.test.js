@@ -1322,7 +1322,8 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
     expect(shifted).toBe(0);
     expect(log.update).toBeNull();
-    expect(report.skipped).toBeUndefined(); // changed-under-lock is not a booked-slot skip
+    // Plan drift is reported like a booked slot (warning + durable card), never silent.
+    expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19', reason: 'changed' }]);
   });
 
   test('a booked-slot skip with NO report rings the durable schedule_conflict card itself', async () => {

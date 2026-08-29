@@ -681,7 +681,14 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     const skipped = [];
     for (const planned of kids) {
       const k = lockedById.get(String(planned.id));
-      if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) continue;
+      if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) {
+        // Plan drift (the child moved / was reassigned before the locked
+        // read): not written — and REPORTED, like a booked slot, so the
+        // caller's warning and the durable card say the package lost its
+        // spacing (codex r17 P2).
+        skipped.push({ id: planned.id, day: planned.day, newDay: planned.new_day, reason: 'changed' });
+        continue;
+      }
       // Canonical occupancy check on the destination block (a windowless
       // child occupies nothing and is not probed): a clash — or a block
       // that cannot be probed — means the child is NOT written onto that
@@ -703,7 +710,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           continue;
         }
       }
-      shifted += await trx('scheduled_services')
+      const wrote = await trx('scheduled_services')
         .where({ id: k.id })
         .where(filter)
         // CAS on the locked read (knex object form renders null as IS NULL).
@@ -719,6 +726,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           route_order: null,
           updated_at: trx.fn.now(),
         });
+      if (Number(wrote) === 1) shifted += 1;
+      else skipped.push({ id: k.id, day: k.day, newDay: k.new_day, reason: 'changed' }); // CAS miss = drift too
     }
     if (skipped.length) {
       if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);
@@ -733,7 +742,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Call-booked follow-up visit kept its date',
-            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date because the shifted slot is already booked (${skipped.map((k) => `${k.day} → ${k.newDay}`).join(', ')}). Re-space them from dispatch.`,
+            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : ' — slot booked'}`).join(', ')}). Re-space them from dispatch.`,
             { metadata: { parentServiceId, skipped } },
           );
         } catch (err) {
