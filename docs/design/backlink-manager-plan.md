@@ -679,7 +679,7 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   repeated against the LIVE checkout before reservation and again before submit (§6.3) — then the shipped
   `price-scan/extract.parsePriceText()` (strict: a range, a percentage, a promo badge or an
   empty string parses to null; it does not validate currency, which is why the gate precedes
-  it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown','foreign') — the ONE enum, identical in the migration, the investigator JSON schema and the tests)
+  it) → integer cents derived from the DECIMAL STRING, never via binary floats: split on the decimal point, `dollars*100 + zero-padded 2-digit fraction` (the same string-based minor-units parse the repo's money paths use — `Math.round(n * 100)` mis-rounds values like 10.075), and a quote with more than 2 fractional digits parses to null (→ the price-entry card), so the approved amount, budget reservation, card ceiling and checkout total can never disagree by a cent. `currency` (NOT NULL, CHECK IN ('USD','unknown','foreign') — the ONE enum, identical in the migration, the investigator JSON schema and the tests)
   is a column on the path, copied into every approval `terms_snapshot` and stamped on every
   purchase row; §6.3 never automates a `payment_required` path whose `currency ≠ 'USD'`
   (no conversion is ever performed): `currency='foreign'` ⇒ `OWNER_MANUAL_PAYMENT` (stays
