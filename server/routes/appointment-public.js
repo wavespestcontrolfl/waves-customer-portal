@@ -241,7 +241,7 @@ async function visitServicesFor(svc) {
       .where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .orderBy('window_start', 'asc')
-      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed');
+      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start');
     if (members.length < 2) return {};
     // The stop's canonical start (service_visits.window_start — the
     // earliest member's) drives the arrival promise: two links to the same
@@ -286,9 +286,12 @@ async function visitServicesFor(svc) {
 // saw exactly the services it is about to confirm — a count cannot tell
 // A+B from A+C (local codex audit). Never the raw ids on a public page.
 function membershipKeyFor(members) {
-  const ids = (members || []).map((m) => String(m.id)).sort();
-  if (ids.length < 2) return null;
-  return require('crypto').createHash('sha256').update(ids.join(',')).digest('hex').slice(0, 16);
+  if (!members || members.length < 2) return null;
+  // Bound to each member's PLACEMENT too (local audit): a sibling that moved
+  // to another slot while keeping its visit_id is a different appointment
+  // than the one the page showed.
+  const parts = members.map((m) => `${m.id}@${apptDateStr(m.scheduled_date) || ''}T${hhmm(m.window_start) || ''}`).sort();
+  return require('crypto').createHash('sha256').update(parts.join(',')).digest('hex').slice(0, 16);
 }
 
 // The confirm POST's shown-membership contract: the page showed the member

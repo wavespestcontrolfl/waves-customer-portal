@@ -22,12 +22,14 @@ jest.mock('../models/db', () => {
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       count() { chain._ops.push(['count', ...arguments]); return chain; },
       del() { log.push({ table, op: 'del', ops: chain._ops }); return Promise.resolve(1); },
+      insert(values) { log.push({ table, op: 'insert', ops: chain._ops, values }); return Promise.resolve([{}]); },
       then(res, rej) { return Promise.resolve([]).then(res, rej); },
     };
     return chain;
   }
   const db = jest.fn((table) => makeChain(table, db.__script, calls));
   db.__calls = calls; db.__script = {}; db.__rawCalls = [];
+  db.fn = { now: () => 'now()' };
   db.transaction = jest.fn(async (fn) => {
     const trx = jest.fn((table) => makeChain(table, db.__script, calls));
     trx.raw = jest.fn(async (...a) => { db.__rawCalls.push(a); return { rows: [] }; });
@@ -633,6 +635,24 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
   });
 
+  test('rollback restores a pending member\'s status (the rebooker forced confirmed), fenced on the restored slot; a frozen visit with a LIVE member is refused up front', async () => {
+    db.__script = script({ members: [member('a', { status: 'pending' }), member('b')] });
+    db.__script.scheduled_services.update = undefined; // harness default update() resolves 1
+    const rebooker = fakeRebooker({ b: 'throw' });
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
+    const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
+    expect(restore.ops).toEqual([['where', { id: 'a', status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' }]]);
+    const hist = db.__calls.find((c) => c.table === 'job_status_history' && c.op === 'insert');
+    expect(hist.values).toEqual({ job_id: 'a', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
+    // a live member on a frozen visit: refused before any write (its lifecycle could never be compensated)
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b', { status: 'on_site' })] });
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { allowLive: true } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_LIVE_MOVE_UNSUPPORTED' });
+    expect(db.__calls.some((c) => c.op === 'update')).toBe(false);
+  });
+
   test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     const rebooker = { reschedule: jest.fn(async (id, date, win, reason) => {
@@ -674,6 +694,20 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
       .mockRejectedValueOnce(new Error('restore boom'));                                          // a's restore
     const err2 = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
     expect(err2).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['b'], rollbackFailed: ['a'] });
+  });
+
+  test('a parent that is gone or no longer open at retarget time is a retarget FAILURE (parentRetargetFailed + warning), never a silent success (local audit)', async () => {
+    let reads = 0;
+    db.__script = script({ members: [member('a'), member('b')] });
+    db.__script.service_visits.first = (ops) => {
+      if (ops.some((o) => o[0] === 'max')) return { max: 0 };
+      reads += 1;
+      return reads <= 2 ? VISIT : { ...VISIT, status: 'dissolved' }; // plan reads open; the retarget read finds it dissolved
+    };
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], parentRetargetFailed: true });
+    expect(out.warnings.some((w) => /visit parent retarget failed: visit v1 is dissolved/.test(w))).toBe(true);
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
   });
 
   test('a member that left the visit or moved again before the retarget is reported as failed, never as moved (codex r17)', async () => {

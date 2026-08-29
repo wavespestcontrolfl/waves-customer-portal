@@ -503,6 +503,11 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(membershipKeyFor([{ id: 'b' }, { id: 'a' }])).toBe(AB); // order-free
     expect(membershipKeyFor([{ id: 'a' }])).toBe(null);            // solo page carries no key
     expect(membershipKeyFor([{ id: 'a' }, { id: 'c' }])).not.toBe(AB);
+    // bound to placement (local audit): the same ids at another slot is a different appointment
+    const placed = membershipKeyFor([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '10:00:00' }]);
+    expect(membershipKeyFor([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '10:00' }])).toBe(placed);
+    expect(membershipKeyFor([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '11:00' }])).not.toBe(placed);
+    expect(membershipKeyFor([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'b', scheduled_date: '2026-08-06', window_start: '10:00' }])).not.toBe(placed);
     // page showed ONE (no key) but the stop has two ⇒ CHANGED, never a hidden fan-out
     let trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
     await expect(confirmGroupedOrSolo(trx, svc, shown)).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });

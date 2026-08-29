@@ -218,7 +218,7 @@ async function lockStopForRow(trx, serviceId) {
 async function openMembers(t, visitId) {
   return t('scheduled_services').where({ visit_id: visitId })
     .whereNotIn('status', TERMINAL_ROW_STATUSES)
-    .select('id', 'window_start', 'window_end', 'technician_id', 'status');
+    .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
 }
 
 /**
@@ -1615,6 +1615,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // a member failure rolls the landed members back and 409s.
         const split = canSplit(await visitActivity(visit.id, t));
         const frozen = !split.ok && split.reason !== 'visit_not_open';
+        // A frozen visit with a LIVE member (en_route/on_site) cannot be
+        // compensated — the rebooker rewinds the lifecycle stamps on the
+        // move and nothing can put them back — so it is refused up front
+        // rather than risk a rollback that cannot restore state (local audit).
+        if (frozen && members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status)))) {
+          throw Object.assign(new Error('Cannot move this stop: a grouped service is already underway and the visit has an issued link or records — finish or separate it first'), { statusCode: 409, code: 'VISIT_FROZEN_LIVE_MOVE_UNSUPPORTED', isOperational: true });
+        }
         // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
         // its per-run change budget from an unlocked pre-read; the member
         // count that actually moves is decided here, under the stop lock,
@@ -1825,6 +1832,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
           await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }));
         }
+        // The rebooker forces 'confirmed' on every move: a member that was
+        // pending/rescheduled before this move must read that way again
+        // after the rollback (fenced on the restored slot + the forced
+        // status; a history row records the compensation). A miss means
+        // another writer got there first — the row is reported stuck.
+        const prev = String(t.previousStatus || '');
+        if (prev && prev !== 'confirmed') {
+          const [os, oe] = String(t.original.window || '').split('-');
+          const restored = await db('scheduled_services')
+            .where({ id, status: 'confirmed', visit_id: plan.visitId, scheduled_date: t.original.date, window_start: os || null, window_end: oe || null })
+            .update({ status: prev, updated_at: db.fn.now() });
+          if (Number(restored) !== 1) throw new Error(`status could not be restored to ${prev} (row changed)`);
+          await db('job_status_history').insert({ job_id: id, from_status: 'confirmed', to_status: prev, transitioned_by: null });
+        }
         if (!t.isPrimary) {
           await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${(t.original.window || '').split('-')[0] || '08:00'}`, {
             sendNotification: false, keepPendingConfirmation: true,
@@ -1990,7 +2011,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     await db.transaction(async (t) => {
       for (const key of [...new Set([plan.oldKey, newKey])].sort()) await lockStop(t, key);
       const visit = await t('service_visits').where({ id: plan.visitId }).first();
-      if (!visit || String(visit.status) !== 'open') return;
+      if (!visit || String(visit.status) !== 'open') {
+        // The members moved but their parent is gone / no longer open: the
+        // rows now hang off a parent that names another stop and the seams
+        // below no-op on a non-open visit — a retarget FAILURE the caller
+        // must see (parentRetargetFailed), never a silent success (local audit).
+        throw Object.assign(new Error(`visit ${plan.visitId} is ${visit ? visit.status : 'missing'} — members moved but the visit record could not be retargeted`), { code: 'VISIT_PARENT_NOT_OPEN' });
+      }
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
