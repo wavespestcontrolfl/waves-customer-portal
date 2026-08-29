@@ -208,12 +208,22 @@ export function TermiteStationRecord({ stationMap }) {
   };
 
   const collapsed = [...checked, ...onFile];
+  // Only 'ok' pins support an absence statement; a serviced pin may be the
+  // very station the hero reports activity at (statuses are mutually
+  // exclusive), so serviced pins get count-neutral service wording
+  // (codex P2 #3600 r28).
+  const clean = checked.filter((st) => st.status === 'ok');
+  const serviced = checked.filter((st) => st.status === 'serviced');
   const summaryParts = [];
-  if (checked.length) {
+  if (clean.length) {
     // "All" only when every station on the visit was checked clean — never
-    // beside exceptions OR on-file (unchecked) stations (codex P2 #3600 r17).
-    const every = !exceptions.length && !onFile.length;
-    summaryParts.push(`${every ? 'All ' : ''}${checked.length} ${exceptions.length ? 'other ' : ''}station${checked.length === 1 ? '' : 's'} checked — no activity observed`);
+    // beside exceptions, serviced, OR on-file (unchecked) stations
+    // (codex P2 #3600 r17).
+    const every = !exceptions.length && !onFile.length && !serviced.length;
+    summaryParts.push(`${every ? 'All ' : ''}${clean.length} ${exceptions.length || serviced.length ? 'other ' : ''}station${clean.length === 1 ? '' : 's'} checked — no activity observed`);
+  }
+  if (serviced.length) {
+    summaryParts.push(`${serviced.length} station${serviced.length === 1 ? '' : 's'} serviced this visit`);
   }
   if (onFile.length) {
     summaryParts.push(`${onFile.length} station${onFile.length === 1 ? '' : 's'} on file — not checked this visit`);

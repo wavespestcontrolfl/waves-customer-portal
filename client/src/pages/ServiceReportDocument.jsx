@@ -495,7 +495,11 @@ export default function ServiceReportDocument({ data, token }) {
     return method !== 'station_check' && zoneIds.length > 0 && isProductApplication(app);
   });
 
+  // A partial station sync (termite V2 flag) means the placement section
+  // would draw the synced subset beside the dashboard's frozen counts —
+  // suppressed, same as the live report (codex P2 #3600 r28).
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length
+    && !data.termiteReportV2?.stationSyncPartial
     ? data.stationMap : null;
   const reportUrl = `${portalBase(data.publicOrigin)}/report/${encodeURIComponent(token)}`;
   const reportNumber = String(data.serviceRecordId || token || '').replace(/-/g, '').slice(0, 10).toUpperCase();
@@ -1378,6 +1382,14 @@ export default function ServiceReportDocument({ data, token }) {
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
                 {String(companion.todaysResult.headline).replace(/\.$/, '')}.
                 {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+              </p>
+            )}
+            {/* …but the companion's ACCEPTED narrative (the dashboard's
+                aiSummary) still prints here — the suppressed body was its
+                only PDF surface (codex P2 #3600 r28). */}
+            {termiteV2Companion && companion.type === 'termite_bait_station' && cleanVisitSummary(termiteV2?.aiSummary?.body || '') && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                {cleanVisitSummary(termiteV2.aiSummary.body)}
               </p>
             )}
             {/* Same containment rule TodaysResultCard uses: the snapshot

@@ -152,7 +152,8 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(needsAttention).getAllByText('Termite activity observed')).toHaveLength(2);
     expect(within(needsAttention).getAllByText('Could not be accessed this visit')).toHaveLength(2);
     expect(within(needsAttention).queryByText(/serviced today/i)).toBeNull();
-    expect(within(needsAttention).getByText('10 other stations checked — no activity observed')).toBeInTheDocument();
+    // 7 clean pins + 3 serviced pins: only the clean ones support "no activity"
+    expect(within(needsAttention).getByText('7 other stations checked — no activity observed · 3 stations serviced this visit')).toBeInTheDocument();
     // Station map rides inside the dashboard exactly once.
     expect(container.querySelectorAll('#station-map')).toHaveLength(1);
     // The tech's required next-step commitment survives the typed card swap.

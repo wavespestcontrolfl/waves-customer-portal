@@ -477,6 +477,35 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).not.toMatch(/Stations checked: 12/);
   });
 
+  it('companion-source: the companion\'s accepted narrative prints in the PDF companion block', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        todaysResult: { headline: 'x', body: 'Stations 6 and 10 fed heavily; both cartridges replaced.', bodySource: 'technician_report' }, findings: [],
+      }],
+      termiteReportV2: {
+        source: 'companion',
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        aiSummary: { headline: null, body: 'Stations 6 and 10 fed heavily; both cartridges replaced.' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/both cartridges replaced/);
+  });
+
+  it('a partial station sync suppresses the PDF placement section', () => {
+    const stationMap = { available: true, program: 'termite', image: { url: '/x.png', width: 640, height: 340 }, stations: [{ id: 's1', number: 1, cx: 10, cy: 10, status: 'ok' }], summary: { total: 1, checked: 1, activity: 0, serviced: 0, inaccessible: 0 } };
+    const base = { ...BASE_DATA, serviceLine: 'termite', stationMap, termiteReportV2: { status: { key: 'protected', tone: 'good', label: 'No termite activity observed' }, statusSummary: 'x', stationSyncPartial: false } };
+    expect(render(<ServiceReportDocument data={base} token="t" />).container.textContent).toMatch(/Bait station placement/);
+    cleanup();
+    const partial = { ...base, termiteReportV2: { ...base.termiteReportV2, stationSyncPartial: true } };
+    expect(render(<ServiceReportDocument data={partial} token="t" />).container.textContent).not.toMatch(/Bait station placement/);
+  });
+
   it('companion-source: the bait companion\'s frozen gauge bullet is suppressed and its current history row is reconciled', () => {
     const data = {
       ...BASE_DATA,
