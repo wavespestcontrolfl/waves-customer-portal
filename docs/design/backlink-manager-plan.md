@@ -454,8 +454,10 @@ CSV rows. Steps, all idempotent:
    `twitter.com/<user>/status/<id>`) is resolved through the existing `backlink-agent/x-poller`
    URL extraction (tweet entities → expanded URLs) **with redirect expansion moved behind the
    SSRF-safe fetcher** — `x-poller.resolveUrl` today does a raw `fetch(redirect:'follow')`
-   and is replaced by `contact-finder.fetchPage`'s pinned resolver (every hop validated
-   against private/metadata ranges, hop count bounded, no body needed) as part of step 2 and each
+   and is replaced by `contact-finder.fetchPage`'s pinned resolver EXTENDED in step 2 to expose
+   the validated `finalUrl` (today it returns only status/body metadata) and a bodyless
+   `resolveOnly` mode (HEAD/early-abort — every hop validated against private/metadata ranges,
+   hop count bounded); the X feeder consumes `finalUrl`, never the shortener host, and each
    resolved host enters as `source='x'`, `source_detail=<post URL>`; the post host itself is
    never a candidate. A competitor backlink URL contributes its host. Hosts on a fixed
    never-a-target list (`x.com`, `twitter.com`, `google.com`, `t.co`, URL shorteners, Waves'
