@@ -135,47 +135,61 @@ function lowRatingExitFields(reason) {
   return { auto_reply_status: null, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: null, auto_reply_attempts: 0 };
 }
 
-// Rows the OLD rule parked as low_rating / unrated (before the 2026-08-29
-// ruling) leave the lane: automation state is released (NULL status with the
-// reason stamped; due, claims, error and retry counter cleared) but the TEXT
-// STAYS — review_reply / auto_reply_draft are never touched. Before the
-// *_requested reasons existed, a draft a person asked for via Post now was
-// stored with exactly the same status / reason / version as an automatic
-// park, so the two cannot be told apart afterwards; a leftover "[DRAFT]" is
-// simply a draft on the card the person may use or discard (hook on #3587:
-// no data loss on ambiguous legacy rows). Bounded and idempotent, so it
-// runs every tick. Human / Agent Ops drafts are theirs (untouched); a live
-// publish claim means a publisher is mid-flight; a live auto-reply claim
-// (Post now stamps one via claimDueRows(force) BEFORE it verifies and takes
-// the publish claim) means an operator action is mid-flight — both are
-// excluded from the read AND re-checked in the compare-and-set, so the
-// sweep never clears a claim it does not own. low_rating_requested /
-// unrated_requested is not a legacy park and is never selected.
-async function sweepLowRatingParks({ limit = 50 } = {}) {
-  const nowIso = new Date().toISOString();
-  const rows = await db('google_reviews')
-    .where('auto_reply_status', STATUS.PARKED)
-    .whereIn('auto_reply_reason', ['low_rating', 'unrated'])
+// Rows the OLD rule left in the lane under-4★ / unrated (before the
+// 2026-08-29 ruling) leave it here: parks stamped low_rating / unrated, and
+// queued / failed rows whose rating is under 4 (a gate switched off at deploy
+// means claimDueRows never runs, so without this they would read "Auto-reply
+// queued / retrying" for ever — codex #3587 r4). Automation state is
+// released (NULL status with the reason stamped; due, claims, error and retry
+// counter cleared) and the TEXT STAYS: review_reply keeps its "[DRAFT] …",
+// while the pipeline's own draft fields (auto_reply_draft / version / mode /
+// grounding / drafted_at) are cleared, so the card offers it as an ordinary
+// person's draft — Use Draft and Post now publish it as written through the
+// human path (no dead draftToken; codex r4). Before the *_requested reasons
+// existed, a draft a person asked for via Post now was stored with exactly the
+// same status / reason / version as an automatic park, so the two cannot be
+// told apart afterwards and neither is deleted (hook on #3587). Bounded and
+// idempotent, so it runs every tick. Human / Agent Ops drafts are theirs
+// (untouched); a live publish claim means a publisher is mid-flight; a live
+// auto-reply claim (Post now stamps one via claimDueRows(force) BEFORE it
+// verifies and takes the publish claim) means an operator action is
+// mid-flight — both are excluded from the read AND re-checked in the
+// compare-and-set, so the sweep never clears a claim it does not own.
+// low_rating_requested / unrated_requested is not a legacy park and is
+// never selected.
+const LEGACY_RELEASE_FIELDS = { auto_reply_status: null, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0, auto_reply_claimed_until: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_mode: null, auto_reply_grounding: null };
+function legacyLowRatingQuery(qb, nowIso) {
+  return qb
     .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
     .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [nowIso])
-    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [nowIso])
+    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [nowIso]);
+}
+async function sweepLowRatingParks({ limit = 50 } = {}) {
+  const nowIso = new Date().toISOString();
+  const parks = await legacyLowRatingQuery(db('google_reviews'), nowIso)
+    .where('auto_reply_status', STATUS.PARKED)
+    .whereIn('auto_reply_reason', ['low_rating', 'unrated'])
     .limit(limit)
-    .select('id', 'auto_reply_reason');
+    .select('id', 'auto_reply_status', 'auto_reply_reason', 'star_rating');
+  const pending = await legacyLowRatingQuery(db('google_reviews'), nowIso)
+    .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
+    .whereRaw('COALESCE(star_rating, 0) < 4')
+    .limit(limit)
+    .select('id', 'auto_reply_status', 'auto_reply_reason', 'star_rating');
   let n = 0;
-  for (const r of (rows || [])) {
+  for (const r of [...(parks || []), ...(pending || [])]) {
     // Compare-and-set on everything the eligibility read saw — status,
-    // reason, version, both claims — so a concurrent Skip / sync / Post now /
-    // publisher transition wins.
+    // reason, version, both claims (and the rating for pending rows) — so a
+    // concurrent Skip / sync / Post now / publisher transition wins.
     const casIso = new Date().toISOString();
-    const updated = await db('google_reviews')
-      .where({ id: r.id, auto_reply_status: STATUS.PARKED, auto_reply_reason: r.auto_reply_reason })
-      .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
-      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [casIso])
-      .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [casIso])
-      .update({ auto_reply_status: null, auto_reply_reason: r.auto_reply_reason, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0, auto_reply_claimed_until: null });
+    const reason = r.auto_reply_status === STATUS.PARKED ? r.auto_reply_reason : ((Number(r.star_rating) || 0) === 0 ? 'unrated' : 'low_rating');
+    const updated = await legacyLowRatingQuery(db('google_reviews'), casIso)
+      .where({ id: r.id, auto_reply_status: r.auto_reply_status, auto_reply_reason: r.auto_reply_reason })
+      .modify((qb) => { if (r.auto_reply_status !== STATUS.PARKED) qb.where('star_rating', r.star_rating); })
+      .update({ ...LEGACY_RELEASE_FIELDS, auto_reply_reason: reason });
     n += Array.isArray(updated) ? updated.length : (updated || 0);
   }
-  if (n) logger.info(`[review-auto-reply] ${n} under-4★ park(s) from before the 2026-08-29 rule left the lane`);
+  if (n) logger.info(`[review-auto-reply] ${n} under-4★ row(s) from before the 2026-08-29 rule left the lane`);
   return n;
 }
 
@@ -586,12 +600,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'parked', reason: 'human_draft' };
   }
 
-  if (intent !== 'post_now' && !locationAllowed(merged.location_id, cfg)) {
-    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'location_disabled' });
-    return { outcome: 'parked', reason: 'location_disabled' };
-  }
   const rating = Number(merged.star_rating) || 0;
-  // Under 4★ / unrated: the lane does not respond at all (owner ruling
+  // Under 4★ / unrated: the lane does not respond at all (checked BEFORE the
+  // location allowlist so a narrowed rollout never parks such a row as
+  // location_disabled — codex #3587 r4) (owner ruling
   // 2026-08-29) — a row that reached a claim (edited down after it was queued,
   // or queued before this rule) is released with no draft and no bell. Post
   // now is an explicit human action and keeps its own path below.
@@ -602,6 +614,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // window; skipped would exclude it for good (codex #3587 r1).
     await releaseClaim(row, lowRatingExitFields(reason));
     return { outcome: 'skipped', reason };
+  }
+  if (intent !== 'post_now' && !locationAllowed(merged.location_id, cfg)) {
+    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'location_disabled' });
+    return { outcome: 'parked', reason: 'location_disabled' };
   }
   // Hard invariant, independent of config: unrated and 1-3★ never auto-post
   // (Post now on such a row parks the freshly drafted text for the person).
@@ -651,6 +667,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
 
   if (!draft.ok) {
     if (draft.reason === 'provider_unavailable') {
+      // A person asked for an under-4★ draft (Post now) and the providers
+      // were down: the cron lane never drafts such a row, so a scheduled
+      // retry would only be released unfinished by the exit above. Leave the
+      // row out of the lane with the error on it; the person tries again
+      // (codex #3587 r4).
+      if (intent === 'post_now' && (rating === 0 || rating <= 3)) {
+        await releaseClaim(row, { auto_reply_status: null, auto_reply_reason: rating === 0 ? 'unrated_requested' : 'low_rating_requested', auto_reply_due_at: null, auto_reply_error: String(draft.error || '') });
+        return { outcome: 'failed', reason: 'provider_unavailable' };
+      }
       const attempts = (merged.auto_reply_attempts || 0) + 1;
       if (attempts < MAX_ATTEMPTS) {
         const due = new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString();
@@ -858,15 +883,18 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
  * Sweeps that run on EVERY cron tick regardless of the posting mode — and
  * regardless of the scheduler's own isEnabled('reviewAutoReply') guard,
  * which calls this directly when the gate is off (codex #3587 r3):
+ *  - legacy under-4★ release: pre-2026-08-29 parks / queued / failed rows
+ *    must leave the lane even if the lane itself is disabled at deploy;
  *  - failed-bell retry (codex r53): a bell_failed stamp left while the lane
- *    was on must still be re-rung after the gate is switched off;
- *  - legacy under-4★ park release: pre-2026-08-29 drafts/parks must leave
- *    the lane even if the lane itself is disabled during or after deploy.
+ *    was on must still be re-rung after the gate is switched off.
  * Each sweep is isolated so one failing never starves the other.
  */
 async function runModeIndependentSweeps() {
-  const bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
+  // Release FIRST: a legacy under-4★ park carrying a bell_failed stamp must
+  // not get its "needs you" bell re-rung a moment before it leaves the lane
+  // (the release clears the stamp with the rest of the state — codex r4).
   const lowRatingReleased = await sweepLowRatingParks().catch((err) => { logger.warn(`[review-auto-reply] low-rating park sweep failed: ${err.message}`); return 0; });
+  const bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
   return { bellsRetried, lowRatingReleased };
 }
 
@@ -1696,6 +1724,7 @@ module.exports = {
   expireOverAgeQueued,
   renewClaim,
   processClaimedRow,
+  humanDraftOn,
   processDueAutoReplies,
   runModeIndependentSweeps,
   postNow,

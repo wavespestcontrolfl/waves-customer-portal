@@ -74,6 +74,7 @@ jest.mock('../models/db', () => {
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
+        if (/COALESCE\(star_rating, 0\) < 4/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
         if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
@@ -323,11 +324,11 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_claimed_until: null, auto_reply_draft: GOOD_DRAFT.text });
   });
 
-  test('under 4★ and unrated are left alone: released skipped, no draft, no bell (owner ruling 2026-08-29)', async () => {
+  test('under 4★ and unrated are left alone: queued rows leave via the tick sweep before any claim; no draft, no bell (owner ruling 2026-08-29)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [row({ star_rating: 2, auto_reply_attempts: 2 }), row({ id: 'rev-0', star_rating: 0 })];
     const stats = await Runner.processDueAutoReplies();
-    expect(stats).toMatchObject({ claimed: 2, skipped: 2, parked: 0, posted: 0 });
+    expect(stats).toMatchObject({ lowRatingReleased: 2, claimed: 0, skipped: 0, parked: 0, posted: 0 });
     expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
@@ -336,6 +337,31 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0].auto_reply_draft).toBeFalsy();
     expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
+  });
+
+  test('a row edited under 4★ AFTER it was claimed is released at the claim (NULL state, reason stamped) — and before the location check (codex #3587 r4)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'venice';
+    try {
+      state.rows = [row({ star_rating: 2, auto_reply_attempts: 2, location_id: 'sarasota', auto_reply_claimed_until: '2099-01-01T00:00:00Z' })];
+      const r = await Runner.processClaimedRow({ ...state.rows[0], _claimToken: '2099-01-01T00:00:00Z' });
+      expect(r).toEqual({ outcome: 'skipped', reason: 'low_rating' });
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_claimed_until: null, auto_reply_attempts: 0 });
+      expect(mockDraft).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    } finally { delete process.env.REVIEW_AUTO_REPLY_LOCATIONS; }
+  });
+
+  test('Post now on an under-4★ review with the providers down never enters the cron retry lane (codex #3587 r4)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
+    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: null, auto_reply_reason: null })];
+    const r = await Runner.postNow('pn', { type: 'admin' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'provider_unavailable' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: 'all providers down' });
+    expect(mockNotify).not.toHaveBeenCalled();
+    // Nothing for the tick to pick up or release.
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
   });
 
   test('gate OFF: the scheduler entry runModeIndependentSweeps still releases legacy under-4★ parks and re-rings failed bells; processDueAutoReplies(off) reports the same and claims nothing (codex #3587 r3)', async () => {
@@ -348,7 +374,7 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'due', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: new Date(Date.now() - 60000).toISOString() }),
     ];
     expect(await Runner.runModeIndependentSweeps()).toEqual({ bellsRetried: 1, lowRatingReleased: 1 });
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: 'Hi Dana, sorry.' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: null });
     expect(state.rows[1].auto_reply_error).toBeNull();
     expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
     // Idempotent; the cron entry (mode off) runs the same sweeps and never claims the due row.
@@ -375,15 +401,25 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'postnow', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'z', review_reply: '[DRAFT] z', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
       // An EXPIRED auto-reply claim is not a claim.
       row({ id: 'expired', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'w', review_reply: '[DRAFT] w', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2000-01-01T00:00:00Z' }),
+      // Legacy PENDING rows under 4★ (gate off at deploy ⇒ claimDueRows never runs): queued + failed leave too (r4).
+      row({ id: 'q-low', star_rating: 3, auto_reply_status: 'queued', auto_reply_reason: null, auto_reply_due_at: '2099-01-01T00:00:00Z' }),
+      row({ id: 'f-unrated', star_rating: 0, auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: 2, auto_reply_due_at: '2099-01-01T00:00:00Z', auto_reply_error: 'down' }),
+      row({ id: 'q-ok', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: '2099-01-01T00:00:00Z' }),
     ];
-    expect(await Runner.sweepLowRatingParks()).toBe(3);
+    expect(await Runner.sweepLowRatingParks()).toBe(5);
     expect(state.rows[4]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', review_reply: '[DRAFT] Asked for.' });
     expect(state.rows[5]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] y' });
     expect(state.rows[6]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] z', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
-    expect(state.rows[7]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] w', auto_reply_draft: 'w', auto_reply_claimed_until: null });
-    // Released rows keep their TEXT (a pre-rule Post-now draft is indistinguishable from an automatic one — no data loss); only automation state goes.
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: 'Hi Dana, sorry.', auto_reply_drafted_at: '2026-08-28T00:00:00Z', auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0 });
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: 'Thanks.' });
+    expect(state.rows[7]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] w', auto_reply_draft: null, auto_reply_claimed_until: null });
+    expect(state.rows[8]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null });
+    expect(state.rows[9]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_due_at: null, auto_reply_attempts: 0, auto_reply_error: null });
+    expect(state.rows[10]).toMatchObject({ auto_reply_status: 'queued', star_rating: 5 });
+    // Released rows keep their TEXT in the reply slot as an ordinary person's draft (a pre-rule Post-now draft
+    // is indistinguishable from an automatic one — no data loss); the pipeline's own draft fields go, so the
+    // list API emits no draftToken and Use Draft / Post now take the human path (r4).
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_grounding: null, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0 });
+    expect(Runner.humanDraftOn(state.rows[0])).toBe('Hi Dana, sorry.');
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: null });
     expect(state.rows[2]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Human words.' });
     expect(state.rows[3]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
     // Idempotent, and it runs on every tick.
