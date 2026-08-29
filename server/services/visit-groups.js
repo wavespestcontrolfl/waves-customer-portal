@@ -447,9 +447,23 @@ async function handleChildTerminal(scheduledServiceId) {
       const visit = await t('service_visits').where({ id: row.visit_id }).first();
       if (!visit || !['open'].includes(String(visit.status))) return false;
       await lockStop(t, visit.stop_base_key);
+      // Re-read under the stop lock (codex #3590 r3 P1): this hook runs
+      // post-commit and async — a cancellation reversal or regroup may
+      // have landed first. Only a row still terminal AND still attached
+      // to THIS visit detaches; the update is predicated on both.
+      const fresh = await t('scheduled_services').where({ id: row.id })
+        .forUpdate().first('id', 'visit_id', 'status');
+      if (!fresh || String(fresh.visit_id) !== String(visit.id)
+          || !TERMINAL_ROW_STATUSES.includes(String(fresh.status || ''))) {
+        return false;
+      }
       // Terminal child leaves the group (its record keeps history via the
       // packet items / service_records, not via visit_id).
-      await t('scheduled_services').where({ id: row.id }).update({ visit_id: null });
+      const cleared = await t('scheduled_services')
+        .where({ id: fresh.id, visit_id: visit.id })
+        .whereIn('status', TERMINAL_ROW_STATUSES)
+        .update({ visit_id: null });
+      if (!Number(cleared)) return false;
       const remaining = await t('scheduled_services')
         .where({ visit_id: visit.id })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)

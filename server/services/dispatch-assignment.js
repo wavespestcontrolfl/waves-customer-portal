@@ -227,6 +227,21 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     }
   }
 
+  // Visit-group seam (visit-group-scope.md §2, rev-5 item 6): the visit
+  // owns the technician — a routine single-row reassignment that now
+  // conflicts with its visit's tech detaches the row (full visit-level
+  // assignment lands with the grouped route card PR). Best-effort,
+  // post-commit; skipped inside a caller trx (uncommitted row invisible
+  // to the helper's own transaction) — those callers re-run assignment
+  // through this writer on commit paths that matter.
+  if (!trx) {
+    try {
+      await require('./visit-groups').handleChildStopChanged(jobId);
+    } catch (vgErr) {
+      logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`);
+    }
+  }
+
   return {
     job: updatedRow,
     technicianName: tech?.name || null,

@@ -5291,20 +5291,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // interleaving: either stamping saw our claim and refused, or we see
     // its committed stamp here and stop before any side effect.
     if (claim.action === 'proceed') {
-      const groupedNow = await db.transaction(async (trx) => {
+      const visitRecheck = async (trx) => {
         // Lock ORDER matches stamping (codex #3590 r2 P1): stop advisory
-        // lock FIRST, then the row lock. The stop key is derived from the
-        // row's own stop fields, so both sides serialize on the same key
-        // whether or not the row is attached yet.
+        // lock FIRST, then the row lock — with the peek → lock → verify →
+        // retry pattern from createOrJoinVisit (r3 P1: the svc snapshot is
+        // thousands of lines stale; a concurrent reschedule can have moved
+        // the row under another stop key).
         const { stopBaseKey } = require('../services/visit-groups');
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', stopBaseKey({
-          propertyId: svc.property_id,
-          customerId: svc.customer_id,
-          scheduledDate: svc.scheduled_date,
-        })]);
+        const peek = await trx('scheduled_services').where({ id: svc.id })
+          .first('property_id', 'customer_id', 'scheduled_date');
+        if (!peek) return null;
+        const baseKey = stopBaseKey({
+          propertyId: peek.property_id,
+          customerId: peek.customer_id,
+          scheduledDate: peek.scheduled_date,
+        });
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
         const lockedRow = await trx('scheduled_services')
-          .where({ id: svc.id }).forUpdate().first('visit_id');
-        if (!lockedRow || !lockedRow.visit_id) return null;
+          .where({ id: svc.id }).forUpdate()
+          .first('visit_id', 'property_id', 'customer_id', 'scheduled_date');
+        if (!lockedRow) return null;
+        const lockedKey = stopBaseKey({
+          propertyId: lockedRow.property_id,
+          customerId: lockedRow.customer_id,
+          scheduledDate: lockedRow.scheduled_date,
+        });
+        if (lockedKey !== baseKey) {
+          const moved = new Error('visit stop moved concurrently');
+          moved.code = 'VISIT_STOP_MOVED';
+          throw moved;
+        }
+        if (!lockedRow.visit_id) return null;
         const parent = await trx('service_visits')
           .where({ id: lockedRow.visit_id }).first();
         if (!parent) return lockedRow.visit_id; // orphan: fail closed
@@ -5323,7 +5340,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
         return lockedRow.visit_id;
-      });
+      };
+      let groupedNow = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          groupedNow = await db.transaction(visitRecheck);  
+          break;
+        } catch (recheckErr) {
+          if (recheckErr && recheckErr.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+          throw recheckErr;
+        }
+      }
       if (groupedNow) {
         await CompletionAttempts.markCompletionAttemptFailed(
           completionAttempt,
