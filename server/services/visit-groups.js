@@ -412,8 +412,18 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // membership under the same row lock, so every interleaving resolves:
     // either we see the claim here and refuse, or the handler sees our
     // committed stamp and 409s.
+    // The check spans EVERY current member of a reused/joined visit, not
+    // just the input rows (codex #3590 r11): a claim on an existing member
+    // may already have committed and released the post-claim stop lock —
+    // attaching new rows now would only have them dissolved by that
+    // completion's dissolveForLegacyCompletion moments later.
     const liveAttempt = await t('service_completion_attempts')
-      .whereIn('service_id', ids)
+      .where((qb) => {
+        qb.whereIn('service_id', ids);
+        if (visit.id) {
+          qb.orWhereIn('service_id', t('scheduled_services').select('id').where({ visit_id: visit.id }));
+        }
+      })
       .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'])
       .first('id')
       .catch(() => null);
