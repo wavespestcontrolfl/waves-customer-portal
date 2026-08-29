@@ -136,8 +136,9 @@ service_visits                                  ← rev 5 shape
   scheduled_date     date
   window_start       time
   window_end         time
-  stop_base_key      text  NOT NULL   — `<property_id>:<date>:<window_start>` (or the dispatch
-                                        stop id once routed); the identity of "one physical stop"
+  stop_base_key      text  NOT NULL   — `<property_id>:<date>` (rev 5f: NO window in the key —
+                                        the window lives on the visit; a 09:00 row and a 10:00
+                                        row share the lock and join iff their windows overlap)
   stop_seq           int   NOT NULL DEFAULT 1 — a split creates seq 2, 3 … under the same lock
   route_stop_key     text  GENERATED = stop_base_key || ':' || stop_seq
   technician_id      uuid → technicians (nullable until dispatch; the VISIT owns assignment,
@@ -168,8 +169,10 @@ service_visits                                  ← rev 5 shape
 
   UNIQUE INDEX (stop_base_key, stop_seq)            — across ALL lifecycle states, not partial
   — creation, auto-join and split all run under advisory lock `['visit.stop', stop_base_key]`:
-    auto-join looks up OPEN visits for the base key and joins the lowest seq that satisfies
-    the join rules; creation and split allocate `max(seq)+1` over every historical row for
+    auto-join looks up OPEN visits for the base key (property+date) and joins the lowest seq
+    whose window overlaps the row's and satisfies the other join rules — the visit's
+    `window_start/end` then widen to the union (visit-level window policy); non-overlapping ⇒
+    a new seq (a second stop that day); creation and split allocate `max(seq)+1` over every historical row for
     that base, in one transaction, so `route_stop_key` is an immutable identity for the life
     of the row and a late scheduler or retry can never re-mint a closed/dissolved visit's key. Nullable technician_id is NOT part of the identity (NULLs don't collide
     in a unique index).
@@ -248,7 +251,10 @@ Rules:
   own history and the customer simply gets the later messages per visit). After any record /
   invoice / link / payment, membership is **frozen**: a child can be cancelled or marked
   `cancelled_by_office` in place (row leaves the group logically, visit preserved) but never
-  moved to another visit — there is no transfer protocol in this lane.
+  moved to another visit — there is no transfer protocol in this lane. **A child whose invoice
+  has a captured/paid payment cannot be cancelled** — the office uses the existing
+  refund/credit path on that invoice (refund to original method, never account credit) and
+  the visit page reflects the adjusted state; a minted-but-unpaid invoice is voided as today.
 - **Technician (rev 5, item 6).** The visit owns `technician_id`; child rows inherit it on
   dispatch and on every row-level edit. Changing the tech on ONE row is not allowed silently —
   the admin gets *Split this service into a separate visit and assign another technician*,
