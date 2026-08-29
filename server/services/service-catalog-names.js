@@ -139,25 +139,41 @@ async function resolveSeriesChildIdentity(conn, parent) {
         ? { service_type: row.name, service_id: row.id, service_key: row.service_key || null }
         : verbatim;
     }
+    // DURABLE snapshot evidence outranks any label bridging — exactly as
+    // lookupServiceForScheduledService orders it (id → service_key_snapshot
+    // → name). An unlinked parent whose snapshot names service A while its
+    // label maps to B must never birth a B-linked child carrying A's
+    // snapshot (codex #3604 r2 P0). Snapshot naming no active row → verbatim.
+    const snapshotKey = String(parent.service_key_snapshot || '').trim();
+    if (snapshotKey) {
+      const byKey = await conn('services')
+        .where({ service_key: snapshotKey, is_active: true })
+        .select('id', 'name', 'service_key');
+      return byKey.length === 1 && byKey[0].name
+        ? { service_type: byKey[0].name, service_id: byKey[0].id, service_key: byKey[0].service_key || null }
+        : verbatim;
+    }
     const label = String(parent.service_type || '').trim();
     if (!label) return verbatim;
     const candidate = renamedCatalogName(label) || legacyCatalogName(label, parent.recurring_pattern) || label;
-    const activeByName = (name) => conn('services')
-      .whereRaw('lower(name) = lower(?)', [name])
+    // services.name is not unique and the Service Library can reactivate an
+    // old spelling as its own row: the parent's exact label is evidence too.
+    // Both spellings are read in ONE statement so the decision comes from
+    // one catalog snapshot (a rename committing between two reads could
+    // otherwise link from a stale row — r2 P2). Both live → conflicting
+    // evidence → verbatim, unlinked. Only the old spelling lives → it is the
+    // exact-name match.
+    const names = candidate.toLowerCase() === label.toLowerCase() ? [candidate] : [candidate, label];
+    const rows = await conn('services')
+      .whereRaw(`lower(name) IN (${names.map(() => 'lower(?)').join(', ')})`, names)
       .where({ is_active: true })
       .select('id', 'name', 'service_key');
-    let rows = await activeByName(candidate);
-    if (candidate !== label) {
-      // services.name is not unique and the Service Library can reactivate
-      // an old spelling as its own row: the parent's exact label is evidence
-      // too. Both spellings live → conflicting evidence → verbatim, unlinked.
-      // Only the old spelling lives → it is the exact-name match.
-      const exact = await activeByName(label);
-      if (exact.length && rows.length) return verbatim;
-      if (exact.length) rows = exact;
-    }
-    if (rows.length !== 1) return verbatim;
-    return { service_type: rows[0].name, service_id: rows[0].id, service_key: rows[0].service_key || null };
+    const mapped = rows.filter((r) => String(r.name).toLowerCase() === candidate.toLowerCase());
+    const exact = names.length === 2 ? rows.filter((r) => String(r.name).toLowerCase() === label.toLowerCase()) : [];
+    if (mapped.length && exact.length) return verbatim;
+    const hit = mapped.length ? mapped : exact;
+    if (hit.length !== 1) return verbatim;
+    return { service_type: hit[0].name, service_id: hit[0].id, service_key: hit[0].service_key || null };
   } catch (err) {
     try {
       require('./logger').warn(`[service-catalog-names] child identity resolution failed for parent ${parent.id || '?'} — using the parent label verbatim: ${err.message}`);

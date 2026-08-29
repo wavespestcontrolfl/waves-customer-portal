@@ -21,21 +21,23 @@ const {
   LEGACY_LABEL_CADENCE_NAMES, legacyCatalogName, renamedCatalogName, counterpartServiceName,
 } = require('../config/service-name-aliases');
 
-function fakeConn(services, { fail = false } = {}) {
+function fakeConn(services, { fail = false, onQuery = null } = {}) {
   return (table) => {
     if (table !== 'services') throw new Error(`unexpected table ${table}`);
     const filters = [];
-    let lowerName = null;
+    let lowerNames = null;
     const q = {
       where(cond) { filters.push(cond); return q; },
       whereRaw(sql, bindings) {
-        if (sql !== 'lower(name) = lower(?)') throw new Error(`unexpected whereRaw ${sql}`);
-        lowerName = String(bindings[0]).toLowerCase();
+        // The resolver reads every name candidate in ONE statement.
+        if (!/^lower\(name\) IN \((lower\(\?\)(, )?)+\)$/.test(sql)) throw new Error(`unexpected whereRaw ${sql}`);
+        lowerNames = bindings.map((b) => String(b).toLowerCase());
         return q;
       },
       rows() {
         if (fail) throw new Error('db down');
-        return services.filter((s) => (lowerName == null || String(s.name).toLowerCase() === lowerName)
+        if (onQuery) onQuery();
+        return services.filter((s) => (lowerNames == null || lowerNames.includes(String(s.name).toLowerCase()))
           && filters.every((f) => Object.entries(f).every(([k, v]) => s[k] === v)));
       },
       async select() { return q.rows().map((s) => ({ ...s })); },
@@ -96,6 +98,28 @@ describe('resolveSeriesChildIdentity', () => {
     );
   });
 
+  test('an unlinked parent\'s service_key_snapshot outranks every label bridge (identity order: id → snapshot → name)', async () => {
+    // Label + cadence map to Quarterly; the durable snapshot says Monthly → Monthly.
+    const parent = { id: 'p', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', service_key_snapshot: 'pest_monthly' };
+    await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), parent)).resolves.toEqual(
+      { service_type: 'Monthly Pest Control Service', service_id: 'svc-m', service_key: 'pest_monthly' }
+    );
+    // Snapshot naming an inactive or unknown key → verbatim, never a label guess.
+    await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), { ...parent, service_key_snapshot: 'retired' })).resolves.toEqual(
+      { service_type: 'Quarterly Pest Control', service_id: null, service_key: null }
+    );
+    await expect(resolveSeriesChildIdentity(fakeConn(CATALOG), { ...parent, service_key_snapshot: 'never_existed' })).resolves.toEqual(
+      { service_type: 'Quarterly Pest Control', service_id: null, service_key: null }
+    );
+  });
+
+  test('alias + exact label are read in ONE catalog query', async () => {
+    let queries = 0;
+    const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };
+    await resolveSeriesChildIdentity(fakeConn(CATALOG, { onQuery: () => { queries += 1; } }), parent);
+    expect(queries).toBe(1);
+  });
+
   test('alias vs exact-name conflict: both spellings active → verbatim unlinked; only the old spelling active → it is the exact match', async () => {
     const old = { id: 'svc-old-spelling', name: 'General Pest Control Service (Bi-Monthly)', service_key: 'pest_bimonthly_legacy', is_active: true };
     const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };
@@ -139,6 +163,15 @@ describe('service-name-aliases legacy map', () => {
     expect(renamedCatalogName('Lawn Care Program — Monthly')).toBe('Monthly Lawn Care Service');
     expect(renamedCatalogName('Monthly Lawn Care Service')).toBeNull(); // current form is not "renamed to" anything
     expect(counterpartServiceName('Monthly Lawn Care Service')).toBe('Lawn Care Program — Monthly'); // bidirectional bridge unchanged
+  });
+});
+
+describe('canonical recurring seeder (source)', () => {
+  const seeder = fs.readFileSync(path.join(__dirname, '../services/recurring-appointment-seeder.js'), 'utf8');
+  test('seedFollowUpsForParent resolves the child identity on its connection and hands it to the builder', () => {
+    expect(seeder).toContain('const childIdentity = opts.childIdentity || await resolveSeriesChildIdentity(conn, parent);');
+    expect(seeder).toContain("service_type: opts.serviceType || (opts.childIdentity && opts.childIdentity.service_type) || parent.service_type || 'Service',");
+    expect(seeder).toContain('if (opts.childIdentity.service_id) row.service_id = opts.childIdentity.service_id;');
   });
 });
 
