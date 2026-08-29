@@ -11918,6 +11918,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   invoice_id: invoice.id,
                   pay_url: payUrl,
                   original_message_type: 'payment_failed',
+                  // Lane that authorized the decline notice — the replay
+                  // forwards it so the owner autopay digest (#3607)
+                  // classifies the morning send against it.
+                  billing_mode_at_send: svc.cust_billing_mode ?? null,
                   original_block_code: failResult.code,
                   replay_purpose: 'payment_failure',
                   refresh_customer_phone: true,

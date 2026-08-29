@@ -38,9 +38,12 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 // definition (send-customer-message.js isAutopayCustomerSms — purpose
 // 'autopay', or an entry point / original_message_type starting with
 // 'autopay_'), so every site the wrapper gates as autopay — including the
-// completion-time decline notice and its deferred replay (codex r3 P1) —
-// is covered without this file keeping its own drifting list. The three
-// send sites that carry none of those markers are named here explicitly.
+// completion-time decline notice (codex r3 P1) — is covered without this
+// file keeping its own drifting list. A quiet-hours DEFERRED decline is
+// replayed by the scheduled-SMS worker under its own entry point
+// ('scheduled_sms_cron'); the worker forwards the enqueue entry point as
+// metadata.original_entry_point, matched here too (codex r4 P1). The three
+// send sites that carry none of those markers are named explicitly.
 const AUTOPAY_EXTRA_ENTRY_POINTS = [
   'monthly_billing_success',       // billing-cron.js — charge receipt
   'monthly_billing_failure',       // billing-cron.js — first failure
@@ -92,6 +95,7 @@ async function loadSentAutopayTexts(since) {
         a.purpose = 'autopay'
         OR a.entry_point LIKE 'autopay\\_%'
         OR (a.metadata ->> 'original_message_type') LIKE 'autopay\\_%'
+        OR (a.metadata ->> 'original_entry_point') LIKE 'autopay\\_%'
         OR a.entry_point = ANY(:extraEntryPoints)
       )
     ORDER BY a.sent_at DESC

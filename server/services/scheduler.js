@@ -3451,6 +3451,15 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              // Enqueue provenance survives the replay (codex #3607 r4): the
+              // audit row is written under this worker's own entry point, so
+              // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
+              // and the lane stamped at enqueue ride along in metadata for
+              // the owner autopay digest to classify the send.
+              ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
+                ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
+                : {}),
               // resolve_from_by_customer: customer-linked requeues (deferred
               // completion/prep/follow-up texts) stamped a placeholder
               // from_phone at enqueue only because the column is NOT NULL —
