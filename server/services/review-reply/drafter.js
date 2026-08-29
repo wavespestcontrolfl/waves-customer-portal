@@ -301,7 +301,11 @@ coming letting giving working watching checking
 // a grammar to close, so "Ants and roaches …" simply costs one retry of the
 // drafter ladder instead. There is deliberately NO singular-predicate path
 // ("Treatment is glad …" must fail).
-const ORDINARY_FOLLOWER_RE = /^\s*(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them)\b/u;
+// …and the follower may not lead into a possessive or role phrase (codex
+// #3580 r11: "Finding from our team is glad …" reads as a staff surname): a
+// preposition may not be followed by his / her / their / our / your / my, and
+// no follower may be followed by a role noun, with or without an article.
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them)\b|(?:of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within)\b(?!\s+(?:his|her|hers|their|theirs|our|ours|your|yours|my|mine)\b))(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);

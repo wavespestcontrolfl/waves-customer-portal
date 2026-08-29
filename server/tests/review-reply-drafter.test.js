@@ -415,7 +415,8 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nAnts in the kitchen are gone, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // No coordination of any kind is exempt (codex #3580 r1–r10): a conjunction
     // or comma after the opener fails provenance whatever follows — including an
-    // ordinary plural, which costs one retry of the drafter ladder by design.
+    // ordinary plural, which costs one retry of the drafter ladder by design —
+    // and neither is a follower that leads into a possessive / role phrase (r11).
     for (const body of [
       'Roaches and ants hate this heat, and Marcus is glad it worked for you.',
       'Honestly, we are glad Marcus could help.',
@@ -430,6 +431,10 @@ describe('verifyReplyText — public-surface safety net', () => {
       'Finding and some who are on our team appreciate your note about Marcus.',
       'Finding and even we are glad Marcus handled the ants.',
       'Roaches, our technician, was glad to help alongside Marcus.',
+      'Finding from our team is glad Marcus came out fast and the ants are gone.',
+      'Roaches in our office are glad Marcus could help.',
+      'Finding the technician was easy, and Marcus is glad the ants are gone.',
+      'Roaches are our team, and Marcus is glad the ants are gone.',
       'Roaches Smith helped with the ants alongside Marcus.',
     ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
     // …and a word that is NOT on the list needs provenance whatever follows it
