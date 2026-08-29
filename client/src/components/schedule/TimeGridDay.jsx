@@ -1269,9 +1269,12 @@ export default function TimeGridDay({
     // plan up front, disclose the sets once, and carry each visit's ack —
     // otherwise the gated server refuses every recurring row while the
     // one-time rows commit, an avoidable partial batch (hook P1). A plan
-    // that can't be read aborts BEFORE anything moves.
+    // that can't be read aborts BEFORE anything moves. `busy` goes up
+    // before the first await so a second Apply click can't start a parallel
+    // batch over the same selection (GH codex P2).
     const seriesAcks = new Map();
     const recurring = toMove.filter((s) => s.isRecurring);
+    setBusy(true);
     if (recurring.length > 0) {
       const previews = await Promise.allSettled(
         recurring.map((svc) => fetchSeriesMovePreview(svc.id, newDate)),
@@ -1279,6 +1282,7 @@ export default function TimeGridDay({
       const unreadable = previews.filter((p) => p.status !== 'fulfilled').length;
       if (unreadable > 0) {
         alert(`Couldn't read the recurring plan for ${unreadable} selected visit${unreadable === 1 ? '' : 's'} — nothing was moved. Try again.`);
+        setBusy(false);
         return;
       }
       const lines = [];
@@ -1290,11 +1294,11 @@ export default function TimeGridDay({
       if (lines.length > 0 && !window.confirm(
         `Recurring plans in this selection move with their later visits:\n\n${lines.join('\n')}\n\nMove all ${toMove.length} selected visit${toMove.length === 1 ? '' : 's'} to ${newDate}?`,
       )) {
+        setBusy(false);
         return;
       }
     }
     setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
-    setBusy(true);
     try {
       const results = await Promise.allSettled(
         toMove.map((svc) => {
