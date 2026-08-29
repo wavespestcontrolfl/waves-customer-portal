@@ -3654,7 +3654,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // proof, and passing skipCardRequest for an unowned confirm permanently
     // suppressed the card funnel (customer_confirmed stamps, no retry rail).
     let fieldConfirmVerified = false;
-    let visitFan = null; // visit-group fan-out (visit-group-scope.md §3)
     try {
       await db.transaction(async (trx) => {
         // ⭐ OWNERSHIP IS PROVEN UNDER THE ROW LOCK, NOT THE SNAPSHOT. The
@@ -3742,12 +3741,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // (below) — the shared writer must not fire its lazy one too.
           legacyOutboundActivation: isOfficeReviewConfirm ? 'caller' : undefined,
         });
-        if (toStatus === 'en_route' || toStatus === 'on_site') {
-            visitFan = await require('../services/visit-groups').liveTransitionSiblings({
-              trx, primaryId: svc.id, primaryVisitId: svc.visit_id, toStatus: toStatus,
-              transitionedBy: req.technicianId, lifecycleAt,
-            });
-        }
       });
     } catch (err) {
       // transitionJobStatus throws when fromStatus mismatch — surface
@@ -3807,12 +3800,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
-        if (result && result.ok && visitFan && visitFan.visitId) {
-          await require('../services/visit-groups').afterLiveTransition({
-            visitId: visitFan.visitId, kind: 'en_route', primaryId: svc.id,
-            siblingIds: visitFan.siblingIds, actorType: 'admin', actorId: req.technicianId,
-          });
-        }
       } catch (e) {
         logger.error(`[admin-dispatch] markEnRoute failed: ${e.message}`);
         await recordTrackTransitionFailure({
@@ -3831,12 +3818,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
           actorId: req.technicianId,
           result,
         });
-        if (result && result.ok && visitFan && visitFan.visitId) {
-          await require('../services/visit-groups').afterLiveTransition({
-            visitId: visitFan.visitId, kind: 'on_site', primaryId: svc.id,
-            siblingIds: visitFan.siblingIds, actorType: 'admin', actorId: req.technicianId,
-          });
-        }
       } catch (e) {
         logger.error(`[admin-dispatch] markOnProperty failed: ${e.message}`);
         await recordTrackTransitionFailure({

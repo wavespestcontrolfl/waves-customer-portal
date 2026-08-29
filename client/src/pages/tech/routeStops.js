@@ -41,6 +41,42 @@ export function nextStopOf(stops) {
   return (stops || []).find((st) => st.liveCount > 0) || null;
 }
 
+/**
+ * The stop's window = union of the members' windows (the visit parent
+ * stores the same union; a 09-10 + 10-11 chain is one 09-11 stop) —
+ * codex #3603 r1. Falls back to the primary's own window for a single row.
+ */
+export function stopWindow(stop) {
+  if (!stop) return { windowStart: null, windowEnd: null, windowDisplay: null };
+  if (!stop.isVisit) {
+    const p = stop.primary || {};
+    return { windowStart: p.windowStart || null, windowEnd: p.windowEnd || null, windowDisplay: p.windowDisplay || null };
+  }
+  const starts = stop.services.map((s) => s.windowStart).filter(Boolean).sort();
+  const ends = stop.services.map((s) => s.windowEnd).filter(Boolean).sort();
+  return { windowStart: starts[0] || null, windowEnd: ends[ends.length - 1] || null, windowDisplay: null };
+}
+
+/**
+ * Every member's property alerts, deduplicated by text (two services at
+ * one stop can carry different field instructions — codex #3603 r1). Keeps
+ * the first object form seen so type-driven accents still apply.
+ */
+export function stopPropertyAlerts(stop) {
+  if (!stop) return [];
+  const seen = new Set();
+  const out = [];
+  stop.services.forEach((s) => {
+    (Array.isArray(s.propertyAlerts) ? s.propertyAlerts : []).forEach((a) => {
+      const text = typeof a === 'string' ? a : a && a.text;
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      out.push(a);
+    });
+  });
+  return out;
+}
+
 /** "2 services · ~55 min" for a grouped stop; null for a single row. */
 export function stopSummaryLabel(stop) {
   if (!stop || !stop.isVisit) return null;

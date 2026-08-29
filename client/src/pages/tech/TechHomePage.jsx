@@ -188,7 +188,7 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
-import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
 
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
@@ -383,6 +383,11 @@ export default function TechHomePage() {
   const nextVisitStop = nextStopOf(stops);
   const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
   const nextStopSummary = stopSummaryLabel(nextVisitStop);
+  // Grouped stop: window = union of members; alerts = every member's, deduped.
+  const nextStopWindowLabel = nextVisitStop && nextVisitStop.isVisit
+    ? serviceWindowLabel(stopWindow(nextVisitStop))
+    : serviceWindowLabel(nextStop);
+  const nextStopAlerts = nextVisitStop ? stopPropertyAlerts(nextVisitStop) : [];
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -606,7 +611,7 @@ export default function TechHomePage() {
               fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
               background: '#0ea5e920', color: DARK.teal,
             }}>
-              {serviceWindowLabel(nextStop) || 'Pending'}
+              {nextStopWindowLabel || 'Pending'}
             </span>
           </div>
           {/* Property alerts — the server compiles gate codes, pets, chemical
@@ -615,9 +620,9 @@ export default function TechHomePage() {
               dispatch board chips show; without this the tech had to ask the
               Intelligence Bar for the gate code. Objects here ({type, text});
               tolerate plain strings for the dispatch-shaped payload. */}
-          {Array.isArray(nextStop.propertyAlerts) && nextStop.propertyAlerts.length > 0 && (
+          {nextStopAlerts.length > 0 && (
             <div style={{ marginBottom: 12 }}>
-              {nextStop.propertyAlerts.map((a, i) => {
+              {nextStopAlerts.map((a, i) => {
                 const text = typeof a === 'string' ? a : a?.text;
                 if (!text) return null;
                 const isChemical = a?.type === 'chemical';

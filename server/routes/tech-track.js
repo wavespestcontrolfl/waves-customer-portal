@@ -374,9 +374,6 @@ router.post('/:id/en-route', async (req, res, next) => {
     // file. The shared-writer guard still blocks every other caller; the
     // admin surfaces keep their explicit review flow.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
-    // Visit group: one tap moves every eligible sibling of the stop
-    // (visit-group-scope.md §3). Ungrouped rows issue no extra query.
-    let visitFan = null;
 
     // 1. Admin-side status flip via transitionJobStatus. Same
     // migration pattern as PRs #328 / #329 / #330. The trx + atomic
@@ -397,10 +394,6 @@ router.post('/:id/en-route', async (req, res, next) => {
             toStatus: 'en_route',
             transitionedBy: req.technicianId,
             trx,
-          });
-          visitFan = await require('../services/visit-groups').liveTransitionSiblings({
-            trx, primaryId: svc.id, primaryVisitId: svc.visit_id, toStatus: 'en_route',
-            transitionedBy: req.technicianId,
           });
         });
       } catch (err) {
@@ -427,12 +420,6 @@ router.post('/:id/en-route', async (req, res, next) => {
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
-    }
-    if (result && result.ok && visitFan && visitFan.visitId) {
-      await require('../services/visit-groups').afterLiveTransition({
-        visitId: visitFan.visitId, kind: 'en_route', primaryId: svc.id,
-        siblingIds: visitFan.siblingIds, actorType: 'tech', actorId: req.technicianId,
-      });
     }
 
     // Delegated stale heal: markEnRoute's operational sync is best-effort
@@ -461,8 +448,8 @@ router.post('/:id/en-route', async (req, res, next) => {
       enRouteAt: result.enRouteAt,
       smsSent: result.smsSent,
       alreadyEnRoute: !!result.alreadyEnRoute,
-      ...(visitFan && visitFan.visitId
-        ? { visitId: visitFan.visitId, visitSiblingsMoved: visitFan.siblingIds.length }
+      ...(result.visitFanOut
+        ? { visitId: result.visitFanOut.visitId, visitSiblingsMoved: result.visitFanOut.siblingIds.length }
         : {}),
     });
   } catch (err) {
@@ -508,7 +495,6 @@ router.post('/:id/on-site', async (req, res, next) => {
     // Arrival without a prior En Route tap (geofence or manual) must not
     // dead-end on the review popup either.
     const autoConfirmReview = isPendingOutboundReviewBooking(svc);
-    let visitFan = null; // visit-group fan-out (visit-group-scope.md §3)
 
     if (fromStatus !== 'on_site') {
       const arrivedAt = new Date();
@@ -529,10 +515,6 @@ router.post('/:id/on-site', async (req, res, next) => {
             transitionedBy: req.technicianId,
             trx,
           });
-          visitFan = await require('../services/visit-groups').liveTransitionSiblings({
-            trx, primaryId: svc.id, primaryVisitId: svc.visit_id, toStatus: 'on_site',
-            transitionedBy: req.technicianId, lifecycleAt: arrivedAt,
-          });
         });
       } catch (err) {
         if (respondToTransitionConflict(res, err, fromStatus)) return undefined;
@@ -544,12 +526,6 @@ router.post('/:id/on-site', async (req, res, next) => {
     if (!result.ok) {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
-    }
-    if (result && result.ok && visitFan && visitFan.visitId) {
-      await require('../services/visit-groups').afterLiveTransition({
-        visitId: visitFan.visitId, kind: 'on_site', primaryId: svc.id,
-        siblingIds: visitFan.siblingIds, actorType: 'tech', actorId: req.technicianId,
-      });
     }
 
     logger.info(

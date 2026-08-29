@@ -994,113 +994,136 @@ function siblingEligibleFor(toStatus, siblingStatus) {
 }
 
 /**
- * Inside the caller's transaction, right after the primary row's own
- * transitionJobStatus: move every eligible sibling of the primary's visit to
- * `toStatus`. `primaryVisitId` is the caller's already-loaded row value —
- * an ungrouped row (the overwhelming case, and every legacy test harness)
- * issues NO extra query. Returns { visitId, siblingIds, skippedIds }.
+ * THE visit-aware step of every tracker transition (codex #3603 r1): called
+ * by track-transitions.markEnRoute / markOnProperty after the primary row's
+ * own write succeeded — manual taps, admin status flips, geofence, GPS
+ * arrival and the time clock all converge there, so one En Route / Arrived
+ * signal moves the whole stop no matter which entry point produced it.
+ *
+ * Runs on EVERY call for a grouped primary, including idempotent re-taps,
+ * and is idempotent itself (siblings already at the target are skipped for
+ * status but still reconciled for tracker state; effect rows insert
+ * on-conflict-ignore) — a transient failure after a partial run is repaired
+ * by the next signal instead of leaving siblings stale.
+ *
+ * Lock order: stop advisory lock → sibling row locks, in its OWN
+ * transaction after the primary's transaction committed — the primary's
+ * status write never holds a row lock while waiting on the stop lock, so
+ * two taps on different members (or a tap vs a split/reschedule seam)
+ * cannot deadlock.
+ *
+ * `primary` is the already-loaded scheduled_services row (select *) — an
+ * ungrouped row costs no query at all.
  */
-async function liveTransitionSiblings({
-  trx, primaryId, primaryVisitId, toStatus, transitionedBy, lifecycleAt = new Date(),
-}) {
-  const none = { visitId: null, siblingIds: [], skippedIds: [] };
-  if (!trx || !primaryId || !primaryVisitId || !LIVE_TRANSITION_FROM[String(toStatus || '')]) return none;
-  const primary = await trx('scheduled_services').where({ id: primaryId })
-    .first('id', 'visit_id', 'technician_id');
-  if (!primary || !primary.visit_id) return none;
-  const visit = await trx('service_visits').where({ id: primary.visit_id }).first();
-  if (!visit || String(visit.status) !== 'open') return none;
-  await lockStop(trx, visit.stop_base_key);
-  const siblings = await trx('scheduled_services')
-    .where({ visit_id: visit.id })
-    .whereNot('id', primary.id)
-    .whereNotIn('status', TERMINAL_ROW_STATUSES)
-    .forUpdate()
-    .select('id', 'status', 'technician_id', 'actual_start_time', 'check_in_time', 'arrived_at');
-  const { transitionJobStatus } = require('./job-status');
-  const siblingIds = [];
-  const skippedIds = [];
-  for (const s of siblings) {
-    const sameTech = !primary.technician_id || !s.technician_id
-      || String(s.technician_id) === String(primary.technician_id);
-    if (String(s.status) === String(toStatus)) continue; // already there
-    if (!sameTech || !siblingEligibleFor(toStatus, s.status)) { skippedIds.push(s.id); continue; }
-    if (toStatus === 'on_site') {
-      const { buildOnSiteLifecycleUpdates } = require('../utils/service-duration-capture');
-      const updates = buildOnSiteLifecycleUpdates(s, lifecycleAt);
-      if (Object.keys(updates).length) await trx('scheduled_services').where({ id: s.id }).update(updates);
-    }
-    await transitionJobStatus({ jobId: s.id, fromStatus: s.status, toStatus, transitionedBy, trx });
-    siblingIds.push(s.id);
-  }
-  const stampCol = toStatus === 'en_route' ? 'en_route_at' : 'arrived_at';
-  await trx('service_visits').where({ id: visit.id }).whereNull(stampCol).update({ [stampCol]: lifecycleAt });
-  if (skippedIds.length) {
-    const logger = require('./logger');
-    logger.warn(`[visit-groups] visit ${visit.id} ${toStatus}: ${skippedIds.length} sibling(s) not eligible (status/technician) — left as-is: ${skippedIds.join(',')}`);
-  }
-  return { visitId: visit.id, siblingIds, skippedIds };
-}
-
-/**
- * After the primary's tracker write committed: run the tracker writer for
- * each sibling with the customer text suppressed, stamp the siblings as
- * covered by the visit's one text (so no later per-row path re-texts),
- * and record the visit one-shot in visit_effects. Best-effort per step —
- * the primary's transition already stands.
- */
-async function afterLiveTransition({
-  visitId, kind, primaryId, siblingIds = [], actorType = 'tech', actorId = null,
-}) {
-  if (!visitId || !['en_route', 'on_site'].includes(String(kind))) return null;
-  const trackTransitions = require('./track-transitions');
+async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId = null, smsOutcome = null }) {
+  const toStatus = kind === 'en_route' ? 'en_route' : kind === 'on_site' ? 'on_site' : null;
+  if (!primary || !primary.visit_id || !toStatus) return null;
+  const targetTrack = kind === 'en_route' ? 'en_route' : 'on_property';
   const logger = require('./logger');
-  const now = new Date();
-  for (const id of siblingIds) {
+  const lifecycleAt = new Date();
+  let fan = null;
+  try {
+    fan = await db.transaction(async (t) => {
+      const visit = await t('service_visits').where({ id: primary.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return null;
+      await lockStop(t, visit.stop_base_key);
+      const siblings = await t('scheduled_services')
+        .where({ visit_id: visit.id })
+        .whereNot('id', primary.id)
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .forUpdate()
+        .select('id', 'status', 'technician_id', 'track_state', 'source_action', 'customer_confirmed',
+          'actual_start_time', 'check_in_time', 'arrived_at');
+      const { transitionJobStatus } = require('./job-status');
+      const { isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
+      const moved = [];
+      const trackers = [];
+      const covered = [];
+      const skipped = [];
+      for (const s of siblings) {
+        // Exact technician equality — an unassigned sibling is NOT the
+        // primary's tech's to advance (codex r1): the visit owns assignment,
+        // so a null here is an inconsistency to surface, not a wildcard.
+        if (String(s.technician_id || '') !== String(primary.technician_id || '')) {
+          skipped.push({ id: s.id, reason: 'technician' });
+          continue;
+        }
+        if (String(s.status) !== toStatus) {
+          if (!siblingEligibleFor(toStatus, s.status)) { skipped.push({ id: s.id, reason: `status:${s.status}` }); continue; }
+          // An office-review booking needs the tech's explicit field-confirm
+          // stamp + activation (tech-track's autoConfirmOutboundReviewBooking)
+          // before a day-of advance — never implied by a sibling's tap. It
+          // stays behind for its own tap (fail closed: no silent activation).
+          if (isPendingOutboundReviewBooking(s)) { skipped.push({ id: s.id, reason: 'office_review' }); continue; }
+          if (toStatus === 'on_site') {
+            const { buildOnSiteLifecycleUpdates } = require('../utils/service-duration-capture');
+            const updates = buildOnSiteLifecycleUpdates(s, lifecycleAt);
+            if (Object.keys(updates).length) await t('scheduled_services').where({ id: s.id }).update(updates);
+          }
+          await transitionJobStatus({ jobId: s.id, fromStatus: s.status, toStatus, transitionedBy: actorId, trx: t });
+          moved.push(s.id);
+        }
+        covered.push(s.id);
+        if (String(s.track_state || '') !== targetTrack) trackers.push(s.id);
+      }
+      const stampCol = toStatus === 'en_route' ? 'en_route_at' : 'arrived_at';
+      await t('service_visits').where({ id: visit.id }).whereNull(stampCol).update({ [stampCol]: lifecycleAt });
+      return { visitId: visit.id, moved, trackers, covered, skipped };
+    });
+  } catch (err) {
+    logger.warn(`[visit-groups] ${kind} fan-out for ${primary.id} (visit ${primary.visit_id}) failed: ${err.message}`);
+    return null;
+  }
+  if (!fan) return null;
+
+  // Tracker writes for lagging siblings — customer text suppressed (the one
+  // text came from the primary). _visitSibling stops the tracker from
+  // fanning out again from inside the fan-out.
+  const trackTransitions = require('./track-transitions');
+  for (const id of fan.trackers) {
     try {
       const r = kind === 'en_route'
-        ? await trackTransitions.markEnRoute(id, { actorType, actorId, suppressCustomerSms: true })
-        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, suppressArrivalSms: true });
-      if (!r || !r.ok) logger.warn(`[visit-groups] visit ${visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
+        ? await trackTransitions.markEnRoute(id, { actorType, actorId, suppressCustomerSms: true, _visitSibling: true })
+        : await trackTransitions.markOnProperty(id, { actingTechId: actorId, suppressArrivalSms: true, _visitSibling: true });
+      if (!r || !r.ok) logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} returned ${r && r.reason}`);
     } catch (err) {
-      logger.warn(`[visit-groups] visit ${visitId} ${kind}: tracker write for sibling ${id} failed: ${err.message}`);
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: tracker write for sibling ${id} failed: ${err.message}`);
     }
   }
+  // Covered-by-visit stamps on every reconciled sibling (whereNull ⇒
+  // idempotent): no later per-row path re-texts the customer.
   const smsCol = kind === 'en_route' ? 'track_sms_sent_at' : 'arrival_sms_sent_at';
-  if (siblingIds.length) {
+  if (fan.covered.length) {
     try {
-      await db('scheduled_services').whereIn('id', siblingIds).whereNull(smsCol).update({ [smsCol]: now });
+      await db('scheduled_services').whereIn('id', fan.covered).whereNull(smsCol).update({ [smsCol]: lifecycleAt });
     } catch (err) {
-      logger.warn(`[visit-groups] visit ${visitId} ${kind}: covered-by-visit stamp failed: ${err.message}`);
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: covered-by-visit stamp failed: ${err.message}`);
     }
   }
+  // The visit's one-shot, recorded from the primary's ACTUAL send outcome
+  // (codex r1): 'sent' only for a delivered text; opt-out / gate-off /
+  // already-handled are 'suppressed'; a retryable miss is 'failed'.
   const effectType = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
-  let status = 'suppressed';
+  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   try {
-    const primary = primaryId
-      ? await db('scheduled_services').where({ id: primaryId }).first(smsCol)
-      : null;
-    // The primary's guard column means "handled", not "delivered": the
-    // arrival guard is claimed even with GATE_TECH_ARRIVED_SMS off, so the
-    // gate is part of the verdict; the en-route guard is only stamped on a
-    // successful Twilio send.
-    const gateOn = kind === 'en_route' || require('../config/feature-gates').isEnabled('techArrivedSms');
-    if (primary && primary[smsCol] && gateOn) status = 'sent';
     await db('visit_effects')
       .insert({
-        visit_id: visitId,
+        visit_id: fan.visitId,
         effect_type: effectType,
-        dedupe_key: `${visitId}:${effectType}`,
+        dedupe_key: `${fan.visitId}:${effectType}`,
         status,
         attempts: 1,
-        sent_at: status === 'sent' ? now : null,
+        sent_at: status === 'sent' ? lifecycleAt : null,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
       .ignore();
   } catch (err) {
-    logger.warn(`[visit-groups] visit ${visitId} ${kind}: visit_effects record failed: ${err.message}`);
+    logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: visit_effects record failed: ${err.message}`);
   }
-  return { effectType, status };
+  if (fan.skipped.length) {
+    logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);
+  }
+  return { visitId: fan.visitId, siblingIds: fan.moved, trackerIds: fan.trackers, skipped: fan.skipped, effect: { effectType, status } };
 }
 
 /**
@@ -1146,8 +1169,7 @@ module.exports = {
   lockStopForRow,
   openMembers,
   visitActivity,
-  liveTransitionSiblings,
-  afterLiveTransition,
+  fanOutLiveTransition,
   visitSummariesForRows,
   _test: {
     siblingEligibleFor,

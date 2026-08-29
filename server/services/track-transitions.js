@@ -332,6 +332,22 @@ async function syncOperationalStatus(svc, toStatus, actorId) {
  * Returns: { ok, state, enRouteAt, smsSent, alreadyEnRoute, reason? }
  */
 async function markEnRoute(serviceId, opts = {}) {
+  const result = await markEnRouteCore(serviceId, opts);
+  // Visit group: canonical en-route path for every signal, so the whole
+  // stop follows from here — on the idempotent re-tap too, which is what
+  // repairs a sibling left behind by a transient failure (codex #3603 r1).
+  if (result && result.ok && !opts._visitSibling && result._row) {
+    const fan = await require('./visit-groups').fanOutLiveTransition({
+      primary: result._row, kind: 'en_route', actorType: opts.actorType || 'tech', actorId: opts.actorId || null,
+      smsOutcome: result.smsSent ? 'sent' : 'suppressed',
+    });
+    if (fan) result.visitFanOut = fan;
+  }
+  if (result) delete result._row;
+  return result;
+}
+
+async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
@@ -483,6 +499,7 @@ async function markEnRoute(serviceId, opts = {}) {
       enRouteAt: svc.en_route_at,
       smsSent: false,
       alreadyEnRoute: svc.track_state === 'en_route',
+      _row: svc,
     };
   }
 
@@ -540,6 +557,7 @@ async function markEnRoute(serviceId, opts = {}) {
       enRouteAt: fresh?.en_route_at || null,
       smsSent: false,
       alreadyEnRoute: fresh?.track_state === 'en_route' || !fresh,
+      _row: svc,
     };
   }
 
@@ -572,7 +590,7 @@ async function markEnRoute(serviceId, opts = {}) {
   let smsSent = false;
   // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
   // way" text came from the visit's primary row; the visit stamps this row
-  // as covered afterwards (visit-groups.afterLiveTransition).
+  // as covered afterwards (visit-groups.fanOutLiveTransition).
   if (!opts.suppressCustomerSms && (!svc.track_sms_sent_at || 'track_sms_sent_at' in staleFieldClears)) {
     try {
       const tech = svc.technician_id
@@ -653,6 +671,7 @@ async function markEnRoute(serviceId, opts = {}) {
     enRouteAt: now,
     smsSent,
     alreadyEnRoute: false,
+    _row: svc,
     actor: opts.actorType ? { type: opts.actorType, id: opts.actorId || null } : null,
     ...(opts.suppressCustomerSms ? { smsSuppressed: 'visit' } : {}),
   };
@@ -709,7 +728,7 @@ function classifyArrivalSend(result) {
  * later real arrival still sends. sendTechArrived also self-guards on twilioSms.
  */
 async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt = null) {
-  if (svc.arrival_sms_sent_at) return;
+  if (svc.arrival_sms_sent_at) return 'already_handled';
   // Atomically CLAIM the first on-site flip before doing anything else (see the
   // CLAIM-then-act invariant above). We claim regardless of the gate: the guard
   // means "handled", so an arrival under a disabled gate is recorded, not sent.
@@ -740,10 +759,10 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
     );
   }
   const claimed = await claimQuery.update({ arrival_sms_sent_at: claimStamp });
-  if (!claimed) return;
+  if (!claimed) return 'not_claimed';
 
   // Gate off: the claim stands as "handled" so no later signal re-sends.
-  if (!isEnabled('techArrivedSms')) return;
+  if (!isEnabled('techArrivedSms')) return 'gate_off';
 
   let outcome = 'retry';
   try {
@@ -769,6 +788,7 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
       logger.error(`[track-transitions] arrival SMS guard release failed: ${err.message}`);
     }
   }
+  return outcome;
 }
 
 /**
@@ -976,8 +996,22 @@ async function markOnProperty(serviceId, opts = {}) {
   // (geofence drive-past for a job the tech hasn't actually started) skips it —
   // the flip leaves the guard NULL so a later real arrival still sends.
   // maybeSendArrivalSms owns claim -> gate -> acting-tech -> send -> release.
+  let arrivalSms = 'not_attempted';
   if (arrivalRow && !opts.suppressArrivalSms) {
-    await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+    arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
+  }
+  if (result && result.ok) {
+    result.arrivalSms = arrivalSms;
+    // Visit group: this is the canonical arrival path for every signal
+    // (manual, admin, geofence, GPS, time clock), so the whole stop follows
+    // from here (visit-group-scope.md §3; codex #3603 r1). Siblings re-enter
+    // with _visitSibling and never fan out again.
+    if (!opts._visitSibling) {
+      const fan = await require('./visit-groups').fanOutLiveTransition({
+        primary: svc, kind: 'on_site', actorType: opts.actorType || 'tech', actorId: opts.actingTechId || null, smsOutcome: arrivalSms,
+      });
+      if (fan) result.visitFanOut = fan;
+    }
   }
   return result;
 }
