@@ -56,8 +56,11 @@ describe('AUTOPAY_EXTRA_ENTRY_POINTS', () => {
   test('lane checks apply only to texts that presuppose a monthly charge (codex r6)', () => {
     expect(MONTHLY_CHARGE_ENTRY_POINTS).toEqual([
       'autopay_pre_charge_reminder', 'monthly_billing_success', 'monthly_billing_failure',
-      'autopay_retry_success', 'autopay_retry_failed', 'autopay_retry_final_failed',
     ]);
+    // Retry-ladder texts are governed by classifyFailedPaymentRetry's own
+    // verdict (a lane transition with a paid monthly charge on file keeps
+    // collecting) — never second-guessed by the lane at send (codex r8).
+    expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('autopay_retry_failed');
     expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('autopay_completion_decline');
     expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('autopay_card_expiry_warning');
     expect(MONTHLY_CHARGE_ENTRY_POINTS).not.toContain('payment_expiry_workflow');

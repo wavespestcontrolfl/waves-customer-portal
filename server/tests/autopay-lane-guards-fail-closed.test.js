@@ -49,7 +49,15 @@ jest.mock('../services/autopay-log', () => ({
   eventExistsRecently: jest.fn(() => Promise.resolve(false)),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
+  // Mirrors the wrapper's preDispatchCheck contract: a caller closure that
+  // does not return { ok: true } blocks the send with its code/reason.
+  sendCustomerMessage: jest.fn(async (input) => {
+    if (typeof input.preDispatchCheck === 'function') {
+      const verdict = await input.preDispatchCheck();
+      if (!verdict || verdict.ok !== true) return { sent: false, blocked: true, code: verdict?.code || 'PRE_DISPATCH_CHECK_FAILED', reason: verdict?.reason };
+    }
+    return { sent: true };
+  }),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(() => Promise.resolve('Hello! Your auto-pay processes soon.')),
@@ -121,7 +129,7 @@ describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)
     expect(sendCustomerMessage.mock.calls[0][0].metadata.billing_mode_at_send).toBe('monthly_membership');
   });
 
-  test('a customer moved out of the monthly lane after the batch query is skipped at dispatch, never texted (codex r7)', async () => {
+  test('a customer moved out of the monthly lane after the batch query is blocked by preDispatchCheck at the wrapper boundary, never texted (codex r7 + r8)', async () => {
     const { sendPreChargeReminders } = require('../services/autopay-notifications');
     mockCustomers = [{
       id: 'cust-moved', first_name: 'Moved', phone: '+15550004444', monthly_rate: '55.00',
@@ -131,7 +139,10 @@ describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)
 
     const r = await sendPreChargeReminders();
 
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // The wrapper was entered (that IS the boundary) but its preDispatchCheck
+    // refused, so nothing reached the provider and no reminder was logged.
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-moved', 'pre_charge_reminder_sent', expect.any(Object));
     expect(r.sent).toBe(0);
     expect(r.skipped).toBe(1);
   });
@@ -146,7 +157,8 @@ describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)
 
     const r = await sendPreChargeReminders();
 
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-gone', 'pre_charge_reminder_sent', expect.any(Object));
+    expect(r.sent).toBe(0);
     expect(r.skipped).toBe(1);
   });
 });

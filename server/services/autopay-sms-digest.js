@@ -61,19 +61,20 @@ const AUTOPAY_EXTRA_ENTRY_POINTS = [
   'payment_expiry_workflow',       // workflows/payment-expiry.js
 ];
 
-// Only texts that PRESUPPOSE a monthly charge are lane-checked (codex r6):
-// a non-monthly recipient of one of these is the 08-29 incident. The rest
-// of the autopay family is invoice- or card-driven and legitimately reaches
-// any lane — a per_application customer's completion-charge decline, a
-// card-expiry warning on any autopay card — so those are listed but never
-// flagged. A deferred replay is checked by its ORIGINAL entry point.
+// Only texts that PRESUPPOSE a monthly charge the recipient's CURRENT
+// lane must justify are lane-checked (codex r6 + r8): a non-monthly
+// recipient of one of these is the 08-29 incident. The rest of the
+// autopay family legitimately reaches any lane and is listed but never
+// flagged — completion-charge declines and card-expiry warnings are
+// invoice-/card-driven, and the retry ladder's own verdict
+// (retry-collectibility.js classifyFailedPaymentRetry) already decides
+// whether a monthly obligation survives a lane transition, so its texts
+// are governed by that verdict, not by the lane at send. A deferred
+// replay is checked by its ORIGINAL entry point.
 const MONTHLY_CHARGE_ENTRY_POINTS = [
   'autopay_pre_charge_reminder',
   'monthly_billing_success',
   'monthly_billing_failure',
-  'autopay_retry_success',
-  'autopay_retry_failed',
-  'autopay_retry_final_failed',
 ];
 
 // Hard ceiling on the window when no marker exists (first run, or the
