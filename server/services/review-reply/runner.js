@@ -127,6 +127,37 @@ function ratingEligible(star_rating) {
   return (Number(star_rating) || 0) >= 4;
 }
 
+// How an under-4★ row leaves the lane: back to NULL state with the reason
+// stamped, nothing pending, no draft. Same shape as queue_expired.
+function lowRatingExitFields(reason) {
+  return { auto_reply_status: null, auto_reply_reason: reason, auto_reply_due_at: null, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: null };
+}
+
+// Rows the OLD rule parked as low_rating / unrated with a pipeline draft
+// (before the 2026-08-29 ruling) leave the lane the same way; bounded and
+// idempotent, so it simply runs every tick. Human / Agent Ops drafts are
+// theirs (untouched); a live publish claim means a publisher is mid-flight.
+async function sweepLowRatingParks({ limit = 50 } = {}) {
+  const rows = await db('google_reviews')
+    .where('auto_reply_status', STATUS.PARKED)
+    .whereIn('auto_reply_reason', ['low_rating', 'unrated'])
+    .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+    .limit(limit)
+    .select('id', 'review_reply', 'auto_reply_draft', 'auto_reply_reason');
+  let n = 0;
+  for (const r of (rows || [])) {
+    // Compare-and-set on the reply slot: only OUR draft is removed.
+    const ours = r.auto_reply_draft && r.review_reply === asDraft(r.auto_reply_draft);
+    const updated = await db('google_reviews')
+      .where({ id: r.id, review_reply: r.review_reply })
+      .update({ ...lowRatingExitFields(r.auto_reply_reason), auto_reply_claimed_until: null, ...(ours ? { review_reply: null, reply_updated_at: null } : {}) });
+    n += Array.isArray(updated) ? updated.length : (updated || 0);
+  }
+  if (n) logger.info(`[review-auto-reply] ${n} under-4★ park(s) from before the 2026-08-29 rule left the lane`);
+  return n;
+}
+
 function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review_created_at, dismissed, star_rating } = {}, { now = new Date(), cfg = config() } = {}) {
   if (cfg.mode === 'off') return {};
   if (!ratingEligible(star_rating)) return {};
@@ -545,7 +576,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // now is an explicit human action and keeps its own path below.
   if (intent !== 'post_now' && (rating === 0 || rating <= 3)) {
     const reason = rating === 0 ? 'unrated' : 'low_rating';
-    await releaseClaim(row, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: reason, auto_reply_draft: null, auto_reply_drafted_at: null });
+    // NULL state (reason stamped), not skipped: if the reviewer later raises
+    // the review to 4–5★ the catch-up enqueue may take it within the normal
+    // window; skipped would exclude it for good (codex #3587 r1).
+    await releaseClaim(row, lowRatingExitFields(reason));
     return { outcome: 'skipped', reason };
   }
   // Hard invariant, independent of config: unrated and 1-3★ never auto-post
@@ -805,6 +839,7 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   // a bell_failed stamp left while the lane was on must still be re-rung
   // after the gate is switched off.
   stats.bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
+  await sweepLowRatingParks().catch((err) => { logger.warn(`[review-auto-reply] low-rating park sweep failed: ${err.message}`); });
   if (cfg.mode === 'off') return stats;
   stats.enqueued = await enqueueMissedReviews({ cfg }).catch((err) => { logger.warn(`[review-auto-reply] catch-up enqueue failed: ${err.message}`); return 0; });
   const rows = await claimDueRows({ limit });
@@ -1614,6 +1649,7 @@ module.exports = {
   computeDueAt,
   autoReplyInsertFields,
   ratingEligible,
+  sweepLowRatingParks,
   enqueueMissedReviews,
   rolloutCutoff,
   _resetRolloutCutoffCache: () => { rolloutCutoffCache = undefined; },

@@ -331,10 +331,36 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'low_rating', auto_reply_claimed_until: null });
+    // NULL state with the reason stamped (not skipped): re-eligible if the reviewer later raises it.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, auto_reply_claimed_until: null });
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0].auto_reply_draft).toBeFalsy();
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'unrated' });
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
+  });
+
+  test('pre-rule low-rating parks are swept back to NULL state; human drafts and reconciliation parks stay (codex #3587 r1)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [
+      row({ id: 'old-park', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana, sorry.', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_version: 'reply-v1', auto_reply_drafted_at: '2026-08-28T00:00:00Z' }),
+      row({ id: 'old-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'unrated', auto_reply_draft: 'Thanks.', review_reply: null, auto_reply_version: 'reply-v1' }),
+      row({ id: 'human', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Human words.', review_reply: '[DRAFT] Human words.', auto_reply_version: 'human' }),
+      row({ id: 'recon', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'x', auto_reply_version: 'reply-v1' }),
+    ];
+    expect(await Runner.sweepLowRatingParks()).toBe(2);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: null, auto_reply_draft: null, auto_reply_due_at: null });
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: null });
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Human words.' });
+    expect(state.rows[3]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    // Idempotent, and it runs on every tick.
+    expect(await Runner.sweepLowRatingParks()).toBe(0);
+    // A swept / released row that the reviewer later raises to 4-5★ re-enters via the catch-up enqueue.
+    state.rows = [row({ id: 'up', star_rating: 5, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued' });
+    // …but not while it is still under 4★.
+    state.rows = [row({ id: 'still-low', star_rating: 3, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBeNull();
   });
 
   test('MIN_STARS can only raise the bar; 1-3★ stay human-only even if configured lower', async () => {
@@ -347,7 +373,7 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.config().minStars).toBe(4);
     state.rows = [row({ id: 'r3', star_rating: 3 })];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
     expect(mockPublish).not.toHaveBeenCalled();
   });
 
@@ -645,9 +671,9 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats).toMatchObject({ retry: 1, posted: 0 });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_claimed_until: null });
     expect(state.rows[0].review_reply).toBeNull();
-    // Next tick sees the 2★ and leaves it alone (skipped, no draft — owner ruling 2026-08-29).
+    // Next tick sees the 2★ and leaves it alone (NULL state, no draft — owner ruling 2026-08-29).
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
     expect(state.rows[0].auto_reply_draft).toBeFalsy();
     expect(mockPublish).toHaveBeenCalledTimes(1);
   });
@@ -755,7 +781,7 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text });
     state.rows = [row({ id: 'low', location_id: 'venice', star_rating: 2 })];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
     expect(state.rows[0].auto_reply_draft).toBeFalsy();
     // auto mode: the draft is produced, then the missing credentials retry with the draft kept for reuse.
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
@@ -1479,7 +1505,7 @@ describe('admin actions', () => {
     state.rows = [row({ id: 't2', star_rating: 2 })];
     mockNotify.mockClear();
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
