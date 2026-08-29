@@ -453,15 +453,19 @@ function typedSnapshotType(service = {}) {
  * predicate live here so the two callers cannot drift. Best-effort: never
  * throws, never blocks a report. Consumes and removes the live-only
  * `termiteNextMonitoringVisit` field (the customer surface carries it as
- * termiteReportV2.nextVisit only).
+ * termiteReportV2.nextVisit only). Not gated on the name-derived service
+ * line — see the applicability note inside.
  */
 function attachTermiteReportV2(data, service = {}) {
   if (!data || typeof data !== 'object') return data;
   const nextVisit = data.termiteNextMonitoringVisit || null;
   delete data.termiteNextMonitoringVisit;
+  // Applicability = the frozen typed identity ONLY (the same predicate as
+  // the PDF signature). The name-derived serviceLine is not consulted: a
+  // catalog short name such as "Bait Annual" detects as 'pest' while its
+  // profile and snapshot are termite_bait_station (codex P1 #3600 r12).
   if (
     process.env.TERMITE_REPORT_V2 !== 'true'
-    || data.serviceLine !== 'termite'
     || data.typedReport?.type !== TERMITE_BAIT_TYPED_TYPE
   ) return data;
   try {

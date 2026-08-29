@@ -406,13 +406,15 @@ describe('attachTermiteReportV2 — the one composer shared by the route and the
     expect(data).not.toHaveProperty('termiteNextMonitoringVisit');
   });
 
-  it('is a no-op (and still removes the live-only field) when the gate is off, on another line, or on a non-bait typed type', () => {
+  it('is a no-op (and still removes the live-only field) when the gate is off or on a non-bait typed type — never keyed on serviceLine', () => {
     process.env.TERMITE_REPORT_V2 = 'false';
     const off = attachTermiteReportV2(payload(), service);
     expect(off.termiteReportV2).toBeUndefined();
     expect(off).not.toHaveProperty('termiteNextMonitoringVisit');
     process.env.TERMITE_REPORT_V2 = 'true';
-    expect(attachTermiteReportV2({ ...payload(), serviceLine: 'pest' }, service).termiteReportV2).toBeUndefined();
+    // the name-derived serviceLine is NOT consulted — "Bait Annual" detects
+    // as pest while its snapshot is termite_bait_station
+    expect(attachTermiteReportV2({ ...payload(), serviceLine: 'pest' }, service).termiteReportV2.status.label).toBe('No termite activity observed');
     expect(attachTermiteReportV2({ ...payload(), typedReport: { type: 'termite_liquid' } }, service).termiteReportV2).toBeUndefined();
     expect(attachTermiteReportV2(null, service)).toBeNull();
   });

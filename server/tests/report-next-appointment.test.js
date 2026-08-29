@@ -417,6 +417,17 @@ test('termite report: the canonical completion-profile resolver is authoritative
   });
 });
 
+test('a "Bait Annual" report (name detects as pest, snapshot is bait-station) still gets its next monitoring visit', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
+    ],
+  });
+  const data = await buildReportV1Data({ ...TERMITE_SERVICE, service_line: null, service_type: 'Bait Annual' }, 'token-bait-annual', knex, LIVE_V2);
+  expect(data.termiteNextMonitoringVisit?.scheduledDate).toBe('2999-04-03');
+});
+
 test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,

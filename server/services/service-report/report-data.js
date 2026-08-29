@@ -4357,7 +4357,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     nextAppointment = sameLineNextAppointment
       || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
 
-    // Termite bait-station reports: the "next monitoring visit" is the first
+    // Termite bait-station reports (typed identity): the "next monitoring visit" is the first
     // upcoming BAIT-STATION appointment, selected here while the candidate
     // rows are still in hand — the collapsed same-line pick above may be an
     // earlier liquid/trench/inspection visit, which is termite work but not
@@ -4373,9 +4373,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // it), gate on, bait-station typed visit — each resolution is a few
     // catalog reads, so gated-off and PDF builds must not pay for it
     // (codex P2 #3600 r8).
+    // Keyed on the frozen typed identity, not the name-derived serviceLine:
+    // a "Bait Annual" short name detects as 'pest' while its snapshot is
+    // termite_bait_station (codex P1 #3600 r12) — same predicate as
+    // attachTermiteReportV2 and the PDF signature.
     if (
-      serviceLine === 'termite'
-      && opts.mode === 'live'
+      opts.mode === 'live'
       && process.env.TERMITE_REPORT_V2 === 'true'
       && typedSnapshot?.type === TERMITE_BAIT_TYPED_TYPE
     ) {
