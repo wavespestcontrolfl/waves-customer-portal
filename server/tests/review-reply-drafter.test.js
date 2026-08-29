@@ -449,6 +449,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nTruly, alongside Marcus, we are glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches love this heat, so we are glad Marcus could help.'))).not.toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nTruly, we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    // hook: conjunction into a possessive / role phrase is attribution syntax.
+    expect(verify(good('Hi Dana,\n\nTruly and his team are glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nFinding and the crew are glad Marcus could help.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches with our technician made sure Marcus could help.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.

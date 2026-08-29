@@ -293,14 +293,15 @@ treatment treatments visits results protection prevention nothing something ever
 // it (codex #3580 r2 + hook: "Going and Marcus", "Truly says thanks", "Truly,
 // alongside Marcus"): a plural-only verb ("Ants are / love / need"), a
 // determiner or preposition ("Finding a", "Skipping the"), a pronoun, a
-// conjunction followed by a lowercase word, or a comma followed by a lowercase
-// word that opens neither an appositive (", our technician") nor a
-// coordination (", alongside Marcus"). Nothing a single person's name takes —
+// conjunction followed by a lowercase word that is not a possessive / role
+// phrase ("Truly and his team" fails; "Ants and roaches" passes), or a comma
+// followed by a lowercase word that opens neither an appositive (", our
+// technician") nor a coordination (", alongside Marcus"). Nothing a single person's name takes —
 // singular copula / auxiliary / possessive, modal, adverb, present- or
 // past-tense verb, capitalised word — is on the list, so adverb openers need
 // adverb syntax ("Honestly, we…") and surnames the list audit missed still
 // fail on shape.
-const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
