@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { publicSelectableService, quoteServicesForKey } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -752,8 +753,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
-      enriched, services, attribution,
+      enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
+    // exact engine request for that product, so the site never composes
+    // cadence/tier options and can never receive another product's price.
+    // A selectable-but-not-instant key is answered as quote-on-request.
+    const requestedServiceKey = String(req.body?.serviceKey ?? req.body?.service_key ?? '').trim().toLowerCase() || null;
+    let keyedService = null;
+    if (requestedServiceKey) {
+      if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
+      keyedService = await publicSelectableService(requestedServiceKey);
+      if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
+      if (!quoteServicesForKey(requestedServiceKey)) {
+        return res.status(409).json({ error: 'quote_on_request', service_key: requestedServiceKey, name: keyedService.name });
+      }
+    }
+    const services = keyedService ? quoteServicesForKey(requestedServiceKey) : bodyServices;
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -1126,7 +1142,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? (commercialEstimatedLines[0].disclaimer || 'Estimated from property data — final price confirmed on site.')
       : null;
 
-    const serviceInterest = buildPublicQuoteServiceInterest(services);
+    // Keyed quotes carry the catalog name as the label — identity wins.
+    const serviceInterest = keyedService ? keyedService.name : buildPublicQuoteServiceInterest(services);
+    const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
@@ -1191,6 +1209,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
+        service_key: leadServiceKey,
         monthly_value: leadMonthlyValue,
         // quote_wizard leads keep the historical replace semantics (each stage
         // snapshot supersedes the last). A lead the wizard ATTACHED to via the
@@ -1236,6 +1255,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
+        service_key: leadServiceKey,
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,

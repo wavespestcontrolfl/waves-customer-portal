@@ -34,27 +34,61 @@ const CADENCE_LABELS = {
   annual: 'Annual',
 };
 
-// Products the PUBLIC quote engine can price without an office pass — a
-// property of the pricing engine, not of the catalog, so it lives here in
-// code and MUST stay in step with routes/public-quote.js
-// PUBLIC_QUOTE_SERVICE_KEYS (asserted by public-services-menu.test.js).
-// Everything else is quote-on-request (a keyed lead the office estimates).
-// Rodent Inspection is a flat $75 (owner ruling 2026-08-29).
-const PUBLIC_INSTANT_QUOTE_KEYS = new Set([
-  'pest_general_quarterly', 'pest_general_bimonthly', 'pest_general_monthly', 'pest_general_semiannual',
-  'one_time_pest_control', 'pest_initial_cleanout',
-  'lawn_care_quarterly', 'lawn_care_recurring', 'lawn_care_6week', 'lawn_care_monthly', 'lawn_care_one_time',
-  'dethatching', 'plugging', 'top_dressing',
-  // mosquito_one_time: NOT instant — /api/public/quote/calculate has no
-  // oneTimeMosquito path; it stays quote-on-request until one exists.
-  'mosquito_monthly', 'mosquito_seasonal',
-  'tree_shrub_quarterly', 'tree_shrub_program', 'tree_shrub_6week', 'palm_injection',
-  'rodent_bait_quarterly', 'rodent_trapping', 'rodent_exclusion_only',
-  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
-  'flea_tick', 'bed_bug_treatment', 'bee_wasp_removal',
-  'termite_bait', 'termite_trenching', 'termite_slab_pretreat',
-  'rodent_inspection',
-]);
+// Lossless service_key → /api/public/quote/calculate request. A product is
+// public_instant_quote ONLY when this map carries the COMPLETE engine
+// options that select exactly that product (cadence / tier), so a consumer
+// can never pick one catalog product and receive another's price (pre-push
+// codex P1). Keys use the vocabularies the engine actually prices:
+//   pest.frequency  quarterly | bimonthly | monthly     (no semiannual)
+//   lawn.tier       standard | enhanced | premium      (no 4-app basic)
+//   mosquito.tier   seasonal9 | monthly12
+//   treeShrub.tier  light | standard | enhanced
+//   sanitation.tier light | standard | heavy
+// Everything absent here is quote-on-request (a keyed lead the office
+// estimates). This is a pricing-engine capability, kept in code, and MUST
+// stay in step with routes/public-quote.js PUBLIC_QUOTE_SERVICE_KEYS
+// (asserted by public-services-menu.test.js). Rodent Inspection is a flat
+// $75 (owner ruling 2026-08-29).
+const PUBLIC_QUOTE_REQUESTS = Object.freeze({
+  pest_general_quarterly: { pest: { frequency: 'quarterly' } },
+  pest_general_bimonthly: { pest: { frequency: 'bimonthly' } },
+  pest_general_monthly: { pest: { frequency: 'monthly' } },
+  one_time_pest_control: { oneTimePest: {} },
+  pest_initial_cleanout: { oneTimePest: {} },
+  lawn_care_recurring: { lawn: { tier: 'standard' } },
+  lawn_care_6week: { lawn: { tier: 'enhanced' } },
+  lawn_care_monthly: { lawn: { tier: 'premium' } },
+  lawn_care_one_time: { oneTimeLawn: {} },
+  dethatching: { dethatching: {} },
+  plugging: { plugging: {} },
+  top_dressing: { topDressing: {} },
+  mosquito_seasonal: { mosquito: { tier: 'seasonal9' } },
+  mosquito_monthly: { mosquito: { tier: 'monthly12' } },
+  tree_shrub_quarterly: { treeShrub: { tier: 'light' } },
+  tree_shrub_program: { treeShrub: { tier: 'standard' } },
+  tree_shrub_6week: { treeShrub: { tier: 'enhanced' } },
+  palm_injection: { palm: {} },
+  rodent_bait_quarterly: { rodentBait: {} },
+  rodent_trapping: { rodentTrapping: {} },
+  rodent_exclusion_only: { exclusion: {} },
+  rodent_sanitation_light: { sanitation: { tier: 'light' } },
+  rodent_sanitation_standard: { sanitation: { tier: 'standard' } },
+  rodent_sanitation_heavy: { sanitation: { tier: 'heavy' } },
+  flea_tick: { flea: {} },
+  bed_bug_treatment: { bedBug: {} },
+  bee_wasp_removal: { stinging: {} },
+  termite_bait: { termite: {} },
+  termite_trenching: { trenching: {} },
+  termite_slab_pretreat: { preSlab: {} },
+  rodent_inspection: { rodentInspection: {} },
+});
+const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
+
+// Deep copy so a caller can never mutate the canonical request.
+function quoteServicesForKey(serviceKey) {
+  const req = PUBLIC_QUOTE_REQUESTS[serviceKey];
+  return req ? JSON.parse(JSON.stringify(req)) : null;
+}
 
 function modeFor(row) {
   if (row.category === 'inspection') return 'inspection';
@@ -113,4 +147,4 @@ async function isPublicSelectableServiceKey(serviceKey, conn = db) {
   return !!(await publicSelectableService(serviceKey, conn));
 }
 
-module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, menuItem, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };
+module.exports = { loadPublicServicesMenu, publicSelectableService, isPublicSelectableServiceKey, quoteServicesForKey, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };

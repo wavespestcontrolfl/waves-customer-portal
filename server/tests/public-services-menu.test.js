@@ -7,7 +7,7 @@
  *  - lead intake accepts an optional serviceKey, shape-checked, and the
  *    handler keeps it only when the catalog says it is publicly selectable.
  */
-const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, menuItem, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
+const { loadPublicServicesMenu, isPublicSelectableServiceKey, publicSelectableService, quoteServicesForKey, menuItem, PUBLIC_QUOTE_REQUESTS, PUBLIC_INSTANT_QUOTE_KEYS } = require('../services/public-services-menu');
 
 function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
   const conn = () => {
@@ -76,29 +76,32 @@ describe('keyed leads', () => {
 
 describe('instant-quote set stays in step with the public quote engine', () => {
   const { PUBLIC_QUOTE_SERVICE_KEYS } = require('../routes/public-quote');
-  // service_key → the /calculate service key that prices it
-  const PATH_FOR = {
-    pest_general_quarterly: 'pest', pest_general_bimonthly: 'pest', pest_general_monthly: 'pest', pest_general_semiannual: 'pest',
-    one_time_pest_control: 'oneTimePest', pest_initial_cleanout: 'oneTimePest',
-    lawn_care_quarterly: 'lawn', lawn_care_recurring: 'lawn', lawn_care_6week: 'lawn', lawn_care_monthly: 'lawn', lawn_care_one_time: 'oneTimeLawn',
-    dethatching: 'dethatching', plugging: 'plugging', top_dressing: 'topDressing',
-    mosquito_monthly: 'mosquito', mosquito_seasonal: 'mosquito',
-    tree_shrub_quarterly: 'treeShrub', tree_shrub_program: 'treeShrub', tree_shrub_6week: 'treeShrub', palm_injection: 'palm',
-    rodent_bait_quarterly: 'rodentBait', rodent_trapping: 'rodentTrapping', rodent_exclusion_only: 'exclusion',
-    rodent_sanitation_light: 'sanitation', rodent_sanitation_standard: 'sanitation', rodent_sanitation_heavy: 'sanitation',
-    flea_tick: 'flea', bed_bug_treatment: 'bedBug', bee_wasp_removal: 'stinging',
-    termite_bait: 'termite', termite_trenching: 'trenching', termite_slab_pretreat: 'preSlab',
-    rodent_inspection: 'rodentInspection',
-  };
-  test('every instant service_key maps to a /calculate service key the route accepts', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
+  test('every instant service_key expands to a /calculate request the route accepts', () => {
     for (const key of PUBLIC_INSTANT_QUOTE_KEYS) {
-      const path = PATH_FOR[key];
-      expect({ key, path }).toEqual({ key, path: expect.any(String) });
-      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(path) }).toEqual({ key, accepted: true });
+      const services = quoteServicesForKey(key);
+      const paths = Object.keys(services);
+      expect({ key, paths }).toEqual({ key, paths: [expect.any(String)] });
+      expect({ key, accepted: PUBLIC_QUOTE_SERVICE_KEYS.includes(paths[0]) }).toEqual({ key, accepted: true });
     }
   });
-  test('a product with no public engine path is never advertised as instant', () => {
-    expect(PUBLIC_INSTANT_QUOTE_KEYS.has('mosquito_one_time')).toBe(false);
-    expect(PUBLIC_INSTANT_QUOTE_KEYS.has('wdo_inspection')).toBe(false);
+  test('the expansion is lossless: cadence/tier keys select exactly that product', () => {
+    const cadence = (key) => generateEstimate({ ...BASE, services: quoteServicesForKey(key) }).lineItems.find((l) => l.service === 'pest_control');
+    expect(cadence('pest_general_bimonthly').frequency).toBe('bimonthly');
+    expect(cadence('pest_general_monthly').frequency).toBe('monthly');
+    expect(cadence('pest_general_quarterly').frequency).toBe('quarterly');
+    const mosq = (key) => generateEstimate({ ...BASE, services: quoteServicesForKey(key) }).lineItems.find((l) => l.service === 'mosquito');
+    expect(mosq('mosquito_seasonal').visitsPerYear ?? mosq('mosquito_seasonal').visits).toBe(9);
+    expect(mosq('mosquito_monthly').visitsPerYear ?? mosq('mosquito_monthly').visits).toBe(12);
+  });
+  test('quoteServicesForKey returns a copy; callers cannot mutate the canonical request', () => {
+    const a = quoteServicesForKey('pest_general_bimonthly'); a.pest.frequency = 'monthly';
+    expect(PUBLIC_QUOTE_REQUESTS.pest_general_bimonthly.pest.frequency).toBe('bimonthly');
+  });
+  test('products with no complete public engine request are never advertised as instant', () => {
+    for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid']) {
+      expect({ k, instant: PUBLIC_INSTANT_QUOTE_KEYS.has(k) }).toEqual({ k, instant: false });
+    }
   });
 });
