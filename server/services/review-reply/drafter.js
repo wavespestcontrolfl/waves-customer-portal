@@ -301,7 +301,10 @@ treatment treatments visits results protection prevention nothing something ever
 // singular copula / auxiliary / possessive, modal, adverb, present- or
 // past-tense verb, capitalised word — is on the list, so adverb openers need
 // adverb syntax ("Honestly, we…") and surnames the list audit missed still
-// fail on shape.
+// fail on shape. There is deliberately NO singular-predicate path ("Treatment
+// is glad…" must fail; codex #3580 r7): an abstract noun opener passes with a
+// determiner / preposition ("Communication with you matters") and a bare
+// "Communication matters" costs one retry of the drafter's ladder.
 const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them)\b|(?:and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
 // …and when the evidence went through a conjunction or comma, the word after
 // it must itself be ordinary and may not be a name in ANY case (codex #3580
@@ -309,15 +312,7 @@ const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|
 // Words that may sit between a conjunction / comma and the coordinated word
 // without changing what it is ("and even Marcus", "and not just the ants").
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
-// Abstract mass nouns on the opener list — none a surname — take their normal
-// singular predicate ("Communication matters", "Reliability is what we aim
-// for"; codex #3580 r5 P2). Bounded on purpose: no pest / lawn noun here, and
-// no person-like predicate (says, speaks, shows, comes …) — "Service says
-// thanks" would read as a speaker (r6).
-const MASS_NOUN_OPENERS = new Set(['dependability', 'reliability', 'consistency', 'communication', 'service', 'treatment', 'protection', 'prevention', 'nothing', 'something', 'everything', 'anything']);
-const SINGULAR_PREDICATE_RE = /^\s*(?:is|isn't|was|wasn't|has|hasn't|does|doesn't|will|won't|can|can't|should|matters|means|counts|starts|makes|'s)\b/u;
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
-  if (MASS_NOUN_OPENERS.has(w) && SINGULAR_PREDICATE_RE.test(rest)) return true;
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {
     // An -ly adverb opener, a comma, then a name the reviewer wrote
     // ("Honestly, Marcus made this easy") is ordinary adverb syntax (codex
