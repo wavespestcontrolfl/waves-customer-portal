@@ -14687,7 +14687,9 @@ function composeLeadAddress(line1, line2) {
  * P2).
  */
 function splitLeadStreetParts(street) {
-  const { splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const {
+    splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS, DIRECTIONALS,
+  } = require('../utils/address-normalizer');
   const clampTail = (parts, locality = '') => ({
     street: parts.street,
     unit: parts.unit,
@@ -14703,15 +14705,27 @@ function splitLeadStreetParts(street) {
   const split = splitStreetAndCity(street);
   let line = split.line1;
   const cityTokens = String(split.city || '').split(' ').filter(Boolean);
-  while (cityTokens.length >= 2) {
-    const first = cityTokens[0].replace(/\./g, '').toLowerCase();
-    if (!(first.startsWith('#') || UNIT_DESIGNATORS.has(first))) break;
-    line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
+  const tok = (t) => String(t || '').replace(/[.,]/g, '').toLowerCase();
+  // splitStreetAndCity cuts right after the suffix, so a trailing
+  // directional ("100 Main St N") or a unit pair lands at the head of the
+  // "city" — pull them back onto the street before trusting the remainder
+  // as a place (#3608 codex r1: "N" was read as the city and no exact
+  // restatement could ever reaffirm).
+  for (;;) {
+    if (cityTokens.length >= 1 && DIRECTIONALS.has(tok(cityTokens[0]))) {
+      line = `${line} ${cityTokens.shift()}`;
+      continue;
+    }
+    if (cityTokens.length >= 2 && (tok(cityTokens[0]).startsWith('#') || UNIT_DESIGNATORS.has(tok(cityTokens[0])))) {
+      line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
+      continue;
+    }
+    break;
   }
   const locality = cityTokens.join(' ');
-  // A locality that does not start with a letter is a unit fragment or
-  // noise, not a place — keep the line whole.
-  if (!/^[A-Za-z]/.test(locality)) return clampTail(direct);
+  // No remaining locality, or one that does not start with a letter (a
+  // unit fragment or noise), is not a place — keep the line whole.
+  if (!locality || !/^[A-Za-z]/.test(locality)) return clampTail(splitStreetLineUnitParts(line));
   return clampTail(splitStreetLineUnitParts(line), locality);
 }
 

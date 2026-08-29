@@ -102,6 +102,19 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
   });
 
+  test('a trailing directional stays on the street and is never read as a city', () => {
+    expect(composeLeadAddress('100 Main St N', 'Apt 4')).toBe('100 Main St N, Apt 4');
+    expect(composeLeadAddress('100 Main St N', null)).toBe('100 Main St N');
+    expect(composeLeadAddress('100 Main St N Apt 4', 'Apt 4')).toBe('100 Main St N, Apt 4');
+    expect(composeLeadAddress('100 Main St N Sarasota FL 34236', 'Apt 4')).toBe('100 Main St N, Apt 4, Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St NW Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St NW, Apt 4, Sarasota FL 34236');
+    expect(leadAddressTailPlace('100 Main St N')).toBeNull();
+    expect(leadAddressCompareKey('100 Main St N')).not.toBe(leadAddressCompareKey('100 Main St'));
+    const locked = { address: '100 Main St N, Apt 4', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St N, Apt 4', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St N, Apt 4');
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St N', '#4'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St N, Apt 4');
+  });
+
   test('a runaway place tail never crowds the street out of the bound', () => {
     const out = composeLeadAddress(`100 Main St, ${'Somewhere '.repeat(40)}`, 'Apt 4');
     expect(out.length).toBeLessThanOrEqual(255);
