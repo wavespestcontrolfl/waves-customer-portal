@@ -1280,6 +1280,26 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
+  test('re-reads each child UNDER the locks: a child whose tech/day changed meanwhile is skipped, and the write CASes on the locked tech/window/duration', async () => {
+    const before = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+    // First select (pre-lock plan) → t1; second select (locked re-read) → the tech changed to t2.
+    let selects = 0;
+    const { conn, log } = fakeConn({ kids: [before] });
+    const origConn = conn;
+    const trxWrap = (table) => { const c = origConn(table); const sel = c.select; c.select = () => { selects += 1; return sel().then((rows) => (selects === 2 ? [{ ...before, technician_id: 't2' }] : rows)); }; return c; };
+    trxWrap.raw = origConn.raw; trxWrap.fn = origConn.fn; trxWrap.transaction = (cb) => cb(trxWrap);
+    const shifted = await shiftCallFollowUpsForParentMove({ conn: trxWrap, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(selects).toBe(2);
+    expect(shifted).toBe(0);
+    expect(log.update).toBeNull();
+
+    // Unchanged under the locks → written, with the locked values in the CAS.
+    const { conn: conn2, log: log2 } = fakeConn({ kids: [before] });
+    await shiftCallFollowUpsForParentMove({ conn: conn2, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(log2.wheres).toContainEqual({ technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
+    expect(log2.update).toMatchObject({ route_order: null });
+  });
+
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {
     const { conn, log } = fakeConn();
     // new Date(y, m, d) is local midnight — exactly how pg hydrates a `date`

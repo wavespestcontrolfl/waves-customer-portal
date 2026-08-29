@@ -932,7 +932,11 @@ describe('caller wiring (source)', () => {
     expect(sms).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(sms).toContain("sourceSurface: 'sms_reply',\n            notifyRequested: true,");
     expect(sms).not.toContain('notify: false');
-    expect(read('../index.js')).toContain("runExclusive('series-move-effects-reconcile'");
+    const index = read('../index.js');
+    expect(index).toContain("runExclusive('series-move-effects-reconcile'");
+    // Recovery runs independently of the GATE_CRON_JOBS master gate: its block is guarded on the test env only, never on isEnabled('cronJobs').
+    expect(index.slice(index.indexOf('// Collective series moves: finish the post-commit effects'), index.indexOf("runExclusive('series-move-effects-reconcile'"))).toContain("if (config.nodeEnv !== 'test') {");
+    expect(index.slice(index.indexOf('// Collective series moves: finish the post-commit effects'), index.indexOf("runExclusive('series-move-effects-reconcile'"))).not.toContain("isEnabled('cronJobs')");
   });
 
   test('an SMS reply pins the schedule it observed on the move (the series path tells a return move from a stale retry by it)', () => {

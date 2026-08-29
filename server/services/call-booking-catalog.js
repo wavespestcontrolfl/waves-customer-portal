@@ -658,14 +658,19 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       { techId: k.technician_id, date: k.day },
       { techId: k.technician_id, date: k.new_day },
     ]));
-    // Each write is keyed to the day OBSERVED before the lock (uncapped
-    // audit r28 P1): a reschedule that committed while we waited for the
-    // fence has already moved the child — shifting the NEWER date would
-    // double-move it into tech-days this transaction never locked. A day
-    // mismatch skips that child (best-effort contract: it stays where the
-    // newer writer put it).
+    // The pre-lock read only named the locks. Everything the probe and the
+    // write key on — day, tech, window, duration — is re-read UNDER the
+    // locks (hook r22 P1): a child whose tech or day changed meanwhile sits
+    // in tech-days this transaction never fenced and is skipped (best-effort
+    // contract: it stays where the newer writer put it); the probe uses the
+    // locked values, and the write CASes on every one of them so a
+    // concurrent window/tech edit between here and the UPDATE misses
+    // instead of moving an unprobed block.
+    const lockedById = new Map((await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate })).map((k) => [String(k.id), k]));
     let shifted = 0;
-    for (const k of kids) {
+    for (const planned of kids) {
+      const k = lockedById.get(String(planned.id));
+      if (!k || k.day !== planned.day || k.new_day !== planned.new_day || String(k.technician_id ?? '') !== String(planned.technician_id ?? '')) continue;
       // Canonical occupancy check on the destination block (a windowless
       // child occupies nothing and is not probed): a clash — or a block
       // that cannot be probed — means the child is NOT written onto that
@@ -690,6 +695,13 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
       shifted += await trx('scheduled_services')
         .where({ id: k.id })
         .where(filter)
+        // CAS on the locked read (knex object form renders null as IS NULL).
+        .where({
+          technician_id: k.technician_id ?? null,
+          window_start: k.window_start ?? null,
+          window_end: k.window_end ?? null,
+          estimated_duration_minutes: k.estimated_duration_minutes ?? null,
+        })
         .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ?", [k.day])
         .update({
           scheduled_date: trx.raw('scheduled_date + (?::date - ?::date)', [toStr, fromStr]),
