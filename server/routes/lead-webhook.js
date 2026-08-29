@@ -870,7 +870,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             intake,
             customer,
             body,
-            readiness: { ...estimateAutomationReadiness, serviceKey: leadServiceKey },
+            // The live catalog verdict rides with the key: a cadence edit or the
+            // termite rental gate can turn an instant product into quote-on-
+            // request after the map was written, and the draft must follow the
+            // catalog as it is NOW, not the static map (pre-push codex P1).
+            readiness: { ...estimateAutomationReadiness, serviceKey: leadServiceKey, serviceKeyInstant: keyedService ? keyedService.instant === true : null },
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');

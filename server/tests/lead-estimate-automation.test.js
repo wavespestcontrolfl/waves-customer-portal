@@ -440,20 +440,36 @@ describe('keyed leads (C2): the draft prices the canonical product, never a labe
     intake: { email: 'lead@example.com', serviceInterest, normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' } },
   });
   test('mosquito_seasonal drafts the seasonal9 tier (the label alone would have priced monthly)', () => {
-    const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal' };
+    const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal', serviceKeyInstant: true };
     const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation).toMatchObject({ status: 'generated', generated: true });
     expect(draft.estimateData.services).toEqual({ mosquito: { tier: 'seasonal9' } });
   });
   test('flea_tick drafts the single-visit knockdown, not the two-visit package', () => {
-    const readiness = { ...readinessFor('Flea Control Service'), serviceKey: 'flea_tick' };
+    const readiness = { ...readinessFor('Flea Control Service'), serviceKey: 'flea_tick', serviceKeyInstant: true };
     const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Flea Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.estimateData.services).toEqual({ flea: { offerKey: 'flea_knockdown_single' } });
     expect(draft.estimateData.engineResult.lineItems.map((l) => l.service)).toContain('flea_knockdown_single');
   });
   test('a selectable key with no instant request is quote-on-request — no automated draft', () => {
-    const readiness = { ...readinessFor('WDO Inspection Service'), serviceKey: 'wdo_inspection' };
+    const readiness = { ...readinessFor('WDO Inspection Service'), serviceKey: 'wdo_inspection', serviceKeyInstant: false };
     const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'WDO Inspection Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    expect(draft.automation.generated).toBe(false);
+    expect(draft.automation.unsupportedReason).toBe('quote_on_request');
+  });
+  test('an instant-mapped key whose LIVE catalog verdict is not instant is quote-on-request (cadence drift / termite rental gate off)', () => {
+    // termite_bait has a canonical request, but the rental gate or an admin
+    // cadence edit can turn the row off instant after the map was written;
+    // the draft must follow the catalog verdict, never the static map.
+    const readiness = { ...readinessFor('Termite Bait Station Service'), serviceKey: 'termite_bait', serviceKeyInstant: false };
+    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Termite Bait Station Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
+    expect(draft.automation.generated).toBe(false);
+    expect(draft.automation.unsupportedReason).toBe('quote_on_request');
+    expect(draft.estimateData.services).toBeUndefined();
+  });
+  test('a keyed lead with NO live verdict fails closed to quote-on-request', () => {
+    const readiness = { ...readinessFor('Seasonal Mosquito Control Service'), serviceKey: 'mosquito_seasonal' };
+    const draft = buildAutomatedLeadDraftEstimate({ readiness, intake: { serviceInterest: 'Seasonal Mosquito Control Service', fullAddress: '123 Main St, Venice, FL 34285' }, body: { homeSqFt: 2200, lotSqFt: 9000 } });
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.unsupportedReason).toBe('quote_on_request');
   });
