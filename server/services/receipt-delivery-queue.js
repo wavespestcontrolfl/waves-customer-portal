@@ -146,29 +146,10 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 }
 
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
-  // Send-window hold: not a delivery failure. Schedule the retry exactly at
-  // the window open and REFUND the claimed attempt — an after-8PM payment's
-  // receipt must go out at 8:00 AM, not burn the whole backoff ladder
-  // overnight and land permanently 'failed' before the window ever opens.
-  const holdAt = smsResult?.code === 'QUIET_HOURS_HOLD' && smsResult?.nextAllowedAt
-    ? new Date(smsResult.nextAllowedAt)
-    : null;
-  if (holdAt && !Number.isNaN(holdAt.getTime()) && holdAt.getTime() > Date.now()) {
-    await db('receipt_delivery_jobs')
-      .where({ id: job.id })
-      .update({
-        status: 'retry_scheduled',
-        sms_result: smsResult,
-        email_result: emailResult,
-        last_error: err?.message || 'receipt SMS held for send window',
-        attempts: db.raw('GREATEST(attempts - 1, 0)'),
-        next_attempt_at: holdAt,
-        locked_at: null,
-        locked_by: null,
-        updated_at: db.fn.now(),
-      });
-    return;
-  }
+  // No send-window branch: invoice_receipt_sms is a customer-action entry
+  // point (owner ruling 2026-08-29) — receipts send at any hour, so
+  // QUIET_HOURS_HOLD cannot surface here and every retry rides the
+  // generic backoff ladder.
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;

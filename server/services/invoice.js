@@ -3370,9 +3370,10 @@ const InvoiceService = {
       customerId: customer.id,
       invoiceId,
       entryPoint: "invoice_receipt_sms",
-      // Send-window operator marker: only the admin manual-resend routes
-      // set it (an operator chose to text THIS receipt now); the
-      // automated receipt paths stay fenced and ride the receipt queue.
+      // Operator marker from the admin manual-resend routes. Redundant for
+      // the send window since invoice_receipt_sms became a customer-action
+      // entry point (owner ruling 2026-08-29 — receipts send at any hour),
+      // but kept as send provenance in the audit log.
       ...(operatorInitiated ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: "receipt" },
       // Caller-declared (see the sendReceipt option doc above) — only flows
@@ -3417,11 +3418,6 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
-      // Send-window hold: carry the window-open time so the receipt queue
-      // schedules its retry there instead of burning generic backoff
-      // attempts overnight (an after-8PM payment's receipt must go out at
-      // 8:00 AM, not fail permanently ~75 minutes in).
-      if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
       throw err;
     }
     logger.info(`[invoice] Receipt SMS sent for ${invoice.invoice_number}`);

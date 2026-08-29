@@ -1534,29 +1534,10 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(r).toEqual({ settled: true, invoiceId: 'inv1' });
   });
 
-  it("channel 'both' with the SMS held for the send window: queue owns the text — the delivered email must NOT stamp receipt_sent_at", async () => {
-    // Stamping off tonight's email while the held SMS sits on the receipt
-    // queue makes the queue's unforced 8 AM sendReceipt read 'already-sent'
-    // and silently drop the text the customer asked for (codex r15 P2 on
-    // 0b64ab5). The queue's SMS leg stamps when it actually delivers.
-    stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
-    mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
-    mockSendReceipt.mockRejectedValueOnce(Object.assign(new Error('receipt SMS blocked: QUIET_HOURS_HOLD'), {
-      code: 'QUIET_HOURS_HOLD',
-      nextAllowedAt: '2026-08-08T12:00:00.000Z',
-    }));
-    const r = await settleNoShowFee(pi());
-    expect(r.settled).toBe(true);
-    expect(mockEnqueueReceiptDelivery).toHaveBeenCalledWith(expect.objectContaining({
-      invoiceId: 'inv1',
-      source: 'no_show_fee_window_hold',
-    }));
-    expect(mockDbUpdates).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ receipt_sent_at: 'NOW' }),
-    ]));
-  });
-
-  it("channel 'both' with a NON-hold SMS failure still stamps off the delivered email (no queue handoff)", async () => {
+  // The send-window hold → receipt-queue handoff test was removed with the
+  // 2026-08-29 owner ruling: invoice_receipt_sms is a customer-action entry
+  // point, so sendReceipt can no longer throw QUIET_HOURS_HOLD.
+  it("channel 'both' with an SMS failure still stamps off the delivered email (no queue handoff)", async () => {
     stubDb([null, { payment_receipt_channel: 'both', email_enabled: true }, { first_name: 'Sam' }]);
     mockSendReceiptEmail.mockResolvedValueOnce({ ok: true });
     mockSendReceipt.mockRejectedValueOnce(new Error('twilio down'));

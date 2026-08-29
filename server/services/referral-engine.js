@@ -150,11 +150,13 @@ async function sendSMS(to, body, options = {}) {
     });
     if (!result.sent) {
       // Send-window hold: reward/milestone legs fire from payment and
-      // first-service events at any hour, and invites can queue behind a
-      // night action — none of the callers have a retry, so a held text
-      // (e.g. "you earned $X") would be silently lost while the money
-      // moved. Persist it on the scheduled-SMS rail for 8:00 AM; report
-      // true — the obligation is durably owned.
+      // first-service events at any hour and stay fenced — none of the
+      // callers have a retry, so a held text (e.g. "you earned $X") would
+      // be silently lost while the money moved. Persist it on the
+      // scheduled-SMS rail for 8:00 AM; report true — the obligation is
+      // durably owned. (The invite leg never reaches this branch:
+      // referral_engine_invite is a customer-action entry point, exempt
+      // from the window since the 2026-08-29 owner ruling.)
       if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
         try {
           const TWILIO_NUMBERS = require('../config/twilio-numbers');

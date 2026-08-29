@@ -24,18 +24,17 @@
  *     (manual SMS, estimate sends, IB drafts) chose the moment on purpose;
  *     the owner works nights and the moratorium is for machine-initiated
  *     sends, not his own.
- *   - customer-action entry points (CUSTOMER_ACTION_ENTRY_POINTS) — the
- *     direct confirmation of an action the customer just took themselves
- *     (self-serve estimate extension, estimate/quote request, estimate
- *     acceptance, portal service request). Owner ruling 2026-08-29: a
- *     customer acting at night chose the moment, and their confirmation
- *     must not be held to 8 AM. This supersedes the 2026-08-07 fencing of
- *     the lead-webhook form auto-reply — that send is the immediate
- *     acknowledgment of the customer's own form fill, not a cold night
- *     text. Machine-COMPOSED or machine-TIMED outreach stays fenced even
- *     when a customer event sits upstream (the lead-response agent, crons,
- *     reminders, follow-ups, abandon recovery, autopay/webhook billing
- *     notices).
+ *   - customer-action entry points (CUSTOMER_ACTION_ENTRY_POINTS) — sends
+ *     that answer an action the customer just took themselves (self-serve
+ *     estimate extension, estimate/quote request, estimate acceptance,
+ *     portal service request, payment receipts and payment-lifecycle
+ *     notices, the lead-response agent's reply, referral invites). Owner
+ *     rulings 2026-08-29: a customer acting at night chose the moment, and
+ *     our communication back must not be held to 8 AM. This supersedes the
+ *     2026-08-07 fencing of the lead-webhook form auto-reply and the
+ *     lead-response agent. Purely schedule-driven outreach (crons,
+ *     reminders, follow-up sequences, recovery/retry lanes) stays fenced —
+ *     see the set's comment.
  *
  * Blocked results carry { retryable, deferred, nextAllowedAt } so callers
  * that already understand deferral (review requests, card-request nudges)
@@ -88,33 +87,39 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'intelligence_bar_email_sms_reply',
 ]);
 
-// Customer-action confirmations (owner ruling 2026-08-29): each of these
-// entry points fires synchronously from a customer's OWN action — a form
-// submit, a portal click, a tokened-page acceptance or payment — and the
-// send is the acknowledgment of that action, to that same person. The
-// customer chose the moment, so the confirmation goes out immediately, at
-// any hour. Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
-// customer-action surfaces must opt in here. Deliberately ABSENT:
-//   - lead_response_auto_reply — the lead-response agent COMPOSES outreach
-//     on its own schedule; a customer event sits upstream but the machine
-//     picks the words and the moment.
-//   - stripe_webhook / invoice_receipt_sms — those paths serve autopay and
-//     machine-initiated charges alongside customer clicks, and the entry
-//     point can't tell them apart (the deposit receipt, which is always a
-//     customer click on the tokened estimate page, IS exempt).
-//   - referral invites — they text a THIRD PARTY, not the acting customer.
-//   - every cron/reminder/follow-up/recovery entry point — machine-timed.
+// Customer-action sends (owner rulings 2026-08-29): each of these entry
+// points answers an action the customer took themselves — a form submit,
+// a portal click, a tokened-page acceptance or payment — and the send goes
+// out immediately, at any hour: the customer chose the moment. That
+// includes the responses that ride a customer action indirectly: the
+// lead-response agent's reply to a fresh estimate request, the Stripe
+// webhook's notices for a payment the customer initiated (ACH failure,
+// requires-action, setup-failure), payment receipts, and the invite a
+// customer sends a friend (owner-confirmed 2026-08-29: the friend gets it
+// immediately, not at 8 AM). Same fail-closed posture as
+// OPERATOR_ENTRY_POINTS: new customer-action surfaces must opt in here.
+// Deliberately ABSENT: every purely schedule-driven entry point — crons,
+// reminders, follow-up sequences, abandon recovery, autopay retries,
+// referral reward/milestone notices — where a machine, not a person,
+// picks the moment. Those are the night-blast incidents this window
+// exists to stop; unfencing them is a new owner ruling, not a PR nit.
 const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'customer_service_request',
   'estimate_accept_annual_prepay',
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
+  'invoice_receipt_sms',
+  'lead_response_auto_reply',
   'lead_webhook_auto_reply',
   'promotions_upsell_interest',
   'public_estimate_add_service_request',
   'public_estimate_extension_request',
   'public_quote_booking_sms',
+  'referral_engine_invite',
+  'referrals_legacy_invite',
+  'referrals_v2_invite',
+  'stripe_webhook',
 ]);
 
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {

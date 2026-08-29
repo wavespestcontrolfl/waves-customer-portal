@@ -152,42 +152,11 @@ router.post('/', async (req, res, next) => {
           referrer_customer_id: req.customerId,
         },
       });
-      // Send-window hold: the recipient is a cold third party, so the
-      // invite queues on the scheduled-SMS rail for 8:00 AM (same as the
-      // v2 route). The row still advances to 'contacted' — the queued
-      // send durably owns delivery — so the API's contacted response
-      // stays truthful.
-      let inviteScheduled = false;
-      if (!smsResult.sent
-        && smsResult.code === 'QUIET_HOURS_HOLD'
-        && smsResult.deferred
-        && smsResult.nextAllowedAt) {
-        try {
-          const TWILIO_NUMBERS = require('../config/twilio-numbers');
-          await db('sms_log').insert({
-            customer_id: null,
-            direction: 'outbound',
-            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-            to_phone: refereePhone.trim(),
-            message_body: body,
-            status: 'scheduled',
-            scheduled_for: new Date(smsResult.nextAllowedAt),
-            message_type: 'referral_invite',
-            metadata: JSON.stringify({
-              entry_point: 'referrals_legacy_invite_deferred',
-              referral_id: referral.id,
-              original_block_code: smsResult.code,
-              replay_purpose: 'referral',
-              consent_basis: { status: 'transactional_allowed', source: 'referral_invite_form' },
-            }),
-          });
-          inviteScheduled = true;
-          logger.info(`[referrals] Invite for referral ${referral.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-        } catch (queueErr) {
-          logger.error(`[referrals] Held invite requeue failed for referral ${referral.id}: ${queueErr.message}`);
-        }
-      }
-      if (!smsResult.sent && !inviteScheduled) {
+      // No quiet-hours requeue: referrals_legacy_invite is a
+      // customer-action entry point (owner ruling 2026-08-29, referral
+      // invites confirmed explicitly) — the invite sends immediately, at
+      // any hour, and QUIET_HOURS_HOLD cannot surface here.
+      if (!smsResult.sent) {
         throw new Error(smsResult.reason || smsResult.code || 'SMS send blocked/failed');
       }
 

@@ -35,14 +35,17 @@
  * (a throwing recheck is treated as retryable-ineligible; finalize
  * failures ride the durable retry rail; onTerminal failures only log).
  *
- * DRAIN-ONLY entries (owner ruling 2026-08-29): customer-action entry
+ * DRAIN-ONLY entries (owner rulings 2026-08-29): customer-action entry
  * points (see CUSTOMER_ACTION_ENTRY_POINTS in validators/send-window.js)
  * are now exempt from the send window, and their enqueue sites were
  * removed — estimate_extension_deferred, lead_webhook_auto_reply_deferred,
- * customer_service_request_deferred, estimate_accept_onetime_booking_deferred
- * and public_quote_booking_sms_deferred no longer gain new rows. Their
- * entries stay to replay rows queued before the ruling deployed; they can
- * be deleted once prod's scheduled backlog has drained.
+ * customer_service_request_deferred, estimate_accept_onetime_booking_deferred,
+ * public_quote_booking_sms_deferred, lead_response_auto_reply_deferred,
+ * stripe_webhook_billing_deferred, referrals_v2_invite_deferred,
+ * referrals_legacy_invite_deferred and referral_engine_invite_deferred no
+ * longer gain new rows. Their entries stay to replay rows queued before
+ * the ruling deployed; they can be deleted once prod's scheduled backlog
+ * has drained.
  */
 
 const db = require('../../models/db');
