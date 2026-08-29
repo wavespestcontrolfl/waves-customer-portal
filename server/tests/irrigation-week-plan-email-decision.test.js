@@ -180,10 +180,11 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
-    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \(await renewWeekPlanClaim\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\)\) === true/);
+    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{\s*claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
     expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
-    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
+    expect(sweep).toMatch(/if \(result\.aborted\) \{\s*if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
     // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
     expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);

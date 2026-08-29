@@ -170,25 +170,25 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     // read and its estimate insert. Shared fence — every price-bearing
     // turf writer takes it (contract-pinned).
     const { withTurfProfileFence } = require('../services/customer-pricing-ai');
-    const [saved] = await withTurfProfileFence(db, customerId, (trx) => trx('customer_turf_profiles')
-      .insert(insertRow)
-      .onConflict('customer_id')
-      .merge({ ...fields, updated_at: new Date() })
-      .returning('*'));
-
-    // A county saved here is the technician's statement about the CURRENT
-    // home: it confirms the turf county in the sprinkler-settings ledger, so
-    // the weekly watering plan may trust it for jurisdiction again after a
-    // move (the profile's row-wide updated_at proves nothing — codex #3565
-    // gh-r32). Fail-soft: the plan stays withheld (fail closed) until the
-    // next county save if this write fails; the profile itself is saved.
-    if (typeof fields.county === 'string' && fields.county.trim()) {
-      try {
-        await confirmIrrigationFields(db, customerId, [COUNTY_CONFIRMED_FIELD]);
-      } catch (confirmErr) {
-        logger.warn?.(`[turf-profile] county confirmation skipped for ${customerId}: ${confirmErr.message}`);
+    const [saved] = await withTurfProfileFence(db, customerId, async (trx) => {
+      const rows = await trx('customer_turf_profiles')
+        .insert(insertRow)
+        .onConflict('customer_id')
+        .merge({ ...fields, updated_at: new Date() })
+        .returning('*');
+      // A county saved here is the technician's statement about the CURRENT
+      // home: it confirms the turf county in the sprinkler-settings ledger,
+      // so the weekly watering plan may trust it for jurisdiction again
+      // after a move (the profile's row-wide updated_at proves nothing —
+      // codex #3565 gh-r32). SAME transaction as the profile write, under
+      // the customer row lock every address move also takes first: a move
+      // can never land between the two and be followed by a confirmation
+      // of the former home's county (hook P1 on 45beb0731).
+      if (typeof fields.county === 'string' && fields.county.trim()) {
+        await confirmIrrigationFields(trx, customerId, [COUNTY_CONFIRMED_FIELD]);
       }
-    }
+      return rows;
+    });
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
     res.json({ profile: saved });

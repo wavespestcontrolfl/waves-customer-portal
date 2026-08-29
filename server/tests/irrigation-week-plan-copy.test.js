@@ -411,6 +411,23 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(false);
     db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { throw new Error('db down'); } }));
     expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(null);
+    // Retry wrapper (hook P1 on 45beb0731): null retries with backoff; a decisive answer stops the retries.
+    const { renewWeekPlanClaimWithRetry } = require('../services/irrigation-week-plan');
+    const slept = [];
+    const sleep = async (ms) => { slept.push(ms); };
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(null);
+    expect(slept).toEqual([250, 750]);
+    let calls = 0;
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { calls += 1; if (calls === 1) throw new Error('blip'); return 1; } }));
+    slept.length = 0;
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(true);
+    expect(slept).toEqual([250]);
+    calls = 0;
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { calls += 1; return 0; } }));
+    slept.length = 0;
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(false); // LOST is decisive
+    expect(slept).toEqual([]);
+    expect(calls).toBe(1);
     // Prior week: a STAMPED row counts directly — events for the cadence, prescribed inches (events × depth) as last week's irrigation.
     const rig = (planRow, messages = []) => db.mockImplementation((table) => (table === 'email_messages'
       ? { where(w) { cap.msgWhere = w; return this; }, select: async () => messages }

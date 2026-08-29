@@ -66,12 +66,16 @@ function countyConfirmedAfterMove(row = {}) {
  * shape the portal autosave uses (codex gh-r26) — so a confirmation that
  * overlaps an address change can never write a pre-move set back over the
  * fan-out's reset. Upserts a minimal row when the customer has no
- * preferences yet (tech-only irrigation readings are common).
+ * preferences yet (tech-only irrigation readings are common). Given a
+ * transaction, joins it — a caller whose OWN write is the evidence (the
+ * turf-profile save) commits the two together, so a move that lands between
+ * them can never be followed by a confirmation of the former home's county
+ * (hook P1 on 45beb0731).
  */
 async function confirmIrrigationFields(conn, customerId, fields) {
   const list = (Array.isArray(fields) ? fields : []).filter((f) => typeof f === 'string' && f);
   if (!customerId || !list.length) return 0;
-  return conn.transaction(async (trx) => {
+  const run = async (trx) => {
     await trx.raw(
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['property-preferences', String(customerId)],
@@ -87,7 +91,8 @@ async function confirmIrrigationFields(conn, customerId, fields) {
       .onConflict('customer_id')
       .merge({ irrigation_confirmed_fields: union });
     return 1;
-  });
+  };
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
 module.exports = { IRRIGATION_SIZING_FIELDS, COUNTY_CONFIRMED_FIELD, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, confirmIrrigationFields, parseConfirmedFields: parseConfirmed };

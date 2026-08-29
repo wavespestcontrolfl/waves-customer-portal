@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaim, loadPriorWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan } = require('./irrigation-week-plan');
 
 // Mirrors IRRIGATION_SIZING_FIELDS in routes/property.js: the settings the
 // plan sizes controller instructions from. A field that is empty on the row
@@ -1161,6 +1161,10 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     }
     // Hoisted so the catch can discard a pre-send snapshot when the send throws.
     let snapshotArgs = null;
+    // The queue-transition renewal's verdict: true (renewed), false (claim
+    // LOST to another worker), null (unreadable after retries) — the abort
+    // below is counted by cause, never all as "claimed elsewhere".
+    let claimRenewal = null;
     try {
       if (!isEmailLike(customer.email)) {
         summary.skipped.missing_email += 1;
@@ -1374,11 +1378,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // drift apart across template resolution / suppression checks.
         // Ownership must be VERIFIED at the queue transition: only an
         // explicit `true` renewal dispatches — a lost claim (false) and an
-        // unreadable one (null) both abort inside the library (fail closed;
-        // a reclaimed snapshot must never be followed by this worker's
-        // older decision).
+        // unreadable one (null, after retries) both abort inside the
+        // library (fail closed; a reclaimed snapshot must never be
+        // followed by this worker's older decision).
         onQueued: snapshotArgs?.claimToken
-          ? async () => (await renewWeekPlanClaim({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken })) === true
+          ? async () => {
+            claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+            return claimRenewal === true;
+          }
           : null,
           });
           break;
@@ -1401,6 +1408,15 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // library aborted before dispatch — nothing to stamp, and the discard
       // is the new owner's to make (codex gh-r20).
       if (result.aborted) {
+        if (claimRenewal === null) {
+          // Unreadable renewal even after retries: NOT evidence of another
+          // owner. Fail closed on the send, but say so — this customer's
+          // plan week is an ops exception, not a resolved race (hook P1 on
+          // 45beb0731). The unsent snapshot stays claimable past its lease.
+          summary.plan.claim_error += 1;
+          logger.error(`[irrigation-weekly-email] claim renewal unreadable for ${customer.id}/${weekEnding} — plan email not sent this run`);
+          continue;
+        }
         summary.plan.claimed_elsewhere += 1;
         continue;
       }

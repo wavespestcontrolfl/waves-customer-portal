@@ -522,6 +522,23 @@ async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
   }
 }
 
+// The queue-transition renewal with an unreadable result retried: a
+// transient DB error must not read as "another worker owns the claim" —
+// the cron runs once a week, so that misread silently costs the customer
+// the week's email (hook P1 on 45beb0731). Backoff is short: the library's
+// in-flight lease is already running. Returns the last renewal result —
+// true / false are decisive on the first answer; null only after every
+// attempt failed to read.
+const RENEW_RETRY_DELAYS_MS = [250, 750];
+async function renewWeekPlanClaimWithRetry(args, { delaysMs = RENEW_RETRY_DELAYS_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let result = await renewWeekPlanClaim(args);
+  for (let i = 0; result === null && i < delaysMs.length; i += 1) {
+    await sleep(delaysMs[i]);
+    result = await renewWeekPlanClaim(args);
+  }
+  return result;
+}
+
 // The PRIOR week's delivered plan — what the customer was told to do last
 // week: `events` (null when the plan was forecast-conditional: it may have
 // been skipped as instructed) drives the cool-season cadence, and
@@ -836,6 +853,7 @@ module.exports = {
   renderWeekPlanAfterTreatment,
   visitInPlanWeek,
   renewWeekPlanClaim,
+  renewWeekPlanClaimWithRetry,
   loadPriorWeekPlan,
   PinnedWeekPlanUnavailable,
   persistWeekPlan,

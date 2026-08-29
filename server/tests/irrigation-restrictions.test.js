@@ -148,7 +148,9 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     const fs = require('fs');
     const path = require('path');
     const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customer-turf-profile.js'), 'utf8');
-    expect(route).toMatch(/if \(typeof fields\.county === 'string' && fields\.county\.trim\(\)\) \{\s*try \{\s*await confirmIrrigationFields\(db, customerId, \[COUNTY_CONFIRMED_FIELD\]\);/);
+    // Same transaction as the profile upsert (the turf fence's trx), never a second one after commit (hook P1 on 45beb0731).
+    expect(route).toMatch(/withTurfProfileFence\(db, customerId, async \(trx\) => \{[\s\S]*?\.returning\('\*'\);[\s\S]*?if \(typeof fields\.county === 'string' && fields\.county\.trim\(\)\) \{\s*await confirmIrrigationFields\(trx, customerId, \[COUNTY_CONFIRMED_FIELD\]\);\s*\}\s*return rows;\s*\}\);/);
+    expect(route).not.toMatch(/confirmIrrigationFields\(db,/);
     const assessment = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-lawn-assessment.js'), 'utf8');
     expect(assessment).not.toMatch(/confirmIrrigationFields|COUNTY_CONFIRMED_FIELD/);
   });

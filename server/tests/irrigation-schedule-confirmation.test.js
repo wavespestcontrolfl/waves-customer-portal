@@ -70,5 +70,10 @@ describe('countyConfirmedAfterMove (codex gh-r32)', () => {
     expect(calls.find((c) => c[0] === 'insert')[2]).toEqual({ customer_id: 'c2', irrigation_confirmed_fields: JSON.stringify(['turf_county']) });
     expect(calls.find((c) => c[0] === 'onConflict')[1]).toBe('customer_id');
     expect(await confirmIrrigationFields(conn, 'c3', [])).toBe(0);
+    // Given a transaction, JOINS it (no nested conn.transaction) — the caller's write and the confirmation commit together.
+    calls.length = 0;
+    const joined = Object.assign(builder, { isTransaction: true, raw: trx.raw, transaction: () => { throw new Error('must not open a second transaction'); } });
+    expect(await confirmIrrigationFields(joined, 'c4', ['turf_county'])).toBe(1);
+    expect(calls[0][1]).toMatch(/pg_advisory_xact_lock/);
   });
 });
