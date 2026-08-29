@@ -39,6 +39,9 @@ describe('planBindsToService', () => {
     expect(planBindsToService(snap, { address_line1: '100 Main St', address_line2: 'Unit 4', city: 'Bradenton', zip: '34205' })).toBe(true);
     expect(planBindsToService(snap, { address_line1: '100 Main St', address_line2: 'Unit 7', city: 'Bradenton', zip: '34205' })).toBe(false);
     expect(planBindsToService(snap, { address_line1: '9 Beach Rd', address_line2: null, city: 'Port Charlotte', zip: '33948' })).toBe(false);
+    // gh-r37: same street + same ZIP with a postal-city alias (Bradenton ↔ Lakewood Ranch) is the SAME home — the plan stays bound.
+    expect(planBindsToService(snap, { address_line1: '100 Main St', address_line2: 'Unit 4', city: 'Lakewood Ranch', zip: snap.decisionInputs.home.zip })).toBe(true);
+    expect(planBindsToService(snap, { address_line1: '100 Main Street Unit 4', address_line2: null, city: null, zip: null })).toBe(true); // suffix + inline unit + missing place ≠ contradiction
     expect(planBindsToService({ decisionInputs: {} }, { address_line1: '9 Beach Rd' })).toBe(true); // no home recorded → legacy snapshot, no binding
   });
 });

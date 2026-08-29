@@ -6,7 +6,9 @@
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
 const { buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
 
-const PLAN = { title: 'This week: check the rain before you water', detail: '…' };
+const PLAN = { title: 'This week: check the rain before you water', detail: '…', action: 'run', conditionalOnForecast: true };
+const RUN_PLAN = { title: 'This week: 25 minutes per turf zone', detail: '…', action: 'run', conditionalOnForecast: false };
+const HOLD_PLAN = { title: 'This week: skip your turf watering', detail: '…', action: 'hold', conditionalOnForecast: false };
 
 describe('insight cards defer to the plan', () => {
   const waterCard = (water, extra = {}) => buildLawnInsightCards({ categories: [], water, grassLabel: 'St. Augustine', ...extra }).find((c) => c.category === 'water');
@@ -28,8 +30,14 @@ describe('insight cards defer to the plan', () => {
 describe('root cause defers to the plan', () => {
   test('surplus and deficit name the plan; other stories unchanged', () => {
     expect(buildRootCause({ effectiveWaterStatus: 'deficit' })).toMatch(/a bit more even watering/);
-    expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: PLAN })).toMatch(/this week’s watering plan below sets the runs/);
-    expect(buildRootCause({ effectiveWaterStatus: 'surplus', weekPlan: PLAN })).toMatch(/this week’s watering plan below already eases back/);
+    // gh-r37: the sentence agrees with the card's ACTION — never "sets the runs" beside a hold, never "eases back" beside a run.
+    expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: RUN_PLAN })).toMatch(/this week’s watering plan below sets the runs/);
+    expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: HOLD_PLAN })).toMatch(/weighs that against the week’s rain, so follow it as written/);
+    expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: PLAN })).toMatch(/weighs that against the week’s rain/); // conditional ≠ a promise of runs
+    expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: { title: 'x' } })).toMatch(/weighs that against the week’s rain/); // legacy card without an action = neutral
+    expect(buildRootCause({ effectiveWaterStatus: 'surplus', weekPlan: HOLD_PLAN })).toMatch(/this week’s watering plan below already eases back/);
+    expect(buildRootCause({ effectiveWaterStatus: 'surplus', weekPlan: RUN_PLAN })).toMatch(/already accounts for it/);
+    expect(buildRootCause({ effectiveWaterStatus: 'surplus', weekPlan: RUN_PLAN })).not.toMatch(/eases back/);
     expect(buildRootCause({ effectiveWaterStatus: 'balanced', coverageWatch: true, weekPlan: PLAN })).toMatch(/uneven sprinkler coverage/);
   });
 });

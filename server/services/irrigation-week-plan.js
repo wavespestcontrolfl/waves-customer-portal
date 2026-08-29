@@ -25,7 +25,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
-const { stampedAddressDiverges, premiseStampConflicts } = require('./stamped-address');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
@@ -350,12 +349,16 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
  */
 function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
+  // Every card carries the plan's ACTION so downstream prose (the report's
+  // root cause) can agree with what the card below actually says — a
+  // "deficit" narrative must not promise runs beside a hold card (gh-r37).
+  const card = (o) => ({ ...o, action: plan.action, conditionalOnForecast: plan.conditionalOnForecast === true });
   const minutes = minutesPhrase(plan);
   if (plan.action === 'hold' && plan.reasons.includes('restriction_prohibits')) {
-    return {
+    return card({
       title: 'This week: no lawn watering',
       detail: 'Lawn irrigation isn\'t permitted in your area right now, so your lawn rides on rainfall until the rules change.',
-    };
+    });
   }
   if (plan.action === 'hold') {
     // Same override cycle the email names — one default-dose event, sized
@@ -364,15 +367,15 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
       ? `one cycle of ${plan.rateSource === 'measured' ? '' : 'about '}${plan.fallbackMinutesPerEvent} minutes per turf zone`
       : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
     if (plan.reasons.includes('cool_season_cadence')) {
-      return {
+      return card({
         title: 'This week: skip if you watered last week',
         detail: `In the cool season every 10–14 days is plenty. If you ran last week's watering, skip this week; if you didn't, run ${fallback} on ${permittedDayPhrase(plan, restriction)}.`,
-      };
+      });
     }
-    return {
+    return card({
       title: 'This week: skip your turf watering',
       detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on ${permittedDayPhrase(plan, restriction)}.`,
-    };
+    });
   }
   if (plan.conditionalOnForecast) {
     // Same cycle the email names: minutes when a rate exists, otherwise the
@@ -381,12 +384,12 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     const cycle = minutes
       ? `one cycle of ${minutes} per turf zone`
       : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
-    return {
+    return card({
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
         ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${multiDayPhrase(plan, restriction)}, run ${cycle} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
         : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan, restriction)}, run ${cycle} only if less than ½" has fallen so far this week.`,
-    };
+    });
   }
   // One soaking skips one run — on every unconditional run plan (the email
   // carries the same safeguard); the no-forecast case just says why.
@@ -394,10 +397,10 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
   const noForecastNote = rainLead + (plan.events > 1
     ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
     : 'if ½" or more of rain falls before your run, skip it.');
-  return {
+  return card({
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
     detail: `${plan.events > 1 ? `On ${multiDayPhrase(plan, restriction)}` : `On ${permittedDayPhrase(plan, restriction)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
-  };
+  });
 }
 
 /**
@@ -671,13 +674,16 @@ function failedIsAmbiguous(row, now = Date.now()) {
 function planBindsToService(snapshot, service) {
   const home = snapshot?.decisionInputs?.home || null;
   if (!home) return true;
-  const serviceStamp = { service_address_line1: service?.address_line1, service_address_line2: service?.address_line2, service_address_city: service?.city, service_address_zip: service?.zip };
-  const homeStamp = { service_address_line1: home.addressLine1, service_address_line2: home.addressLine2, service_address_city: home.city, service_address_zip: home.zip };
-  const diverges = stampedAddressDiverges({
-    service_address_line1: service?.address_line1, service_address_city: service?.city, service_address_zip: service?.zip,
-    customer_address_line1: home.addressLine1, customer_city: home.city, customer_zip: home.zip,
-  });
-  return !(diverges || premiseStampConflicts(serviceStamp, homeStamp));
+  // ONE home-identity rule, shared with the move guard and the merge:
+  // homesDiffer — street + unit + place, with ZIP authoritative over the
+  // postal city when both sides carry one (Bradenton / Lakewood Ranch alias
+  // 34211: a city-name correction at the same street + ZIP is the same home
+  // and keeps its plan — codex gh-r37). A service with no street of its own
+  // binds, as before (nothing to contradict the stamp).
+  const fanout = require('./customer-address-fanout');
+  const svc = { address_line1: service?.address_line1, address_line2: service?.address_line2, city: service?.city, zip: service?.zip };
+  if (!fanout.addressMatchKey(svc.address_line1)) return true;
+  return !fanout.homesDiffer(svc, { address_line1: home.addressLine1, address_line2: home.addressLine2, city: home.city, zip: home.zip });
 }
 
 async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {

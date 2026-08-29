@@ -891,6 +891,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         ['collections_case', custId],
       );
     }
+    // The property-preferences advisory lock for BOTH parties, before the FK
+    // sweep or the singleton pref merge touches either customer's
+    // property_preferences row (codex #3565 gh-r37): a portal irrigation
+    // autosave takes this advisory lock first and then updates the row —
+    // if the merge updated the row first and only took the lock later (the
+    // sprinkler-settings move stamp), the two waited on each other in a
+    // deadlock. Same sorted-id order as the case locks.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', custId],
+      );
+    }
     // Combined-session locks BEFORE any customer row locks, UNCONDITIONALLY
     // (codex #3427 r16/r18 P1): the payer-activation release helper later
     // waits on pay.combined.customer, and a payer-presence peek here is a

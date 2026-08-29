@@ -380,18 +380,24 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   // With a weekly plan on the card, the plan IS the watering fix — the root
   // cause names it instead of prescribing more/less water (codex gh-r27).
   const hasPlan = !!(weekPlan && weekPlan.title);
+  // The plan card's own action — the sentence must agree with the card
+  // rendered right below it: a run plan is never described as "easing back"
+  // and a hold plan never as "setting the runs" (codex gh-r37). Legacy
+  // snapshots without an action get the action-neutral defer copy.
+  const planHolds = hasPlan && weekPlan.action === 'hold';
+  const planRuns = hasPlan && weekPlan.action === 'run' && weekPlan.conditionalOnForecast !== true;
   // A vision-only overwatering flag must not override an active coverage
   // (dry-spots) story — the two are contradictory on the same page; only a
   // measured surplus may carry the "too much water" claim alongside it.
   if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
-    return hasPlan
-      ? 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.'
-      : 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    if (planHolds) return 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    if (hasPlan) return 'The main driver looks like too much water — this week’s watering plan below already accounts for it, and easing back should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
-    return hasPlan
-      ? 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.'
-      : 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
+    if (planRuns) return 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.';
+    if (hasPlan) return 'The lawn is simply running a little dry — this week’s watering plan below weighs that against the week’s rain, so follow it as written.';
+    return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
   }
   if (coverageWatch && mowShort) {
     return 'The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.';
