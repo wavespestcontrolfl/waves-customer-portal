@@ -2707,7 +2707,7 @@ function leadAddressCompareKey(v) {
 // as a unit conflict held for read-back (Adam ruling 2026-08-29).
 function canonicalizeInlineUnits(streetKey) {
   const {
-    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair, STREET_SUFFIX_ALIASES,
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
   } = require('../utils/address-normalizer');
   const tokens = String(streetKey || '').split(' ').filter(Boolean);
   // Same grammar as the shared peel: a designator counts only when the
@@ -2742,11 +2742,13 @@ function canonicalizeInlineUnits(streetKey) {
     }
     if (!run.length) { out.push(t); i += 1; continue; }
     // A unit boundary must be defensible: the run comes after the house
-    // number and at least one street-name token, and is not followed by a
-    // street-suffix word — "123 Lot 5 Road" is a street NAME, not a lot,
-    // and reading it as a unit made a real dedicated "Apt 2" a conflict
-    // that was dropped (pre-push audit P1 on f65b5046d).
-    if (i < 2 || Object.prototype.hasOwnProperty.call(STREET_SUFFIX_ALIASES, tokens[j] || '')) { out.push(t); i += 1; continue; }
+    // number and at least one street-name token — "123 Lot 5 Road" is a
+    // street NAME, not a lot, and reading it as a unit made a real
+    // dedicated "Apt 2" a conflict that was dropped (pre-push audit P1 on
+    // f65b5046d). Deliberately NOT "and not followed by a street-suffix
+    // word": cities begin with suffix words ("Apt 4 Lake Wales", "Apt 4 St
+    // Petersburg") and that rule silently persisted two doors (codex r11).
+    if (i < 2) { out.push(t); i += 1; continue; }
     const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
     unitKeys.push(key);
     runs.push({ start: i, end: j });
@@ -14825,8 +14827,14 @@ function analyzeLeadAddress(line1, line2) {
   const parts = splitLeadStreetParts(street);
   const embedded = clampUnit(parts.unit);
   if (!unit) {
+    // An overlong comma-free whole line with its door only inline gets the
+    // same protected split as the dedicated-unit branches — the inline unit
+    // and the place must survive the bound here too (codex r11 P1).
+    const protectedParts = !embedded && parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street, line2: embedded || null };
     return {
-      address: formatAddressBounded({ line1: parts.street, line2: embedded || null, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
       unitConflict: false,
     };
   }

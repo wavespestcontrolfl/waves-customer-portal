@@ -70,6 +70,10 @@ describe('composeLeadAddress', () => {
     expect(leadAddressCompareKey('123 Lot 5 Road Sarasota FL 34236')).not.toMatch(/\{u:/);
     expect(analyzeLeadAddress('123 Lot 5 Road Apt 4 Sarasota FL 34236', 'Apt 2')).toEqual({ address: '123 Lot 5 Road Apt 4 Sarasota FL 34236', unitConflict: true });
     expect(analyzeLeadAddress('123 Lot 5 Road Apt 4 Sarasota FL 34236', 'Apt 4').address).toBe('123 Lot 5 Road Apt 4 Sarasota FL 34236');
+    // A city that begins with a suffix word ("Lake Wales", "St Petersburg") does not un-unit the run before it.
+    expect(analyzeLeadAddress('100 Main St Apt 4 Lake Wales FL 33853', 'Apt 5')).toEqual({ address: '100 Main St Apt 4 Lake Wales FL 33853', unitConflict: true });
+    expect(analyzeLeadAddress('100 Main St Apt 4 Lake Wales FL 33853', 'Apt 4')).toEqual({ address: '100 Main St Apt 4 Lake Wales FL 33853', unitConflict: false });
+    expect(analyzeLeadAddress('100 Main St Apt 4 St Petersburg FL 33701', 'Apt 5').unitConflict).toBe(true);
     // A hash is always a unit — same as the shared parser / customer-properties. The rare hashed route
     // spelling ("State Road #64") is a unit conflict held for read-back; SWFL routes are written "State Road 64".
     expect(analyzeLeadAddress('123 Overseas Hwy #4', 'Apt 5')).toEqual({ address: '123 Overseas Hwy, #4', unitConflict: true });
@@ -342,6 +346,10 @@ describe('reaffirmedFilledLeadFields — address', () => {
       expect(address.startsWith('100 Verylongstreetname')).toBe(true);
       expect(address).not.toMatch(/Apt 5/);
     }
+    // No line2 at all: the door supplied only inline survives the bound the same way.
+    const { address: noLine2 } = analyzeLeadAddress(whole, '');
+    expect(noLine2.length).toBeLessThanOrEqual(255);
+    expect(noLine2).toMatch(/, Apt 4, Sarasota FL 34236$/);
     // A runaway locality after the inline unit is clamped like every other place tail — the street survives.
     const longTail = `${'Somewhereville '.repeat(20)}Sarasota FL 34236`;
     const { address: clamped, unitConflict: noConflict } = analyzeLeadAddress(`100 Main St Apt 4 ${longTail}`, 'Apt 4');
