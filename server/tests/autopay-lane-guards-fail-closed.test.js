@@ -99,9 +99,23 @@ describe('sendPreChargeReminders — lane filter is unconditional', () => {
     expect(mockCalls.whereRaw).toContain(MONTHLY_LANE_SQL);
     expect(r.sent).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    // The owner digest classifies against the lane AT SEND TIME (#3607).
+    // The owner digest classifies against the RESOLVED lane AT SEND TIME (#3607).
     expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual({ original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership' });
     expect(logAutopay).toHaveBeenCalledWith('cust-monthly', 'pre_charge_reminder_sent', expect.any(Object));
+  });
+});
+
+describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)', () => {
+  test('a legacy NULL-mode member with a real tier + rate stamps monthly_membership, not null', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-legacy', first_name: 'Legacy', phone: '+15550003333', monthly_rate: '44.00',
+      autopay_paused_until: null, waveguard_tier: 'Silver', billing_mode: null,
+    }];
+
+    await sendPreChargeReminders();
+
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.billing_mode_at_send).toBe('monthly_membership');
   });
 });
 

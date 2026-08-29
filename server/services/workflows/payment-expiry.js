@@ -306,7 +306,7 @@ class PaymentExpiry {
           entryPoint: 'payment_expiry_workflow',
           metadata: {
             original_message_type: 'payment_expiry',
-            billing_mode_at_send: customer.billing_mode ?? null,
+            billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
           },
         });

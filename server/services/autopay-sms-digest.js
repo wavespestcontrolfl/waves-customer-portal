@@ -26,6 +26,14 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { MONTHLY_LANE_SQL } = require('./billing-lane');
+
+// Live-join fallback for rows written before send sites stamped a lane —
+// resolved through the ONE lane classifier (codex r5), never the raw
+// column: a legacy NULL-mode member with a real tier + rate IS monthly.
+// Unqualified column names resolve to `cu` — messaging_audit_log has none
+// of billing_mode / waveguard_tier / monthly_rate.
+const LIVE_LANE_SQL = `(CASE WHEN cu.id IS NULL THEN NULL WHEN cu.billing_mode IS NOT NULL THEN cu.billing_mode WHEN ${MONTHLY_LANE_SQL} THEN 'monthly_membership' ELSE 'per_visit' END)`;
 
 const digestDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.AUTOPAY_SMS_DIGEST_DISABLED || '').toLowerCase());
@@ -71,7 +79,7 @@ async function loadSentAutopayTexts(since) {
     SELECT COUNT(*) OVER () AS total_count,
            -- Whole-window mismatch count (codex r1): a non-monthly recipient
            -- beyond the display page must still escalate the subject.
-           COUNT(*) FILTER (WHERE (CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE cu.billing_mode END) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
+           COUNT(*) FILTER (WHERE (CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE ${LIVE_LANE_SQL} END) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
            a.sent_at, a.entry_point, a.body_preview,
            a.metadata ->> 'original_message_type' AS message_type,
            a.customer_id,
@@ -79,10 +87,10 @@ async function loadSentAutopayTexts(since) {
            -- Lane AT SEND TIME (codex r2): every autopay send site stamps
            -- billing_mode_at_send into the audit metadata; the live join is
            -- only a fallback for rows written before the stamp existed.
-           -- Key PRESENCE decides (codex r3 P2): a stamped JSON null is a
-           -- real "lane was NULL at send" and must not fall through to the
-           -- customer's current lane.
-           CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE cu.billing_mode END AS billing_mode,
+           -- Key PRESENCE decides (codex r3 P2): a stamped value is the
+           -- RESOLVED lane at send (codex r5) and must not fall through to
+           -- the customer's current lane.
+           CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE ${LIVE_LANE_SQL} END AS billing_mode,
            CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN 'at_send' ELSE 'live' END AS lane_source,
            cu.waveguard_tier, cu.monthly_rate
     FROM messaging_audit_log a
@@ -115,7 +123,7 @@ function composeAutopaySmsDigest(rows) {
   const lines = sends.map((r) => {
     // FAIL CLOSED (codex r1): a send with no customer row has an UNKNOWN
     // lane — it cannot be vouched for as a monthly member, so it escalates.
-    const laneValue = r.customer_id || r.lane_source === 'at_send' ? (r.billing_mode || 'NULL (inferred)') : 'unknown (no customer row)';
+    const laneValue = r.customer_id || r.lane_source === 'at_send' ? (r.billing_mode || 'unresolved') : 'unknown (no customer row)';
     const lane = r.lane_source === 'live' && r.customer_id ? `${laneValue} (lane as of now)` : laneValue;
     const mismatch = r.billing_mode !== 'monthly_membership';
     return {

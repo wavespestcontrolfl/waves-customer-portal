@@ -30,7 +30,7 @@ const { buildPlanForService, isDateInWindow } = require('../services/waveguard-p
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
-const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
+const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected, resolveBillingLane } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
@@ -11884,7 +11884,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             identityTrustLevel: 'phone_matches_customer',
             // billing_mode_at_send: the owner autopay digest (#3607) classifies
             // the text against the lane that authorized it.
-            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: svc.cust_billing_mode ?? null },
+            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
           });
           paymentFailedNoticeSent = !!failResult.sent;
           // Send-window hold: the decline is deliberately independent of
@@ -11921,7 +11921,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   // Lane that authorized the decline notice — the replay
                   // forwards it so the owner autopay digest (#3607)
                   // classifies the morning send against it.
-                  billing_mode_at_send: svc.cust_billing_mode ?? null,
+                  billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode,
                   original_block_code: failResult.code,
                   replay_purpose: 'payment_failure',
                   refresh_customer_phone: true,

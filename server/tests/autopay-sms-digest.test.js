@@ -79,10 +79,10 @@ describe('composeAutopaySmsDigest', () => {
     expect(composed.html).toContain('NOT a monthly member');
   });
 
-  test('NULL billing_mode is shown as inferred and counts as a mismatch', () => {
+  test('an unresolved (null) lane counts as a mismatch — send sites stamp the RESOLVED lane, so null only means pre-stamp data', () => {
     const composed = composeAutopaySmsDigest([row({ billing_mode: null })]);
     expect(composed.mismatches).toBe(1);
-    expect(composed.text).toContain('lane NULL (inferred)');
+    expect(composed.text).toContain('lane unresolved');
   });
 
   test('a send with no customer row fails closed: unknown lane counts as a mismatch (codex r1)', () => {
@@ -113,11 +113,11 @@ describe('composeAutopaySmsDigest', () => {
     expect(live.mismatches).toBe(0);
     expect(live.text).toContain('lane monthly_membership (lane as of now)');
 
-    // A stamped NULL is a real send-time lane (codex r3): inferred, flagged,
-    // and never relabeled from the customer's current lane.
+    // A stamped null (codex r3) stays a send-time value: flagged, never
+    // relabeled from the customer's current lane.
     const stampedNull = composeAutopaySmsDigest([row({ lane_source: 'at_send', billing_mode: null })]);
     expect(stampedNull.mismatches).toBe(1);
-    expect(stampedNull.text).toContain('lane NULL (inferred)');
+    expect(stampedNull.text).toContain('lane unresolved');
     expect(stampedNull.text).not.toContain('(lane as of now)');
   });
 
