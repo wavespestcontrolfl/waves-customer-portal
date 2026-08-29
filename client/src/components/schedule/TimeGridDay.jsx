@@ -19,6 +19,7 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1145,7 +1146,7 @@ export default function TimeGridDay({
     });
   }, [allServices, technicians]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { svc, toTech, fromMin, toMin, newWindow } = pending;
     const fromTech = svc.technicianId || '__unassigned__';
@@ -1167,6 +1168,9 @@ export default function TimeGridDay({
           reasonText: 'Rescheduled via drag-and-drop on Day grid',
           notifyCustomer,
           scope: pending.technicianChange ? 'this_only' : (scope || 'this_only'),
+          // Collective-move ack (GATE_ADMIN_COLLECTIVE_MOVE): same-day drags never
+          // widen the move, but a refusal still carries the modal's ack back in.
+          ...(seriesAck === true ? { seriesAck: true, seriesAckIds } : {}),
         };
         if (fromTech !== toTech) body.technicianId = techForApi;
         await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
@@ -1188,7 +1192,10 @@ export default function TimeGridDay({
       setPending(null);
       onChange?.();
     } catch (err) {
-      alert('Reschedule failed: ' + err.message);
+      // A refused collective-move ack carries a refreshed preview — the modal
+      // re-renders it and stays open; nothing moved, nothing to revert.
+      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
+      alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
     } finally {

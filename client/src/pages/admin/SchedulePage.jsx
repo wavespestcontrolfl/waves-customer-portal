@@ -54,6 +54,14 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 import BestTimeHint from "../../components/schedule/BestTimeHint";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
+import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
+import {
+  SERIES_ACK_REQUIRED,
+  isCollectivePreview,
+  parseSeriesAckError,
+  seriesAckPayload,
+  useSeriesMovePreview,
+} from "../../components/schedule/seriesMove";
 import {
   describeCardRequestState,
   describeCardRequestResult,
@@ -410,6 +418,9 @@ function adminFetch(path, options = {}) {
       err.status = r.status;
       if (body?.code) err.code = body.code;
       if (body?.violations) err.violations = body.violations;
+      // Collective series moves: a refused ack hands back the refreshed
+      // preview the surface must re-render (GATE_ADMIN_COLLECTIVE_MOVE).
+      if (body?.preview) err.preview = body.preview;
       throw err;
     }
     return r.json();
@@ -1322,6 +1333,25 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
   const [notificationType, setNotificationType] = useState("none");
+  // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
+  // 2026-08-28): a DATE change on a recurring visit moves its later sister
+  // visits. The server's preview renders as one line under the date, and
+  // the save carries the ack bound to that previewed set; a refused ack
+  // (the plan changed since) swaps in the refreshed preview and the
+  // operator saves again. Gate off / one-time row / same date: nothing
+  // renders and nothing is sent.
+  const seriesPreview = useSeriesMovePreview({
+    serviceId: service.id,
+    fromDate: service.scheduledDate
+      ? String(service.scheduledDate).split("T")[0]
+      : "",
+    newDate: form.scheduledDate,
+    enabled: !!(service.isRecurring ?? service.is_recurring),
+  });
+  const [seriesStale, setSeriesStale] = useState("");
+  useEffect(() => {
+    setSeriesStale("");
+  }, [form.scheduledDate]);
   // Cancel-appointment confirm overlay.
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelScope, setCancelScope] = useState("this_only");
@@ -2047,6 +2077,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         body: JSON.stringify({
           ...form,
           notifyCustomer: notifyOnMove || undefined,
+          // Collective-move ack — bound to the previewed occurrence set the
+          // modal showed (empty when this save is not a collective move).
+          ...seriesAckPayload(seriesPreview.preview),
           ...(sendAddons
             ? {
                 addons: addonsPayload,
@@ -2305,7 +2338,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
       onSaved?.();
     } catch (e) {
-      alert("Save failed: " + e.message);
+      const ack = parseSeriesAckError(e);
+      if (ack?.code === SERIES_ACK_REQUIRED) {
+        // Nothing saved, nothing moved — the server refused up front. Show
+        // the refreshed recurring-plan line; the operator saves again.
+        seriesPreview.replace(ack.preview);
+        setSeriesStale(ack.message || "The recurring plan changed — confirm again.");
+        alert(ack.message || "This save moves a recurring visit and its later visits — review the recurring-plan line and save again.");
+      } else {
+        alert("Save failed: " + e.message);
+      }
     }
     setSaving(false);
   };
@@ -3667,6 +3709,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              <SeriesMoveNotice
+                tone="inline"
+                preview={seriesPreview.preview}
+                loading={seriesPreview.loading}
+                stale={seriesStale}
+                style={{ marginTop: -2, marginBottom: 14 }}
+              />{" "}
               <SlotConflictNotice
                 conflicts={slotConflicts}
                 style={{ marginTop: -2, marginBottom: 14 }}
@@ -6103,6 +6152,67 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
   });
 
+  // One POST path for the suggested and custom pickers. A 409
+  // COLLECTIVE_MOVE_ACK_REQUIRED (GATE_ADMIN_COLLECTIVE_MOVE: this recurring
+  // visit's later visits move with it) is not a failure — the server hands
+  // back the previewed set; the modal shows that line, asks once more, and
+  // re-submits with the ack bound to it. A refusal without a preview (or
+  // any other error) reports as before. Gate off: unchanged.
+  const [seriesConfirm, setSeriesConfirm] = useState(null);
+  const submitReschedule = async (body) => {
+    setSending(true);
+    try {
+      const result = await adminFetch(
+        `/admin/dispatch/${service.id}/reschedule`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+      if (body.notifyCustomer && result?.notificationSent === false) {
+        alert(
+          `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
+        );
+      }
+      // Advisory schedule-overlap notes — the move committed (conflicts no
+      // longer block staff saves); say what now stacks before closing.
+      if (Array.isArray(result?.warnings) && result.warnings.length) {
+        alert(`Moved.\n\n${result.warnings.join("\n\n")}`);
+      }
+      setSeriesConfirm(null);
+      onRescheduled?.();
+      onClose();
+    } catch (e) {
+      const ack = parseSeriesAckError(e);
+      if (ack?.code === SERIES_ACK_REQUIRED && isCollectivePreview(ack.preview)) {
+        const { seriesAck, seriesAckIds: _seriesAckIds, ...bare } = body;
+        setSeriesConfirm({
+          body: bare,
+          preview: ack.preview,
+          // A second refusal means the set changed under an ack we sent.
+          stale: seriesAck === true ? (ack.message || "changed") : "",
+        });
+      } else {
+        console.error(e);
+        alert(
+          `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+        );
+      }
+    }
+    setSending(false);
+  };
+  const confirmSeriesMove = () => {
+    if (!seriesConfirm) return;
+    submitReschedule({
+      ...seriesConfirm.body,
+      ...seriesAckPayload(seriesConfirm.preview),
+    });
+  };
+  const seriesConfirmDate = (() => {
+    const m = String(seriesConfirm?.body?.newDate || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return "";
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString("en-US", {
+      weekday: "short", month: "short", day: "numeric",
+    });
+  })();
+
   const handleReschedule = async (opt) => {
     // Suggested starts are morning slots, but stay consistent with the
     // manual path: never submit a midnight-truncated block.
@@ -6120,45 +6230,18 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       alert("The appointment is already scheduled at that date and time.");
       return;
     }
-    setSending(true);
-    try {
-      const result = await adminFetch(
-        `/admin/dispatch/${service.id}/reschedule`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            newDate: opt.date,
-            // Re-derive the block from the visit's own duration — the
-            // suggested window's 2-3h span is arrival copy, not occupancy.
-            newWindow: suggestedBlock,
-            // Server re-derives window_end from the CURRENT row, so a stale
-            // board snapshot can't shrink or expand the visit's block.
-            deriveWindowFromCurrentVisit: true,
-            reasonCode: reason,
-            reasonText: notes,
-            notifyCustomer,
-          }),
-        },
-      );
-      if (notifyCustomer && result?.notificationSent === false) {
-        alert(
-          `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
-        );
-      }
-      // Advisory schedule-overlap notes — the move committed (conflicts no
-      // longer block staff saves); say what now stacks before closing.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Moved.\n\n${result.warnings.join("\n\n")}`);
-      }
-      onRescheduled?.();
-      onClose();
-    } catch (e) {
-      console.error(e);
-      alert(
-        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
-      );
-    }
-    setSending(false);
+    await submitReschedule({
+      newDate: opt.date,
+      // Re-derive the block from the visit's own duration — the
+      // suggested window's 2-3h span is arrival copy, not occupancy.
+      newWindow: suggestedBlock,
+      // Server re-derives window_end from the CURRENT row, so a stale
+      // board snapshot can't shrink or expand the visit's block.
+      deriveWindowFromCurrentVisit: true,
+      reasonCode: reason,
+      reasonText: notes,
+      notifyCustomer,
+    });
   };
 
   const handleManualReschedule = async () => {
@@ -6177,42 +6260,16 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       );
       return;
     }
-    setSending(true);
-    try {
-      const result = await adminFetch(
-        `/admin/dispatch/${service.id}/reschedule`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            newDate: manualDate,
-            newWindow: window,
-            // Server re-derives window_end from the CURRENT row, so a stale
-            // board snapshot can't shrink or expand the visit's block.
-            deriveWindowFromCurrentVisit: true,
-            reasonCode: reason,
-            reasonText: notes,
-            notifyCustomer,
-          }),
-        },
-      );
-      if (notifyCustomer && result?.notificationSent === false) {
-        alert(
-          `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
-        );
-      }
-      // Advisory schedule-overlap notes — same as the suggested path above.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Moved.\n\n${result.warnings.join("\n\n")}`);
-      }
-      onRescheduled?.();
-      onClose();
-    } catch (e) {
-      console.error(e);
-      alert(
-        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
-      );
-    }
-    setSending(false);
+    await submitReschedule({
+      newDate: manualDate,
+      newWindow: window,
+      // Server re-derives window_end from the CURRENT row, so a stale
+      // board snapshot can't shrink or expand the visit's block.
+      deriveWindowFromCurrentVisit: true,
+      reasonCode: reason,
+      reasonText: notes,
+      notifyCustomer,
+    });
   };
 
   function formatTimeDisplay(t) {
@@ -6368,6 +6425,62 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             will follow the new appointment time.
           </div>{" "}
         </div>{" "}
+        {seriesConfirm && (
+          <div
+            data-testid="series-move-confirm"
+            style={{
+              marginBottom: 14,
+              padding: 12,
+              borderRadius: 10,
+              border: `1px solid ${D.border}`,
+              background: D.bg,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 8 }}>
+              Move to {seriesConfirmDate || seriesConfirm.body.newDate}?
+            </div>
+            <SeriesMoveNotice
+              tone="inline"
+              preview={seriesConfirm.preview}
+              stale={seriesConfirm.stale}
+              style={{ background: D.card }}
+            />
+            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+              <button
+                onClick={confirmSeriesMove}
+                disabled={sending}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 10,
+                  border: "none",
+                  cursor: "pointer",
+                  background: D.teal,
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  opacity: sending ? 0.6 : 1,
+                }}
+              >
+                {sending ? "Moving…" : "Move visit + later visits"}
+              </button>
+              <button
+                onClick={() => setSeriesConfirm(null)}
+                disabled={sending}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 10,
+                  border: `1px solid ${D.border}`,
+                  background: "transparent",
+                  color: D.muted,
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                Back
+              </button>
+            </div>
+          </div>
+        )}
         <div
           style={{
             fontSize: 13,

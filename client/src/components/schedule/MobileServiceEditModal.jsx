@@ -9,6 +9,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
+import { apiErrorMessage } from './seriesMove';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -123,7 +124,9 @@ export default function MobileServiceEditModal({
       }
       onSaved?.();
     } catch (e) {
-      setError(e.message || 'Failed to save');
+      // The inline helper throws the raw JSON body as the message — show the
+      // server's own sentence (a refused collective move names what it needs).
+      setError(apiErrorMessage(e, 'Failed to save'));
       setSaving(false);
     }
   }

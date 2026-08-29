@@ -5,8 +5,17 @@
 //
 // The parent grid is responsible for optimistic UI (moving the block
 // visually) — this modal only confirms and commits via onConfirm
-// (called with { notificationType, scope }), or tells the parent to
-// revert via onCancel.
+// (called with { notificationType, scope, seriesAck?, seriesAckIds? }), or
+// tells the parent to revert via onCancel.
+//
+// Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE, owner ruling
+// 2026-08-28): with the gate on, a date move of a recurring visit shifts its
+// future sister visits — there is no this/series chooser. The modal renders
+// ONE line from the server's series-move preview and submits the ack bound
+// to that previewed set. onConfirm must REJECT with the server's 409
+// `COLLECTIVE_MOVE_ACK_REQUIRED` (the plan changed since the preview, or no
+// preview was shown) so the modal can re-render the refreshed line and stay
+// open — every other failure stays the grid's to report and revert.
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Button } from '../ui';
@@ -14,6 +23,14 @@ import { useSlotConflicts } from './useSlotConflicts';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useBestTimes } from './useBestTimes';
 import BestTimeHint from './BestTimeHint';
+import SeriesMoveNotice from './SeriesMoveNotice';
+import {
+  SERIES_ACK_REQUIRED,
+  isCollectivePreview,
+  parseSeriesAckError,
+  seriesAckPayload,
+  useSeriesMovePreview,
+} from './seriesMove';
 
 function formatDateLong(dateStr) {
   if (!dateStr) return '';
@@ -52,6 +69,23 @@ export default function RescheduleConfirmModal({
 }) {
   const [notificationType, setNotificationType] = useState('none');
   const [busy, setBusy] = useState(false);
+  // Server message from a refused ack — the previewed set changed under
+  // the operator; the refreshed preview replaces the line.
+  const [staleAck, setStaleAck] = useState('');
+
+  // Collective-move disclosure: the server's preview of what a date move of
+  // this recurring visit touches. Same-day drags (Day grid) never fetch —
+  // the choke point only widens DATE moves.
+  const seriesPreview = useSeriesMovePreview({
+    serviceId,
+    fromDate,
+    newDate: toDate,
+    enabled: open && !!isRecurring,
+  });
+  const collective = isCollectivePreview(seriesPreview.preview);
+  // Hold the confirm while the plan is still being read — submitting ahead
+  // of the preview would only bounce off the server's ack check.
+  const awaitingPreview = !!isRecurring && seriesPreview.loading && !seriesPreview.preview;
 
   // Advisory overlap check on the fixed drag-drop target — warn-only, the
   // confirm buttons never key off it. On a series reschedule the check only
@@ -87,7 +121,10 @@ export default function RescheduleConfirmModal({
   // an accidental customer SMS one click away. Reset to the no-SMS default
   // each time it opens.
   useEffect(() => {
-    if (open) setNotificationType('none');
+    if (open) {
+      setNotificationType('none');
+      setStaleAck('');
+    }
   }, [open]);
 
   if (!open) return null;
@@ -95,7 +132,23 @@ export default function RescheduleConfirmModal({
   const submit = async (scope) => {
     setBusy(true);
     try {
-      await onConfirm({ notificationType, scope });
+      await onConfirm({
+        notificationType,
+        scope,
+        // The ack is bound to the previewed occurrence set; an explicit
+        // "Reschedule series" needs none (scope 'series' is its own path).
+        ...(scope === 'series' ? {} : seriesAckPayload(seriesPreview.preview)),
+      });
+    } catch (err) {
+      const ack = parseSeriesAckError(err);
+      if (ack?.code === SERIES_ACK_REQUIRED) {
+        // Refreshed preview from the refusal — re-render, confirm again.
+        seriesPreview.replace(ack.preview);
+        setStaleAck(ack.message || 'The recurring plan changed — confirm again.');
+        return;
+      }
+      // Anything else is the grid's to report (it already alerted and
+      // reverted before rejecting) — never leave it unhandled here.
     } finally {
       setBusy(false);
     }
@@ -185,6 +238,17 @@ export default function RescheduleConfirmModal({
             </div>
           </div>
 
+          <SeriesMoveNotice
+            preview={seriesPreview.preview}
+            loading={awaitingPreview}
+            stale={staleAck}
+          />
+          {staleAck && !collective && (
+            <p role="alert" className="text-12 text-ink-primary">
+              {staleAck}
+            </p>
+          )}
+
           <SlotConflictNotice conflicts={conflicts} />
           <BestTimeHint bestTimes={bestTimes} currentStart={toStart} />
         </div>
@@ -200,11 +264,14 @@ export default function RescheduleConfirmModal({
           <Button
             variant="primary"
             onClick={() => submit('this_only')}
-            disabled={busy}
+            disabled={busy || awaitingPreview}
           >
-            {busy ? 'Saving…' : 'Reschedule appointment'}
+            {busy ? 'Saving…' : (collective ? 'Move visit + later visits' : 'Reschedule appointment')}
           </Button>
-          {isRecurring && (
+          {/* With collective moves on the server decides the scope — no
+              this/series chooser; the explicit series button stays for the
+              gate-off world and for a refusal that carried no preview. */}
+          {isRecurring && !collective && (
             <Button
               variant="secondary"
               onClick={() => submit('series')}

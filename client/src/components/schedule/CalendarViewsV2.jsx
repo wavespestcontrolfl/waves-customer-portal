@@ -29,6 +29,7 @@ import {
   pointerWithin,
 } from '@dnd-kit/core';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { etDateString } from '../../lib/timezone';
 
 function formatDayLabel(isoDate) {
@@ -485,7 +486,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
     });
   }, [data, optimistic]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
@@ -500,6 +501,9 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
           reasonText: 'Rescheduled via drag-and-drop on month grid',
           notifyCustomer,
           scope: scope || 'this_only',
+          // Collective-move ack (GATE_ADMIN_COLLECTIVE_MOVE): the modal showed the
+          // previewed set; the server binds this move to it.
+          ...(seriesAck === true ? { seriesAck: true, seriesAckIds } : {}),
         }),
       });
       if (notifyCustomer && result?.notificationSent === false) {
@@ -513,7 +517,10 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 
       await reload();
       setPending(null);
     } catch (err) {
-      alert('Reschedule failed: ' + err.message);
+      // A refused collective-move ack carries a refreshed preview — the modal
+      // re-renders it and stays open; nothing moved, nothing to revert.
+      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
+      alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
     } finally {
