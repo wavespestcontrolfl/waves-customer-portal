@@ -1749,7 +1749,12 @@ async function resolveEstimateWritePayload({
       try {
         priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
       } catch (err) {
-        logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+        // A linked customer's qualifying families decide the tier AND the
+        // rodent setup waiver — reading a failed lookup as "no other
+        // qualifier" would persist a lower tier and an unwarranted $99 setup
+        // row for an existing member (codex #3591 r31 P1). Refuse retryably.
+        logger.warn(`[admin-estimate] prior qualifying services lookup failed — refusing save: ${err.message}`);
+        throw errorWithStatus('Could not confirm this customer\'s existing services. Retry the save.', 503);
       }
     } else if (perPropertyStreetScope) {
       // Grouped / non-primary property: qualifying services ALREADY ACTIVE at
@@ -1761,7 +1766,8 @@ async function resolveEstimateWritePayload({
           streetScope: perPropertyStreetScope,
         });
       } catch (err) {
-        logger.warn(`[admin-estimate] property-scoped qualifying services lookup skipped: ${err.message}`);
+        logger.warn(`[admin-estimate] property-scoped qualifying services lookup failed — refusing save: ${err.message}`);
+        throw errorWithStatus('Could not confirm this customer\'s existing services. Retry the save.', 503);
       }
     }
     try {

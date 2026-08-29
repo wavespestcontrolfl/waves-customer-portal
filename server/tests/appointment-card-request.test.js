@@ -280,6 +280,28 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     }
   });
 
+  test('EXISTING customer (ask gated) + saved card + owed setup → coverage auto-secured WITHOUT the fee, fee forgone + logged, no link (codex #3591 r31 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const logger = require('../services/logger');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.action).toBe('auto_secured');
+      expect(mockEnrollConsentedMethod).toHaveBeenCalledTimes(1);
+      // The resolver ran once (the deferral), NOT again on the forgo pass.
+      expect(spy).toHaveBeenCalledTimes(1);
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('FORGONE'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('no obligation (0) → saved-card auto-secure proceeds, no scheduled_services stamp', async () => {
     const plans = require('../services/secure-appointment-plans');
     const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);

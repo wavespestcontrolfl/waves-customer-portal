@@ -291,7 +291,7 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
 // A refused/failed enrollment returns a retryable skip so the next
 // trigger re-attempts; enrollment is idempotent, so a concurrent double
 // run resolves as already_enrolled.
-async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
+async function autoSecureFromSavedMethod({ visit, savedMethod, trigger, forgoDirectRodentSetup = false }) {
   // ONE transaction, visit row locked first (Codex #3361 r26 P1,
   // superseding the r9 read-only re-check): the live-status check, the
   // enrollment (a savepoint via enrollConsentedMethod's dbh param), and
@@ -348,9 +348,14 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       // (accepted_setup_fee) and the per-application choice stamps exactly
       // the disclosed figure. Resolved BEFORE the enrollment savepoint so a
       // skip writes nothing; a resolver failure throws → skip (fail closed).
-      const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
-      const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
-      if (directRodentSetup > 0) return skip('rodent_setup_undisclosed', { setupFee: directRodentSetup });
+      // forgoDirectRodentSetup: the caller already resolved the obligation,
+      // decided (existing customer, ask gated) to secure coverage without it,
+      // and logged the forgone fee — never a silent default.
+      if (!forgoDirectRodentSetup) {
+        const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+        const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
+        if (directRodentSetup > 0) return skip('rodent_setup_undisclosed', { setupFee: directRodentSetup });
+      }
       const { enrollConsentedMethod } = require('./autopay-enrollment');
       const enrollment = await enrollConsentedMethod({
         customerId: visit.customer_id,
@@ -505,12 +510,37 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       logger.error(`[appt-card-request] card-hold lane check failed for visit ${visit.id} — request fails closed: ${err.message}`);
       return skip('hold_lookup_failed');
     }
+    // Owner rule 2026-07-30: the card ASK is for FIRST-TIME customers only —
+    // an existing customer with completed history has an established payment
+    // relationship and "add a card to finish booking" reads wrong. Probed
+    // once here because BOTH the saved-card fall-through below and the ask
+    // gate further down key on it. Lookup failure fails toward asking (same
+    // posture as the saved-method check).
+    let existingCustomer = false;
+    try {
+      const priorCompleted = await db('scheduled_services')
+        .where({ customer_id: visit.customer_id, status: 'completed' })
+        .whereNot({ id: visit.id })
+        .first('id');
+      existingCustomer = !!priorCompleted;
+    } catch (err) {
+      logger.warn(`[appt-card-request] prior-service check failed — proceeding to request: ${err.message}`);
+    }
     if (savedMethod) {
       const secured = await autoSecureFromSavedMethod({ visit, savedMethod, trigger });
-      // An undisclosed rodent setup is the ONE skip that falls through to the
-      // ask below: the /secure plan page is where the fee gets disclosed and
-      // accepted. Every other skip stays terminal exactly as before.
+      // An undisclosed rodent setup is the ONE skip that does not end here.
+      // First-time customer: fall through to the ask — the /secure plan page
+      // discloses and freezes the fee. Existing customer (ask gated by the
+      // owner rule above; codex #3591 r31 P1): the visit must not lose its
+      // card coverage, so auto-secure runs WITHOUT the fee — the setup is
+      // never billed undisclosed (owner ruling pending on whether the
+      // disclosure link should reach existing customers; until then the
+      // $99 is forgone and logged, never charged silently).
       if (secured.reason !== 'rodent_setup_undisclosed') return secured;
+      if (existingCustomer) {
+        logger.warn(`[appt-card-request] direct rodent setup ($${secured.setupFee}) FORGONE for visit ${visit.id}: existing customer, ask gated (owner rule 2026-07-30) — auto-securing coverage without the fee`);
+        return autoSecureFromSavedMethod({ visit, savedMethod, trigger, forgoDirectRodentSetup: true });
+      }
       logger.info(`[appt-card-request] saved-card auto-secure deferred for visit ${visit.id} — direct rodent setup ($${secured.setupFee}) needs the plan-page disclosure`);
     }
 
@@ -522,21 +552,9 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // remain the ask's delivery surfaces.
     if (delivery === 'none') return skip('delivery_suppressed');
 
-    // Owner rule 2026-07-30: the card ask is for FIRST-TIME customers only.
-    // An existing customer with completed service history has an established
-    // payment relationship — "add a card to finish booking" reads wrong and
-    // was never the intent. (Saved-card auto-secure above still applies to
-    // them; only the ASK is gated.) Lookup failure fails toward asking —
-    // same posture as the saved-method check.
-    try {
-      const priorCompleted = await db('scheduled_services')
-        .where({ customer_id: visit.customer_id, status: 'completed' })
-        .whereNot({ id: visit.id })
-        .first('id');
-      if (priorCompleted) return skip('existing_customer');
-    } catch (err) {
-      logger.warn(`[appt-card-request] prior-service check failed — proceeding to request: ${err.message}`);
-    }
+    // Owner rule 2026-07-30 (probed above): only the ASK is gated for
+    // existing customers; saved-card auto-secure already ran.
+    if (existingCustomer) return skip('existing_customer');
 
     // 3. Existing pending/complete capture for this appointment. An inline
     // caller re-running (page refresh, booking retry) gets the SAME pending

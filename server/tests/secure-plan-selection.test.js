@@ -176,6 +176,37 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
   });
 
+  test('a disclosure lowered by a concurrent render between the snapshot and the transaction is consumed under the request-row LOCK on both plans (codex #3591 r31 P1)', async () => {
+    // First read (unlocked snapshot) sees $99; the FOR UPDATE re-read inside
+    // the transaction sees the other tab's lowered $79.
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...pendingRequest, accepted_setup_fee: reads++ === 0 ? '99.00' : '79.00' }),
+    };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    const lockRead = mockDbCalls.find((c) => c.table === 'appointment_card_requests' && c.calls.some(([op]) => op === 'forUpdate'));
+    expect(lockRead).toBeTruthy();
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: 79 });
+
+    reads = 0;
+    mockDbCalls = [];
+    mockInvoiceCreate.mockClear();
+    mockCreateTerm.mockClear();
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    const createArgs = mockInvoiceCreate.mock.calls[0][0];
+    expect(createArgs.lineItems[1]).toEqual(expect.objectContaining({ unit_price: 79 }));
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+  });
+
+  test('a disclosure cleared to NULL under the lock bills no setup', async () => {
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests = {
+      first: () => ({ ...pendingRequest, accepted_setup_fee: reads++ === 0 ? '99.00' : null }),
+    };
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+  });
+
   test('a lowered stamp is consumed at the stamped figure, never the live constant', async () => {
     mockTableHandlers.appointment_card_requests = { first: () => ({ ...pendingRequest, accepted_setup_fee: '79.00' }) };
     await selectSecurePlan({ token: 'tok', plan: 'per_application' });

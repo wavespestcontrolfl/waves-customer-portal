@@ -357,6 +357,23 @@ function fail(code) {
   return err;
 }
 
+// The setup a SELECTION may bill, read under the request-row lock (codex
+// #3591 r31 P1): the context was derived from an unlocked snapshot, and a
+// concurrent render in another tab can lower accepted_setup_fee (fee cut, or
+// a waiver the customer just earned) between that read and the stamp/mint.
+// Only an UNWAIVED setup (waivedWithPrepay === false — the one figure the
+// render stamp tracks) is clamped; NULL under the lock = never disclosed = 0.
+async function lockedDisclosedSetupAmount(trx, request, setupFee) {
+  if (!setupFee || setupFee.waivedWithPrepay !== false || !(Number(setupFee.amount) > 0)) return null;
+  const row = await trx('appointment_card_requests')
+    .where({ id: request.id })
+    .forUpdate()
+    .first('accepted_setup_fee');
+  const frozen = row && row.accepted_setup_fee != null ? Number(row.accepted_setup_fee) : NaN;
+  if (!Number.isFinite(frozen) || frozen < 0) return 0;
+  return cents(Math.min(Number(setupFee.amount), frozen));
+}
+
 /**
  * Record the customer's plan selection. Returns:
  *   { ok:true, plan:'per_application' }                — proceed to card capture
@@ -432,6 +449,8 @@ async function selectSecurePlan({ token, plan }) {
     const stamp = new Date();
     let casLost = false;
     await db.transaction(async (trx) => {
+      // Lock + re-read the disclosure BEFORE the CAS (codex #3591 r31 P1).
+      const lockedSetup = await lockedDisclosedSetupAmount(trx, request, context.setupFee);
       const stamped = await trx('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
         .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
@@ -448,11 +467,12 @@ async function selectSecurePlan({ token, plan }) {
       // the SERIES PARENT — the completion mint's atomic claim always reads
       // the parent, so a child-attached link must not stamp the child.
       // Guarded so a re-selection never re-stamps a consumed fee.
-      if (context.setupFee) {
+      const setupToStamp = lockedSetup == null ? (context.setupFee ? context.setupFee.amount : 0) : lockedSetup;
+      if (context.setupFee && setupToStamp > 0) {
         await trx('scheduled_services')
           .where({ id: seriesAnchorId(visit) })
           .whereNull('pending_setup_fee')
-          .update({ pending_setup_fee: context.setupFee.amount, updated_at: stamp });
+          .update({ pending_setup_fee: setupToStamp, updated_at: stamp });
       }
     });
     if (casLost) {
@@ -498,14 +518,21 @@ async function selectSecurePlan({ token, plan }) {
   // one-time setup that rides the same invoice as its own line — the
   // invoice total the customer saw is the sum (codex #3591 r9 P1).
   const coverageAmount = cents(context.prepay.coverageTotal ?? context.prepay.total);
-  const setupAmount = context.setupFee && context.setupFee.waivedWithPrepay === false
+  let setupAmount = context.setupFee && context.setupFee.waivedWithPrepay === false
     ? cents(context.setupFee.amount)
     : 0;
-  const amount = cents(coverageAmount + setupAmount);
+  let amount = cents(coverageAmount + setupAmount);
 
   let payToken = null;
   try {
     await db.transaction(async (trx) => {
+      // The setup line bills what the LOCKED disclosure row authorizes
+      // (codex #3591 r31 P1) — re-read here, not from the unlocked snapshot.
+      const lockedSetup = await lockedDisclosedSetupAmount(trx, request, context.setupFee);
+      if (lockedSetup != null) {
+        setupAmount = lockedSetup;
+        amount = cents(coverageAmount + setupAmount);
+      }
       // Term starts at the first UPCOMING live visit of the series —
       // coverage must span the visits the customer is prepaying, not the
       // send date. Anchored on the series PARENT and derived INSIDE the

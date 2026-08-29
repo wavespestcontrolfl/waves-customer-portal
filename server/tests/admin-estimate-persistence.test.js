@@ -1,4 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
+// Pass-through mock: every test keeps the real qualifying-services lookup;
+// the lookup-failure test below overrides it once.
+jest.mock('../services/waveguard-existing-services', () => {
+  const actual = jest.requireActual('../services/waveguard-existing-services');
+  return { ...actual, loadExistingQualifyingServiceKeys: jest.fn(actual.loadExistingQualifyingServiceKeys) };
+});
+const mockQualifyingLookup = require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
 
 const {
   buildEstimatePersistenceFields,
@@ -879,6 +886,31 @@ describe('admin estimate persistence', () => {
     expect(stored.priorQualifyingServices).toBeUndefined();
   });
 
+  test('a linked customer whose qualifying-services lookup FAILS refuses the save retryably (503) — never read as a non-member (codex #3591 r31 P1)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver' },
+    });
+    mockQualifyingLookup.mockRejectedValueOnce(new Error('db down'));
+    await expect(createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 10000, services: { rodentBait: {} } },
+          inputs: { homeSqFt: 2000 },
+          result: { total: 89 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    })).rejects.toMatchObject({ statusCode: 503 });
+    expect(inserts.filter((i) => i.table === 'estimates')).toHaveLength(0);
+  });
+
   test('P1-2: a verified active-plan member with NO qualifying priors keeps recurring status on the STORED replay', async () => {
     const now = () => new Date('2026-05-15T12:00:00.000Z');
     const { database, inserts } = makeDatabase({
@@ -887,6 +919,10 @@ describe('admin estimate persistence', () => {
       // WaveGuard-qualifying, so loadExistingQualifyingServiceKeys returns [].
       customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver' },
     });
+    // The fake database cannot serve the real lookup (it used to throw and be
+    // swallowed as []); a failed lookup now refuses the save, so model the
+    // documented "no qualifying priors" result explicitly.
+    mockQualifyingLookup.mockResolvedValueOnce([]);
 
     await createOrReuseAdminEstimate({
       database,
