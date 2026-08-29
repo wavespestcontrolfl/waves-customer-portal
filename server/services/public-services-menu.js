@@ -1,0 +1,103 @@
+/**
+ * Public services menu — the ONE product list every customer-facing surface
+ * renders from (quote-to-estimate alignment C2). Built from the catalog:
+ * active, non-archived rows with public_quote_selectable = true.
+ *
+ * Contract (stable, consumed by the astro site): service_key, name (the
+ * catalog name verbatim), family, mode, cadence (recurring rows only),
+ * public_instant_quote, description. Engine keys are NEVER exposed — the
+ * portal translates service_key → engine path internally.
+ */
+const db = require('../models/db');
+
+const FAMILY_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito Control',
+  tree_shrub: 'Tree & Shrub',
+  termite: 'Termite',
+  rodent: 'Rodent',
+  inspection: 'Inspections',
+  specialty: 'Specialty',
+};
+
+const CADENCE_LABELS = {
+  semiannual: 'Semiannual',
+  quarterly: 'Quarterly',
+  bimonthly: 'Bi-Monthly',
+  every_6_weeks: 'Every 6 Weeks',
+  monthly: 'Monthly',
+  seasonal_feb_oct: 'Seasonal',
+  annual: 'Annual',
+};
+
+// Products the PUBLIC quote engine can price without an office pass — a
+// property of the pricing engine, not of the catalog, so it lives here in
+// code. Everything else is quote-on-request (a keyed lead the office
+// estimates). Rodent Inspection is a flat $75 (owner ruling 2026-08-29).
+const PUBLIC_INSTANT_QUOTE_KEYS = new Set([
+  'pest_general_quarterly', 'pest_general_bimonthly', 'pest_general_monthly', 'pest_general_semiannual',
+  'one_time_pest_control', 'pest_initial_cleanout',
+  'lawn_care_quarterly', 'lawn_care_recurring', 'lawn_care_6week', 'lawn_care_monthly', 'lawn_care_one_time',
+  'dethatching', 'plugging', 'top_dressing',
+  'mosquito_monthly', 'mosquito_seasonal', 'mosquito_one_time',
+  'tree_shrub_quarterly', 'tree_shrub_program', 'tree_shrub_6week', 'palm_injection',
+  'rodent_bait_quarterly', 'rodent_trapping', 'rodent_exclusion_only',
+  'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy',
+  'flea_tick', 'bed_bug_treatment', 'bee_wasp_removal',
+  'termite_bait', 'termite_trenching', 'termite_slab_pretreat',
+  'rodent_inspection',
+]);
+
+function modeFor(row) {
+  if (row.category === 'inspection') return 'inspection';
+  return row.billing_type === 'recurring' ? 'recurring' : 'one_time';
+}
+
+function menuItem(row) {
+  const mode = modeFor(row);
+  const item = {
+    service_key: row.service_key,
+    name: row.name,
+    family: FAMILY_LABELS[row.category] || row.category,
+    family_key: row.category,
+    mode,
+    public_instant_quote: PUBLIC_INSTANT_QUOTE_KEYS.has(row.service_key),
+    description: row.description || null,
+  };
+  if (mode === 'recurring') {
+    item.cadence = {
+      key: row.frequency || null,
+      label: CADENCE_LABELS[row.frequency] || null,
+      visits_per_year: row.visits_per_year == null ? null : Number(row.visits_per_year),
+    };
+  }
+  return item;
+}
+
+async function loadPublicServicesMenu(conn = db) {
+  if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return [];
+  const rows = await conn('services')
+    .where({ is_active: true, is_archived: false, public_quote_selectable: true })
+    .orderBy([{ column: 'category' }, { column: 'sort_order' }, { column: 'name' }])
+    .select('service_key', 'name', 'category', 'billing_type', 'frequency', 'visits_per_year', 'description');
+  return rows.map(menuItem);
+}
+
+// True when a lead-supplied key names a product a NEW customer may choose.
+async function isPublicSelectableServiceKey(serviceKey, conn = db) {
+  if (!serviceKey) return false;
+  try {
+    if (!(await conn.schema.hasColumn('services', 'public_quote_selectable'))) return false;
+    const row = await conn('services')
+      .where({ service_key: serviceKey, is_active: true, is_archived: false, public_quote_selectable: true })
+      .first('id');
+    return !!row;
+  } catch {
+    // Fail closed to a prose-only lead: a keyed lead must never be created
+    // from an unverified key, and a catalog read failure must not fail intake.
+    return false;
+  }
+}
+
+module.exports = { loadPublicServicesMenu, isPublicSelectableServiceKey, menuItem, PUBLIC_INSTANT_QUOTE_KEYS, FAMILY_LABELS };

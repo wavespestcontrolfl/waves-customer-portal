@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { isPublicSelectableServiceKey } = require('../services/public-services-menu');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
@@ -204,8 +205,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       firstName,
       lastName,
       serviceInterest,
+      serviceKey,
       leadSource,
     } = intake;
+    // A keyed lead only when the key names a product a NEW customer may
+    // choose; anything else stays a prose-only lead (service_key NULL).
+    const leadServiceKey = serviceKey && (await isPublicSelectableServiceKey(serviceKey)) ? serviceKey : null;
     // Human-readable note for triage / lead-response / owner alerts so the
     // extra-property ask can never be silently swallowed again (the ask used
     // to arrive as free text in the unit box and vanish).
@@ -505,6 +510,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       address: fullAddress || '',
       city: resolvedCity,
       service_interest: serviceInterest || null,
+      service_key: leadServiceKey,
       customer_id: customer.id,
       // The visitor just submitted from a browser carrying this unit id — a
       // call-pipeline lead attaching to a web submission gains the join too.
@@ -960,6 +966,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           lead_source_id: leadSourceId,
           lead_type: 'form_submission',
           service_interest: serviceInterest || null,
+          service_key: leadServiceKey,
           extracted_data: JSON.stringify(webhookStage),
           first_contact_at: new Date(),
           first_contact_channel: 'form',
@@ -1585,6 +1592,7 @@ function buildLeadWebhookIntake(body = {}) {
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
   const lastName = capitalizeName(normalizedName.last_name || '');
   const serviceInterest = normalizeLeadServiceInterest(body);
+  const serviceKey = normalizeLeadServiceKey(body);
   const leadSource = determineLeadSource(
     attribution.pageUrl,
     attribution.landingUrl,
@@ -1613,6 +1621,7 @@ function buildLeadWebhookIntake(body = {}) {
     firstName,
     lastName,
     serviceInterest,
+    serviceKey,
     leadSource,
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial
@@ -1725,6 +1734,15 @@ function normalizeExplicitServiceInterest(value) {
     }
   }
   return serviceLabelFor(raw);
+}
+
+// Optional catalog identity the keyed quote form posts alongside the label
+// (C2). Shape-checked here; the handler verifies it names a product a NEW
+// customer may choose (public_quote_selectable) before it reaches the row.
+function normalizeLeadServiceKey(body = {}) {
+  const raw = body.serviceKey ?? body.service_key ?? '';
+  const key = String(raw || '').trim().toLowerCase();
+  return /^[a-z0-9_]{1,80}$/.test(key) ? key : null;
 }
 
 function normalizeLeadServiceInterest(body = {}) {
@@ -1935,6 +1953,7 @@ module.exports._test = {
   buildLeadWebhookIntake,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
+  normalizeLeadServiceKey,
   formatServiceInterestForFrequency,
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
