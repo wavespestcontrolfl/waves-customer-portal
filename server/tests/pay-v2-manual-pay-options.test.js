@@ -23,6 +23,8 @@ jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => 
 jest.mock('../services/stripe', () => ({
   isAvailable: () => true,
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+  retrievePaymentIntent: jest.fn(async () => null),
+  cancelPaymentIntent: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: (err) => err?.code === 'STRIPE_CHARGE_IN_PROGRESS' || err?.code === 'STRIPE_CHARGE_RECONCILIATION_REQUIRED',
 }));
 jest.mock('../config/stripe-config', () => ({ publishableKey: 'pk_test_1' }));
@@ -157,6 +159,50 @@ describe('GET /pay/:token manualPayOptions', () => {
     const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
     expect(body).not.toHaveProperty('manualPayOptions');
     expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('env set ⇒ key absent when the attached PaymentIntent already collected (codex r6 P1)', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const StripeService = require('../services/stripe');
+    for (const status of ['succeeded', 'processing', 'requires_capture']) {
+      StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_live', status });
+      const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_live' }));
+      expect(body).not.toHaveProperty('manualPayOptions');
+    }
+    // Any intent the customer has already advanced is an active attempt too
+    // (pre-push P0): 3DS pending, method attached awaiting confirm, ACH
+    // micro-deposit verification.
+    for (const pi of [
+      { id: 'pi_live', status: 'requires_action', next_action: { type: 'use_stripe_sdk' } },
+      { id: 'pi_live', status: 'requires_confirmation', payment_method: 'pm_1' },
+      { id: 'pi_live', status: 'requires_action', next_action: { type: 'verify_with_microdeposits' } },
+    ]) {
+      StripeService.retrievePaymentIntent.mockResolvedValueOnce(pi);
+      const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_live' }));
+      expect(body).not.toHaveProperty('manualPayOptions');
+    }
+    // Inspect-only: the GET never cancels the page's own intent.
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  test('env set ⇒ key absent when the attached PaymentIntent cannot be verified (fail closed)', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const StripeService = require('../services/stripe');
+    StripeService.retrievePaymentIntent.mockResolvedValueOnce(null);
+    let r = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_x' }));
+    expect(r.body).not.toHaveProperty('manualPayOptions');
+    StripeService.retrievePaymentIntent.mockRejectedValueOnce(new Error('stripe down'));
+    r = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_x' }));
+    expect(r.body).not.toHaveProperty('manualPayOptions');
+  });
+
+  test('env set ⇒ block rides beside the page\'s own still-cancelable PaymentIntent', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const StripeService = require('../services/stripe');
+    StripeService.retrievePaymentIntent.mockResolvedValueOnce({ id: 'pi_fresh', status: 'requires_payment_method' });
+    const { body } = await getPayPage(invoiceData({ status: 'overdue', stripe_payment_intent_id: 'pi_fresh' }));
+    expect(body.manualPayOptions).toMatchObject({ venmo: { handle: '@WavesPest' }, amountDue: 150 });
+    expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
   });
 
   test('env set ⇒ a non-fence error from the reconciliation check still propagates', async () => {

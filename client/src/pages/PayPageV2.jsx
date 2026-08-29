@@ -522,6 +522,7 @@ const PAY_ROW_GRID_NARROW = {
 // Every configured recipient in one comparable key — the recipients ride
 // env, not the invoice row, so a rotated handle arrives with an unchanged
 // invoice version and must be detected on its own.
+const MANUAL_PAY_REVALIDATE_MS = 45_000;
 function recipientsKey(opts) {
   return JSON.stringify([opts?.zelle?.recipient ?? null, opts?.venmo?.handle ?? null, opts?.paypal?.handle ?? null]);
 }
@@ -533,11 +534,13 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // re-fetch per click — clipboard writes need transient user activation,
   // which an awaited fetch spends (Safari). So the panel revalidates at the
   // moments of intent instead: when it is expanded, and whenever this tab
-  // regains visibility (an old tab left open). Every control is disabled
-  // until the fresh read lands; a changed invoice/credit/recipient
-  // re-renders the whole panel from the fresh payload with a notice, so
-  // what is shown and copied is always the latest server truth.
-  const [validating, setValidating] = useState(false);
+  // regains visibility (an old tab left open). Every control stays disabled
+  // until a fresh read SUCCEEDS (codex r6 P1: a failed read re-enabling the
+  // stale render would be worse than no read) — either unchanged, or the
+  // panel re-rendered from the fresh payload with a notice — so what is
+  // shown and copied is always the latest server truth.
+  const [validated, setValidated] = useState(false);
+  const validating = !validated;
   const readFresh = async () => {
     const res = await fetch(`${API_BASE}/pay/${token}`);
     const fresh = await res.json().catch(() => null);
@@ -560,27 +563,43 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   };
   const STALE_NOTICE = 'This invoice was just updated — the details above have been refreshed. Please try again.';
   const revalidate = async () => {
-    setValidating(true);
+    setValidated(false);
     try {
       const { fresh, unchanged } = await readFresh();
       if (unchanged) {
         setStaleNotice('');
-      } else {
-        setStaleNotice(STALE_NOTICE);
-        if (fresh?.invoice) onInvoiceChanged?.(fresh);
+        setValidated(true);
+        return;
+      }
+      setStaleNotice(STALE_NOTICE);
+      // Only a fresh payload we can render from counts as validated; an
+      // error body without an invoice leaves the stale controls disabled.
+      if (fresh?.invoice) {
+        onInvoiceChanged?.(fresh);
+        setValidated(true);
       }
     } catch {
       setStaleNotice('Could not confirm the invoice details — check your connection and try again.');
-    } finally {
-      setValidating(false);
     }
   };
+  // The effect below is keyed on `open` only, so its handlers must never
+  // capture a render's `revalidate` (pre-push P0: a panel opened while
+  // /setup was pending would keep calling the callback from the render
+  // where no PI existed). The ref always points at the latest closure —
+  // latest props, latest onInvoiceChanged.
+  const revalidateRef = useRef(revalidate);
+  revalidateRef.current = revalidate;
   useEffect(() => {
     if (!open || typeof document === 'undefined') return undefined;
-    revalidate();
-    const onVisible = () => { if (document.visibilityState === 'visible') revalidate(); };
+    const run = () => revalidateRef.current?.();
+    run();
+    const onVisible = () => { if (document.visibilityState === 'visible') run(); };
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    // A validation is not indefinite (pre-push P1): while the panel stays
+    // open and visible, re-read on a short cadence so a recipient/amount
+    // change lands within the window even with no focus change.
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') run(); }, MANUAL_PAY_REVALIDATE_MS);
+    return () => { document.removeEventListener('visibilitychange', onVisible); clearInterval(timer); };
   }, [open]);
   // Version-fenced open (codex #3610 r3 P1): a delivered invoice can be
   // edited by an admin after this page loaded, and no PaymentIntent fence
@@ -3002,7 +3021,15 @@ export default function PayPageV2() {
                 amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
                 token={token}
                 version={stripeSetup?.version ?? data.manualPayOptions?.version ?? invoice.version ?? null}
-                onInvoiceChanged={(fresh) => setData(fresh)}
+                onInvoiceChanged={(fresh) => {
+                  // A mounted PaymentForm confirms the PI it was minted for
+                  // (pre-push P0): once /setup has answered, a changed
+                  // invoice takes the SAME full reload the staleInvoice 409
+                  // path uses — never a data swap beside the old client
+                  // secret. Before /setup answers there is no PI to strand.
+                  if (stripeSetup) { window.location.reload(); return; }
+                  setData(fresh);
+                }}
               />
             )}
             </div>

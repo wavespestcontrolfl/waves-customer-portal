@@ -5,6 +5,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const InvoiceService = require('../services/invoice');
 const InvoiceAttachments = require('../services/invoice-attachments');
 const db = require('../models/db');
+const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -2207,47 +2208,26 @@ router.get('/:id/credit-context', async (req, res, next) => {
 // it as closed). Any already-open PaymentIntent is cancelled first so a stale
 // session can't charge the card after the credit is consumed; if that PI has
 // money in flight the request is refused for manual review.
-const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_capture'];
 
 // ── Retire an open Stripe collection session before an off-Stripe settlement ──
 // Once the invoice is paid/prepaid, assertInvoiceCollectible blocks NEW
 // PaymentIntents / Terminal handoffs, but an already-minted PI (the pay page
 // mints one on load) could still be confirmed from a still-open tab and
-// charge the card a second time. Cancel it; refuse if money is in flight
-// (mirrors the cancelled-service auto-void triage). Shared by apply-credit
-// and record-payment (codex #3610 P1 — the pay page now actively steers
-// customers to Zelle/Venmo/PayPal while its PI is live). Returns null when
-// clear, or a { status, error } the route sends as-is.
+// charge the card a second time. The ONE mechanism for this is
+// services/prepaid-pi-guard.js (also run by mark-prepaid in admin-schedule
+// and the completion-side application in admin-dispatch — codex #3610 r6
+// P1: no parallel retire logic here). This wrapper only maps its verdict to
+// the { status, error } these routes send as-is; null means clear. Shared
+// by apply-credit and record-payment.
 async function retireOpenPaymentIntentBeforeSettlement(invoice, { action }) {
   const openPiId = invoice.stripe_payment_intent_id || null;
   if (!openPiId) return null;
-  const StripeService = require('../services/stripe');
-  let pi;
-  try {
-    pi = await StripeService.retrievePaymentIntent(openPiId);
-  } catch (e) {
-    return { status: 409, error: `Open payment session ${openPiId} could not be verified (${e.message}); resolve it before ${action}` };
+  const verdict = await guardOpenPaymentIntentForPrepaid(invoice);
+  if (verdict.ok) return null;
+  if (verdict.reason === 'payment_in_flight') {
+    return { status: 409, error: `A payment is already in flight (${verdict.piStatus}); wait for it to settle or refund it before ${action}` };
   }
-  // Null = Stripe unconfigured/unreachable — we can't prove the PI is dead,
-  // so fail closed rather than settle while a client secret could still
-  // collect (the webhook treats paid/prepaid as terminal and would skip it).
-  if (!pi) {
-    return { status: 409, error: `Open payment session ${openPiId} could not be verified (payment service unavailable); resolve it before ${action}` };
-  }
-  if (PI_MONEY_IN_FLIGHT_STATUSES.includes(pi.status)) {
-    return { status: 409, error: `A payment is already in flight (${pi.status}); wait for it to settle or refund it before ${action}` };
-  }
-  if (pi.status !== 'canceled') {
-    try {
-      await StripeService.cancelPaymentIntent(openPiId, { cancellation_reason: 'abandoned' });
-    } catch (e) {
-      return { status: 409, error: `Couldn't cancel the open payment session ${openPiId} (${e.message}); resolve it before ${action}` };
-    }
-  }
-  // Unbind combined siblings from the canceled intent — regardless of
-  // who canceled it (codex #3427 r17 P2).
-  await require('../services/pay-combined').clearPaymentIntentStamps(db, openPiId, { keepInvoiceIds: [String(invoice.id)] });
-  return null;
+  return { status: 409, error: `Open payment session ${openPiId} could not be verified (${verdict.detail || 'payment service unavailable'}); resolve it before ${action}` };
 }
 
 

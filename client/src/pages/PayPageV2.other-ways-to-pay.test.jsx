@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import PayPageV2 from './PayPageV2';
@@ -249,6 +249,87 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
     fireEvent(document, new Event('visibilitychange'));
     await waitFor(() => expect(gets).toBe(3));
+  });
+
+  it('re-reads on a cadence while the panel stays open so a validation never lasts indefinitely', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const first = payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+      let gets = 0;
+      const fetchMock = vi.fn(async (url, init) => {
+        if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, first); }
+        return response(204, {});
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeEnabled());
+      expect(gets).toBe(2);
+      await vi.advanceTimersByTimeAsync(45_000);
+      await waitFor(() => expect(gets).toBe(3));
+      await vi.advanceTimersByTimeAsync(45_000);
+      await waitFor(() => expect(gets).toBe(4));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps every control disabled when the revalidation read fails (codex r6 P1)', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(async () => undefined) } });
+    const first = payload({ manualPayOptions: { zelle: { recipient: '9415551234' }, venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+    let gets = 0;
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') {
+        gets += 1;
+        if (gets === 1) return response(200, first);
+        throw new Error('network down');
+      }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    expect(await screen.findByRole('status')).toHaveTextContent(/Could not confirm/);
+    expect(gets).toBe(2);
+    expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeDisabled();
+    expect(screen.getByRole('link', { name: '(941) 555-1234' })).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByRole('link', { name: 'Open Zelle' })).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('once /setup has minted a PI, a changed invoice from the panel read forces a full reload (never a data swap beside the mounted form)', async () => {
+    const reload = vi.fn();
+    vi.stubGlobal('location', { ...window.location, search: '', href: 'http://localhost/pay/x', reload, assign: vi.fn() });
+    const stripeOn = { available: true, publishableKey: 'pk_test_1' };
+    const first = payload({ stripe: stripeOn, manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+    const edited = payload({ stripe: stripeOn, manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 175, version: 2 } });
+    edited.invoice.amountDue = 175; edited.invoice.total = 175; edited.invoice.version = 2;
+    let gets = 0;
+    let releaseSetup;
+    const setupGate = new Promise((r) => { releaseSetup = r; });
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets <= 2 ? first : edited); }
+      if (String(url).endsWith('/setup')) {
+        await setupGate; // /setup is still pending while the panel opens
+        return response(200, { clientSecret: 'cs_1', paymentIntentId: 'pi_1', amount: 150, baseAmount: 150, publishableKey: 'pk_test_1', status: 'requires_payment_method', version: 1 });
+      }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    // Panel opens (and validates) BEFORE /setup answers.
+    fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeEnabled());
+    expect(gets).toBe(2);
+    // Now /setup answers and the PaymentForm mounts against pi_1.
+    await act(async () => { releaseSetup(); await setupGate; });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/setup'))).toBe(true));
+    // The invoice changes; the panel's next read must reload the page, not
+    // swap `data` beside the old client secret.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+    expect(screen.queryByText('$175.00')).not.toBeInTheDocument();
   });
 
   it('withholds the block while account credit is pending and Stripe setup has not answered (codex r3 P1)', async () => {

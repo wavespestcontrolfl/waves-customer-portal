@@ -398,6 +398,19 @@ router.get('/:token', async (req, res, next) => {
         manualPayOptions = null;
       }
     }
+    if (manualPayOptions && data.stripe_payment_intent_id) {
+      // Attached pay-page PaymentIntent (codex r6 P1): Stripe may already have
+      // moved the stamped PI to succeeded/processing while the row is still
+      // collectible (webhook delayed or failed). Same verdict the off-Stripe
+      // settlement paths use — services/prepaid-pi-guard.js, inspect-only
+      // (this GET cancels nothing): money in flight or unverifiable ⇒ no
+      // second rail. A fresh, still-cancelable PI (the page's own mint) is
+      // fine. Only runs when a PI is stamped, so a fresh link costs nothing.
+      const verdict = await require('../services/prepaid-pi-guard')
+        .guardOpenPaymentIntentForPrepaid(data, { inspectOnly: true })
+        .catch(() => ({ ok: false }));
+      if (!verdict.ok) manualPayOptions = null;
+    }
     if (manualPayOptions) {
       // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
       // Partial account credit is applied only when /setup mints (codex r2
