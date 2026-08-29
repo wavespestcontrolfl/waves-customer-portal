@@ -4690,14 +4690,16 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n  /dest.webp\nprose')).toBe('      \n            \nprose');
     // Only definitions the strict parser recognizes are blanked: an invalid continuation or trailing junk is paragraph text and stays (GH r13).
     expect(guardrails.blankLinkDefinitionsAndTitles('[ref]:\nProse ![bad](/missing.webp)')).toBe('[ref]:\nProse ![bad](/missing.webp)');
-    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n[y]: /ok.webp "t"')).toBe(`[x]: /dest.webp junk\n${' '.repeat('[y]: /ok.webp "t"'.length)}`);
+    // `[x]: /dest.webp junk` is paragraph text, so the glued `[y]` line cannot interrupt it — neither is a definition (GH r20).
+    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n[y]: /ok.webp "t"')).toBe('[x]: /dest.webp junk\n[y]: /ok.webp "t"');
+    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n\n[y]: /ok.webp "t"')).toBe(`[x]: /dest.webp junk\n\n${' '.repeat('[y]: /ok.webp "t"'.length)}`);
     // A title on the line AFTER a destination-only definition is consumed with it (GH r14); a non-title next line stays.
     const t1 = '[pic]: /x.webp\n"title ![t](/y.webp)"\nprose';
     expect(guardrails.blankLinkDefinitionsAndTitles(t1)).toBe(`${' '.repeat(14)}\n${' '.repeat(21)}\nprose`);
     expect(guardrails.blankLinkDefinitionsAndTitles('[pic]: /x.webp\n"unterminated ![t](/y.webp)')).toBe(`${' '.repeat(14)}\n"unterminated ![t](/y.webp)`);
     expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n/x.webp\n(paren title)\nprose')).toBe(`${' '.repeat(6)}\n${' '.repeat(7)}\n${' '.repeat(13)}\nprose`);
     // Full-grammar remainder: a quoted / parenthesized title is fine, trailing junk makes the line a paragraph (no definition).
-    const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk', '[f]: </f g.webp>  (paren "quote")'].join('\n'));
+    const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[f]: </f g.webp>  (paren "quote")', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk'].join('\n'));
     expect([...strict.keys()]).toEqual(['a', 'b', 'c', 'f']);
   });
 
@@ -4722,8 +4724,13 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.parseLinkDestination('/images/body-\\(detail.webp')).toBe('/images/body-(detail.webp');
     expect(guardrails.parseLinkDestination('</images/a\\_b.webp>')).toBe('/images/a_b.webp');
     for (const bad of ['/images/body-(detail.webp', '/images/body-detail).webp', '/a)(b']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // A definition cannot interrupt a paragraph: only at a block start (first line / after blank / heading / break / another definition) (GH r20).
+    expect([...guardrails.markdownReferenceDefinitions('Intro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /ok.webp\n[two]: /two.webp\n## H\n[after-heading]: /h.webp\n---\n[after-break]: /b.webp').keys()]).toEqual(['ok', 'two', 'after-heading', 'after-break']);
+    expect(guardrails.blankLinkDefinitionsAndTitles('Intro prose\n[pic]: /images/blog/x/body-1.webp')).toBe('Intro prose\n[pic]: /images/blog/x/body-1.webp');
     // An empty `[bad]:` followed by a VALID definition does not swallow it (GH r18).
-    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n[good]: /images/good.webp').entries()]).toEqual([['good', '/images/good.webp']]);
+    // `[bad]:` alone is paragraph text; a glued `[good]` line cannot interrupt that paragraph (CommonMark 4.7) — after a blank line it defines (GH r18/r20).
+    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n[good]: /images/good.webp').entries()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n\n[good]: /images/good.webp').entries()]).toEqual([['good', '/images/good.webp']]);
     expect(guardrails.parseLinkDestination('junk here', { allowEmpty: true })).toBeNull();
   });
 

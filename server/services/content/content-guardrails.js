@@ -333,12 +333,23 @@ const DESTINATION_ONLY_RE = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
 function normalizeReferenceLabel(label) {
   return String(label || '').replace(/\\([!-/:-@[-`{-~])/g, '$1').trim().replace(/\s+/g, ' ').toLowerCase();
 }
+// A link reference definition cannot INTERRUPT a paragraph (CommonMark
+// 4.7): it is recognised only at a block start — the first line, after a
+// blank line, after an ATX heading / thematic break, or directly after
+// another accepted definition. `Intro\n[pic]: /x.webp` is paragraph text.
+function definitionMayStartAt(lines, i, lastDefinitionEnd) {
+  if (i === 0 || lastDefinitionEnd === i - 1) return true;
+  const prev = lines[i - 1];
+  return prev.trim() === '' || isInterruptingBlock(prev);
+}
 function markdownReferenceDefinitions(str) {
   const defs = new Map();
   const lines = String(str || '').split('\n');
+  let lastDefinitionEnd = -2;
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd)) continue;
     let rest = lines[i].slice(m[0].length);
     if (rest.trim() === '') {
       // Continuation line: consumed ONLY when it is a valid destination —
@@ -350,6 +361,10 @@ function markdownReferenceDefinitions(str) {
     }
     const dest = parseLinkDestination(rest);
     if (!dest) continue;
+    lastDefinitionEnd = i;
+    // A title-only line after a destination-only line belongs to the
+    // definition too (the blanker consumes it likewise).
+    if (DESTINATION_ONLY_RE.test(rest) && lines[i + 1] !== undefined && LINK_TITLE_ONLY_RE.test(lines[i + 1])) { i += 1; lastDefinitionEnd = i; }
     const label = normalizeReferenceLabel(m[1]);
     if (!label || defs.has(label)) continue;
     defs.set(label, dest);
@@ -367,9 +382,11 @@ function markdownReferenceDefinitions(str) {
 // stays (an image on that line still renders and must still be seen).
 function blankReferenceDefinitions(str) {
   const lines = String(str || '').split('\n');
+  let lastDefinitionEnd = -2;
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd)) continue;
     const rest = lines[i].slice(m[0].length);
     let destLine = -1;
     let destText = '';
@@ -395,6 +412,7 @@ function blankReferenceDefinitions(str) {
     } else {
       i = destLine;
     }
+    lastDefinitionEnd = i;
   }
   return lines.join('\n');
 }

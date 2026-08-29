@@ -1789,9 +1789,11 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   // the base moved after this check (`baseSha`).
   let changed = new Set();
   let baseSha = null;
+  let mergeBaseSha = null;
   if (typeof gh.compareFiles === 'function') {
     const cmp = await gh.compareFiles(branch);
     changed = new Set(cmp?.files || []);
+    mergeBaseSha = cmp?.mergeBaseSha || null;
   }
   if (typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
     baseSha = await gh.getBranchSha(gh.env().defaultBranch) || null;
@@ -1841,6 +1843,18 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
     label = slug;
   }
   if (!found?.file?.content) return { ok: false, reason: `post file for ${label} not found on ${branch}` };
+  // The body is read from the PR head, but the MERGE carries main's edits
+  // to the same file when GitHub can combine them (e.g. main dropped one
+  // image reference in a section the PR left alone). A post that changed
+  // on the default branch since the branch was cut is withheld for a
+  // rebase / human merge rather than validated on a copy the merge will
+  // not ship.
+  if (mergeBaseSha) {
+    const [onBase, atFork] = await Promise.all([gh.getFile(found.path), gh.getFile(found.path, mergeBaseSha)]);
+    if ((onBase?.sha || null) !== (atFork?.sha || null)) {
+      return { ok: false, reason: `${found.path} changed on the default branch since ${branch} was cut (${(atFork?.sha || 'absent').slice(0, 9)} → ${(onBase?.sha || 'absent').slice(0, 9)}) — the merged body cannot be validated from the PR head; rebase or merge by hand` };
+    }
+  }
   let parsed;
   try { parsed = fm.parse(found.file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
   const body = String(parsed?.content || '');
@@ -1856,9 +1870,17 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
 // An image-generation error is transient when any provider attempt was
 // retryable (5xx / rate limit / timeout) or the failure is a network-shaped
 // error around the download — nothing about the content caused it.
+const TRANSIENT_HTTP_STATUS_RE = /^(?:408|425|429|5\d\d)$/;
+function attemptIsTransient(a) {
+  const r = a?.result || a || {};
+  if (r.retryable === true) return true;
+  // Some providers (Gemini) record a 429 / 5xx as `fatal` — the STATUS says
+  // it was a temporary response, so it is classified by status here.
+  return TRANSIENT_HTTP_STATUS_RE.test(String(r.status ?? ''));
+}
 function isTransientImageError(err) {
   const attempts = Array.isArray(err?.attempts) ? err.attempts : [];
-  if (attempts.length) return attempts.some((a) => a?.result?.retryable === true || a?.retryable === true);
+  if (attempts.length) return attempts.some(attemptIsTransient);
   return /\b(?:5\d\d|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|timeout|timed out|rate limit)\b/i.test(String(err?.message || '')) || /^E(?:CONN|TIMEDOUT|NOTFOUND|AI_AGAIN)/.test(String(err?.code || ''));
 }
 
@@ -3587,12 +3609,10 @@ async function unpublishAstro(postId) {
     // Generated in-article pictures (body-N.webp) live beside the hero and
     // would otherwise stay publicly addressable — and hold their names, so
     // a later republish would pay for higher-numbered replacements.
-    let bodyAssets = [];
-    try {
-      bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
-    } catch (listErr) {
-      logger.warn(`[astro-publisher] could not list body images for ${slug}: ${listErr.message}`);
-    }
+    // A listing failure ABORTS the unpublish (the catch below drops the
+    // branch; the admin retries) — proceeding would leave every body picture
+    // public and holding its name.
+    const bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
     for (const asset of bodyAssets) {
       await gh.deleteFile({
         path: asset.path || `${ASTRO_HERO_DIR}/${slug}/${asset.name}`,
@@ -4249,6 +4269,7 @@ module.exports = {
     scanBodySections,
     renderedBodyView,
     imageRefsInText,
+    isTransientImageError,
     assertBodyImagesAtHead,
     legacyHeroRefs,
     imageDHash,

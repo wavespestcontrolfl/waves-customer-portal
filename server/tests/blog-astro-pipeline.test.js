@@ -3955,13 +3955,13 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       '![shortcut]',
       '![nope][undefined]',
       '![in-fence][fenced]',
+      '![multiline][multi]',
       '[a reference link][body] and [text](/x/) stay prose',
       '',
       '[body]: /images/blog/x/body-1.webp "Title"',
       '[ collapsed   alt ]: </images/blog/x/body-2.webp>',
       '[SHORTCUT]: /images/blog/x/body-3.webp',
       '[body]: /images/blog/x/ignored-second-definition.webp',
-      '![multiline][multi]',
       '[multi]:',
       '  /images/blog/x/body-5.webp',
       '```',
@@ -4196,10 +4196,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     gh.compareFiles.mockResolvedValue({ files: ['src/content/blog/pest-control/drywood-frass-venice.mdx', 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp'], mergeBaseSha: 'mb' });
     gh.getBranchSha.mockResolvedValue('main-tip-1');
     gh.getFile.mockImplementation(async (path, ref) => {
-      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref ? { content: md, sha: 'm' } : null;
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref === 'content/autonomous-x' ? { content: md, sha: 'm' } : null;
       if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
       if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
-      if (path.endsWith('/body-2.webp')) return { content: '', sha: ref ? 'b2-head' : 'b2-main', raw: { content: ref ? b2 : hero } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: ref === 'content/autonomous-x' ? 'b2-head' : 'b2-main', raw: { content: ref === 'content/autonomous-x' ? b2 : hero } };
       return null;
     });
     const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
@@ -4209,7 +4209,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-1.webp', 'content/autonomous-x');
     // With main's body-2 distinct, the check passes and reports the base tip it validated against.
     gh.getFile.mockImplementation(async (path, ref) => {
-      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref ? { content: md, sha: 'm' } : null;
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref === 'content/autonomous-x' ? { content: md, sha: 'm' } : null;
       if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
       if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
       if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
@@ -4405,6 +4405,63 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/0 distinct in-article image/);
     expect((await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-y', filePath: 'src/content/blog/ant-trails-bradenton.md' })).reason).toMatch(/not found on content\/blog-y/);
+  });
+
+  test('bodyImageRefs: a reference-looking line glued to prose defines nothing — the reference stays text (GH r20)', () => {
+    expect(AstroPublisher._internals.bodyImageRefs('![a][pic]\n\nIntro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /images/blog/x/body-2.webp\n\n![b][ok]').map((r) => r.src)).toEqual(['/images/blog/x/body-2.webp']);
+  });
+
+  test('isTransientImageError: a Gemini 429/5xx recorded as fatal is still transient; a 400 is not (GH r20 P1)', () => {
+    const { isTransientImageError } = AstroPublisher._internals;
+    const err = (attempts) => Object.assign(new Error('image-generator: all providers failed'), { attempts });
+    expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { fatal: true, status: 400 } }, { provider: 'gemini', result: { fatal: true, status: 429 } }]))).toBe(true);
+    expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 503 } }]))).toBe(true);
+    expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 400 } }, { provider: 'gpt-image-2', result: { fatal: true, status: 'no_b64_in_response' } }]))).toBe(false);
+  });
+
+  test('unpublishAstro aborts (branch dropped, no PR) when the body-asset listing fails (GH r20)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un2', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/ant-trails-bradenton.md' ? { content: '---\ntitle: x\n---\nbody', sha: 'md' } : null));
+    gh.listDir.mockRejectedValue(new Error('GitHub 502'));
+    let thrown;
+    try { await AstroPublisher.unpublishAstro('post-un2'); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('assertBodyImagesAtHead: a post that changed on the default branch since the branch was cut is withheld (the merged body is not the PR-head copy) (GH r20)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = draft().frontmatter;
+    const md = fmModule.stringify({ ...fmData, hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } }, '## A\n\nProse.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\nMore.\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const hero = await webp(0); const b1 = await webp(1); const b2 = await webp(2);
+    gh.compareFiles.mockResolvedValue({ files: ['src/content/blog/pest-control/drywood-frass-venice.mdx'], mergeBaseSha: 'mb' });
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') {
+        if (ref === 'content/autonomous-x') return { content: md, sha: 'head' };
+        if (ref === 'mb') return { content: md, sha: 'fork' };
+        return { content: md, sha: 'main-moved' }; // default branch edited the post after the fork
+      }
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.transient).toBeFalsy();
+    expect(res.reason).toMatch(/changed on the default branch since content\/autonomous-x was cut/);
+    // Same blob at the fork and now → validated normally.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: md, sha: ref === 'content/autonomous-x' ? 'head' : 'fork' };
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
   });
 
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
