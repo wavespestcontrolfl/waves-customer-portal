@@ -2647,8 +2647,10 @@ function leadAddressTailPlace(address) {
   // and a cross-shape restatement from another city could take rollback
   // ownership (#3608 pre-push audit P1). No inline unit → no delimiter →
   // no evidence (and no cross-shape match either), never a locality guess.
-  const { normalizeStreetLine } = require('../utils/address-normalizer');
-  const streetKey = String(normalizeStreetLine(parts.street) || parts.street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  // From the RAW line, not through normalizeStreetLine: a terminal locality
+  // word that doubles as a street suffix ("Palm Harbor" → "Palm Hbr") must
+  // reach placeCorroborates as the city the caller will restate (codex r7).
+  const streetKey = String(parts.street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   const { streetKey: canon, unitKeys } = canonicalizeInlineUnits(streetKey);
   if (!unitKeys.length) return null;
   const afterUnit = canon.slice(canon.lastIndexOf('}') + 1).trim();
@@ -2702,9 +2704,23 @@ function leadAddressKeysEquivalent(a, b) {
   };
   for (const [x, y] of [[a, b], [b, a]]) {
     const inl = inlineForm(x);
-    if (inl && (y === inl || y.startsWith(`${inl} `))) return true;
+    if (!inl) continue;
+    if (y === inl) return true;
+    // The text after the marker must be locality only: a further secondary
+    // unit the shared parser does not know ("Rm 2", "Trlr 7") or a hash
+    // names a smaller door, and "…, Apt 4" alone must not claim it (codex r7).
+    if (y.startsWith(`${inl} `) && !remainderNamesSubpremise(y.slice(inl.length + 1))) return true;
   }
   return false;
+}
+
+// True when a (lower-cased, punctuation-free) remainder carries a secondary-
+// unit designator the fan-out recognizes — the shared UNIT_DESIGNATORS
+// plus USPS "trlr"/"rm", minus "fl" (state) — or a hash token.
+function remainderNamesSubpremise(remainder) {
+  const { UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const tokens = String(remainder || '').split(' ').filter(Boolean);
+  return tokens.some((t) => t.startsWith('#') || t === 'trlr' || t === 'rm' || (t !== 'fl' && UNIT_DESIGNATORS.has(t)));
 }
 
 // Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
@@ -2715,6 +2731,7 @@ function leadAddressKeysEquivalent(a, b) {
 // so "Apt 4" never equals "Bldg 2 Apt 4" (different door, same rule as the
 // composer's dedupe) while Apt / Unit / Suite / hash spellings do
 // (#3608 codex r5 + r6).
+const ROUTE_WORDS = new Set(['route', 'rte', 'highway', 'hwy', 'sr', 'cr', 'us', 'interstate']);
 function canonicalizeInlineUnits(streetKey) {
   const {
     normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
@@ -2732,18 +2749,28 @@ function canonicalizeInlineUnits(streetKey) {
   // branch — "#A" / "#PH" are units there, so they must be units here too or
   // the whole-line key drifts from the comma form's (#3608 pre-push audit).
   const isHashValue = (t) => /^#\S+$/.test(t);
+  // A hash right after a numbered-route word is the road's number, not a
+  // unit: "State Road #64", "County Road #675", "Hwy #41", "US #301" (codex
+  // r7 P2). "Main Rd #4" keeps its unit — only State/County Road qualify.
+  const isRouteHash = (idx) => {
+    const prev = tokens[idx - 1] || '';
+    const prev2 = tokens[idx - 2] || '';
+    if (ROUTE_WORDS.has(prev)) return true;
+    return (prev === 'road' || prev === 'rd') && (prev2 === 'state' || prev2 === 'county');
+  };
+  const hashAt = (idx) => !isRouteHash(idx) && (isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1])));
   const out = [];
   const unitKeys = [];
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i];
-    if (!(isDesignator(t, tokens[i + 1], tokens[i + 2]) || (t === '#' && isValue(tokens[i + 1])) || isHashValue(t))) { out.push(t); i += 1; continue; }
+    if (!(isDesignator(t, tokens[i + 1], tokens[i + 2]) || hashAt(i))) { out.push(t); i += 1; continue; }
     const run = [];
     let j = i;
     while (j < tokens.length) {
       const c = tokens[j];
-      if (isHashValue(c)) { run.push(c); j += 1; continue; }
-      if (c === '#' && isValue(tokens[j + 1])) { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (hashAt(j) && isHashValue(c)) { run.push(c); j += 1; continue; }
+      if (hashAt(j) && c === '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
       if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
       if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
       break;

@@ -1,4 +1,9 @@
 const DIRECTIONALS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+// Spelled-out forms count as a post-directional for the street-suffix
+// lookahead ONLY ("100 Main Street North Apt 4" abbreviates the same as
+// "100 Main Street N Apt 4"); they are deliberately not in DIRECTIONALS,
+// which also drives token upper-casing ("north" must never become "NORTH").
+const POST_DIRECTIONAL_LOOKAHEAD = new Set([...DIRECTIONALS, 'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest']);
 const CITY_PREFIX_TOKENS = new Set(['st', 'lake', 'key', 'ridge']);
 const UNIT_DESIGNATORS = new Set([
   'apt', 'apartment', 'bldg', 'building', 'fl', 'floor', 'lot', 'spc',
@@ -238,7 +243,7 @@ function normalizeStreetLine(value) {
     // comma-separated street ("100 Main Street N"). "Street North Port" still does not
     // qualify — "Port" is neither a directional nor a unit, so the suffix is left alone.
     let afterDirectionals = 0;
-    while (afterDirectionals < tail.length && DIRECTIONALS.has(tail[afterDirectionals].replace(/[.,]/g, '').toLowerCase())) {
+    while (afterDirectionals < tail.length && POST_DIRECTIONAL_LOOKAHEAD.has(tail[afterDirectionals].replace(/[.,]/g, '').toLowerCase())) {
       afterDirectionals += 1;
     }
     const rest = tail.slice(afterDirectionals);

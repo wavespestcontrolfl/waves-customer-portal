@@ -64,6 +64,10 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St Floor 2', 'Fl 2')).toBe('100 Main St, Floor 2');
     expect(composeLeadAddress('100 Main St Lot 7', 'Lot 7')).toBe('100 Main St, Lot 7');
     expect(composeLeadAddress('100 Main St Space 12', 'Spc 12')).toBe('100 Main St, Space 12');
+    // A numbered route's hash is the road, not a unit — no false conflict, the real unit is appended (r7 P2).
+    expect(analyzeLeadAddress('123 State Road #64 Bradenton FL 34208', 'Apt 4')).toEqual({ address: '123 State Road #64 Bradenton FL 34208, Apt 4', unitConflict: false });
+    expect(analyzeLeadAddress('500 Hwy #41 Venice FL 34285', 'Unit 2')).toEqual({ address: '500 Hwy #41 Venice FL 34285, Unit 2', unitConflict: false });
+    expect(analyzeLeadAddress('100 Main Rd #4 Sarasota FL 34236', 'Apt 5').unitConflict).toBe(true);
     // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed into one, never stored as two.
     expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toEqual({ address: '100 Main St, Bldg 2 Apt 4', unitConflict: true });
     // Designator words inside a street name are not a unit.
@@ -304,6 +308,11 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #A Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #A, Sarasota, FL 34236'))).toBe(true);
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St #PH Sarasota FL 34236'), leadAddressCompareKey('100 Main St, #PH, Sarasota, FL 34236'))).toBe(true);
     expect(composeLeadAddress('100 Main St #A Sarasota FL 34236', '#A')).toBe('100 Main St #A Sarasota FL 34236');
+    // Spelled-out post-directionals abbreviate the suffix too (r7): "Street North Apt 4 …" ≡ "St North, Apt 4".
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Apt 4 Sarasota FL 34236'), leadAddressCompareKey('100 Main St North, Apt 4'))).toBe(true);
+    // A further secondary unit after the recognized run is a smaller door — "…, Apt 4" alone never claims it (r7).
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St Apt 4 Rm 2 Sarasota FL 34236'), leadAddressCompareKey('100 Main St, Apt 4, Sarasota, FL 34236'))).toBe(false);
+    expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main St Apt 4 Trlr 7'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
     // "Street North Port" is a city, not a post-directional — the suffix stays unabbreviated, and it is a different street.
     expect(leadAddressKeysEquivalent(leadAddressCompareKey('100 Main Street North Port FL 34287'), leadAddressCompareKey('100 Main St, Apt 4'))).toBe(false);
     // Different unit, different street, or a unit-less side: never.
@@ -323,6 +332,9 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton FL 34205')).toEqual({ zip: '34205', city: expect.stringMatching(/bradenton/i) });
     expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton')).toEqual({ zip: null, city: expect.stringMatching(/bradenton/i) });
     expect(leadAddressTailPlace('100 Main St Apt 4')).toBeNull();
+    // The locality is read from the RAW line — a terminal city word that is also a street suffix is not abbreviated (r7).
+    expect(leadAddressTailPlace('100 Main St Apt 4 Palm Harbor')).toEqual({ zip: null, city: expect.stringMatching(/palm harbor/i) });
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Palm Harbor', zip: null }, { address: '100 Main St Apt 4 Palm Harbor', city: null, zip: null }).address).toBe('100 Main St Apt 4 Palm Harbor');
     expect(leadAddressTailPlace('100 Main St North Port FL 34287')).toBeNull();
     const lockedWholeNoCols = { address: '100 Main St Apt 4 Bradenton FL 34205', city: null, zip: null };
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Sarasota', zip: '34236' }, lockedWholeNoCols).address).toBeUndefined();
