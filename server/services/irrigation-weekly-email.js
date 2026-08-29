@@ -364,7 +364,29 @@ function forecastLine({ forecastRainInches, status, targetInches }) {
  * template key + payload when it does. Pure given its inputs — this is the
  * unit-testable core of the sweep.
  */
-function buildWeeklyEmailDecision({
+// The schedule inputs a moved home must never quote: portal entries, the
+// derived figure's runtime inputs, and tech readings alike (all describe the
+// former property). Withheld on EVERY legacy path — gate off, a late
+// (Tue–Sun) retry, or a plan that cannot render — so the legacy templates
+// can never carry the former home's totals (codex gh-r24). The PLAN path
+// keeps the raw inputs for routing and drops them itself (gh-r22).
+const WITHHELD_SCHEDULE_INPUTS = Object.freeze({
+  irrigationInchesPerWeek: null,
+  turfIrrigationInchesPerWeek: null,
+  assessmentIrrigationInchesPerWeek: null,
+  irrigationRunMinutes: null,
+  wateringDays: null,
+  irrigationSystemType: null,
+  scheduleUnconfirmed: false,
+});
+function buildWeeklyEmailDecision(args = {}) {
+  if (args.scheduleUnconfirmed && !args.weekPlanEnabled) {
+    return decideWeeklyEmail({ ...args, ...WITHHELD_SCHEDULE_INPUTS }, args);
+  }
+  return decideWeeklyEmail(args, args);
+}
+
+function decideWeeklyEmail({
   firstName,
   grassType = null,
   weekEnding,
@@ -401,7 +423,7 @@ function buildWeeklyEmailDecision({
   county = null,
   weekPlanEnabled = false,
   now = new Date(),
-} = {}) {
+} = {}, rawArgs = {}) {
   // Same fallback chain, same precedence, as the lawn report's
   // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
   // tech-recorded turf-profile reading, then the latest assessment. The two
@@ -688,6 +710,12 @@ function buildWeeklyEmailDecision({
       omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
       scheduleUnconfirmed,
     });
+    // No plan to render (no policy in force) for an unconfirmed schedule:
+    // never fall through with the former home's payload — re-enter the
+    // legacy path with the schedule withheld (the setup ask).
+    if (!planCopy && scheduleUnconfirmed) {
+      return buildWeeklyEmailDecision({ ...rawArgs, weekPlanEnabled: false });
+    }
     if (planCopy) {
       // LAST week's narrative only — the plan owns the week ahead, so the
       // forecast-rerouted summaries ("your current schedule has it covered")

@@ -186,10 +186,21 @@ function snapshotMatchesLine1(snapshot, line1) {
 // with the customer merge (a duplicate pair can be the old and new home).
 function homesDiffer(a, b) {
   const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
-  // Suffix-normalized ("Main Street" == "Main St") like every other street
-  // compare in this file — a spelling correction is never a move.
-  return addressMatchKey(normalizeStreetLine(a?.address_line1)) !== addressMatchKey(normalizeStreetLine(b?.address_line1))
-    || unitKey(a?.address_line2) !== unitKey(b?.address_line2)
+  // Street + unit resolved the way snapshotMatchesContact does: an inline
+  // unit on line 1 ("123 Main St Apt 4") is the same premise as line 1 +
+  // line 2 ("123 Main St" / "Apt 4") — a cleanup is never a move. Suffix-
+  // normalized ("Main Street" == "Main St") like every street compare here.
+  const premise = (row) => {
+    const inline = splitStreetLineUnit(row?.address_line1 || '');
+    return {
+      street: addressMatchKey(normalizeStreetLine(inline.unit ? inline.street : (row?.address_line1 || ''))),
+      unit: unitKey(row?.address_line2 || inline.unit || ''),
+    };
+  };
+  const pa = premise(a);
+  const pb = premise(b);
+  return pa.street !== pb.street
+    || pa.unit !== pb.unit
     || zip5(a?.zip) !== zip5(b?.zip)
     || addressMatchKey(a?.city) !== addressMatchKey(b?.city);
 }

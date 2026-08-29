@@ -114,6 +114,24 @@ describe('renderWeekPlanEmail', () => {
     expect(renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null }).plan_note).toContain('Add your sprinkler head type');
   });
 
+  test('renderWeekPlanAfterTreatment reduces the plan by the credited watering-in (codex gh-r24)', () => {
+    const { renderWeekPlanAfterTreatment } = require('../services/irrigation-week-plan');
+    const one = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(one.events).toBe(1);
+    expect(renderWeekPlanAfterTreatment(one, { restriction: ONE_DAY })).toEqual({
+      title: 'This week: covered by today\'s treatment watering-in',
+      detail: 'Water in today\'s application as the after-visit note says — that is this week\'s run. No further turf runs this week.',
+    });
+    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(two.events).toBe(2);
+    const after = renderWeekPlanAfterTreatment(two, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
+    expect(after.title).toBe('This week: 1 more run after today\'s watering-in');
+    expect(after.detail).toContain('counts as one of your 2 runs. Run one more cycle of about 25 minutes per turf zone on one of your other permitted watering days (on your assigned day');
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(hold.action).toBe('hold');
+    expect(renderWeekPlanAfterTreatment(hold)).toBe(null);
+  });
+
   test('a single run under a multi-day policy says "one of your permitted watering days" everywhere', () => {
     const two = { maxDaysPerWeek: 2 };
     const run = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'peak', restriction: two, ...SPRAY });
@@ -372,6 +390,9 @@ describe('snapshot lifecycle — exactness contract', () => {
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
     expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
+    // gh-r24: a CONDITIONAL prior plan is no evidence of a run (the rain may have arrived) → unknown.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, conditionalOnForecast: true }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);

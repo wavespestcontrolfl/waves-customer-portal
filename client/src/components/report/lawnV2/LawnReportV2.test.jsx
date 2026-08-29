@@ -193,6 +193,17 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     render(<WaterIntakeBar water={{ rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 1, status: 'low', explanation: 'A little more irrigation time will help this week.' }} />);
     expect(screen.getByText(/more irrigation time will help/)).toBeInTheDocument();
   });
+  it('a credited watering-in shows the REDUCED plan, never the unreduced run under the credit note (codex gh-r24)', () => {
+    const afterTreatment = { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' };
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent(afterTreatment.title);
+    expect(screen.getByTestId('lawn-week-plan-detail')).toHaveTextContent('No further turf runs this week.');
+    expect(screen.queryByText('About 20 minutes.')).toBeNull();
+    cleanup();
+    // No required watering-in → the plan itself.
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, afterTreatment } }} aftercare={{ watering: 'Keep your normal schedule.', waterInRequired: false }} />);
+    expect(screen.getByTestId('lawn-week-plan-title')).toHaveTextContent('This week: run once');
+  });
   it('credits the treatment watering only for a label-REQUIRED watering-in inside the plan week', () => {
     render(<WaterIntakeBar water={water} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
     expect(screen.getByTestId('lawn-week-plan-aftercare-note')).toHaveTextContent(/counts as one of this week/);

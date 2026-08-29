@@ -721,8 +721,18 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
                 : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
             </div>
           ) : null}
-          <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{water.weekPlan.title}</div>
-          {water.weekPlan.detail ? <div style={{ marginTop: 3 }}>{water.weekPlan.detail}</div> : null}
+          {/* A credited watering-in REDUCES the plan shown — never the
+              unreduced run under the credit note (codex gh-r24). */}
+          {(() => {
+            const credited = aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true && water.weekPlan.prescribesRun === true && water.weekPlan.afterTreatment;
+            const shown = credited ? water.weekPlan.afterTreatment : water.weekPlan;
+            return (
+              <>
+                <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{shown.title}</div>
+                {shown.detail ? <div data-testid="lawn-week-plan-detail" style={{ marginTop: 3 }}>{shown.detail}</div> : null}
+              </>
+            );
+          })()}
         </div>
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}

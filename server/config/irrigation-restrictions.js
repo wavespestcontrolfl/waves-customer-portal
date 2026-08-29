@@ -142,6 +142,13 @@ function validPolicy(p) {
     if (!validCalendarDate(p.effectiveFrom)) return false;
     if (String(p.effectiveFrom) > String(p.expiresOn)) return false;
   }
+  // Legal-first: an order that restricts days usually restricts hours too.
+  // A policy must STATE its hours (hoursNote rides every instruction) or
+  // explicitly assert there is no hour restriction — silence would render
+  // day-specific instructions with no allowed-hours constraint (codex
+  // #3565 gh-r24).
+  const hours = typeof p.hoursNote === 'string' ? p.hoursNote.trim() : '';
+  if (!hours && p.noHourRestriction !== true) return false;
   return true;
 }
 

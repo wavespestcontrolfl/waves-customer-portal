@@ -56,7 +56,7 @@ describe('weekly email decision — plan mode', () => {
   test('hold: a big surplus against a small cool-season target (season from NOW, January)', () => {
     // The checked-in order is not in force in January — a year-round policy
     // is configured for this case (the fail-closed path is pinned separately).
-    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', coverage: 'all' });
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', coverage: 'all', hoursNote: 'before 10 a.m. or after 4 p.m.' });
     let d;
     try {
       d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, forecastEt0Inches: 0.8, rainfallInches7d: 1.5, now: new Date('2026-01-19T12:00:00Z') });
@@ -234,5 +234,19 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(ok.payload.total_inches).toMatch(/^[\d.]+"$/);
     expect(moved.decisionInputs.rainOnlyCarryover).toBe(true);
     expect(ok.decisionInputs.rainOnlyCarryover).toBe(false);
+  });
+  test('every LEGACY path withholds the former home\'s schedule (gate off / late retry / plan unavailable) → the setup ask, never stale totals (codex gh-r24)', () => {
+    const { TEMPLATE_SETUP_SCHEDULE } = require('../services/irrigation-weekly-email');
+    // Gate off (or a Tue–Sun late retry: the sweep passes weekPlanEnabled:false).
+    const legacy = buildWeeklyEmailDecision({ ...base, weekPlanEnabled: false, scheduleUnconfirmed: true });
+    expect(legacy.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(legacy.payload.irrigation_inches).toBeUndefined();
+    expect(JSON.stringify(legacy.payload)).not.toMatch(/20 min/);
+    // Confirmed legacy still balances the schedule.
+    expect(buildWeeklyEmailDecision({ ...base, weekPlanEnabled: false }).templateKey).not.toBe(TEMPLATE_SETUP_SCHEDULE);
+    // Plan mode but no policy in force (Charlotte = partial coverage) → same withholding, not a fall-through.
+    const noPolicy = buildWeeklyEmailDecision({ ...base, county: 'Charlotte', scheduleUnconfirmed: true });
+    expect(noPolicy.templateKey).toBe(TEMPLATE_SETUP_SCHEDULE);
+    expect(buildWeeklyEmailDecision({ ...base, county: 'Charlotte' }).templateKey).not.toBe(TEMPLATE_SETUP_SCHEDULE);
   });
 });

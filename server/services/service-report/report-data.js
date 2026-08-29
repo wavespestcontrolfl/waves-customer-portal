@@ -47,7 +47,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
@@ -2667,7 +2667,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // prescribesRun: a hold plan (zero runs) never has a run for a
       // treatment watering-in to cover — the card keeps treatment-first but
       // must not claim a nonexistent run was covered (codex gh-r16).
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1 } : null;
+      // afterTreatment: the plan reduced by a credited watering-in (the card
+      // shows it INSTEAD of the unreduced plan under the credit note).
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }) } : null;
     }
   }
 

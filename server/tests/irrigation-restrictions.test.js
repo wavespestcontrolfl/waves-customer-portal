@@ -38,8 +38,13 @@ describe('currentRestrictionPolicy', () => {
     // The week fully inside the order is fine.
     expect(currentRestrictionPolicy(new Date('2026-09-21T12:00:00Z'), { env: {}, county: 'Manatee', horizonEnd: '2026-09-27' })).toMatchObject({ maxDaysPerWeek: 1 });
     // A successor policy covering the horizon restores plans.
-    const env = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-09-28', expiresOn: '2027-12-31', label: 'successor', coverage: 'all' }) };
+    const env = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-09-28', expiresOn: '2027-12-31', label: 'successor', coverage: 'all', hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
     expect(currentRestrictionPolicy(new Date('2026-09-28T12:00:00Z'), { env, county: 'Manatee', horizonEnd: '2026-10-04' })).toMatchObject({ maxDaysPerWeek: 2 });
+    // gh-r24: a policy that does not state its hours is rejected unless it explicitly asserts none.
+    const silent = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-09-28', expiresOn: '2027-12-31', label: 'successor', coverage: 'all' }) };
+    expect(currentRestrictionPolicy(new Date('2026-09-28T12:00:00Z'), { env: silent, county: 'Manatee', horizonEnd: '2026-10-04' })).toBeNull();
+    const noHours = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-09-28', expiresOn: '2027-12-31', label: 'successor', coverage: 'all', noHourRestriction: true }) };
+    expect(currentRestrictionPolicy(new Date('2026-09-28T12:00:00Z'), { env: noHours, county: 'Manatee', horizonEnd: '2026-10-04' })).toMatchObject({ maxDaysPerWeek: 2 });
   });
 
   test('IRRIGATION_RESTRICTION_POLICY env JSON overrides the default', () => {
@@ -71,10 +76,10 @@ describe('jurisdiction', () => {
   test('an env policy MUST declare coverage — none → invalid → null; the explicit all marker still needs a known county', () => {
     const none = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'year-round' }) };
     expect(currentRestrictionPolicy(IN_FORCE, { env: none, county: 'Manatee' })).toBeNull();
-    const all = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysWeek: 2, maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'year-round', coverage: 'all' }) };
+    const all = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysWeek: 2, maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'year-round', coverage: 'all', hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
     expect(currentRestrictionPolicy(IN_FORCE, { env: all, county: 'Charlotte' })).toMatchObject({ maxDaysPerWeek: 2 });
     expect(currentRestrictionPolicy(IN_FORCE, { env: all })).toBeNull();
-    const listed = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: ['Manatee'], partial: ['Charlotte'] } }) };
+    const listed = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2027-12-31', label: 'x', coverage: { counties: ['Manatee'], partial: ['Charlotte'] }, hoursNote: 'before 10 a.m. or after 4 p.m.' }) };
     expect(currentRestrictionPolicy(IN_FORCE, { env: listed, county: 'Charlotte' })).toBeNull();
     expect(currentRestrictionPolicy(IN_FORCE, { env: listed, county: 'Manatee' })).toMatchObject({ maxDaysPerWeek: 2 });
   });

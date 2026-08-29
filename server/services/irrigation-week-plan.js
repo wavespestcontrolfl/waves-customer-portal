@@ -350,6 +350,34 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
 }
 
 /**
+ * The report card's plan once a REQUIRED treatment watering-in has been
+ * credited as one of the week's runs: the customer must never see the
+ * unreduced plan under the credit note (a one-run plan + the watering-in =
+ * two waterings, over both the agronomic plan and a one-day legal limit —
+ * codex gh-r24). Null for hold / unavailable plans (nothing to reduce).
+ */
+function renderWeekPlanAfterTreatment(plan, { restriction = null } = {}) {
+  if (!plan || plan.action !== 'run') return null;
+  const events = Number(plan.events || 0);
+  const remaining = Math.max(0, events - 1);
+  if (remaining === 0) {
+    return {
+      title: 'This week: covered by today\'s treatment watering-in',
+      detail: 'Water in today\'s application as the after-visit note says — that is this week\'s run. No further turf runs this week.',
+    };
+  }
+  const minutes = minutesPhrase(plan);
+  const cycles = remaining === 1
+    ? (minutes ? `one more cycle of ${minutes} per turf zone` : 'one more full cycle on each turf zone')
+    : (minutes ? `${remaining} more cycles of ${minutes} per turf zone` : `${remaining} more full cycles on each turf zone`);
+  const days = remaining === 1 ? 'one of your other permitted watering days' : 'your other permitted watering days';
+  return {
+    title: `This week: ${remaining} more run${remaining === 1 ? '' : 's'} after today\'s watering-in`,
+    detail: `Today\'s watering-in counts as one of your ${events} runs. Run ${cycles} on ${withHours(days, restriction)}${plan.conditionalOnForecast ? ', only if less than ½" has fallen since your previous run' : ''}.`,
+  };
+}
+
+/**
  * Snapshot lifecycle — exactness contract: the row the report renders is the
  * decision the SENT email was built from.
  *   persistWeekPlan()       before the send: ATOMIC CLAIM — insert, or
@@ -487,6 +515,10 @@ async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
       if (delivery.state !== 'sent' || !delivery.decisionHash || delivery.decisionHash !== row.decision_hash) return null;
     }
     const plan = typeof row.week_plan === 'string' ? JSON.parse(row.week_plan) : row.week_plan;
+    // A plan conditional on forecast rain is no evidence the customer
+    // watered (the threshold rain may have arrived and the run been skipped
+    // exactly as instructed) — unknown, never a completed run (codex gh-r24).
+    if (plan?.conditionalOnForecast) return null;
     const events = Number(plan?.events);
     return Number.isFinite(events) ? events : null;
   } catch (err) {
@@ -755,6 +787,7 @@ module.exports = {
   decideWeekPlan,
   renderWeekPlanEmail,
   renderWeekPlanReport,
+  renderWeekPlanAfterTreatment,
   visitInPlanWeek,
   renewWeekPlanClaim,
   loadPriorWeekPlanEvents,
