@@ -353,8 +353,28 @@ same-date pairs next 120d, share of same tech + window, top service pairs, compl
 pairs last 90d.
 
 ```
-! cd ~ && export DATABASE_PUBLIC_URL="$(railway variables -s Postgres --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).DATABASE_PUBLIC_URL))')" && NODE_PATH=~/wt-service-convention/node_modules node ~/visit-pairs-2026-08-29.js
+! cd ~ && export DATABASE_PUBLIC_URL="$(railway variables -s Postgres --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).DATABASE_PUBLIC_URL))')" && NODE_PATH=~/wt-body-images/node_modules node ~/visit-pairs-2026-08-29.js
 ```
+
+**Result (prod, run by owner 2026-08-29):**
+
+| read | value |
+|---|---|
+| Future multi-row days, next 120d | **2 days · 4 rows · 2 customers** (2 same tech, 1 same window) |
+| Past multi-row days, all completed, last 180d | **10 days · 10 customers** (~1 every 18 days) |
+| Top future pair | Every 6 Weeks Lawn Care × Quarterly Pest (1) — no pest × rodent pair on the calendar yet |
+| Completed same-day pairs last 90d | 6, of which **1** had both rows invoiced |
+
+**Reading:** at today's volume a visit group would fire roughly **once every 2–3 weeks**, and the
+motivating pair (quarterly pest + rodent bait) does not yet appear — rodent bait only became its
+own row on 07-12 and the calendar has not caught up. The 6→1 both-invoiced gap says most
+same-day pairs are already being billed as one line or comped, i.e. the "two invoices, one
+payment" problem is currently small in count but real when it occurs. Phase-2's largest cost
+(extracting the 8,580-line `/complete` body into a service) is a fixed cost that does not shrink
+with volume; the value case rests on the sales direction (rodent bait as an add-on row, combo-row
+retirement per 08-28 ruling) rather than on current calendar counts. Recommendation: build
+Phase 1 (model + grouping, gate off, cheap) so groups start being stamped as bundles are sold;
+hold Phase 2 until future multi-row days reach ~10 per 120d or the owner GOes on sales direction.
 
 ---
 
