@@ -963,6 +963,12 @@ describe('PR codex r22 (b4db7a542)', () => {
     const h = gate._internals.headingsOf('Taexx Guide\n===========\n\nWhy Taexx\n---------\n\n## Costs\n');
     expect(h).toEqual(['Costs', 'Why Taexx']); // ATX first, then Setext
   });
+  test('full "Saint" spellings match their St. entries (r28)', () => {
+    for (const t of ['Saint Petersburg pest control', 'Saint Louis termite treatment', 'pest control in Saint Paul', 'Saint Augustine termite treatment', 'saint pete rodent control']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('saint augustine grass pests in sarasota').out_of_area).toEqual([]);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

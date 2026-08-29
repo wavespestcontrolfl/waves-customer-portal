@@ -317,7 +317,7 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // (Reading too: "Reading pest control labels" is a gerund, not Reading, PA.)
 const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading'].includes(n));
 // "St. Augustine" must match "St Augustine" / "St. Augustine" (cityRe's rule).
-const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+');
+const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+').replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+');
 // Footprint forms of a contextual name: never the out-of-footprint city.
 const CONTEXT_PLACE_FOOTPRINT_RE = /\b(?:port\s+charlotte|charlotte\s+(?:county|harbor)|(?:vs\.?|versus|or|and|than)\s+st\.?\s*augustine|st\.?\s*augustine\s+(?:vs\.?|versus|or|and|than))\b/gi;
 // "<Name>, <state>": an AMBIGUOUS postal abbreviation ("in" = Indiana, "or",
@@ -361,7 +361,9 @@ function cityRe(names) {
       // "St Pete" for St. Petersburg (the prose guardrail aliases Fort the
       // same way).
       .replace(/^Fort\\s\+/, '(?:Fort|Ft\\.?)\\s+')
-      .replace(/^St\\.\?\\s\+Petersburg$/, 'St\\.?\\s+Pete(?:rsburg)?'))
+      .replace(/^St\\.\?\\s\+Petersburg$/, 'St\\.?\\s+Pete(?:rsburg)?')
+      // …and the full "Saint" spelling for any leading St./St entry.
+      .replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+'))
     .filter(Boolean);
   return alts.length ? new RegExp(`\\b(${alts.join('|')})\\b`, 'i') : null;
 }
