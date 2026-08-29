@@ -365,8 +365,9 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
   const visitGroups = require('./visit-groups');
   let fan = await visitGroups.fanOutLiveTransition({ primary: row, kind, actorType, actorId, smsOutcome, notificationOwner });
   if (!row.visit_id) return fan;
-  if (smsOutcome === 'claim_error' || smsOutcome === 'claim_in_flight') {
-    const reason = smsOutcome === 'claim_error' ? 'notification claim failed' : 'notification claim in flight';
+  if (smsOutcome === 'claim_error' || smsOutcome === 'claim_in_flight' || smsOutcome === 'lease_expired') {
+    const reason = smsOutcome === 'claim_error' ? 'notification claim failed'
+      : smsOutcome === 'lease_expired' ? 'notification lease expired' : 'notification claim in flight';
     return { ...(fan || { siblingIds: [], trackerIds: [], skipped: [] }), ok: false, visitId: row.visit_id, reason };
   }
   // Owned claim whose ledger row the fan-out did not finalize — because it
@@ -429,10 +430,15 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
     }
   }
   const mayText = visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached';
+  if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'en_route'))) {
+    // Our own lease expired before we could send (a stalled process): a
+    // reclaim may own the notice now — never send twice (codex r9).
+    smsOutcome = 'lease_expired';
+  }
   // suppressCustomerSms: a visit-group SIBLING — the customer's one "on the
   // way" text came from the visit's primary row; the visit stamps this row
   // as covered afterwards (visit-groups.fanOutLiveTransition).
-  if (!opts.suppressCustomerSms && mayText && guardOpen) {
+  if (!opts.suppressCustomerSms && mayText && guardOpen && smsOutcome !== 'lease_expired') {
     try {
       const tech = svc.technician_id
         ? await db('technicians').where({ id: svc.technician_id }).first('name')
@@ -456,7 +462,18 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         },
       );
 
-      smsOutcome = result && result.success ? 'sent' : (result && result.suppressed ? 'suppressed' : 'retry');
+      // undefined = deterministic opt-out (tech_en_route off / SMS disabled,
+      // twilio.js sendTechEnRoute) — handled, not a retry (codex r9).
+      smsOutcome = result && result.success ? 'sent' : (result == null || result.suppressed ? 'suppressed' : 'retry');
+      if (smsOutcome === 'suppressed' && svc.visit_id) {
+        // Grouped row: stamp the attempt handled so later signals do not
+        // reclaim and send a stale notice once the preference flips.
+        try {
+          await db('scheduled_services').where(attemptFence).whereNull('track_sms_sent_at').update({ track_sms_sent_at: new Date() });
+        } catch (guardErr) {
+          logger.error(`[track-transitions] en-route opt-out guard stamp failed for ${serviceId}: ${guardErr.message}`);
+        }
+      }
       if (result && result.success) {
         smsSent = true;
         try {
@@ -483,6 +500,18 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
 async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
+  // for a row that no longer is the row the fan-out locked (rescheduled /
+  // detached in between) is refused rather than applied to the new attempt.
+  if (opts._visitSibling && opts.expect) {
+    const e = opts.expect;
+    if (String(svc.visit_id || '') !== String(e.visitId || '')
+        || (scheduledDayOf(svc) || '') !== String(e.scheduledDate || '')
+        || String(svc.status) !== String(e.status)) {
+      return { ok: false, reason: 'sibling_state_changed' };
+    }
+  }
+
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   // Terminal operational status rejects here, not just at the routes: the
   // stale-heal below reloads and re-enters, and a completion can commit
@@ -885,6 +914,18 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
+  // for a row that no longer is the row the fan-out locked (rescheduled /
+  // detached in between) is refused rather than applied to the new attempt.
+  if (opts._visitSibling && opts.expect) {
+    const e = opts.expect;
+    if (String(svc.visit_id || '') !== String(e.visitId || '')
+        || (scheduledDayOf(svc) || '') !== String(e.scheduledDate || '')
+        || String(svc.status) !== String(e.status)) {
+      return { ok: false, reason: 'sibling_state_changed' };
+    }
+  }
+
   if (svc.cancelled_at) return { ok: false, reason: 'already_cancelled' };
   // Terminal operational status rejects on EVERY load (same guard as
   // markEnRoute): the stale-attempt repair below reloads and re-enters,
@@ -1091,7 +1132,9 @@ async function markOnProperty(serviceId, opts = {}) {
     if (svc.visit_id && !opts._visitSibling && !arrivalRow.arrival_sms_sent_at) {
       visitClaim = await require('./visit-groups').claimVisitNotification(svc, 'on_site');
     }
-    if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
+    if (visitClaim === 'owner' && !(await require('./visit-groups').notificationLeaseLive(svc.visit_id, 'on_site'))) {
+      arrivalSms = 'lease_expired'; // our lease lapsed before sending — never send twice (r9)
+    } else if (visitClaim === null || visitClaim === 'owner' || visitClaim === 'detached') {
       arrivalSms = await maybeSendArrivalSms(arrivalRow, serviceId, opts.actingTechId, claimArrivedAt);
     } else if (visitClaim === 'taken') {
       arrivalSms = 'covered';

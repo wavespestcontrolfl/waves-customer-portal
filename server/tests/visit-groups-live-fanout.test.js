@@ -51,11 +51,11 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { transitionJobStatus } = require('../services/job-status');
 const trackTransitions = require('../services/track-transitions');
-const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification } = require('../services/visit-groups');
+const { fanOutLiveTransition, claimVisitNotification, finalizeVisitNotification, notificationLeaseLive } = require('../services/visit-groups');
 
 const PRIMARY = { id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route' };
-const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', window_start: '09:00', window_end: '10:00', ...over });
-const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1' };
+const lockedPrimary = (over = {}) => () => ({ id: 'p', visit_id: 'v1', technician_id: 't1', status: 'en_route', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', ...over });
+const VISIT = { id: 'v1', status: 'open', stop_base_key: 'p1:2026-08-30', scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', window_start: '09:00', window_end: '12:00' };
 
 beforeEach(() => { db.__calls.length = 0; db.__rawCalls.length = 0; db.__script = {}; jest.clearAllMocks(); });
 
@@ -96,7 +96,10 @@ describe('fanOutLiveTransition', () => {
     expect(stamp.ops).toEqual(expect.arrayContaining([['whereNull', 'en_route_at']]));
     // siblings' trackers written with the customer text suppressed, marked as siblings
     expect(trackTransitions.markEnRoute).toHaveBeenCalledTimes(2);
-    expect(trackTransitions.markEnRoute).toHaveBeenCalledWith('s5', expect.objectContaining({ suppressCustomerSms: true, _visitSibling: true }));
+    expect(trackTransitions.markEnRoute).toHaveBeenCalledWith('s5', expect.objectContaining({
+      suppressCustomerSms: true, _visitSibling: true,
+      expect: { visitId: 'v1', scheduledDate: '2026-08-30', status: 'en_route' },
+    }));
     // covered stamps on every reconciled sibling
     const covered = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.track_sms_sent_at);
     // fenced to THIS visit attempt: visit id, date, target tracker state, guard null
@@ -236,9 +239,26 @@ describe('fanOutLiveTransition', () => {
     expect(out).toMatchObject({ ok: false, reason: 'primary_status_lagging', visitId: 'v1' });
   });
 
+  test('a windowless primary never bridges: siblings follow only when they form one chain among themselves', async () => {
+    const chain = [
+      { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '09:00', window_end: '10:00' },
+      { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's2', status: 'confirmed', technician_id: 't1', track_state: 'scheduled', window_start: '10:00', window_end: '11:00' },
+    ];
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary({ window_start: null, window_end: null }), select: () => chain } };
+    let out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.siblingIds.sort()).toEqual(['s1', 's2']);
+    jest.clearAllMocks();
+    db.__script.scheduled_services.select = () => [chain[0], { ...chain[1], id: 's3', window_start: '14:00', window_end: '15:00' }];
+    out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.siblingIds).toEqual([]);
+    expect(out.skipped.map((x) => x.reason)).toEqual(['stop_changed', 'stop_changed']);
+  });
+
   test.each([
     ['detached (split committed under the lock)', { visit_id: 'v2' }],
     ['reassigned technician', { technician_id: 't9' }],
+    ['moved to another day (detach seam pending)', { scheduled_date: '2026-09-01' }],
+    ['window moved outside the visit (detach seam pending)', { window_start: '15:00', window_end: '16:00' }],
   ])('primary revalidated under the stop lock — %s ⇒ no fan-out', async (_label, over) => {
     db.__script = {
       service_visits: { first: () => VISIT },
@@ -256,7 +276,7 @@ describe('fanOutLiveTransition', () => {
 describe('claimVisitNotification (visit-scoped at-most-once claim, under the stop lock)', () => {
   const ROW = { id: 'p', visit_id: 'v1' };
   test('first claimant owns the send; a concurrent member sees taken; the stop lock is held', async () => {
-    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
     expect(await claimVisitNotification(ROW, 'en_route')).toBe('owner');
     expect(db.__rawCalls[0][1]).toEqual(['visit.stop', 'p1:2026-08-30']);
     const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
@@ -270,7 +290,9 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
     db.__script.visit_effects = { returning: () => [], first: () => ({ status: 'claimed' }) };
     expect(await claimVisitNotification(ROW, 'on_site')).toBe('in_flight');
   });
-  test('a row a split just detached (or a visit no longer open) never claims', async () => {
+  test('a row a split just detached (or moved off the stop, or a visit no longer open) never claims', async () => {
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v1', customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-08-30', window_start: '15:00', window_end: '16:00' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
+    expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: () => ({ id: 'p', visit_id: 'v2' }) }, visit_effects: { returning: () => [{ id: 'e1' }] } };
     expect(await claimVisitNotification(ROW, 'en_route')).toBe('detached');
     expect(db.__calls.some((c) => c.table === 'visit_effects')).toBe(false);
@@ -312,5 +334,18 @@ describe('finalizeVisitNotification', () => {
     expect(out.ok).toBe(false);
     expect(out.effect).toBe(null);
     expect(out.trackerFailures[0]).toMatchObject({ id: 'effect_finalize' });
+  });
+});
+
+describe('notificationLeaseLive', () => {
+  test('live inside the lease, dead when expired / not claimed / missing', async () => {
+    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date() }) } };
+    expect(await notificationLeaseLive('v1', 'en_route')).toBe(true);
+    db.__script = { visit_effects: { first: () => ({ status: 'claimed', claimed_at: new Date(Date.now() - 11 * 60 * 1000) }) } };
+    expect(await notificationLeaseLive('v1', 'en_route')).toBe(false);
+    db.__script = { visit_effects: { first: () => ({ status: 'sent', claimed_at: new Date() }) } };
+    expect(await notificationLeaseLive('v1', 'on_site')).toBe(false);
+    db.__script = { visit_effects: { first: () => null } };
+    expect(await notificationLeaseLive('v1', 'on_site')).toBe(false);
   });
 });
