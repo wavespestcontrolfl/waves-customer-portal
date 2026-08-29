@@ -1335,7 +1335,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
-      const serviceInterestForCustomer = buildCompactPublicQuoteServiceInterest(services);
+      // A keyed quote (instant or on-request) names its product from the
+      // catalog — never derived from `services`, which is {} for on-request
+      // (pre-push codex P1: that erased the customer's interest).
+      const serviceInterestForCustomer = keyedService
+        ? compactServiceInterestPart(keyedService.name) || String(keyedService.name).slice(0, 32)
+        : buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
 
@@ -1830,9 +1835,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin(
         'new_lead',
-        quoteRequired ? `Manual quote needed: ${contactFirstName} ${contactLastName}` : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         quoteRequired
-          ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
+          ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
+          : `Calculator quote: ${contactFirstName} ${contactLastName}`,
+        quoteRequired
+          ? (quoteRequiredReason === 'quote_on_request'
+            ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
+            : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
@@ -2167,7 +2176,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: quoteRequiredReason === 'unit_in_multi_unit_building'
+        message: quoteRequiredReason === 'quote_on_request'
+          ? `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`
+          : quoteRequiredReason === 'unit_in_multi_unit_building'
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
