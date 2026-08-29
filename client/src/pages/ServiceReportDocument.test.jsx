@@ -381,7 +381,10 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       typedReport: {
         type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection',
         todaysResult: { headline: 'Termite activity was high today.', body: 'We inspected 10 stations (typed).', nextStep: 'Recheck active stations sooner.' },
-        findings: [],
+        findings: [
+          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '10' },
+          { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+        ],
       },
       termiteReportV2: {
         status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
@@ -397,6 +400,10 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).not.toMatch(/Termite activity was high today/);
     expect(text).not.toMatch(/10 stations \(typed\)/);
     expect(text).not.toMatch(/Legacy recap/);
+    // dashboard-owned typed tiles (counts / status / bait condition) never
+    // print beside the V2 network; other typed fields still do
+    expect(text).not.toMatch(/Stations checked: 10/);
+    expect(text).toMatch(/Station condition issues: Station obstructed/);
     // the required next step still prints
     expect(text).toMatch(/Recheck active stations sooner/);
     // the summary body prints once (status row carries the label only)
@@ -734,6 +741,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     };
     const { container } = render(<ServiceReportDocument data={data} token="t" />);
     expect(container.textContent).toContain('Termidor Foam');
+  });
+
+  it('never lists a bait cartridge recorded under bait_placement (device identity beats the method)', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'bait_placement', totalAmount: '6', amountUnit: 'cartridges', product: { name: 'Trelona Compressed Termite Bait Cartridges', category: 'termite bait', epa_reg: '499-557' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Products applied');
+    expect(container.textContent).not.toContain('Trelona');
   });
 
   it('never lists a bait cartridge as an application, even EPA-registered', () => {

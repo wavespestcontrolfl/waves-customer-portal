@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
 import { epaReg, isProductApplication } from '../lib/product-application';
+import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
@@ -357,7 +358,13 @@ export default function ServiceReportDocument({ data, token }) {
   }, [failedImages, payloadDroppedImages]);
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
-  const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];
+  const findings = (Array.isArray(typed?.findings) ? typed.findings : [])
+    .filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '')
+    // Termite V2 owns the count/status/bait-condition tiles (visit-backed
+    // map counts may override hand-edited typed counts) — same filter as the
+    // live report, so the PDF never prints two inspected totals (codex P2
+    // #3600 r7).
+    .filter((f) => !data.termiteReportV2 || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f.fieldKey));
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
   // Older records store the aliases the web report's conditionRows accepts

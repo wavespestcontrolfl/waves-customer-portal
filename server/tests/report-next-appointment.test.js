@@ -13,7 +13,7 @@ const { buildReportV1Data } = require('../services/service-report/report-data');
 // (where/andWhere/whereIn/whereNot via modify/orderBy/first) on top of the
 // object-criteria `where` the rest of the builder calls.
 function makeKnex(fixtures) {
-  return (table) => {
+  const knex = (table) => {
     let rows = [...(fixtures[table] || [])];
     const sortKeys = [];
     const query = {
@@ -36,6 +36,16 @@ function makeKnex(fixtures) {
       },
       whereNot(column, value) {
         rows = rows.filter((row) => row[column] !== value);
+        return query;
+      },
+      // service-completion-profiles' canonical resolver matches catalog
+      // names case-insensitively: `lower(<col>) = lower(?)`.
+      whereRaw(sql, bindings) {
+        const m = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(String(sql));
+        if (m) {
+          const wanted = String(bindings?.[0] ?? '').toLowerCase();
+          rows = rows.filter((row) => String(row[m[1]] || '').toLowerCase() === wanted);
+        }
         return query;
       },
       modify(fn) { fn(query); return query; },
@@ -61,6 +71,9 @@ function makeKnex(fixtures) {
     };
     return query;
   };
+  // the profile resolver probes the table before reading it
+  knex.schema = { hasTable: async () => true };
+  return knex;
 }
 
 const BASE_SERVICE = {
@@ -361,27 +374,33 @@ test('termite report: next monitoring visit skips an earlier liquid visit for th
   });
 });
 
-test('termite report: the catalog completion profile is authoritative in both directions', async () => {
+test('termite report: the canonical completion-profile resolver is authoritative in both directions', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
     services: [
-      { id: 'svc-custom', service_key: 'termite_bait_quarterly' },
-      { id: 'svc-liquid', service_key: 'termite_liquid' },
+      { id: 'svc-custom', service_key: 'termite_bait_quarterly', name: 'Custom Termite Plan', short_name: 'Custom Plan', category: 'termite' },
+      { id: 'svc-annual', service_key: 'termite_active_annual', name: 'Termite Active Annual Program', short_name: 'Bait Annual', category: 'termite' },
+      { id: 'svc-liquid', service_key: 'termite_liquid', name: 'Termite Liquid Treatment', short_name: 'Liquid', category: 'termite' },
     ],
     service_completion_profiles: [
-      { service_key: 'termite_bait_quarterly', active: true, project_type: 'termite_bait_station' },
-      { service_key: 'termite_liquid', active: true, project_type: 'termite_liquid' },
+      { service_key: 'termite_bait_quarterly', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+      { service_key: 'termite_active_annual', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+      { service_key: 'termite_liquid', active: true, completion_mode: 'service_report', project_type: 'termite_liquid' },
     ],
     scheduled_services: [
-      // bait-sounding label but linked to the liquid profile → vetoed
+      // bait-sounding label but linked (service_id) to the liquid profile → vetoed
       { id: 'scheduled-veto', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Station Follow-up', window_start: '09:00:00', service_id: 'svc-liquid' },
-      // renamed plan with no bait token, linked to the bait profile → admitted
-      { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Custom Termite Plan', window_start: '11:00:00', service_key_snapshot: 'termite_bait_quarterly' },
+      // unlinked legacy row whose label is a unique catalog SHORT NAME with
+      // no bait/station token — the canonical resolver's short-name path
+      // finds the bait profile (an exact-key-plus-regex path missed it)
+      { id: 'scheduled-annual', customer_id: 'customer-1', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Bait Annual', window_start: '11:00:00' },
+      // renamed plan via service_key_snapshot, later — never reached
+      { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-03-03', status: 'confirmed', service_type: 'Custom Termite Plan', window_start: '11:00:00', service_key_snapshot: 'termite_bait_quarterly' },
     ],
   });
   const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-profile', knex);
   expect(data.termiteNextMonitoringVisit).toEqual({
-    serviceType: 'Custom Termite Plan',
+    serviceType: 'Bait Annual',
     scheduledDate: '2999-02-03',
     windowStart: '11:00:00',
   });

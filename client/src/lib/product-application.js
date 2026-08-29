@@ -26,9 +26,13 @@ export function epaReg(app) {
 
 export function isProductApplication(app) {
   if (!app) return false;
-  if ((app.method || 'perimeter_spray') !== 'station_check') return true;
+  // Device identity FIRST: a bait cartridge / station / monitor row is
+  // never an application whatever method the tech picked (bait_placement,
+  // station_check, …) — the method shortcut below must not admit it
+  // (codex P2 #3600 r7).
   const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
   if (/bait|station|cartridge|monitor/i.test(identity)) return false;
+  if ((app.method || 'perimeter_spray') !== 'station_check') return true;
   if (epaReg(app)) return true;
   const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
   return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);

@@ -204,6 +204,14 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     expect(out.metrics[0].value).toBe('10 of 12');
   });
 
+  it('clamps a recorded total below the documented counts — never "10 of 8"', () => {
+    const net = buildStationNetwork({ values: { ...CLEAN_VALUES, total_stations: 8, stations_checked: 10 } });
+    expect(net.counts.total).toBe(10);
+    expect(buildTodaysMetrics({ checked: 10, total: net.counts.total, activityCount: 0, servicedCount: 0 })[0].value).toBe('10 of 10');
+    const partial = buildStationNetwork({ values: { stations_checked: 10, stations_inaccessible: 2, total_stations: 11, termite_activity: 'None observed', bait_consumption: 'None — bait intact' } });
+    expect(partial.counts.total).toBe(12);
+  });
+
   it('falls back to the typed counts and returns null without an inspected count', () => {
     const net = buildStationNetwork({ values: CLEAN_VALUES });
     expect(net.counts.checked).toBe(12);

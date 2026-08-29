@@ -221,8 +221,12 @@ function visitBackedSummary(stationSummary) {
  * "all N stations" (codex P2 #3600 r2).
  */
 function stationDenominator({ total, checked, inaccessible }) {
-  if (total != null && total > 0) return total;
-  if (checked != null && inaccessible > 0) return checked + inaccessible;
+  // Never smaller than the documented counts: the typed validator checks
+  // each count's shape, not their relationship, so a recorded total below
+  // checked (+ inaccessible) would print "10 of 8" (codex P2 #3600 r7).
+  const documented = checked != null ? checked + (inaccessible || 0) : null;
+  if (total != null && total > 0) return documented != null ? Math.max(total, documented) : total;
+  if (checked != null && inaccessible > 0) return documented;
   return null;
 }
 
