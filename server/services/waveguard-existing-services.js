@@ -349,6 +349,14 @@ function qualifyingKeysForRow(row = {}) {
   if (!catalogText) return toQualifyingKeys(row.service_type);
   const catalogKeys = toQualifyingKeys(catalogText);
   if (catalogKeys.length) return catalogKeys;
+  // A RECOGNIZED rodent bait catalog identity that resolved no key means the
+  // live rodent_waveguard.tier_qualifier flag is off — the row is a
+  // non-qualifying bait plan, never "fall back to the stale label" (a
+  // generic 'Pest Control' service_type would otherwise re-admit it as pest
+  // evidence and waive setups / raise tiers while rodent is disabled —
+  // codex #3591 r25 P1).
+  const catalogLower = catalogText.toLowerCase();
+  if (isRodentLedText(catalogLower) && /bait|station|monitor/.test(catalogLower)) return [];
   return toQualifyingKeys(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
 

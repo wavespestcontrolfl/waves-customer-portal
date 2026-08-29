@@ -66,6 +66,10 @@ describe('SecurePlanChoice', () => {
     expect(screen.queryByText(/setup fee waived/)).toBeNull();
     expect(screen.getByText('You save $17.80')).toBeInTheDocument();
     expect(screen.getByText('$437.20')).toBeInTheDocument();
+    // The struck pay-per-application-year comparison includes the same
+    // unwaived setup (356 + 99), never a figure below the offer (codex #3591 r25 P2).
+    expect(screen.getByText('$455.00')).toBeInTheDocument();
+    expect(screen.queryByText('$356.00')).toBeNull();
   });
 
   it('discount mix: percent label, strikethrough base, and savings badge from the payload', () => {

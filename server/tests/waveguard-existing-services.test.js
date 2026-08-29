@@ -99,10 +99,16 @@ describe('loadExistingRecurringQualifyingRows plan-gate', () => {
         scheduledRows: [{ id: 'pest', service_type: 'Quarterly Pest Control' }, { id: 'rodent', service_type: 'Rodent Bait Stations' }],
       });
       expect(await loadExistingQualifyingServiceKeys(db, 'c1')).toEqual(['pest_control']);
+      // A recognized bait CATALOG identity with a stale generic label never
+      // falls back to the label while rodent is disabled (codex #3591 r25 P1).
+      const { qualifyingKeysForRow } = require('../services/waveguard-existing-services');
+      expect(qualifyingKeysForRow({ service_type: 'Pest Control', service_key: 'rodent_bait_quarterly', service_name: 'Quarterly Rodent Bait Station Service' })).toEqual([]);
     } finally {
       constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
     }
     expect(toQualifyingKeys('Rodent Bait Stations')).toEqual(['rodent_bait']);
+    const { qualifyingKeysForRow } = require('../services/waveguard-existing-services');
+    expect(qualifyingKeysForRow({ service_type: 'Pest Control', service_key: 'rodent_bait_quarterly', service_name: 'Quarterly Rodent Bait Station Service' })).toEqual(['rodent_bait']);
   });
 
   test('rodent-trapping- and palm-only rows never feed qualifying keys (bait stations DO, since 2026-08-29)', async () => {

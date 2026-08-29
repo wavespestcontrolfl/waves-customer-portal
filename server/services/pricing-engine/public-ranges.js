@@ -97,9 +97,13 @@ function rodentBaitSweepFootprints() {
   const points = brackets.map((b) => Number(b.maxSqFt)).filter((n) => Number.isFinite(n) && n > 0);
   const top = points.length ? Math.max(...points) : 0;
   const step = Number(ext.perSqFt) > 0 ? Number(ext.perSqFt) : 1000;
-  for (let f = top + step; f < RODENT_PUBLIC_MAX_SQFT; f += step) points.push(f);
+  // The extension is monotonic (+stations/+$ per step), so its extrema are
+  // the FIRST step past the top bracket and the public cap — never every
+  // increment (a tiny per_sq_ft would otherwise enumerate tens of thousands
+  // of engine runs per sweep — codex #3591 r25 P2).
+  if (top + step < RODENT_PUBLIC_MAX_SQFT) points.push(top + step);
   points.push(RODENT_PUBLIC_MAX_SQFT);
-  return points;
+  return [...new Set(points)];
 }
 
 function waveGuardBundleValues() {

@@ -32,6 +32,11 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: serviceRow \}\)/);
   });
 
+  test('the signed funnel key is normalized to the priced family before the setup-fee intersection (codex #3591 r25 P1)', () => {
+    expect(booking).toMatch(/const FUNNEL_TO_DRAFT_FAMILY = \{ rodent: \['rodent_bait'\], termite: \['termite_bait'\] \};/);
+    expect(booking).toMatch(/!signedFeeComponents\.every\(draftHasComponent\)/);
+  });
+
   test('member-waiver retires a consumed draft, or freezes a zero-waiver into a live one', () => {
     // The member waiver is the membership fee's; a rodent setup quote is
     // never waived by account-level membership (codex #3591 r18 P1).

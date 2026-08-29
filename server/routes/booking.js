@@ -2886,6 +2886,15 @@ async function createSelfBooking(payload = {}) {
                     .filter(Boolean),
                 );
                 const signedFeeComponents = String(serviceKey || '').split('+').filter(Boolean);
+                // Funnel keys are coarser than engine service keys: the
+                // rodent funnel signs 'rodent' while the priced draft carries
+                // 'rodent_bait' (and termite signs 'termite' for
+                // 'termite_bait'). Normalize each signed component to the
+                // priced family before the intersection, or a standalone
+                // rodent quote never stamps its setup (codex #3591 r25 P1).
+                const FUNNEL_TO_DRAFT_FAMILY = { rodent: ['rodent_bait'], termite: ['termite_bait'] };
+                const draftHasComponent = (c) => draftServices.has(c)
+                  || (FUNNEL_TO_DRAFT_FAMILY[c] || []).some((family) => draftServices.has(family));
                 // EVERY signed component must be in the quoted plan — a
                 // composite slot (e.g. lawn+pest) paired with a solo pest
                 // quote would otherwise pass on the one overlapping
@@ -2893,7 +2902,7 @@ async function createSelfBooking(payload = {}) {
                 // composite visit (Codex #3500 r3).
                 if (draftServices.size > 0
                   && (signedFeeComponents.length === 0
-                    || !signedFeeComponents.every((c) => draftServices.has(c)))) return;
+                    || !signedFeeComponents.every(draftHasComponent))) return;
                 const { isMembershipCustomerRow } = require('../services/waveguard-existing-services');
                 const freshCustomer = await sp('customers')
                   .where({ id: custId })

@@ -1399,11 +1399,15 @@ function EstimateToolView() {
       // Rodent bait ladder + setup fee: live-rates posture, not part of the
       // readiness return (new rows — codex #3591 r10 P1). A missing row
       // leaves the in-code default in place.
-      if (rodentBracketsRow.ok && rodentBracketsRow.data) applyServerRodentBaitBracketsPricingConfig(rodentBracketsRow.data);
-      if (rodentSetupRow.ok && rodentSetupRow.data) applyServerRodentSetupFeePricingConfig(rodentSetupRow.data);
+      // Applied whenever the fetch succeeded — including an authoritative
+      // 404 (data null), which the appliers read as "reset to the in-code
+      // default" so a removed row cannot leave stale customized pricing in
+      // module state (codex #3591 r25 P2).
+      if (rodentBracketsRow.ok) applyServerRodentBaitBracketsPricingConfig(rodentBracketsRow.data);
+      if (rodentSetupRow.ok) applyServerRodentSetupFeePricingConfig(rodentSetupRow.data);
       // Tier-count / bundle-% posture must follow the same live row the
       // server's WaveGuard maps follow (codex #3591 r12 P1).
-      if (rodentWaveguardRow.ok && rodentWaveguardRow.data) applyServerRodentWaveguardPricingConfig(rodentWaveguardRow.data);
+      if (rodentWaveguardRow.ok) applyServerRodentWaveguardPricingConfig(rodentWaveguardRow.data);
       rodentConfigOkRef.current = rodentBracketsRow.ok && rodentSetupRow.ok && rodentWaveguardRow.ok;
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();

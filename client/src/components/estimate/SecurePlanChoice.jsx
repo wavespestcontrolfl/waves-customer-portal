@@ -136,7 +136,9 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
           title={discounted ? `Prepay the year — save ${prepay.ratePctLabel}` : 'Prepay the year'}
           price={fmtMoney(prepay.total)}
           priceSuffix={`/ year · ${visitsPerYear} application${visitsPerYear === 1 ? '' : 's'}`}
-          strike={discounted ? fmtMoney(annualBase) : null}
+          strike={discounted
+            ? fmtMoney(setupFee && !setupWaivedByPrepay ? annualBase + Number(setupFee.amount) : annualBase)
+            : null}
           sub={setupFee
             ? (setupWaivedByPrepay
               ? `Pay once today and the ${fmtMoney(setupFee.amount)} setup fee is waived. No charges after your visits.`
