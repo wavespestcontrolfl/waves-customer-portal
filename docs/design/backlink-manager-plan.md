@@ -280,13 +280,13 @@ t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // CHECK (provider IN ('deterministic_runner','openai_cua','claude_cu','stagehand','grok','hermes','human')) — `hermes` = the legacy shared HERMES_SERVICE_TOKEN identity (§12): investigation/draft reports only, no payment/credential capability
 t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and — because a DB row cannot prove whether the external call took effect — treats it as **`mutation_ambiguous`** (outcome, added to the enum): the runner first RECONCILES per action before anything is re-sent (`create_account`: probe the login/‘email already registered’ path or the inbox for the welcome mail; verification activation: reload the account and read its verified state; `submit`: the existing profile/listing probe the Judge uses) and only retries the external call when reconciliation PROVES the first one did not take effect; an unprovable state stays `mutation_ambiguous` for the owner card — a crashed mutation is therefore never repeated blindly
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
-t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
+t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered) | accept_terms (the guarded legal-acceptance mutation: its own idempotency_key `${prospect_id}:accept_terms:${generation}` — never aliased to resume; outcomes `terms_accepted` on success, `mutation_ambiguous` on an unproven crash (reconciled by re-reading the account's agreement state), `terms_changed` when the live hash ≠ legal_terms_hash)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back on lease expiry (ET-day rollover re-slots the same row in place, §13) — audit-only, NEVER counted by the cap query; the same row returns to slot_reserved on the instance's next lease
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
-                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','price_entered','mutation_ambiguous','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
+                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','price_entered','mutation_ambiguous','terms_accepted','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
 t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
@@ -499,7 +499,7 @@ bridge → authority before any send).
   (`source='existing_backlink'`, `agent_state='acquired'`) **plus** a placement and a path,
   so the baselines are real rows, not a flag: ONE representative placement per
   `(target_domain, target_page, location_key)` — placements stay unique on that key — chosen
-  deterministically (the dofollow link with the earliest `first_seen`, ties by lowest id),
+  deterministically (dofollow preferred, else the earliest active nofollow — ordering by `is_dofollow DESC, first_seen ASC, id ASC` — so a nofollow-only referring domain still gets its representative and mappings),
   while EVERY inbound `seo_backlinks` row from that host to that page is kept in a new
   one-to-many `seo_link_placement_backlinks (prospect_id, backlink_id UNIQUE)` mapping so no
   link identity is dropped or overwritten; the placement is `seo_link_prospects`
@@ -1137,14 +1137,17 @@ together:
   must still be valid, and a waiver never promotes the level) — except
   `OWNER_MANUAL_PAYMENT`, which is never leasable for any payment claim (no reservation, no
   mint: the owner pays outside the system and records the charge through the manual
-  settlement form, which atomically inserts a `manual_charged` purchase row + a `human`
-  attempt and only then writes the paid term; the placement's non-payment dimensions proceed
+  settlement form, which atomically — in ONE transaction — inserts a `manual_charged`
+  purchase row + a `human` attempt, writes the paid term, marks the payment authority
+  instance `satisfied_at = now` (the settlement click is its satisfaction; no approval row),
+  and restores the placement from `awaiting_owner` to `parked_from_status` (or to `placed`
+  when the settlement itself completes the acquisition) so it continues toward verification
+  instead of stranding; the placement's non-payment dimensions proceed
   normally), and
   `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
   `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
-  which the investigator re-marks the remainder `agent_completable=true` and the bridge
-  re-decides; the path's lane
+  which the bridge re-decides THAT placement only, with the human step recorded as satisfied on the placement's own authority instance/session (`human_step_done` attempt + `satisfied_at`) — the shared path-level `agent_completable` flag is NEVER changed by a checkpoint (a sibling location's session has not completed it, and a recurring human-only step must recur); only an independent investigator pass may re-mark the path itself; the path's lane
   gate is on (**`GATE_LINK_AUTHORITY` for EVERY automated claim, `AUTO_*` and owner-approved alike — the kill switch is checked at
   claim and again immediately before EVERY irreversible external action — submit, send, mint, account creation, verification-link activation, and accepting/signing legal terms — under the same locked revalidation (authority row + approval + gate), never
   only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach
@@ -1290,7 +1293,7 @@ Implementations, in order:
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
 Provider selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
-for non-credentialed, non-payment steps only; **credentialed steps (account creation, email
+for non-credentialed, non-payment steps only, restricted to live `BrowserAgentProvider` implementations that support the current action (CHECK on both columns: never `hermes` or `human`, which hold no execution-capable worker token; an unsupported choice falls through to the next preference, then the runner); **credentialed steps (account creation, email
 verification, login, authenticated resume) and payment steps always resolve to
 `deterministic_runner`** regardless of preference — a `ready_for_credentials` / `ready_for_payment`
 hand-off is therefore always picked up by the runner, never re-offered to the provider
