@@ -161,18 +161,21 @@ describe('runAutopaySmsDigest', () => {
     expect(stampSendMarker).not.toHaveBeenCalled();
   });
 
-  test('sends to contact@ by default and stamps the marker with the newest sent_at', async () => {
+  test('sends to contact@ by default and stamps the marker with the window upper bound (now − settle lag), not the newest row', async () => {
     const stampSendMarker = jest.fn();
     const loadRows = jest.fn(async () => [row({ sent_at: '2026-08-29T13:03:00Z' })]);
     const r = await runAutopaySmsDigest({ windowStart, loadRows, stampSendMarker });
     expect(r.sent).toBe(true);
-    expect(loadRows).toHaveBeenCalledWith(new Date('2026-08-29T00:00:00Z'));
+    expect(loadRows).toHaveBeenCalledWith(new Date('2026-08-29T00:00:00Z'), expect.any(Date));
+    const until = loadRows.mock.calls[0][1];
+    expect(Date.now() - until.getTime()).toBeGreaterThanOrEqual(5 * 60 * 1000 - 1000);
+    expect(Date.now() - until.getTime()).toBeLessThan(6 * 60 * 1000);
     expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({
       to: 'contact@wavespestcontrol.com',
       subject: 'FYI: 1 autopay text went out',
       categories: ['ops', 'autopay-sms-digest'],
     }));
-    expect(stampSendMarker).toHaveBeenCalledWith('2026-08-29T13:03:00Z');
+    expect(stampSendMarker).toHaveBeenCalledWith(until);
   });
 
   test('kill switch: composes but does not send or stamp', async () => {

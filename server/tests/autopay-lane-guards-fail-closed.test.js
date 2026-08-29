@@ -15,6 +15,8 @@
  */
 
 let mockCustomers = [];
+// Row the pre-dispatch refetch (`.first()`) returns; undefined = the batch row.
+let mockFreshCustomer;
 const mockCalls = { whereRaw: [], select: [] };
 
 jest.mock('../models/db', () => {
@@ -27,7 +29,7 @@ jest.mock('../models/db', () => {
     ]) b[m] = () => b;
     b.whereRaw = (sql) => { mockCalls.whereRaw.push(String(sql)); return b; };
     b.select = (...cols) => { mockCalls.select.push(cols.flat()); return b; };
-    b.first = () => Promise.resolve(null);
+    b.first = () => Promise.resolve(mockFreshCustomer !== undefined ? mockFreshCustomer : (resultFn()[0] || null));
     b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
     return b;
   }
@@ -72,6 +74,7 @@ const PaymentRouter = require('../services/payment-router');
 
 beforeEach(() => {
   mockCustomers = [];
+  mockFreshCustomer = undefined;
   mockCalls.whereRaw.length = 0;
   mockCalls.select.length = 0;
   jest.clearAllMocks();
@@ -116,6 +119,35 @@ describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)
     await sendPreChargeReminders();
 
     expect(sendCustomerMessage.mock.calls[0][0].metadata.billing_mode_at_send).toBe('monthly_membership');
+  });
+
+  test('a customer moved out of the monthly lane after the batch query is skipped at dispatch, never texted (codex r7)', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-moved', first_name: 'Moved', phone: '+15550004444', monthly_rate: '55.00',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
+    }];
+    mockFreshCustomer = { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: '55.00', autopay_enabled: true, active: true, deleted_at: null };
+
+    const r = await sendPreChargeReminders();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(r.sent).toBe(0);
+    expect(r.skipped).toBe(1);
+  });
+
+  test('a customer who disappeared (refetch null) is skipped — fail closed', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-gone', first_name: 'Gone', phone: '+15550005555', monthly_rate: '55.00',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
+    }];
+    mockFreshCustomer = null;
+
+    const r = await sendPreChargeReminders();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(r.skipped).toBe(1);
   });
 });
 

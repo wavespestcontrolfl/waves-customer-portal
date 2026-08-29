@@ -73,12 +73,28 @@ async function sendPreChargeReminders() {
       const already = await eventExistsRecently(c.id, 'pre_charge_reminder_sent', 25);
       if (already) { skipped++; continue; }
 
+      // Fresh verdict at the dispatch boundary (codex #3607 r7): the lane
+      // filter ran once for the whole batch; a customer moved out of the
+      // monthly lane (or off autopay) while earlier iterations were
+      // texting must not get a monthly-charge reminder stamped as valid.
+      const fresh = await db('customers')
+        .where({ id: c.id })
+        .first('billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'active', 'deleted_at');
+      const laneAtSend = fresh && !fresh.deleted_at && fresh.active !== false && fresh.autopay_enabled !== false
+        && Number(fresh.monthly_rate || 0) > 0
+        ? resolveBillingLane(fresh).mode
+        : null;
+      if (laneAtSend !== 'monthly_membership') {
+        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: lane changed before dispatch (${laneAtSend || 'ineligible'})`);
+        skipped++; continue;
+      }
+
       const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
       // Plan-aware branding (owner ruling 2026-07-30): the monthly lane
       // includes explicit monthly-membership customers WITHOUT a WaveGuard
       // tier, so the old hardcoded "WaveGuard auto-pay" copy misbranded them
       // — the sms-guard stopgap blocked every pre-charge text over it.
-      const autopayLabel = isMembershipTier(c.waveguard_tier) ? 'WaveGuard auto-pay' : 'Waves auto-pay';
+      const autopayLabel = isMembershipTier(fresh.waveguard_tier) ? 'WaveGuard auto-pay' : 'Waves auto-pay';
       const body = await renderSmsTemplate(
         'autopay_pre_charge',
         { first_name: c.first_name, charge_date: dateStr, autopay_label: autopayLabel },
@@ -96,12 +112,12 @@ async function sendPreChargeReminders() {
         purpose: 'autopay',
         customerId: c.id,
         entryPoint: 'autopay_pre_charge_reminder',
-        // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5): the one lane
-        // classifier, so a legacy NULL-mode member the lane SQL admitted
-        // stamps 'monthly_membership', not a null the owner digest would
-        // flag. The digest classifies against this stamp, not the
-        // customer's lane at read time.
-        metadata: { original_message_type: 'autopay_pre_charge', billing_mode_at_send: resolveBillingLane(c).mode },
+        // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5 + r7): the fresh
+        // pre-dispatch verdict from the one lane classifier, so a legacy
+        // NULL-mode member stamps 'monthly_membership', not a null the owner
+        // digest would flag. The digest classifies against this stamp, not
+        // the customer's lane at read time.
+        metadata: { original_message_type: 'autopay_pre_charge', billing_mode_at_send: laneAtSend },
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

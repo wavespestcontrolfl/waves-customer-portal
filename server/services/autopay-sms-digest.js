@@ -33,7 +33,10 @@ const { MONTHLY_LANE_SQL } = require('./billing-lane');
 // column: a legacy NULL-mode member with a real tier + rate IS monthly.
 // Unqualified column names resolve to `cu` — messaging_audit_log has none
 // of billing_mode / waveguard_tier / monthly_rate.
-const LIVE_LANE_SQL = `(CASE WHEN cu.id IS NULL THEN NULL WHEN cu.billing_mode IS NOT NULL THEN cu.billing_mode WHEN ${MONTHLY_LANE_SQL} THEN 'monthly_membership' ELSE 'per_visit' END)`;
+// MONTHLY_LANE_SQL carries the tier half of the inference; the cron adds
+// the rate half in its own select, and resolveBillingLane requires both —
+// so the fallback requires both too (codex r7).
+const LIVE_LANE_SQL = `(CASE WHEN cu.id IS NULL THEN NULL WHEN cu.billing_mode IS NOT NULL THEN cu.billing_mode WHEN (${MONTHLY_LANE_SQL}) AND coalesce(cu.monthly_rate, 0) > 0 THEN 'monthly_membership' ELSE 'per_visit' END)`;
 
 const digestDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.AUTOPAY_SMS_DIGEST_DISABLED || '').toLowerCase());
@@ -77,6 +80,11 @@ const MONTHLY_CHARGE_ENTRY_POINTS = [
 // marker row was lost) — never replay a month of history into one email.
 const MAX_LOOKBACK_HOURS = 7 * 24;
 const MAX_ROWS = 60;
+// Rows are windowed on audit INSERTION time and only once they are older
+// than this settle lag (codex r7): a send whose audit insert is still in
+// flight at tick time must not land behind an advanced watermark. Anything
+// younger rolls into the next tick.
+const SETTLE_LAG_MS = 5 * 60 * 1000;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -88,7 +96,7 @@ function etStamp(date) {
   });
 }
 
-async function loadSentAutopayTexts(since) {
+async function loadSentAutopayTexts(since, until) {
   const { rows } = await db.raw(
     `
     SELECT COUNT(*) OVER () AS total_count,
@@ -115,7 +123,8 @@ async function loadSentAutopayTexts(since) {
     WHERE a.channel = 'sms'
       AND a.audience = 'customer'
       AND a.sent_at IS NOT NULL
-      AND a.sent_at > :since
+      AND a.created_at > :since
+      AND a.created_at <= :until
       AND (
         a.purpose = 'autopay'
         OR a.entry_point LIKE 'autopay\\_%'
@@ -126,7 +135,7 @@ async function loadSentAutopayTexts(since) {
     ORDER BY a.sent_at DESC
     LIMIT :maxRows
     `,
-    { since, extraEntryPoints: AUTOPAY_EXTRA_ENTRY_POINTS, monthlyChargeEntryPoints: MONTHLY_CHARGE_ENTRY_POINTS, maxRows: MAX_ROWS },
+    { since, until, extraEntryPoints: AUTOPAY_EXTRA_ENTRY_POINTS, monthlyChargeEntryPoints: MONTHLY_CHARGE_ENTRY_POINTS, maxRows: MAX_ROWS },
   );
   return rows;
 }
@@ -191,9 +200,9 @@ function composeAutopaySmsDigest(rows) {
   return { subject, text, html, count: total, mismatches };
 }
 
-// Marker-based window: everything sent after the last notice. No 20h guard
-// here — two ticks a day are intended, and the marker makes the second one
-// a no-op unless new texts landed in between.
+// Marker-based window on audit insertion time: (last watermark, now − settle
+// lag]. No 20h guard here — two ticks a day are intended, and the marker
+// makes the second one a no-op unless new texts landed in between.
 const SEND_MARKER_KEY = 'autopay-sms-digest';
 
 async function windowStart() {
@@ -208,13 +217,13 @@ async function windowStart() {
   }
 }
 
-// The marker is stamped with the NEWEST sent_at in the batch, not "now": a
-// text that lands between the query and the stamp would otherwise vanish
-// from every future window.
-async function stampSendMarker(newestSentAt) {
+// The marker is stamped with the window's upper bound (now − settle lag at
+// query time), never the newest row: rows inserted after the query but
+// before the stamp are younger than the bound and stay in the next window.
+async function stampSendMarker(until) {
   try {
     const now = new Date();
-    const at = newestSentAt ? new Date(newestSentAt) : now;
+    const at = until ? new Date(until) : now;
     await db('ops_email_send_state')
       .insert({ email_key: SEND_MARKER_KEY, last_sent_at: at, updated_at: now })
       .onConflict('email_key')
@@ -226,9 +235,11 @@ async function stampSendMarker(newestSentAt) {
 
 async function runAutopaySmsDigest(opts = {}) {
   let rows;
+  let until;
   try {
     const since = await (opts.windowStart || windowStart)();
-    rows = await (opts.loadRows || loadSentAutopayTexts)(since);
+    until = new Date(Date.now() - SETTLE_LAG_MS);
+    rows = await (opts.loadRows || loadSentAutopayTexts)(since, until);
   } catch (err) {
     logger.error(`[autopay-sms-digest] query failed: ${err.message}`);
     return { skipped: 'query_failed' };
@@ -270,8 +281,7 @@ async function runAutopaySmsDigest(opts = {}) {
     logger.error(`[autopay-sms-digest] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
     return { sent: false, error: true, ...composed };
   }
-  // rows are newest-first
-  await (opts.stampSendMarker || stampSendMarker)(rows[0]?.sent_at);
+  await (opts.stampSendMarker || stampSendMarker)(until);
   logger.info(`[autopay-sms-digest] sent: ${composed.count} autopay text(s), ${composed.mismatches} lane mismatch(es)`);
   return { sent: true, ...composed };
 }
