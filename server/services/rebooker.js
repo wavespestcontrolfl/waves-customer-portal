@@ -223,20 +223,35 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   // an explicit anchor clear — so only a true repeat matches. Stored on the
   // row as request_key; a client-minted operation_key replays only the
   // identical request.
-  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}`;
+  // …and the requested technician when the caller chose one (the customer
+  // self-serve path validates a specific tech's slot): two requests for the
+  // same slot with different techs are different requests, never a replay
+  // (hook r27 P1).
+  const techKey = options.technicianId ? `:tech=${String(options.technicianId)}` : '';
+  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${techKey}`;
+  const technicianId = options.technicianId ? String(options.technicianId) : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
-    return { key: options.operationKey, derived: false, requestKey };
+    return { key: options.operationKey, derived: false, requestKey, technicianId };
   }
-  return { key: requestKey, derived: true, requestKey };
+  return { key: requestKey, derived: true, requestKey, technicianId };
 }
 // A replay additionally requires the anchor to still sit exactly where the
 // committed move left it (date + window from its recorded occurrence).
-function priorStillCurrent(prior, service) {
+// When the request named a technician, the committed landing must carry
+// that technician too (the anchor row's after-snapshot) and the anchor must
+// still be assigned to them — a move that landed with another tech is not
+// this request's result.
+function priorStillCurrent(prior, service, technicianId = null) {
   const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
     || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
   const after = occ ? { date: occ.date ?? occ.after?.scheduled_date, start: occ.windowStart ?? occ.after?.window_start, end: occ.windowEnd ?? occ.after?.window_end } : null;
   if (!after) return false;
   const hm = (t) => (t ? String(t).slice(0, 5) : null);
+  if (technicianId) {
+    const anchorRow = Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null;
+    const landedTech = anchorRow?.after?.technician_id ?? null;
+    if (String(landedTech ?? '') !== String(technicianId) || String(service.technician_id ?? '') !== String(technicianId)) return false;
+  }
   return dateOnly(after.date) === dateOnly(service.scheduled_date)
     && hm(after.start) === hm(service.window_start)
     && hm(after.end) === hm(service.window_end);
@@ -247,7 +262,7 @@ function priorStillCurrent(prior, service) {
 // lookup saw (or null) BEFORE any decision, so a later transactional
 // conflict can tell a row committed concurrently with this attempt from
 // the row this attempt already judged (see findConcurrentSeriesMoveWinner).
-async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null, expect = null, observed = null) {
+async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey, technicianId = null }, service = null, newDate = null, expect = null, observed = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
@@ -265,7 +280,7 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }
       code: 'OPERATION_KEY_REUSED',
     });
   }
-  if (service && !priorStillCurrent(prior, service)) {
+  if (service && !priorStillCurrent(prior, service, technicianId)) {
     // The anchor no longer sits where the prior move left it. Two cases share
     // this shape: a STALE retry of the prior move (dangerous — its window is
     // obsolete) and a LEGITIMATE new move back to the same slot (A→B, B→C,
@@ -316,8 +331,8 @@ async function findConcurrentSeriesMoveWinner(conn, serviceId, opKey, observedPr
   if (!winner) return null;
   if (observedPrior && String(winner.id) === String(observedPrior.id)) return null;
   if (opKey.requestKey && winner.request_key && winner.request_key !== opKey.requestKey) return null;
-  const fresh = await conn('scheduled_services').where({ id: serviceId }).first('id', 'scheduled_date', 'window_start', 'window_end');
-  if (!fresh || !priorStillCurrent(winner, fresh)) return null;
+  const fresh = await conn('scheduled_services').where({ id: serviceId }).first('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+  if (!fresh || !priorStillCurrent(winner, fresh, opKey.technicianId)) return null;
   return winner;
 }
 

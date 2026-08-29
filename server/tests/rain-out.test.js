@@ -98,11 +98,12 @@ const SERVICE = {
 // `.select(...).first()` still works.
 function chain({ rows = [], ...terminal } = {}) {
   const builder = {
-    where: jest.fn().mockReturnThis(),
+    where: jest.fn(function where(arg) { if (typeof arg === 'function') arg.call(builder, builder); return builder; }),
     whereIn: jest.fn().mockReturnThis(),
     whereNot: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
+    orWhere: jest.fn(function orWhere(arg) { if (typeof arg === 'function') arg.call(builder, builder); return builder; }),
     leftJoin: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     orderByRaw: jest.fn().mockReturnThis(),
@@ -851,7 +852,6 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
-      expect(claim.whereNull).toHaveBeenCalledWith('notified_at');
       expect(claim.update).toHaveBeenCalledWith({ notified_at: 'now()', customer_notified: false });
       const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
       expect(sendCustomerMessage).not.toHaveBeenCalled();

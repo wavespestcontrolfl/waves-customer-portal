@@ -259,6 +259,22 @@ describe('reschedule() choke point', () => {
       .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_MOVE_STALE' });
   });
 
+  test('a request naming a technician is its own identity: the same slot with another tech is never a replay, and a prior that landed with a different tech is not "still current"', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    // Prior committed the anchor ON the target with tech-1; this request asks for tech-2 on the same slot → different key → no prior → a new series move.
+    const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 60 * 1000), request_key: `svc-1:${TARGET}:13:00:15:00:tech=tech-1`, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] }, rows: [{ id: 'svc-1', anchor: true, before: {}, after: { scheduled_date: TARGET, window_start: '13:00:00', window_end: '15:00:00', technician_id: 'tech-1' } }] };
+    wireLookup(anchorRow({ scheduled_date: BASE, window_start: '13:00:00', window_end: '15:00:00', technician_id: 'tech-1' }), { priorMove, priorKey: `svc-1:${TARGET}:13:00:15:00:tech=tech-1` });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, technicianId: 'tech-2' });
+    expect(result.seriesMoveId).toBe('sm-1');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+    // Same tech as the prior → still current → replayed (no second sweep).
+    SmartRebooker.rescheduleSeries.mockClear();
+    wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '15:00:00', technician_id: 'tech-1' }), { priorMove, priorKey: `svc-1:${TARGET}:13:00:15:00:tech=tech-1` });
+    const replay = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, technicianId: 'tech-1' });
+    expect(replay).toMatchObject({ replayed: true, seriesMoveId: 'sm-prior' });
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+  });
+
   test('a completed ROUND TRIP (A→B, B→A, A→B within the horizon) proceeds: a later committed move of this anchor makes the A→B row history, not this request\'s earlier attempt', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 5 * 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
@@ -1014,7 +1030,8 @@ describe('caller wiring (source)', () => {
     expect(rainOut).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(rainOut).toContain('notify: false,');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
-    expect(rainOut).toContain(".whereNull('notified_at')\n          .update({ notified_at: db.fn.now(), customer_notified: false });");
+    expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");
+    expect(rainOut).toContain('const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;');
     expect(rainOut).toContain('if (notifyCustomer && ownsSeriesText) {');
     const pub = read('../routes/reschedule-public.js');
     expect(pub).toContain("const { applySeriesMoveEffects } = require('./admin-dispatch');");

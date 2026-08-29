@@ -1493,6 +1493,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  *                                            a future autonomous caller can't
  *                                            text at night by omission.
  */
+// How long a Quick Move series-text claim (series_moves.notified_at with
+// customer_notified=false) stays exclusive before a retry may reclaim it.
+const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
 async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
@@ -1924,20 +1927,24 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     // Quick Move's own moved-SMS for a SERIES move is tracked on the
-    // series_moves row: the text is CLAIMED (notified_at) before it is
-    // sent, so a replay sends only when no earlier pass concluded it — a
-    // pass that died between the commit and this send is recovered by the
-    // retry, a winner that already sent is never duplicated (hook r26 P1).
-    // A send that definitively did not go out releases the claim. The
-    // effects pass above never texts for quick_move (notify_requested is
-    // false), so the row's text markers are this block's alone.
+    // series_moves row with an EXPIRING claim: notified_at is the claim
+    // time while customer_notified is false, and becomes the conclusion
+    // once the text went out (customer_notified true). A retry sends only
+    // when the text is unclaimed OR the claim is stale (a pass that died
+    // between claiming and sending — SERIES_TEXT_CLAIM_MS, the effects
+    // lease horizon), so a lost send is recovered and a sent one is never
+    // duplicated (hook r26 + r27 P1). A definitive non-send releases the
+    // claim. The effects pass above never texts for quick_move
+    // (notify_requested is false), so these markers are this block's alone.
     const seriesMoveId = seriesResultForEffects?.seriesMoveId || null;
     let ownsSeriesText = !seriesMoveId;
     if (notifyCustomer && seriesMoveId) {
       try {
         const claimed = await db('series_moves')
           .where({ id: seriesMoveId })
-          .whereNull('notified_at')
+          .where((q) => q
+            .whereNull('notified_at')
+            .orWhere((stale) => stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))))
           .update({ notified_at: db.fn.now(), customer_notified: false });
         ownsSeriesText = Number(claimed) === 1;
         if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
