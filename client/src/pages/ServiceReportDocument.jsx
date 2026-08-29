@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
+import { epaReg, isProductApplication } from '../lib/product-application';
 import {
   MARKED_PHOTO_INTRO, markColor, markedPhotoCaption,
 } from '../components/report/markedPhotoCopy';
@@ -126,15 +127,6 @@ function fmtTime(value) {
 
 // "10.000" -> "10", "0.49" -> "0.49"; units come through as snake_case
 // ("fl_oz") from the application record.
-// Catalog rows for unregistered products (fertilizers, wetting agents,
-// mechanical devices) store the literal "N/A" — printing it under EPA Reg.
-// No. reads like missing paperwork. Mirrors applicationEpaReg.
-function epaReg(app) {
-  const raw = String(app.product?.epa_reg || app.epaReg || '').trim();
-  if (/^n\/?a$/i.test(raw) || /^none$/i.test(raw)) return '';
-  return raw;
-}
-
 function fmtAmount(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value || '').trim();
@@ -400,35 +392,9 @@ export default function ServiceReportDocument({ data, token }) {
     && (Object.values(normalizedConditions).some((value) => value != null && value !== '') || usingWeeklyRain)
     ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
-  // A station check is a device inspection, not an application. But `method`
-  // can't be trusted alone: methodFromProduct INFERS 'station_check' for any
-  // termite or rodent product with a null application_method (a supported
-  // state — the column was added nullable), so a historical liquid or
-  // pre-treatment termiticide is classified as a device check. Filtering on
-  // method alone therefore deleted the actual pesticide from the record and
-  // suppressed its precautions.
-  //
-  // Identity decides, and the signal is PESTICIDE identity — an EPA
-  // registration or a pesticide product type. Not the recorded amount: a
-  // snap trap check legitimately records "1 ea" and still isn't a product
-  // application, which is the case that made this filter necessary.
-  const isProductApplication = (app) => {
-    if ((app.method || 'perimeter_spray') !== 'station_check') return true;
-    // Checking a station baited with a registered rodenticide/termiticide
-    // cartridge applies nothing — bait / station / cartridge / monitor
-    // product FAMILIES are never applications, whatever their EPA number
-    // (codex P1 r19, generalized). Beyond that, product identity decides
-    // regardless of methodInferred: the completion panel DEFAULTS methodless
-    // termite products to station_check and persists it (methodInferred
-    // false), so a freshly recorded Termidor Foam row would otherwise vanish
-    // from the PDF while the advisory says treatment occurred — this
-    // mirrors the server's isNonBaitPesticideProduct (#3516 r11).
-    const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
-    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
-    if (epaReg(app)) return true;
-    const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
-    return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);
-  };
+  // "Did a product get applied?" — the shared identity rule
+  // (lib/product-application.js) the live report uses too, so the PDF and
+  // the web report never disagree about a station-check-only visit.
   const appliedProducts = applications.filter(isProductApplication);
   // Lawn-assessment photos fall back to raw per-photo vision `observations`
   // as their caption (report-data.js). The lawn V2 path deliberately drops

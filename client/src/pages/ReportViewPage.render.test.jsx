@@ -180,6 +180,22 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(typed).getByText('Pull mulch back from foundation')).toBeInTheDocument();
   });
 
+  it('keeps Products Applied for a real termiticide recorded on the bait visit, never for the cartridge check', async () => {
+    const withFoam = JSON.parse(JSON.stringify(termiteReportV2));
+    // The completion panel defaults methodless termite products to
+    // station_check and persists it — identity decides, not the method.
+    withFoam.applications.push({
+      id: 'app-foam', method: 'station_check', methodInferred: false, totalAmount: '2', amountUnit: 'fl_oz',
+      product: { name: 'Termidor Foam', category: 'termiticide', epa_reg: '7969-XXX', active_ingredient: 'Fipronil' },
+    });
+    const { container } = renderReport(withFoam);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const products = container.querySelector('#products-applied');
+    expect(products).not.toBeNull();
+    expect(within(products).getAllByText(/Termidor Foam/).length).toBeGreaterThan(0);
+    expect(within(products).queryByText(/Trelona/)).toBeNull();
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);

@@ -8,6 +8,7 @@
 const {
   buildTermiteReportV2,
   termiteReportV2PdfSignature,
+  isTermiteBaitServiceName,
   resolveTermiteStatus,
   buildStationNetwork,
   buildTodaysResultCopy,
@@ -23,6 +24,22 @@ const CLEAN_VALUES = {
   termite_activity: 'None observed',
   bait_consumption: 'None — bait intact',
 };
+
+describe('isTermiteBaitServiceName — next-visit predicate (bait-station appointments only)', () => {
+  it('accepts bait / station / monitoring termite names', () => {
+    expect(isTermiteBaitServiceName('Termite Bait Station Service')).toBe(true);
+    expect(isTermiteBaitServiceName('Termite Monitoring (Quarterly)')).toBe(true);
+    expect(isTermiteBaitServiceName('Termite Bait Cartridge Replacement')).toBe(true);
+  });
+
+  it('rejects liquid / trench / inspection termite work and other lines', () => {
+    expect(isTermiteBaitServiceName('Termite Liquid Treatment')).toBe(false);
+    expect(isTermiteBaitServiceName('Termite Trenching')).toBe(false);
+    expect(isTermiteBaitServiceName('Termite Inspection')).toBe(false);
+    expect(isTermiteBaitServiceName('Rodent Bait Station Service')).toBe(false);
+    expect(isTermiteBaitServiceName(null)).toBe(false);
+  });
+});
 
 describe('resolveTermiteStatus — honest status ladder', () => {
   it('clean full inspection → protected (good)', () => {
@@ -125,6 +142,37 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     expect(net.counts).toEqual({ total: 14, checked: 12, activity: 2, inaccessible: 2 });
     expect(net.items.map((i) => i.key)).toEqual(['inspected', 'activity', 'bait', 'access']);
     expect(net.summary).toBe('Your protective ring: 12 inspected · 2 with activity · 2 inaccessible.');
+  });
+
+  it('ignores a registry-only map summary (no per-visit statuses) and keeps the frozen typed counts', () => {
+    // Fail-soft station sync: registry pins, no check rows → the map
+    // summarises 0 checked / 0 activity. That must not erase a documented
+    // 12-checked / 2-active snapshot.
+    const net = buildStationNetwork({
+      values: { ...CLEAN_VALUES, stations_with_activity: 2, termite_activity: 'Active termites present' },
+      stationSummary: { total: 14, checked: 0, activity: 0, serviced: 0, inaccessible: 0 },
+    });
+    expect(net.counts).toEqual({ total: 12, checked: 12, activity: 2, inaccessible: 0 });
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2, termite_activity: 'Active termites present' },
+      typedReportType: 'termite_bait_station',
+      stationSummary: { total: 14, checked: 0, activity: 0, serviced: 0, inaccessible: 0 },
+    });
+    expect(out.status.label).toBe('Termite activity observed at 2 stations');
+    expect(out.metrics[0].value).toBe('12 of 12');
+    expect(out.metrics[2].value).toBe('0');
+  });
+
+  it('partial access without a recorded total derives a safe denominator — never "all N"', () => {
+    const values = { stations_checked: 10, stations_inaccessible: 2, termite_activity: 'None observed', bait_consumption: 'None — bait intact' };
+    const net = buildStationNetwork({ values });
+    expect(net.counts.total).toBe(12);
+    expect(net.items[0].detail).toBe('10 of 12 stations');
+    const out = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station' });
+    expect(out.status.label).toBe('10 of 12 stations inspected');
+    expect(out.statusSummary).toMatch(/10 stations we were able to inspect/);
+    expect(out.statusSummary).not.toMatch(/all 10/);
+    expect(out.metrics[0].value).toBe('10 of 12');
   });
 
   it('falls back to the typed counts and returns null without an inspected count', () => {

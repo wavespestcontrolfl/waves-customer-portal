@@ -18,6 +18,17 @@
 
 const TERMITE_BAIT_TYPED_TYPE = 'termite_bait_station';
 
+// Bait-station SERVICE names (appointments only carry a service name, not a
+// completion profile). Liquid / trench / spot treatments and inspections are
+// termite work but not monitoring visits — an upcoming one must never render
+// as the "next monitoring visit" (codex P2 #3600 r2).
+const TERMITE_NAME_RE = /termite/i;
+const STATION_TOKEN_RE = /\b(bait|station|stations|monitor|monitoring|cartridge)\b/i;
+function isTermiteBaitServiceName(serviceType) {
+  const name = String(serviceType || '');
+  return TERMITE_NAME_RE.test(name) && STATION_TOKEN_RE.test(name);
+}
+
 const ACTIVITY_VALUES = {
   NONE: 'None observed',
   ACTIVE: 'Active termites present',
@@ -110,9 +121,12 @@ function buildTodaysResultCopy({
       body: `${where}${servicedSentence({ servicedCount, servicedToday })}${accessNote}`,
     };
   }
-  if (inaccessible > 0 && total) {
+  if (inaccessible > 0) {
+    // `total` is already a safe denominator (recorded total, else
+    // checked + inaccessible) — a partial visit never reads as "all".
+    const denominator = total || checked + inaccessible;
     return {
-      headline: `${checked} of ${total} stations inspected`,
+      headline: `${checked} of ${denominator} stations inspected`,
       body: `No termite activity was observed in the ${checked} station${plural(checked)} we were able to inspect.${accessNote}`,
     };
   }
@@ -146,11 +160,37 @@ function buildTodaysMetrics({ checked, total, activityCount = null, activityObse
  * defenseBlock chain renders it without a new branch shape. `counts.activity`
  * stays null when neither the map nor the form documents a count.
  */
+/**
+ * The station-map summary counts only when it is backed by per-visit
+ * statuses. The fail-soft station sync can leave a visit with registry pins
+ * and no check rows — the map then summarises as 0 checked / 0 activity,
+ * which must not overwrite a frozen 12-checked / 2-active snapshot
+ * (codex P2 #3600 r2).
+ */
+function visitBackedSummary(stationSummary) {
+  if (!stationSummary || typeof stationSummary !== 'object') return null;
+  const statused = (Number(stationSummary.checked) || 0) + (Number(stationSummary.inaccessible) || 0);
+  return statused > 0 ? stationSummary : null;
+}
+
+/**
+ * Denominator for "N of M": the recorded total, else — when stations were
+ * explicitly inaccessible — checked + inaccessible. total_stations is
+ * optional on the form, so a null total must never turn a partial visit into
+ * "all N stations" (codex P2 #3600 r2).
+ */
+function stationDenominator({ total, checked, inaccessible }) {
+  if (total != null && total > 0) return total;
+  if (checked != null && inaccessible > 0) return checked + inaccessible;
+  return null;
+}
+
 function buildStationNetwork({ values = {}, stationSummary = null }) {
-  const total = stationSummary?.total ?? toCount(values.total_stations);
-  const checked = stationSummary?.checked ?? toCount(values.stations_checked);
-  const activityCount = stationSummary?.activity ?? toCount(values.stations_with_activity);
-  const inaccessible = stationSummary?.inaccessible ?? toCount(values.stations_inaccessible);
+  const summary = visitBackedSummary(stationSummary);
+  const checked = summary?.checked ?? toCount(values.stations_checked);
+  const activityCount = summary?.activity ?? toCount(values.stations_with_activity);
+  const inaccessible = summary?.inaccessible ?? toCount(values.stations_inaccessible);
+  const total = stationDenominator({ total: summary?.total ?? toCount(values.total_stations), checked, inaccessible: inaccessible || 0 });
   if (checked == null) return null;
 
   const items = [];
@@ -247,7 +287,7 @@ function buildTermiteReportV2({
   const total = network?.counts?.total ?? toCount(values.total_stations);
   const activityCount = network?.counts?.activity ?? null;
   const inaccessible = network?.counts?.inaccessible || 0;
-  const servicedCount = stationSummary?.serviced ?? 0;
+  const servicedCount = visitBackedSummary(stationSummary)?.serviced ?? 0;
   // "Serviced today" is a VISIT fact claimed only on documented evidence:
   // serviced pins on the station map, or bait/station work recorded on the
   // typed form. Never attributed to individual activity stations.
@@ -329,6 +369,7 @@ module.exports = {
   TERMITE_BAIT_TYPED_TYPE,
   buildTermiteReportV2,
   termiteReportV2PdfSignature,
+  isTermiteBaitServiceName,
   // exported for tests
   resolveTermiteStatus,
   buildStationNetwork,

@@ -13,6 +13,7 @@ import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap'
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
+import { isProductApplication } from '../lib/product-application';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import useStickyStuck from '../hooks/useStickyStuck';
 import {
@@ -5531,6 +5532,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // spaced — see the recurring pest control report"). The two review
   // mounts are mutually exclusive on this flag.
   const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
+  // Termite V2: only genuine product applications survive into Products
+  // Applied (bait cartridge / station-check rows are monitoring).
+  const termiteProductApplications = data.termiteReportV2
+    ? (Array.isArray(data.applications) ? data.applications : []).filter(isProductApplication)
+    : [];
   const hasReentry = Boolean(dynamicContext.reentry);
   // Bed bug: the typed narrative owns the report's ONE summary surface even
   // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
@@ -9190,12 +9196,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {/* Termite bait visits: no Products Applied section (owner
-            2026-08-29) — station checks read as monitoring, not application;
-            bait work is documented in the station record instead. */}
+        {/* Termite bait visits: bait cartridge / station checks are
+            monitoring, not application (owner 2026-08-29) — they never list
+            here; bait work is documented in the station record instead. A
+            REAL termiticide recorded on the same visit (foam, liquid — the
+            panel still defaults it to station_check) keeps the section with
+            its EPA facts and precautions (codex P1 #3600 r2). Same identity
+            rule as the PDF document (lib/product-application.js). */}
         {!isV2LeadLayout && !data.termiteReportV2 && (
           <AppliedProductsSection
             data={data}
+            mode={mode}
+          />
+        )}
+        {!isV2LeadLayout && data.termiteReportV2 && termiteProductApplications.length > 0 && (
+          <AppliedProductsSection
+            data={{ ...data, applications: termiteProductApplications }}
             mode={mode}
           />
         )}

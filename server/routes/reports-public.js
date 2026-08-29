@@ -164,7 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
-const { buildTermiteReportV2, termiteReportV2PdfSignature, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
+const { buildTermiteReportV2, termiteReportV2PdfSignature, isTermiteBaitServiceName, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -551,12 +551,13 @@ async function buildServiceReportV1ResponseData(service, token, {
     try {
       const serviceData = parseJsonObject(service.service_data);
       const typedSnapshot = serviceData?.typedReportSnapshot;
-      // Same-line only: the top-level nextAppointment falls back to the
-      // customer's next visit of ANY line (report-data.js), which must not
-      // render as the next termite monitoring visit. Already null in
-      // pdf/static modes (stripLiveOnlyScheduleFields ran above).
+      // Bait-station appointments only: the top-level nextAppointment
+      // falls back to the customer's next visit of ANY line (report-data.js),
+      // and even a termite-line liquid/trench/inspection visit is not a
+      // monitoring visit. Already null in pdf/static modes
+      // (stripLiveOnlyScheduleFields ran above).
       const nextVisit = data.nextAppointment
-        && detectServiceLine(data.nextAppointment.serviceType) === 'termite'
+        && isTermiteBaitServiceName(data.nextAppointment.serviceType)
         ? data.nextAppointment
         : null;
       const termiteReportV2 = buildTermiteReportV2({
