@@ -4289,6 +4289,7 @@ const {
   splitTerminalCompletionInvoice,
   COMPLETION_TERMINAL_INVOICE_STATUSES,
 } = require('../services/completion-invoice-candidate');
+const { _test: { isRowVisitBlocked } } = require('../services/visit-groups');
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
@@ -4523,6 +4524,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
+    // attached to a non-dissolved visit must complete through the visit
+    // sheet — legacy per-row completion alongside the packet worker would
+    // double records and side effects. Inert until GATE_VISIT_GROUPS
+    // stamping ships (no row carries a visit_id today). The check reads
+    // the CURRENT visit status, so an admin "Separate these services"
+    // (dissolve) restores per-row completion immediately.
+    if (svc.visit_id) {
+      const parentVisit = await db('service_visits')
+        .where({ id: svc.visit_id }).first('id', 'status')
+        .catch(() => null);
+      if (isRowVisitBlocked(svc, parentVisit)) {
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: svc.visit_id,
+        });
+      }
+    }
 
     // This endpoint can mint reports, invoices, inventory deductions, and
     // customer messages. Technicians may only perform that write for their

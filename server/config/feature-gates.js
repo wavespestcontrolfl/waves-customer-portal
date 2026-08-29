@@ -250,6 +250,14 @@ const gates = {
   // identical to today. Kill switch: unset or any non-'true' value.
   payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
 
+  // Visit groups (docs/design/visit-group-scope.md rev 5): parent
+  // service_visits rows grouping same-stop scheduled_services. CREATION
+  // gate only — off means no new groups are stamped; existing visits keep
+  // the behaviour they were created under (behavior_version frozen at
+  // creation) and issued /visit/:token links keep resolving. Fail-closed
+  // ==='true' in EVERY environment; kill switch: unset.
+  visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
   // report offers the next service family the customer lacks (pest ↔ lawn,
   // then tree & shrub, then termite) with estimator-backed pricing, falling
