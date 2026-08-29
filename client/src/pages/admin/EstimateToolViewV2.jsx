@@ -41,6 +41,7 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
+  rodentBaitBracketForFootprint,
   rodentBaitPolicyNote,
   termiteBaitSelectionLabel,
   termiteBaitSystemLabel,
@@ -2587,11 +2588,11 @@ export default function EstimateToolViewV2({
     }
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
     if (form.svcRodentBait && !commercialDetected) {
-      // Footprint-bracket ladder (2026-08-29): per-visit × 4 ÷ 12 as a
-      // monthly-equivalent preview figure; engine is authoritative.
-      const rbPerVisit = sqft <= 1750 ? 79 : sqft <= 2750 ? 89 : sqft <= 3750 ? 99
-        : sqft <= 4750 ? 109 : sqft <= 5750 ? 119 : sqft <= 6750 ? 129
-          : 129 + Math.ceil((sqft - 6750) / 1000) * 10;
+      // LIVE footprint-bracket ladder (pricing_config.rodent_bait_brackets,
+      // loaded into the engine module by refreshPricingConfig — codex #3591
+      // r16 P1): per-visit × 4 ÷ 12 as a monthly-equivalent preview figure;
+      // the engine is authoritative.
+      const rbPerVisit = rodentBaitBracketForFootprint(sqft).perVisit;
       approx.rodentBait = Math.round((rbPerVisit * 4) / 12);
     }
     if (form.svcFoamRecurring) {
@@ -4149,6 +4150,9 @@ export default function EstimateToolViewV2({
 
       const options = {
         grassType: form.grassType || "st_augustine",
+        // The matched account — the server derives its canonical qualifying
+        // families for tier + rodent setup waiver (codex #3591 r16 P1).
+        existingCustomerId: existingCustomerMatch?.id || form.customerId || null,
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         // Availability gates only the CHECKBOX (new selections); a selection
         // already in the form — e.g. seeded from a saved estimate's inputs

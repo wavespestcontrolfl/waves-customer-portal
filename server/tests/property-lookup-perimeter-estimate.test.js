@@ -151,3 +151,19 @@ describe('_observed propertyType provenance (codex #3367 PR r10)', () => {
     expect(observedBit({ squareFootage: 1600 })).toBe(false);
   });
 });
+
+describe('resolveCalculatePriorQualifyingServices (codex #3591 r16 P1)', () => {
+  const { resolveCalculatePriorQualifyingServices } = require('../routes/property-lookup-v2');
+  test('no matched customer → no prior services; a matched customer → the canonical loader keys (server-derived, client list ignored)', async () => {
+    const loader = jest.fn(async (id) => (id === 'c1' ? ['lawn_care', 'rodent_bait'] : []));
+    expect(await resolveCalculatePriorQualifyingServices({}, loader)).toEqual([]);
+    expect(loader).not.toHaveBeenCalled();
+    expect(await resolveCalculatePriorQualifyingServices({ existingCustomerId: 'c1', priorQualifyingServices: ['pest_control'] }, loader))
+      .toEqual(['lawn_care', 'rodent_bait']);
+    expect(loader).toHaveBeenCalledWith('c1');
+  });
+  test('a failing lookup throws (the route refuses retryably instead of previewing a different result than the save)', async () => {
+    await expect(resolveCalculatePriorQualifyingServices({ existingCustomerId: 'c1' }, async () => { throw new Error('db down'); }))
+      .rejects.toThrow('db down');
+  });
+});

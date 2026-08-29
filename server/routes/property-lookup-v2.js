@@ -4287,6 +4287,22 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   };
 }
 
+// existingCustomerId → the account's WaveGuard-qualifying families via the
+// canonical loader (waveguard-existing-services). Empty when no customer is
+// matched; the loader is injectable for tests. Throws on lookup failure
+// (the route refuses retryably).
+async function resolveCalculatePriorQualifyingServices(options = {}, loader = null) {
+  const customerId = options?.existingCustomerId;
+  if (customerId == null || String(customerId).trim() === '') return [];
+  const load = loader || (async (id) => {
+    const db = require('../models/db');
+    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+    return loadExistingQualifyingServiceKeys(db, id);
+  });
+  const keys = await load(String(customerId));
+  return Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : [];
+}
+
 router.post('/calculate-estimate', async (req, res) => {
   try {
     const { profile, selectedServices, options } = req.body;
@@ -4306,6 +4322,23 @@ router.post('/calculate-estimate', async (req, res) => {
       await pricingEngine.syncConstantsFromDB();
     }
     const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
+    // Canonical qualifying families of the MATCHED account (codex #3591 r16
+    // P1): the estimator forwards only existingCustomerId; the keys are
+    // derived server-side through the same loader estimate conversion uses
+    // (never a client-supplied list), so a rodent-only addition for a
+    // customer who owns another qualifying service waives the setup — and
+    // prices its tier — exactly as the save-time recompute will. A lookup
+    // failure refuses (retryable) rather than previewing a different result
+    // than the save persists.
+    try {
+      v1Input.priorQualifyingServices = await resolveCalculatePriorQualifyingServices(options || {});
+    } catch (lookupErr) {
+      return res.status(503).json({
+        error: 'Account service lookup is temporarily unavailable — please retry in a moment.',
+        code: 'PRIOR_SERVICES_UNAVAILABLE',
+        retryable: true,
+      });
+    }
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
     res.json(mapped);
@@ -4715,6 +4748,7 @@ module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
+module.exports.resolveCalculatePriorQualifyingServices = resolveCalculatePriorQualifyingServices;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {

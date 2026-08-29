@@ -9609,7 +9609,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           recurringServices: recurringSvcList,
           estimateData: estData,
         });
-        const base = resolved.amount;
+        // The converter's prepay invoice carries the disclosed bait-station
+        // setup as its own (never-waived, taxed) line — the quoted/
+        // acknowledged total must include it or the exact-total check
+        // rejects every in-lane prepay accept as PREPAY_QUOTE_STALE (codex
+        // #3591 r16 P1). Same frozen resolver the converter bills from.
+        const base = Math.round((resolved.amount + converter.frozenRodentBaitSetupAmount(estData)) * 100) / 100;
         // Commercial prepay is taxed on the taxable pest share — quote the
         // TAX-INCLUSIVE total so the customer/admin message matches the invoice
         // + PaymentIntent the converter creates (uses the same blended rate +
