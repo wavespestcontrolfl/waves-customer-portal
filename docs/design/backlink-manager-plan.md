@@ -201,7 +201,7 @@ model-observed provider handed off at the credential boundary, §12; leasable ON
 `deterministic_runner` via `claim(?mode=credentials)`). `PROSPECT_STATUSES` in
 `admin-backlink-agent-v2.js` is the contract — all three are added there, in the step-1
 status migration/constraint, the domain guard (`ready_for_credentials` joins
-`IN_FLIGHT_STATUSES` beside `watching`), the board's status filters and the tests; the
+`IN_FLIGHT_STATUSES` beside `watching` AND `ACTIVE_OUTREACH_STATUSES` beside `awaiting_owner`, so an outreach placement parked at the credential boundary still holds the domain's one conversation against a second writer — covered in `prospect-domain-lock.test.js`; signup lanes keep their location-aware coexistence), the board's status filters and the tests; the
 worker's generic `claim()` never leases any of the three.
 Both statuses join the board's domain guard in the SAME PR (step 1): `awaiting_owner` is added
 to `ACTIVE_OUTREACH_STATUSES` in `prospect-domain-lock.js` — a parked outreach placement is
