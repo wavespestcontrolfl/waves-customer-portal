@@ -353,8 +353,20 @@ router.post('/assess', async (req, res, next) => {
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
 
-    // Verify customer exists
-    const customer = await db('customers').where({ id: customerId }).first();
+    // Verify customer exists. The premise AND the move stamp are read in one
+    // transaction under the prefs advisory lock — a move committing between
+    // two separate reads could pair the NEW stamp with the OLD in-memory
+    // address, letting the final stamp comparison confirm the former lawn's
+    // grass (codex gh-r47).
+    const { customer, preAnalysisMoveStamp } = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
+      const cust = await trx('customers').where({ id: customerId }).first();
+      const prefs = cust ? await trx('property_preferences').where({ customer_id: customerId }).first('irrigation_home_changed_at') : null;
+      return { customer: cust, preAnalysisMoveStamp: prefs?.irrigation_home_changed_at || null };
+    });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     // If serviceId is provided, validate it exists AND belongs to the
@@ -372,14 +384,12 @@ router.post('/assess', async (req, res, next) => {
       scheduledService = svc;
     }
 
-    // Grass-confirmation freshness (codex #3565 gh-r45): the photos being
-    // analyzed describe a premise — capture the move stamp BEFORE the
+    // Grass-confirmation freshness (codex #3565 gh-r45/r47): the customer
+    // premise and move stamp above were snapshotted atomically BEFORE the
     // long-running analysis (a move committing mid-analysis must void the
-    // confirmation), and note when the linked visit was stamped for a
-    // DIFFERENT premise than the current home (a backfilled prior-address
-    // assessment must never confirm the new home's grass).
-    const preAnalysisMoveStamp = (await db('property_preferences')
-      .where({ customer_id: customerId }).first('irrigation_home_changed_at'))?.irrigation_home_changed_at || null;
+    // confirmation); the linked visit stamped for a DIFFERENT premise than
+    // the current home (a backfilled prior-address assessment) never
+    // confirms the new home's grass.
     const fanoutPremise = require('../services/customer-address-fanout');
     const svcPremise = scheduledService ? {
       address_line1: scheduledService.service_address_line1,

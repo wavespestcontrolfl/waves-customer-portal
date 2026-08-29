@@ -398,7 +398,7 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   // measured surplus may carry the "too much water" claim alongside it.
   if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
     if (planHolds) return 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.';
-    if (hasPlan) return 'The main driver looks like too much water — this week’s watering plan below already accounts for it, and easing back should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    if (hasPlan) return 'The main driver looks like too much water — this week’s watering plan below already accounts for it, so follow it as written; that should do more for fungus, mushrooms, and weed pressure than any single treatment.';
     return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
@@ -503,7 +503,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // overwatering signal must ignore it too. (A rain-unknown snapshot — irrigation-only
   // — is also excluded, same as mapWater.)
   const clientRainKnown = num(lawnAssessment.waterContext?.rainfallInches7d) != null;
-  const usingSnapshot = !clientRainKnown && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Same move guard as mapWater (gh-r39/r47): a moved home's snapshot was
+  // computed from the withheld schedule — its status must not drive
+  // effectiveWaterStatus / overwatering insights either.
+  const movedSnapshot = !!lawnAssessment.waterContext?.scheduleUnconfirmed;
+  const usingSnapshot = !clientRainKnown && !movedSnapshot && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
   const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);
@@ -701,8 +705,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
   if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
+    // Beside a plan the wording stays action-neutral — a hot week's RUN plan
+    // can follow a historical surplus, and "exception to easing back" would
+    // contradict the card (codex gh-r47).
     aftercare.watering += (water && water.weekPlan && water.weekPlan.title)
-      ? ' This one watering-in is the exception to easing back on irrigation — after it, follow this week’s watering plan.'
+      ? ' This one watering-in is required by today’s application — after it, follow this week’s watering plan.'
       : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
   }
 

@@ -61,7 +61,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
           ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
           : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
       nextVisitPlan: hasPlan
-        ? 'Recheck moisture and fungus signs next visit to confirm the plan is drying things out.'
+        ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
         : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });

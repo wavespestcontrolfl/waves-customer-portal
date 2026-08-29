@@ -54,8 +54,17 @@ function sizingFieldsUnconfirmed(row = {}) {
   if (IRRIGATION_SIZING_FIELDS.some((f) => present(row[f]) && !confirmed.includes(f))) return true;
   const techFallback = present(row.turf_irrigation_inches_per_week) || present(row.assessment_irrigation_inches_per_week);
   if (!techFallback) return false;
-  const portalScheduleConfirmed = ok('irrigation_inches_per_week') || RUNTIME_FIELDS.every(ok);
-  return !portalScheduleConfirmed;
+  // A confirmed portal schedule outranks the former home's tech reading
+  // only when it actually YIELDS a figure: re-confirmed zeros, drip-only or
+  // mixed head types derive nothing, so the resolver would fall through to
+  // the stale tech number while this guard reported it replaced (codex
+  // gh-r47).
+  const explicit = Number(row.irrigation_inches_per_week);
+  const explicitUsable = ok('irrigation_inches_per_week') && Number.isFinite(explicit) && explicit > 0;
+  const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
+  const runtimeUsable = RUNTIME_FIELDS.every(ok)
+    && deriveIrrigationInchesPerWeek({ runMinutes: row.irrigation_run_minutes, wateringDays: row.watering_days, systemType: row.irrigation_system_type }).inchesPerWeek != null;
+  return !(explicitUsable || runtimeUsable);
 }
 
 /** The whole move guard: a stamped move AND something unconfirmed to size from. */

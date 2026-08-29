@@ -538,13 +538,13 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
 // Returns true (renewed), false (claim LOST — another worker replaced the
 // row; the caller must not send its older decision), or null (unreadable —
 // ambiguous, the caller proceeds best-effort).
-async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
+async function renewWeekPlanClaim({ customerId, weekEnding, claimToken, conn = db } = {}) {
   if (!customerId || !weekEnding || !claimToken) return false;
   try {
-    const n = await db('irrigation_week_plans')
+    const n = await conn('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding, claim_token: claimToken })
       .whereNull('sent_at')
-      .update({ claimed_at: db.fn.now(), updated_at: db.fn.now() });
+      .update({ claimed_at: conn.fn.now(), updated_at: conn.fn.now() });
     return n > 0;
   } catch (err) {
     logger.warn(`[irrigation-week-plan] claim renew failed for ${customerId}/${weekEnding}: ${err.message}`);

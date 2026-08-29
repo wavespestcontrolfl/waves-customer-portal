@@ -1484,28 +1484,37 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             // (fail closed — this is the last home check before a legal
             // instruction; the snapshot stays claimable for a retry —
             // codex gh-r40).
+            // The stamp check and the claim renewal run in ONE transaction
+            // holding the prefs advisory lock, so a move cannot commit
+            // between the check and the renewal (codex gh-r47) — the only
+            // remaining window is the provider call itself, which no DB
+            // fence can cover.
+            let queueVerdict;
             try {
-              const row = await db.transaction(async (trx) => {
+              queueVerdict = await db.transaction(async (trx) => {
                 await trx.raw(
                   'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
                   ['property-preferences', String(customer.id)],
                 );
-                return trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+                const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+                const stampAt = (v) => (v ? new Date(v).getTime() : null);
+                if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return { moved: true };
+                const renewed = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken, conn: trx });
+                return { renewed };
               });
-              const stampAt = (v) => (v ? new Date(v).getTime() : null);
-              if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) { homeMovedAtQueue = true; return false; }
             } catch (err) {
               logger.error(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id} — plan withheld this run: ${err.message}`);
               stampCheckFailedAtQueue = true;
               return false;
             }
+            if (queueVerdict.moved) { homeMovedAtQueue = true; return false; }
             // Re-read the clock AFTER the home check: the window-closed
             // fallback rebuilds the pre-plan email from this customer's
             // loaded inputs, so a move that committed before the cutoff
             // must win — otherwise the fallback quotes the former home's
             // rainfall and schedule (codex gh-r33/r42).
             if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
-            claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+            claimRenewal = queueVerdict.renewed;
             return claimRenewal === true;
           }
           : null,
