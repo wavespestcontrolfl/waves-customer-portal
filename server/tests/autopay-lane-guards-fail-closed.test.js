@@ -15,6 +15,8 @@
  */
 
 let mockCustomers = [];
+// Row the pre-dispatch refetch (`.first()`) returns; undefined = the batch row.
+let mockFreshCustomer;
 const mockCalls = { whereRaw: [], select: [] };
 
 jest.mock('../models/db', () => {
@@ -27,7 +29,7 @@ jest.mock('../models/db', () => {
     ]) b[m] = () => b;
     b.whereRaw = (sql) => { mockCalls.whereRaw.push(String(sql)); return b; };
     b.select = (...cols) => { mockCalls.select.push(cols.flat()); return b; };
-    b.first = () => Promise.resolve(null);
+    b.first = () => Promise.resolve(mockFreshCustomer !== undefined ? mockFreshCustomer : (resultFn()[0] || null));
     b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
     return b;
   }
@@ -47,7 +49,15 @@ jest.mock('../services/autopay-log', () => ({
   eventExistsRecently: jest.fn(() => Promise.resolve(false)),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
+  // Mirrors the wrapper's preDispatchCheck contract: a caller closure that
+  // does not return { ok: true } blocks the send with its code/reason.
+  sendCustomerMessage: jest.fn(async (input) => {
+    if (typeof input.preDispatchCheck === 'function') {
+      const verdict = await input.preDispatchCheck();
+      if (!verdict || verdict.ok !== true) return { sent: false, blocked: true, code: verdict?.code || 'PRE_DISPATCH_CHECK_FAILED', reason: verdict?.reason };
+    }
+    return { sent: true };
+  }),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(() => Promise.resolve('Hello! Your auto-pay processes soon.')),
@@ -72,6 +82,7 @@ const PaymentRouter = require('../services/payment-router');
 
 beforeEach(() => {
   mockCustomers = [];
+  mockFreshCustomer = undefined;
   mockCalls.whereRaw.length = 0;
   mockCalls.select.length = 0;
   jest.clearAllMocks();
@@ -91,7 +102,7 @@ describe('sendPreChargeReminders — lane filter is unconditional', () => {
     const { sendPreChargeReminders } = require('../services/autopay-notifications');
     mockCustomers = [{
       id: 'cust-monthly', first_name: 'Member', phone: '+15550001111', monthly_rate: '33.33',
-      autopay_paused_until: null, waveguard_tier: 'Bronze',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
     }];
 
     const r = await sendPreChargeReminders();
@@ -99,7 +110,56 @@ describe('sendPreChargeReminders — lane filter is unconditional', () => {
     expect(mockCalls.whereRaw).toContain(MONTHLY_LANE_SQL);
     expect(r.sent).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // The owner digest classifies against the RESOLVED lane AT SEND TIME (#3607).
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual({ original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership' });
     expect(logAutopay).toHaveBeenCalledWith('cust-monthly', 'pre_charge_reminder_sent', expect.any(Object));
+  });
+});
+
+describe('sendPreChargeReminders — stamp is the RESOLVED lane (codex #3607 r5)', () => {
+  test('a legacy NULL-mode member with a real tier + rate stamps monthly_membership, not null', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-legacy', first_name: 'Legacy', phone: '+15550003333', monthly_rate: '44.00',
+      autopay_paused_until: null, waveguard_tier: 'Silver', billing_mode: null,
+    }];
+
+    await sendPreChargeReminders();
+
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.billing_mode_at_send).toBe('monthly_membership');
+  });
+
+  test('a customer moved out of the monthly lane after the batch query is blocked by preDispatchCheck at the wrapper boundary, never texted (codex r7 + r8)', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-moved', first_name: 'Moved', phone: '+15550004444', monthly_rate: '55.00',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
+    }];
+    mockFreshCustomer = { billing_mode: 'per_application', waveguard_tier: 'Bronze', monthly_rate: '55.00', autopay_enabled: true, active: true, deleted_at: null };
+
+    const r = await sendPreChargeReminders();
+
+    // The wrapper was entered (that IS the boundary) but its preDispatchCheck
+    // refused, so nothing reached the provider and no reminder was logged.
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-moved', 'pre_charge_reminder_sent', expect.any(Object));
+    expect(r.sent).toBe(0);
+    expect(r.skipped).toBe(1);
+  });
+
+  test('a customer who disappeared (refetch null) is skipped — fail closed', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-gone', first_name: 'Gone', phone: '+15550005555', monthly_rate: '55.00',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
+    }];
+    mockFreshCustomer = null;
+
+    const r = await sendPreChargeReminders();
+
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-gone', 'pre_charge_reminder_sent', expect.any(Object));
+    expect(r.sent).toBe(0);
+    expect(r.skipped).toBe(1);
   });
 });
 

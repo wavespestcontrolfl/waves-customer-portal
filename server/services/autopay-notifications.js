@@ -6,7 +6,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { isPaused } = require('./autopay-eligibility');
-const { MONTHLY_LANE_SQL, isMembershipTier } = require('./billing-lane');
+const { MONTHLY_LANE_SQL, isMembershipTier, resolveBillingLane } = require('./billing-lane');
 
 /**
  * Autopay Notifications
@@ -35,7 +35,7 @@ async function sendPreChargeReminders() {
     .where('monthly_rate', '>', 0)
     .where('billing_day', targetDay)
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier');
+    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode');
   // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
   // but the monthly cron never charges them (GUARD 3b) — never text a
   // reminder for a monthly charge that will not run (Codex round-2 + 5):
@@ -96,8 +96,37 @@ async function sendPreChargeReminders() {
         purpose: 'autopay',
         customerId: c.id,
         entryPoint: 'autopay_pre_charge_reminder',
-        metadata: { original_message_type: 'autopay_pre_charge' },
+        // Lane AT SEND TIME (codex #3607 r2 + r5 + r7 + r8): the stamp is
+        // the verdict preDispatchCheck below enforces at the wrapper's last
+        // caller-visible abort point — the send only proceeds when the
+        // customer resolves monthly_membership there, so a legacy NULL-mode
+        // member stamps 'monthly_membership', never a null the owner digest
+        // would flag. The digest classifies against this stamp, not the
+        // customer's lane at read time.
+        metadata: { original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership' },
+        // Fresh verdict at the wrapper's final abort point (codex #3607 r7
+        // + r8): the lane filter ran once for the whole batch, and render +
+        // validators are further awaits — a customer moved out of the
+        // monthly lane, off autopay, or deleted in the meantime must not get
+        // a monthly-charge reminder stamped as valid. Null refetch = block
+        // (fail closed).
+        preDispatchCheck: async () => {
+          const fresh = await db('customers')
+            .where({ id: c.id })
+            .first('billing_mode', 'waveguard_tier', 'monthly_rate', 'autopay_enabled', 'active', 'deleted_at');
+          if (!fresh || fresh.deleted_at || fresh.active === false) return { ok: false, code: 'lane_changed', reason: 'customer no longer active' };
+          if (fresh.autopay_enabled === false) return { ok: false, code: 'lane_changed', reason: 'autopay disabled before dispatch' };
+          if (!(Number(fresh.monthly_rate || 0) > 0)) return { ok: false, code: 'lane_changed', reason: 'no monthly rate before dispatch' };
+          const mode = resolveBillingLane(fresh).mode;
+          return mode === 'monthly_membership'
+            ? { ok: true }
+            : { ok: false, code: 'lane_changed', reason: `lane is ${mode} at dispatch` };
+        },
       });
+      if (sendResult.code === 'lane_changed') {
+        logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${sendResult.reason}`);
+        skipped++; continue;
+      }
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
       }
@@ -153,7 +182,7 @@ async function sendCardExpiryWarnings() {
   const customers = await db('customers')
     .where({ active: true, autopay_enabled: true })
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
+    .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id', 'billing_mode', 'waveguard_tier', 'monthly_rate');
 
   // Prepay-covered customers get NO card warning (getCardExpiryExemptions,
   // shared with the dashboard alert and the daily payment-expiry workflow):
@@ -216,6 +245,7 @@ async function sendCardExpiryWarnings() {
       rows.push({
         customer_id: customer.id,
         first_name: customer.first_name,
+        billing_mode_at_send: resolveBillingLane(customer).mode,
         phone: customer.phone,
         payment_method_id: target.id,
         brand: target.card_brand,
@@ -283,7 +313,7 @@ async function sendCardExpiryWarnings() {
         purpose: 'autopay',
         customerId: r.customer_id,
         entryPoint: 'autopay_card_expiry_warning',
-        metadata: { original_message_type: 'payment_expiry' },
+        metadata: { original_message_type: 'payment_expiry', billing_mode_at_send: r.billing_mode_at_send },
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
