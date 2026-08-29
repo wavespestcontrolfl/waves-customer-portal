@@ -136,8 +136,10 @@ service_visits                                  ← rev 5 shape
   scheduled_date     date
   window_start       time
   window_end         time
-  route_stop_key     text  NOT NULL   — `<property_id>:<date>:<window_start>` (or the dispatch
+  stop_base_key      text  NOT NULL   — `<property_id>:<date>:<window_start>` (or the dispatch
                                         stop id once routed); the identity of "one physical stop"
+  stop_seq           int   NOT NULL DEFAULT 1 — a split creates seq 2, 3 … under the same lock
+  route_stop_key     text  GENERATED = stop_base_key || ':' || stop_seq
   technician_id      uuid → technicians (nullable until dispatch; the VISIT owns assignment,
                                         children inherit — §2 rule 6)
   group_family       text   — recurring_property_service | lawn_tree_shrub | pest_rodent …
@@ -149,16 +151,23 @@ service_visits                                  ← rev 5 shape
   billing_hold       bool   — true while any child is hold_for_review (§3)
   en_route_at · arrived_at · completion_submitted_at · closed_at · close_reason
                      (all_resolved | operator | row_cancelled | legacy_completion …)
-  summary_token_hash text unique   — sha256 of the 64-hex bearer (§5); raw token never stored
-  summary_token_revoked_at
+  summary_token_hash text unique   — sha256 of the 64-hex bearer (§5). Minted at LINK ISSUE
+                                     (visit close, or office "Reissue link"), not at creation:
+                                     the raw token exists only inside the outgoing message /
+                                     the office's reissue response; the hash is written in the
+                                     same transaction that claims the completion effect
+  summary_token_issued_at · summary_token_revoked_at
   review_request_id · payment_intent_id
   created_by         converter | seeder | admin:<id> | dispatch
   created_at / updated_at
 
-  UNIQUE INDEX (route_stop_key) WHERE status = 'open'
-  — plus creation under advisory lock `['visit.create', route_stop_key]`, so converter, seeder
-    and admin cannot race two open visits for one stop (nullable technician_id is NOT part of
-    the identity — NULLs don't collide in a unique index).
+  UNIQUE INDEX (stop_base_key, stop_seq) WHERE status = 'open'
+  — creation, auto-join and split all run under advisory lock `['visit.stop', stop_base_key]`:
+    auto-join looks up open visits for the base key and joins the lowest seq that satisfies
+    the join rules; a split atomically allocates `max(seq)+1` for the same base and moves the
+    child there in one transaction, so the original visit is preserved and no two writers can
+    mint the same seq. Nullable technician_id is NOT part of the identity (NULLs don't collide
+    in a unique index).
 
 visit_effects                                   ← rev 5: ONE durable outbox for every external
   id · visit_id · effect_type                      action, replacing per-column comms state
@@ -168,9 +177,16 @@ visit_effects                                   ← rev 5: ONE durable outbox fo
   (Twilio SID / SendGrid id / Stripe PI id) · attempts · scheduled_at · sent_at ·
   payload_version · last_error
   UNIQUE (visit_id, effect_type, dedupe_key)
-  — the worker claims a row, performs the action with the row's dedupe key as the provider
-    idempotency key (Stripe `Idempotency-Key`, SMS/email job keys), then marks it. A crash
-    between provider call and mark ⇒ retry with the SAME key ⇒ the provider dedupes.
+  — handoff rule (rev 5b): the worker CLAIMS the row (status `claimed`, `claimed_at`) in its
+    own committed transaction BEFORE any provider call. Stripe effects pass `dedupe_key` as
+    `Idempotency-Key` (true provider dedupe). Email effects pass it as
+    `email_messages.idempotency_key`, which `email-delivery.js:177-185` already treats as an
+    at-most-once ledger. SMS has no provider dedupe: the send writes the `sms_log` row with
+    the dedupe key first, then calls Twilio, then stores `twilio_sid`. On retry, a row found
+    `claimed` with no `provider_id` is **never re-sent** — it is marked `unknown_delivery`
+    and parks an admin bell ("visit message may not have reached the customer — resend?").
+    Customer-facing messages are therefore **at-most-once**; only money (Stripe) is
+    retried-to-success. A lost text costs one office click; a duplicate text is impossible.
 
 visit_completion_packets                       ← rev 2 (§3), normalised rev 5
   id · visit_id · idempotency_key unique · request_hash (sha256 over visit_id + canonical
@@ -388,19 +404,23 @@ completed child → admin bell with *Close & send* / *Separate*. Never composes 
 
 ## 5. Customer visit-summary page — ships with the message
 
-`/visit/:token` + `GET /api/public/visit/:token`, token = `service_visits.summary_token`.
+`/visit/:token` + `GET /api/public/visit/:token`, token = the 64-hex bearer whose sha256 is
+`service_visits.summary_token_hash` (minted when the link is issued — §2).
 
 **Bearer-token contract (rev 4 — security-critical, mirrors `pay-statement.js`).** The route
 family exposes reports, today's charges, a receipt and a payment write with no auth, so the
 token *is* the credential:
-- `summary_token` = 32 bytes from `crypto.randomBytes` encoded as **64 hex chars**, generated
-  at group creation, `UNIQUE NOT NULL`, never derived from ids or dates, never logged.
+- The token = 32 bytes from `crypto.randomBytes` encoded as **64 hex chars**, generated when
+  the link is issued (close / reissue), stored only as its sha256 (`UNIQUE`), never derived
+  from ids or dates, never logged. Reissue rotates the hash; the old link becomes a 404.
 - Format gate `^[0-9a-f]{64}$` runs **before any DB access**; malformed and unknown tokens both
   return a generic **404** (no distinguishing body/status), exactly like
   `loadStatementByToken`. A dissolved or cancelled visit is also a 404.
-- Gate check first (both gates off ⇒ 404 before the limiter, so a dark surface can't be probed
-  via 429), then a router-wide per-IP limiter (60/min, same shape as
-  `statementPayLimiter`), plus a tighter limiter on the payment POSTs.
+- **No gate check on token resolution** — `GATE_VISIT_GROUPS` is a *creation* gate only
+  (§5 Gates). Before any visit exists the route is unreachable in practice (every token is a
+  404); once links are issued they resolve regardless of the gate's current value. Router-wide
+  per-IP limiter (60/min, same shape as `statementPayLimiter`), plus a tighter limiter on the
+  payment POSTs, applied after the format gate.
 - Privacy headers on every GET/POST outcome including errors: `X-Robots-Tag: noindex`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (same posture as `/report/:token`).
 - The page shows no customer name, email, phone, or full address (R6 **ruled rev 5**: no
