@@ -80,6 +80,10 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('123 State Road #64', '')).toBe('123 State Road #64');
     expect(leadAddressCompareKey('123 State Road #64, Apt 4')).toBe(leadAddressCompareKey('123 State Road #64 Apt 4'));
     expect(analyzeLeadAddress('100 Main Rd #4', 'Apt 5')).toEqual({ address: '100 Main Rd, #4', unitConflict: true });
+    // A NAMED highway's hash is a unit, not a route number — a different dedicated unit is still a held conflict.
+    expect(analyzeLeadAddress('123 Overseas Hwy #4', 'Apt 5')).toEqual({ address: '123 Overseas Hwy, #4', unitConflict: true });
+    expect(analyzeLeadAddress('123 Overseas Hwy #4 Sarasota FL 34236', 'Apt 5')).toEqual({ address: '123 Overseas Hwy #4 Sarasota FL 34236', unitConflict: true });
+    expect(analyzeLeadAddress('10 US Hwy #301', 'Apt 5')).toEqual({ address: '10 US Hwy #301, Apt 5', unitConflict: false });
     // Route number followed by a real unit: only the number goes back to the street.
     expect(analyzeLeadAddress('123 State Road #64 Apt 4', 'Apt 4')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: false });
     expect(analyzeLeadAddress('123 State Road #64 Apt 4', 'Apt 5')).toEqual({ address: '123 State Road #64, Apt 4', unitConflict: true });

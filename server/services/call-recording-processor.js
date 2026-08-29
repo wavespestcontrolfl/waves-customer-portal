@@ -2704,8 +2704,14 @@ const ROUTE_WORDS = new Set(['route', 'rte', 'highway', 'hwy', 'sr', 'cr', 'us',
 // unit: "State Road #64", "County Road #675", "Hwy #41", "US #301" (codex
 // r7 P2). "Main Rd #4" keeps its unit — only State/County Road qualify.
 // `prev`/`prev2` are the lower-cased, punctuation-free tokens before the hash.
+// Fail closed: the route word must directly follow the house number or a
+// State/County/US/Interstate qualifier ("500 Hwy #41", "123 State Road #64",
+// "10 US Hwy #301"). A NAMED highway ("123 Overseas Hwy #4") keeps its hash
+// as a unit, so a different dedicated unit is still a held conflict.
+const ROUTE_QUALIFIERS = new Set(['state', 'county', 'us', 'interstate']);
 function isRouteNumberContext(prev, prev2) {
-  if (ROUTE_WORDS.has(prev)) return true;
+  const qualified = /^\d+[a-z]?$/.test(prev2 || '') || ROUTE_QUALIFIERS.has(prev2 || '');
+  if (ROUTE_WORDS.has(prev)) return qualified;
   return (prev === 'road' || prev === 'rd') && (prev2 === 'state' || prev2 === 'county');
 }
 function canonicalizeInlineUnits(streetKey) {
