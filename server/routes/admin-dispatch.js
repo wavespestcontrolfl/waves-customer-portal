@@ -11882,7 +11882,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             invoiceId: invoice.id,
             entryPoint: 'autopay_completion_decline',
             identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
+            // billing_mode_at_send: the owner autopay digest (#3607) classifies
+            // the text against the lane that authorized it.
+            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: svc.cust_billing_mode ?? null },
           });
           paymentFailedNoticeSent = !!failResult.sent;
           // Send-window hold: the decline is deliberately independent of

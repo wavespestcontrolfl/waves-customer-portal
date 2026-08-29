@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runAutopaySmsDigest,
-  AUTOPAY_ENTRY_POINTS,
+  AUTOPAY_EXTRA_ENTRY_POINTS,
   _private: { composeAutopaySmsDigest },
 } = require('../services/autopay-sms-digest');
 
@@ -42,14 +42,13 @@ beforeEach(() => {
   delete process.env.AUTOPAY_SMS_DIGEST_EMAIL;
 });
 
-describe('AUTOPAY_ENTRY_POINTS', () => {
-  test('covers every autopay-family send site', () => {
-    expect(AUTOPAY_ENTRY_POINTS).toEqual(expect.arrayContaining([
-      'autopay_pre_charge_reminder', 'autopay_card_expiry_warning',
-      'monthly_billing_success', 'monthly_billing_failure',
-      'autopay_retry_success', 'autopay_retry_failed', 'autopay_retry_final_failed',
-      'payment_expiry_workflow',
-    ]));
+describe('AUTOPAY_EXTRA_ENTRY_POINTS', () => {
+  test('names exactly the send sites the wrapper does not already mark as autopay', () => {
+    // autopay_* entry points (pre-charge, card-expiry, retry ladder,
+    // completion decline + its deferred replay) are matched by the SQL
+    // prefix rule that mirrors isAutopayCustomerSms — never listed here.
+    expect(AUTOPAY_EXTRA_ENTRY_POINTS).toEqual(['monthly_billing_success', 'monthly_billing_failure', 'payment_expiry_workflow']);
+    expect(AUTOPAY_EXTRA_ENTRY_POINTS.some((e) => e.startsWith('autopay_'))).toBe(false);
   });
 });
 
@@ -113,6 +112,13 @@ describe('composeAutopaySmsDigest', () => {
     const live = composeAutopaySmsDigest([row({ lane_source: 'live' })]);
     expect(live.mismatches).toBe(0);
     expect(live.text).toContain('lane monthly_membership (lane as of now)');
+
+    // A stamped NULL is a real send-time lane (codex r3): inferred, flagged,
+    // and never relabeled from the customer's current lane.
+    const stampedNull = composeAutopaySmsDigest([row({ lane_source: 'at_send', billing_mode: null })]);
+    expect(stampedNull.mismatches).toBe(1);
+    expect(stampedNull.text).toContain('lane NULL (inferred)');
+    expect(stampedNull.text).not.toContain('(lane as of now)');
   });
 
   test('html escapes the preview and reports overflow beyond the page', () => {

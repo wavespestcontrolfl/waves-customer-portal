@@ -34,18 +34,16 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
-// Every autopay-family send site, by entry point (the audit column the
-// wrapper stamps from `entryPoint`). Listed explicitly rather than by
-// prefix so a new site has to be added here on purpose — and so the digest
-// never mistakes an unrelated 'billing' purpose for an autopay text.
-const AUTOPAY_ENTRY_POINTS = [
-  'autopay_pre_charge_reminder',   // autopay-notifications.js — daily 9:00
-  'autopay_card_expiry_warning',   // autopay-notifications.js — Mon 9:17
+// What counts as an autopay text mirrors the messaging wrapper's OWN
+// definition (send-customer-message.js isAutopayCustomerSms — purpose
+// 'autopay', or an entry point / original_message_type starting with
+// 'autopay_'), so every site the wrapper gates as autopay — including the
+// completion-time decline notice and its deferred replay (codex r3 P1) —
+// is covered without this file keeping its own drifting list. The three
+// send sites that carry none of those markers are named here explicitly.
+const AUTOPAY_EXTRA_ENTRY_POINTS = [
   'monthly_billing_success',       // billing-cron.js — charge receipt
   'monthly_billing_failure',       // billing-cron.js — first failure
-  'autopay_retry_success',         // billing-cron.js — retry ladder
-  'autopay_retry_failed',
-  'autopay_retry_final_failed',
   'payment_expiry_workflow',       // workflows/payment-expiry.js
 ];
 
@@ -70,7 +68,7 @@ async function loadSentAutopayTexts(since) {
     SELECT COUNT(*) OVER () AS total_count,
            -- Whole-window mismatch count (codex r1): a non-monthly recipient
            -- beyond the display page must still escalate the subject.
-           COUNT(*) FILTER (WHERE COALESCE(a.metadata ->> 'billing_mode_at_send', cu.billing_mode) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
+           COUNT(*) FILTER (WHERE (CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE cu.billing_mode END) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
            a.sent_at, a.entry_point, a.body_preview,
            a.metadata ->> 'original_message_type' AS message_type,
            a.customer_id,
@@ -78,8 +76,11 @@ async function loadSentAutopayTexts(since) {
            -- Lane AT SEND TIME (codex r2): every autopay send site stamps
            -- billing_mode_at_send into the audit metadata; the live join is
            -- only a fallback for rows written before the stamp existed.
-           COALESCE(a.metadata ->> 'billing_mode_at_send', cu.billing_mode) AS billing_mode,
-           CASE WHEN a.metadata ->> 'billing_mode_at_send' IS NOT NULL THEN 'at_send' ELSE 'live' END AS lane_source,
+           -- Key PRESENCE decides (codex r3 P2): a stamped JSON null is a
+           -- real "lane was NULL at send" and must not fall through to the
+           -- customer's current lane.
+           CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN a.metadata ->> 'billing_mode_at_send' ELSE cu.billing_mode END AS billing_mode,
+           CASE WHEN jsonb_exists(a.metadata, 'billing_mode_at_send') THEN 'at_send' ELSE 'live' END AS lane_source,
            cu.waveguard_tier, cu.monthly_rate
     FROM messaging_audit_log a
     LEFT JOIN customers cu ON cu.id = a.customer_id
@@ -87,11 +88,16 @@ async function loadSentAutopayTexts(since) {
       AND a.audience = 'customer'
       AND a.sent_at IS NOT NULL
       AND a.sent_at > :since
-      AND a.entry_point = ANY(:entryPoints)
+      AND (
+        a.purpose = 'autopay'
+        OR a.entry_point LIKE 'autopay\\_%'
+        OR (a.metadata ->> 'original_message_type') LIKE 'autopay\\_%'
+        OR a.entry_point = ANY(:extraEntryPoints)
+      )
     ORDER BY a.sent_at DESC
     LIMIT :maxRows
     `,
-    { since, entryPoints: AUTOPAY_ENTRY_POINTS, maxRows: MAX_ROWS },
+    { since, extraEntryPoints: AUTOPAY_EXTRA_ENTRY_POINTS, maxRows: MAX_ROWS },
   );
   return rows;
 }
@@ -243,6 +249,6 @@ async function runAutopaySmsDigest(opts = {}) {
 
 module.exports = {
   runAutopaySmsDigest,
-  AUTOPAY_ENTRY_POINTS,
+  AUTOPAY_EXTRA_ENTRY_POINTS,
   _private: { composeAutopaySmsDigest },
 };
