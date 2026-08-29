@@ -444,6 +444,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoaches and Marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches, our technician, was glad to help alongside Marcus.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches Smith helped with the ants alongside Marcus.'))).toBe('unlisted_name');
+    // hook: an adverb opener needs adverb syntax; a coordination after the comma is still a name.
+    expect(verify(good('Hi Dana,\n\nTruly says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nTruly, alongside Marcus, we are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches love this heat, so we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nTruly, we are glad Marcus could help.'))).not.toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.

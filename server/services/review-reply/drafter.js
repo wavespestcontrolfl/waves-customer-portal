@@ -289,12 +289,18 @@ luckily fortunately clearly obviously usually typically sometimes between withou
 whenever wherever neither none plus dependability reliability consistency communication service
 treatment treatments visits results protection prevention nothing something everything anything
 `.split(/\s+/).filter(Boolean));
-// …and even a listed opener is NOT exempt when what follows is name-shaped
-// (codex #3580 r2, "Going and Marcus are glad…"): a coordination with a
-// capitalised word, an appositive, or another capitalised word — the shape
-// every laundering example used. Structural, so it covers surnames the list
-// audit missed.
-const NAME_SHAPED_AFTER_OPENER_RE = /^\s*(?:(?:and|or|with|&|plus|alongside)\s+\p{Lu}|,\s*(?:our|the|an?|your|who|whose|from)\b|\p{Lu})/u;
+// …and a listed opener is exempt only with POSITIVE ordinary-word syntax after
+// it (codex #3580 r2 + hook: "Going and Marcus", "Truly says thanks", "Truly,
+// alongside Marcus"): a plural-only verb ("Ants are / love / need"), a
+// determiner or preposition ("Finding a", "Skipping the"), a pronoun, a
+// conjunction followed by a lowercase word, or a comma followed by a lowercase
+// word that opens neither an appositive (", our technician") nor a
+// coordination (", alongside Marcus"). Nothing a single person's name takes —
+// singular copula / auxiliary / possessive, modal, adverb, present- or
+// past-tense verb, capitalised word — is on the list, so adverb openers need
+// adverb syntax ("Honestly, we…") and surnames the list audit missed still
+// fail on shape.
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
@@ -578,7 +584,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && !NAME_SHAPED_AFTER_OPENER_RE.test(body.slice(pn.index + pn[0].length))) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
