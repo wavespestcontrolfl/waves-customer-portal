@@ -1624,6 +1624,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           }
         }
         const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
+        const validateSibling = (m, start, end) => {
+          try {
+            require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: m.estimated_duration_minutes });
+          } catch (e) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time is not allowed on the new slot — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
+          }
+        };
         const targets = members.map((m) => {
           const isPrimary = m.id === primary.id;
           let window = null;
@@ -1640,13 +1647,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             // write, for EVERY caller (codex r4/r9): dispatch validates only
             // the tapped window; rain-out and auto-dispatch validate none —
             // a legacy :30 sibling must not ride its offset onto a new slot.
-            if (!isPrimary) {
-              try {
-                require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: targetStart, windowEnd: targetEnd, durationMinutes: m.estimated_duration_minutes });
-              } catch (e) {
-                throw Object.assign(new Error(`Cannot move this stop: a grouped service's shifted time is not allowed — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
-              }
-            }
+            if (!isPrimary) validateSibling(m, targetStart, targetEnd);
+          } else if (!isPrimary && m.window_start && dateOnly(m.scheduled_date) !== newDateStr) {
+            // Date-only move: the sibling keeps its own window, which now
+            // lands on a NEW date — a legacy off-hour window cannot ride
+            // onto it either (codex r11; same ruling update-details applies).
+            validateSibling(m, targetStart, targetEnd);
           }
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
@@ -1709,9 +1715,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};
+  // Landed tuple = what the rebooker actually writes (codex r11): a
+  // date-only move keeps BOTH bounds; a start-only window leaves the end
+  // to the rebooker's derivation, so window_end is left OUT of the contract
+  // (an undefined key is not compared) rather than asserted null.
   const targetTuple = (t) => {
-    const [ts, te] = typeof t.window === 'string' ? t.window.split('-') : [t.window && t.window.start, t.window && t.window.end];
-    return { scheduled_date: newDateStr, window_start: ts || t.expect.window_start || null, window_end: (te === undefined ? t.expect.window_end : te) || null };
+    if (!t.window) return { scheduled_date: newDateStr, window_start: t.expect.window_start || null, window_end: t.expect.window_end || null };
+    if (typeof t.window === 'string') { const [ts, te] = t.window.split('-'); return { scheduled_date: newDateStr, window_start: ts, window_end: te }; }
+    return { scheduled_date: newDateStr, window_start: t.window.start || null };
   };
   for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) landedState[t.id] = targetTuple(t);
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];

@@ -1163,8 +1163,10 @@ class SmartRebooker {
           const same = cur
             && (exp.visit_id === undefined || String(cur.visit_id || '') === String(exp.visit_id || ''))
             && day(cur.scheduled_date) === day(exp.scheduled_date)
-            && norm(cur.window_start) === norm(exp.window_start)
-            && norm(cur.window_end) === norm(exp.window_end)
+            && (exp.window_start === undefined || norm(cur.window_start) === norm(exp.window_start))
+            // An absent end in the contract = "derived by the rebooker" (a
+            // start-only landing); it is not compared (codex #3609 r11).
+            && (exp.window_end === undefined || norm(cur.window_end) === norm(exp.window_end))
             && extras.every((k) => (cur[k] === null || cur[k] === undefined ? null : cur[k]) === (exp[k] === undefined ? null : exp[k]));
           if (!same) {
             throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), {

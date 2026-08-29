@@ -241,16 +241,77 @@ async function visitServicesFor(svc) {
       .where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .orderBy('window_start', 'asc')
-      .select('id', 'service_type');
+      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed');
     if (members.length < 2) return {};
     // The stop's canonical start (service_visits.window_start — the
     // earliest member's) drives the arrival promise: two links to the same
     // physical visit must quote the same window (codex r10).
     const parent = await db('service_visits').where({ id: svc.visit_id }).first('window_start');
-    return { visit: { serviceCount: members.length, services: members.map((m) => m.service_type || 'service'), windowStart: hhmm(parent?.window_start) || null } };
+    // Every member label goes through the same customer-facing resolution
+    // as the heading (codex r11): raw service_type can be a canonical key
+    // or carry admin-only suffixes.
+    const services = await Promise.all(members.map((m) => resolveServiceLabel(m)));
+    const isConfirmed = (m) => String(m.status || '').toLowerCase() === 'confirmed';
+    const isConfirmable = (m) => String(m.status || '').toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(m);
+    return {
+      visit: {
+        serviceCount: members.length,
+        services,
+        windowStart: hhmm(parent?.window_start) || null,
+        // Grouped state is the VISIT's, not the token row's (codex r11): the
+        // appointment reads Confirmed only when every member is, and stays
+        // confirmable while any member can still be customer-confirmed.
+        allConfirmed: members.every(isConfirmed),
+        anyConfirmable: members.some(isConfirmable),
+      },
+    };
   } catch (err) {
     logger.warn(`[appointment-public] visit members lookup failed for ${svc.id}: ${err.message}`);
     return {};
+  }
+}
+
+// Confirm every other pending, customer-confirmable member of the token
+// row's visit — the page presented them as ONE appointment (codex #3609
+// r6/r11). Caller holds the stop lock in `trx`; the token row's membership
+// was proven by the caller's own CAS/re-read. Returns the confirmed ids.
+async function confirmGroupedSiblings(trx, svc) {
+  const siblings = await trx('scheduled_services')
+    .where({ visit_id: svc.visit_id, status: 'pending' })
+    .whereNot('id', svc.id)
+    .forUpdate()
+    // status is part of the projection: dispatchOwnedUnreviewed keys on
+    // it, and a missing column made the guard a no-op (codex r10 P1).
+    .select('id', 'status', 'source_action', 'customer_confirmed');
+  const done = [];
+  for (const sib of siblings) {
+    if (dispatchOwnedUnreviewed(sib)) continue;
+    const n = await trx('scheduled_services')
+      .where({ id: sib.id, status: 'pending' })
+      .update({ status: 'confirmed', customer_confirmed: true, confirmed_at: trx.fn.now(), updated_at: trx.fn.now() });
+    if (n === 0) continue;
+    await trx('job_status_history').insert({ job_id: sib.id, from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
+    done.push(sib.id);
+  }
+  return done;
+}
+
+// Run `fn(trx)` under the token row's stop lock, retrying lockStopForRow's
+// VISIT_STOP_MOVED like every other caller; returns false when the retry
+// is exhausted (the route answers CHANGED, never a 500 — codex r10).
+async function underStopLock(svc, fn) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await db.transaction(async (trx) => {
+        const { lockStopForRow } = require('../services/visit-groups');
+        await lockStopForRow(trx, svc.id);
+        await fn(trx);
+      });
+      return true;
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED') { if (attempt < 2) continue; return false; }
+      throw err;
+    }
   }
 }
 
@@ -375,13 +436,19 @@ router.get('/:token', async (req, res, next) => {
       isTomorrow: base.appointment.date === etDateString(addETDays(new Date(), 1)),
       // status 'confirmed' is the existing schema value the dispatch board
       // already writes; the page just surfaces it.
-      confirmed: String(svc.status).toLowerCase() === 'confirmed',
+      confirmed: visitInfo.visit
+        ? visitInfo.visit.allConfirmed
+        : String(svc.status).toLowerCase() === 'confirmed',
       // Drives the Confirm button. Mirrors the POST guard exactly: only a
       // plain 'pending' visit that is not dispatch-owned (call-created
       // follow-up / outbound-review awaiting office confirmation) may be
-      // customer-confirmed, so the button never renders into a 409.
-      confirmable: String(svc.status).toLowerCase() === 'pending'
-        && !dispatchOwnedUnreviewed(svc),
+      // customer-confirmed, so the button never renders into a 409. For a
+      // grouped visit the tap confirms every confirmable member, so the
+      // button also shows from an already-confirmed member's link while a
+      // sibling can still be confirmed (the POST fans out).
+      confirmable: visitInfo.visit
+        ? (visitInfo.visit.anyConfirmable && ['pending', 'confirmed'].includes(String(svc.status).toLowerCase()) && !dispatchOwnedUnreviewed(svc))
+        : (String(svc.status).toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(svc)),
       tech: svc.technician_id
         ? { firstName: firstNameOf(svc.tech_name), photoUrl: techPhotoUrl || null, sameAsLastVisit: sameTech }
         : null,
@@ -539,6 +606,20 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // stale date/window as confirmed instead of reloading the move.
     if (String(svc.status).toLowerCase() === 'confirmed') {
       if (confirmRaceVerdict(svc) === 'idempotent_success') {
+        // Grouped visit (codex r11): this member is already confirmed but
+        // the page offered the confirm for the whole stop — fan out to the
+        // still-pending confirmable siblings under the stop lock, with the
+        // token row's membership re-proven on the locked row.
+        if (svc.visit_id) {
+          const ok = await underStopLock(svc, async (trx) => {
+            const cur = await trx('scheduled_services').where({ id: svc.id }).first('visit_id');
+            if (!cur || String(cur.visit_id || '') !== String(svc.visit_id)) {
+              throw Object.assign(new Error('membership changed'), { code: 'VISIT_STOP_MOVED' });
+            }
+            await confirmGroupedSiblings(trx, svc);
+          });
+          if (!ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+        }
         return res.json({ success: true, confirmed: true });
       }
       return res.status(409).json({
@@ -638,21 +719,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       if (svc.visit_id) {
         // Stop lock already held (above) and the CAS just proved the row
         // still belongs to svc.visit_id.
-        const siblings = await trx('scheduled_services')
-          .where({ visit_id: svc.visit_id, status: 'pending' })
-          .whereNot('id', svc.id)
-          .forUpdate()
-          // status is part of the projection: dispatchOwnedUnreviewed keys on
-          // it, and a missing column made the guard a no-op (codex r10 P1).
-          .select('id', 'status', 'source_action', 'customer_confirmed');
-        for (const sib of siblings) {
-          if (dispatchOwnedUnreviewed(sib)) continue;
-          const n = await trx('scheduled_services')
-            .where({ id: sib.id, status: 'pending' })
-            .update({ status: 'confirmed', customer_confirmed: true, confirmed_at: trx.fn.now(), updated_at: trx.fn.now() });
-          if (n === 0) continue;
-          await trx('job_status_history').insert({ job_id: sib.id, from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
-        }
+        await confirmGroupedSiblings(trx, svc);
       }
     });
     for (;;) {
@@ -714,6 +781,7 @@ router._test = {
   slotMatchesShown,
   dispatchOwnedUnreviewed,
   visitServicesFor,
+  confirmGroupedSiblings,
 };
 
 module.exports = router;

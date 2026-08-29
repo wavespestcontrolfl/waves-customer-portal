@@ -362,13 +362,21 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     mockDb.mockImplementation((table) => {
       const api = {
         where: () => api, whereNotIn: () => api, orderBy: () => api,
-        select: async () => [{ id: 'a', service_type: 'Quarterly Pest Control' }, { id: 'b', service_type: 'Lawn Fertilization' }],
-        first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
+        select: async () => [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false },
+        ],
+        first: async () => {
+          if (table === 'service_visits') return { window_start: '09:00:00' };
+          // the reminder row carries the customer-facing label for member a
+          if (table === 'appointment_reminders') return { service_type: 'Quarterly Pest Control' };
+          return null;
+        },
       };
       return api;
     });
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00' } });
+      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Quarterly Pest Control'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
     expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
   });
 });

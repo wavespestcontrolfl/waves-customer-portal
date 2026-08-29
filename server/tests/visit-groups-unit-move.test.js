@@ -401,4 +401,24 @@ describe('moveVisitAsUnit', () => {
     const detach = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.visit_id === null);
     expect(detach.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['late']]]));
   });
+
+  test('date-only move: the landed contract keeps BOTH window bounds (the rebooker preserves them), so the sibling never trips VISIT_PLAN_STALE on a null end', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    const rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' }]);
+    // start-only landing: the end is the rebooker's derivation — left out of the contract, not asserted null
+    db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    const rb2 = fakeRebooker();
+    await moveVisitAsUnit({ rebooker: rb2, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: { start: '13:00', end: null } });
+    expect(rb2.reschedule.mock.calls[1][5].excludeExpect[0]).toEqual({ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00' });
+  });
+
+  test('date-only move: a sibling whose own window breaks the admin rules cannot ride it onto the new date', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
 });
