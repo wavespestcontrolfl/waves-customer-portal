@@ -1699,6 +1699,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // tech EXTERIOR ONLY scope (codex #3432 r7).
             interiorOption: item.interiorOption ?? undefined,
             interiorScope: item.interiorScope ?? undefined,
+            // Rodent billing-unit marker + allowance (2026-08-29, codex
+            // #3591 r6): without them the mirrored row reads as a LEGACY
+            // monthly-billed rodent plan — discount-ineligible and showing
+            // the list rate instead of the engine-authorized net.
+            perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
+            stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
           })),
           waveGuard: estimate?.waveGuard || null,
         },

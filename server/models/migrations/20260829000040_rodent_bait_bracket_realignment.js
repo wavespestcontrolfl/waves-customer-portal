@@ -39,6 +39,11 @@ const BRACKETS_DATA = {
   note: 'Owner directive 2026-08-29: billed per application; ladder extends above 6,750 sf; same brackets for commercial',
 };
 
+// Single source for the up() catalog copy — down()'s per-field guards
+// compare against exactly these strings.
+const UP_SETUP_DESCRIPTION = 'One-time inspection, station hardware, placement, and mapping. Charged only for non-WaveGuard members — waived when the customer has any other WaveGuard recurring service.';
+const UP_SETUP_INTERNAL_NOTES = 'Owner directive 2026-08-29: $99, non-WaveGuard members only (no other qualifying recurring service on the estimate or account).';
+
 const CHANGELOG_IDENTITY = {
   version_from: 'v4.7',
   version_to: 'v4.8',
@@ -175,8 +180,8 @@ exports.up = async function up(knex) {
       .where({ service_key: 'rodent_bait_setup' })
       .update({
         base_price: 99.0,
-        description: 'One-time inspection, station hardware, placement, and mapping. Charged only for non-WaveGuard members — waived when the customer has any other WaveGuard recurring service.',
-        internal_notes: 'Owner directive 2026-08-29: $99, non-WaveGuard members only (no other qualifying recurring service on the estimate or account).',
+        description: UP_SETUP_DESCRIPTION,
+        internal_notes: UP_SETUP_INTERNAL_NOTES,
         updated_at: knex.fn.now(),
       });
   }
@@ -287,19 +292,24 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('services')) {
-    // Value-guarded (codex #3591 r3 P2): restore the catalog row only when
-    // it still holds this migration's $99 output — an operator edit after
-    // up() is authoritative and survives rollback untouched.
+    // Value-guarded PER FIELD (codex #3591 r3+r6 P2): restore only the
+    // fields that still hold this migration's up() output — an operator
+    // edit to the price OR the copy after up() is authoritative and
+    // survives rollback untouched.
     const setupRow = await knex('services').where({ service_key: 'rodent_bait_setup' }).first();
-    if (setupRow && Number(setupRow.base_price) === 99) {
-      await knex('services')
-        .where({ service_key: 'rodent_bait_setup' })
-        .update({
-          base_price: 199.0,
-          description: 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.',
-          internal_notes: 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.',
-          updated_at: knex.fn.now(),
-        });
+    if (setupRow) {
+      const restore = {};
+      if (Number(setupRow.base_price) === 99) restore.base_price = 199.0;
+      if (setupRow.description === UP_SETUP_DESCRIPTION) {
+        restore.description = 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.';
+      }
+      if (setupRow.internal_notes === UP_SETUP_INTERNAL_NOTES) {
+        restore.internal_notes = 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.';
+      }
+      if (Object.keys(restore).length) {
+        restore.updated_at = knex.fn.now();
+        await knex('services').where({ service_key: 'rodent_bait_setup' }).update(restore);
+      }
     }
   }
 
