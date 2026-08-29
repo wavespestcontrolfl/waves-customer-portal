@@ -944,9 +944,19 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   through the free-path steps (the worker completes the checkout without a card), and the
   investigator re-marks the path's `payment_required`/cost on its next pass. `final_cents=0`
   never enters `submitting`.
-- **Final total is validated before `submitting`.** The provider must read the checkout's
+- **Final total AND renewal terms are validated before `submitting`.** The provider must read the checkout's
   final total (price + tax + fees + renewal terms as displayed) and report it as
-  `final_cents` — a safe non-negative integer, else the transition is refused — BEFORE the
+  `final_cents` — a safe non-negative integer, else the transition is refused — together with
+  a fail-closed **auto-renew predicate**: the transition to `submitting` (and the mint before
+  it) requires `renewal_evidence` = either `one_time` (the checkout is inherently non-recurring:
+  no renewal term, no subscription language, confirmed by the investigator's `renewal_period='none'`
+  AND the live page) or `auto_renew_disabled` (the checkout independently shows auto-renew
+  OFF / a one-off term after the provider's opt-out, read back from the page, not merely
+  reported), captured into the purchase `terms_snapshot`; anything else — recurring language
+  with no verifiable opt-out, an unreadable renewal block, a provider that only *says* it
+  disabled it — voids the reservation with `auto_renew_unavoidable` (no card, no submit):
+  closing the card would stop the next charge but not the contractual debt, so the guard is
+  the only real protection — BEFORE the
   card is exposed. The `reserved → submitting` transition runs under
   the same `link_budget:<budget_month>` advisory lock and: refuses (→ `voided`,
   `outcome='price_changed'`) if `final_cents > max_auto_purchase_cents` for a row whose stamped
@@ -1247,6 +1257,14 @@ together:
   verifier's domain reconcile (`reconcileByDomain`) discovers the URL on approval, and the
   row is excluded from re-claim while `placed`. `live_url` is required only for a
   non-pending `placed` report, exactly as today.
+- **Reports are bound to the claim.** The lease persists `leased_provider`, `lease_mode`
+  and `lease_action` on the placement (with the lease token); `/report` is accepted only
+  when the reporting identity (HMAC, §12) equals `leased_provider`, the token matches, AND
+  the outcome is in the **mode-specific outcome matrix** (draft ⇒ `drafted`/`skipped`/`failed`
+  only; send/followup ⇒ `sent`/`send_error`/`skipped`/`failed`; payment/renewal ⇒ the
+  purchase outcomes; credentials/acquire ⇒ the execution outcomes incl. handoffs; a draft
+  lease can never report `placed` or a handoff) — enforced atomically in the report
+  transaction with the capability check, so no lease can corrupt another mode's lifecycle.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
   gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `ready_for_credentials`,
   `price_changed`, `captcha`); `ready_for_payment` on a paid execution path atomically sets `status='ready_for_payment'` (§3.3; outreach paths keep `contacted`/`negotiating` and only flag the checkout) and releases the lease; `ready_for_credentials` atomically sets the placement
