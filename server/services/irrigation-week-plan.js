@@ -567,13 +567,17 @@ async function renewWeekPlanClaimWithRetry(args, { delaysMs = RENEW_RETRY_DELAYS
 }
 
 // The PRIOR week's delivered plan — what the customer was told to do last
-// week: `events` (null when the plan was forecast-conditional: it may have
-// been skipped as instructed) drives the cool-season cadence, and
-// `prescribedInches` replaces the customer's programmed schedule as last
-// week's applied irrigation from the second plan week on (events × depth;
-// 0 for a hold or a conditional plan — conservative, never a manufactured
-// surplus/carryover from a schedule the plan superseded — codex gh-r31).
-// Null when there is no delivered prior plan (or it cannot be read).
+// week: `events` drives the cool-season cadence, and `prescribedInches`
+// replaces the customer's programmed schedule as last week's applied
+// irrigation from the second plan week on (events × depth; 0 for a hold —
+// conservative, never a manufactured surplus/carryover from a schedule the
+// plan superseded — codex gh-r31). A forecast-CONDITIONAL plan keeps its
+// events and depth: its instruction is the rain-skip rule itself ("< ½" so
+// far ⇒ run"), and both consumers gate on the OBSERVED rain — ≥ ½" last
+// week withholds the cadence hold (buildWeekPlan) and the run credit
+// (decideWeekPlan's priorWeekRainOverride); < ½" means the customer was
+// told to run (codex gh-r36). Null when there is no delivered prior plan
+// (or it cannot be read).
 async function loadPriorWeekPlan({ customerId, weekEnding } = {}) {
   const prior = etDateStringPlusDays(weekEnding, -7);
   if (!customerId || !prior) return null;
@@ -593,9 +597,9 @@ async function loadPriorWeekPlan({ customerId, weekEnding } = {}) {
     if (!plan || plan.action === 'unavailable') return null;
     const events = Number(plan.events);
     const depth = Number(plan.depthInches);
-    const ran = plan.action === 'run' && !plan.conditionalOnForecast && Number.isFinite(events) && events > 0;
+    const ran = plan.action === 'run' && Number.isFinite(events) && events > 0;
     return {
-      events: plan.conditionalOnForecast ? null : (Number.isFinite(events) ? events : null),
+      events: Number.isFinite(events) ? events : null,
       prescribedInches: ran && Number.isFinite(depth) ? Math.round(events * depth * 100) / 100 : 0,
     };
   } catch (err) {

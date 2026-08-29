@@ -444,9 +444,18 @@ describe('snapshot lifecycle — exactness contract', () => {
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
     expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
     expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
-    // gh-r24/r31: a CONDITIONAL prior plan is no evidence of a run (the rain may have arrived) → events unknown, nothing credited.
+    // gh-r36: a CONDITIONAL prior plan keeps its events + depth — its instruction IS the rain-skip rule, and the
+    // consumers gate on observed rain (≥ ½" withholds the cadence hold and the run credit; < ½" = told to run).
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75, conditionalOnForecast: true }), sent_at: NOW, decision_hash: 'h1' });
-    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: null, prescribedInches: 0 });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
+    {
+      const { decideWeekPlan } = require('../services/irrigation-week-plan');
+      const common = { advice: { rainKnown: true, appliedInchesPerWeek: null, recommendedInchesPerWeek: 0.75 }, grassType: 'st_augustine', forecastEt0Inches: 0.6, priorWeekEvents: 1, priorWeekPrescribedInches: 0.75, county: 'Manatee', planWeekEnd: '2027-01-10', now: new Date('2027-01-04T12:00:00Z'), restriction: undefined };
+      const dry = decideWeekPlan({ ...common, lastWeekRainInches: 0.2 });
+      expect(dry.decisionInputs.priorWeekCreditedInches).toBe(0.75);
+      const wet = decideWeekPlan({ ...common, lastWeekRainInches: 0.6 });
+      expect(wet.decisionInputs.priorWeekCreditedInches).toBe(0);
+    }
     // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
     expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
