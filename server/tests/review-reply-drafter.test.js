@@ -460,6 +460,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     // hook: an unknown lowercase word after the conjunction is not evidence either.
     expect(verify(good('Hi Dana,\n\nRoaches and tasha are glad the ants are gone. Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches, tasha and the crew are glad Marcus could help.'))).toBe('unlisted_name');
+    // codex #3580 r4: modifiers between the conjunction and the name do not hide it;
+    // an -ly adverb opener + comma + a name the reviewer wrote is fine, a noun opener is not.
+    expect(verify(good('Hi Dana,\n\nTruly and even Marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches and not just marcus are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, Marcus and the crew are glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nHonestly, Marcus made this easy. We will pass your note along to him.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nAnts and even roaches hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
