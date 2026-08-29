@@ -611,7 +611,24 @@ async function handleChildStopChanged(scheduledServiceId) {
       // Tech: a conflicting assignment detaches; an assignment landing on
       // an UNASSIGNED visit is ADOPTED — the visit owns assignment, so the
       // parent and every unassigned member align (codex r5).
-      const techConflict = Boolean(
+      let staleParentTech = false;
+      if (fresh.technician_id && visit.technician_id
+          && String(fresh.technician_id) !== String(visit.technician_id)) {
+        // Whole-visit reassignment lands child-by-child (codex r10: the
+        // day swap moves every member, the parent lags): when EVERY
+        // non-terminal member already carries the row's new technician,
+        // the parent is the stale side — re-point it instead of
+        // detaching the first-processed child.
+        const memberTechs = await t('scheduled_services').where({ visit_id: visit.id })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES)
+          .distinct('technician_id').pluck('technician_id');
+        if (memberTechs.length === 1 && String(memberTechs[0]) === String(fresh.technician_id)) {
+          await t('service_visits').where({ id: visit.id }).update({ technician_id: fresh.technician_id });
+          visit.technician_id = fresh.technician_id;
+          staleParentTech = true;
+        }
+      }
+      const techConflict = !staleParentTech && Boolean(
         (fresh.technician_id && visit.technician_id
           && String(fresh.technician_id) !== String(visit.technician_id))
         // Explicitly UNASSIGNING one child of an assigned visit is a
@@ -696,12 +713,21 @@ async function ensureLegacyCompletable(scheduledServiceId) {
   return { ok: true, openVisitId: visit.id };
 }
 
-async function dissolveForLegacyCompletion(visitId) {
+async function dissolveForLegacyCompletion(visitId, { expectChildId = null } = {}) {
   try {
     return await db.transaction(async (t) => {
       const visit = await t('service_visits').where({ id: visitId }).first();
       if (!visit || String(visit.status) !== 'open') return false;
       await lockStop(t, visit.stop_base_key);
+      // The completed child must STILL belong to this visit (codex r10):
+      // a split/move landing between the recheck and this cleanup means
+      // the visit's other members are valid — dissolving it would be
+      // collateral damage.
+      if (expectChildId) {
+        const stillMember = await t('scheduled_services')
+          .where({ id: expectChildId, visit_id: visit.id }).first('id');
+        if (!stillMember) return false;
+      }
       const packet = await t('visit_completion_packets').where({ visit_id: visit.id }).first('id');
       if (packet) return false;
       await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });

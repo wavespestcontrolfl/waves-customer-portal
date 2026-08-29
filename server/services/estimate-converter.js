@@ -4672,7 +4672,11 @@ const EstimateConverter = {
               // Visit groups (visit-group-scope.md §2): a same-trip row and
               // the reserved start share one physical stop — stamp them at
               // scheduling. Gate-checked + best-effort inside maybeGroupRow.
-              if (sameTrip && inserted[0]) {
+              // Only when the property identity is already on the row —
+              // null-property reservations group at post-commit property
+              // linkage instead (codex #3590 r10), so a customer-keyed
+              // stop can never absorb a legacy row at another address.
+              if (sameTrip && inserted[0] && inserted[0].property_id) {
                 await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
               }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'

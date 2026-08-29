@@ -4267,6 +4267,39 @@ router.get('/:serviceId/completion-status', async (req, res) => {
     if (ownershipError) {
       return res.status(ownershipError.status).json(ownershipError.payload);
     }
+
+    {
+      // One atomic re-read (not the svc snapshot above; runs AFTER ownership so an unowned tech never learns visit ids — codex r10 P2) so a group
+      // attachment that landed after the load is still seen, and lookup
+      // errors propagate (fail closed) instead of silently allowing a
+      // duplicate completion. An orphaned visit pointer also blocks —
+      // dissolution NULLs child visit_id in the same transaction, so an
+      // orphan means something is mid-flight or broken, never "go ahead".
+      const membership = await db('scheduled_services as ss')
+        .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+        .where('ss.id', req.params.serviceId)
+        .first('ss.visit_id', 'sv.status as visit_status');
+      if (membership && membership.visit_id
+          && String(membership.visit_status || '') !== 'dissolved') {
+        // READ-ONLY here (codex #3590 r2 P1: nothing may mutate the visit
+        // before ownership/validation): hard-409 only when a completion
+        // packet exists — that is the double-completion race the guard
+        // exists for. An OPEN packet-less visit falls through; the
+        // POST-claim re-check (after ownership + validators + the durable
+        // claim) applies the Phase-1 dissolve fallback atomically.
+        const packet = await db('visit_completion_packets')
+          .where({ visit_id: membership.visit_id }).first('id');
+        if (packet || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
+          return res.status(409).json({
+            error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+            code: 'visit_grouped',
+            visitId: membership.visit_id,
+          });
+        }
+      }
+    }
+
+
     const status = await CompletionAttempts.completionStatusForService({
       serviceId: req.params.serviceId,
       idempotencyKey: String(req.query.idempotencyKey || ''),
@@ -4532,37 +4565,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // stamping ships (no row carries a visit_id today). The check reads
     // the CURRENT visit status, so an admin "Separate these services"
     // (dissolve) restores per-row completion immediately.
-    {
-      // One atomic re-read (not the svc snapshot above) so a group
-      // attachment that landed after the load is still seen, and lookup
-      // errors propagate (fail closed) instead of silently allowing a
-      // duplicate completion. An orphaned visit pointer also blocks —
-      // dissolution NULLs child visit_id in the same transaction, so an
-      // orphan means something is mid-flight or broken, never "go ahead".
-      const membership = await db('scheduled_services as ss')
-        .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
-        .where('ss.id', req.params.serviceId)
-        .first('ss.visit_id', 'sv.status as visit_status');
-      if (membership && membership.visit_id
-          && String(membership.visit_status || '') !== 'dissolved') {
-        // READ-ONLY here (codex #3590 r2 P1: nothing may mutate the visit
-        // before ownership/validation): hard-409 only when a completion
-        // packet exists — that is the double-completion race the guard
-        // exists for. An OPEN packet-less visit falls through; the
-        // POST-claim re-check (after ownership + validators + the durable
-        // claim) applies the Phase-1 dissolve fallback atomically.
-        const packet = await db('visit_completion_packets')
-          .where({ visit_id: membership.visit_id }).first('id');
-        if (packet || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
-          return res.status(409).json({
-            error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
-            code: 'visit_grouped',
-            visitId: membership.visit_id,
-          });
-        }
-      }
-    }
-
     // This endpoint can mint reports, invoices, inventory deductions, and
     // customer messages. Technicians may only perform that write for their
     // own assigned visit; admins retain office-wide dispatch authority.
@@ -5280,7 +5282,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       idempotencyKey,
       requestHash: CompletionAttempts.hashCompletionRequest(req.body),
     });
-    if (claim.action === 'replay') return res.json(claim.payload);
+    if (claim.action === 'replay') {
+      // A prior success whose fire-and-forget dissolve failed transiently
+      // would otherwise never be repaired (codex r10): re-run the fresh-
+      // read dissolve on every replay — no-op unless the row still sits
+      // on an open packet-less visit.
+      void db('scheduled_services').where({ id: svc.id }).first('visit_id')
+        .then((nowRow) => (nowRow && nowRow.visit_id
+          ? require('../services/visit-groups').dissolveForLegacyCompletion(nowRow.visit_id, { expectChildId: svc.id })
+          : null))
+        .catch(() => {});
+      return res.json(claim.payload);
+    }
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
@@ -6250,7 +6263,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
-          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId);
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId, { expectChildId: svc.id });
         }
       }
     } else {
@@ -7920,7 +7933,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
-          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId);
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId, { expectChildId: svc.id });
         }
       }
       } catch (err) {
@@ -13163,30 +13176,26 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 
 // POST /:serviceId/pest-recap — commit the recap (complete, no bill).
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
-  // Visit-group guard (codex #3590 r4: alternate completion route): a
-  // grouped row completes per-row only when its visit is dissolvable —
-  // same contract as /:serviceId/complete. An open packet-less visit is
-  // dissolved AFTER the recap durably commits (below); a visit with a
-  // packet, or closing/closed, hard-blocks.
   let recapLegacyVisitId = null;
   try {
-    const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
-    if (!gate.ok && gate.reason === 'not_found') {
-      // Missing/stale service id: let the route's own lookup produce its
-      // usual 404 instead of a misleading visit_grouped 409 (codex r7 P2).
-    } else if (!gate.ok) {
-      return res.status(409).json({
-        error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
-        code: 'visit_grouped',
-        visitId: gate.visitId || null,
-      });
-    }
-    recapLegacyVisitId = gate.openVisitId || null;
-  } catch (vgErr) {
-    return next(vgErr);
-  }
-  try {
     if (!(await assertRecapOwnership(req, res))) return;
+    // Visit-group guard (codex #3590 r4; AFTER ownership per r10 P2 so an
+    // unowned tech never learns visit ids): a grouped row completes
+    // per-row only when its visit is dissolvable — same contract as
+    // /:serviceId/complete. An open packet-less visit is dissolved AFTER
+    // the recap durably commits (below); packet or closing/closed
+    // hard-blocks; not_found falls through to the route's own 404.
+    {
+      const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
+      if (!gate.ok && gate.reason !== 'not_found') {
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: gate.visitId || null,
+        });
+      }
+      recapLegacyVisitId = (gate.ok && gate.openVisitId) || null;
+    }
     const { actorType, actorId } = recapActor(req);
     const {
       technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,
@@ -13213,7 +13222,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       const nowRow = await db('scheduled_services').where({ id: req.params.serviceId }).first('visit_id');
       const dissolveId = (nowRow && nowRow.visit_id) || recapLegacyVisitId;
       if (dissolveId) {
-        void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveId);
+        void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveId, { expectChildId: req.params.serviceId });
       }
     } catch { /* best-effort */ }
     res.json(result);

@@ -722,15 +722,6 @@ async function moveStopsToDay(input) {
     }
     movedIds.add(s.id);
     if (stopOverlapped) overlapMovedIds.push(s.id);
-    // Visit-group seam (codex #3590 r9): this writer moves the date
-    // directly (not via the rebooker), so it repairs grouped membership
-    // itself — a moved child leaves a visit that stays on the old date.
-    // Post-commit, best-effort, no-op for ungrouped rows.
-    try {
-      await require('../visit-groups').handleChildStopChanged(s.id);
-    } catch (vgErr) {
-      logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${s.id}: ${vgErr.message}`);
-    }
     // Rebooker-parity side effects of the live → confirmed flip above:
     // job_status_history audit row, tech_status release, customer tracker
     // refresh. Best-effort: the move is committed — a side-effect failure
@@ -853,6 +844,19 @@ async function moveStopsToDay(input) {
   }
 
   const movedStops = stops.filter((st) => movedIds.has(st.id));
+
+  // Visit-group seam (codex #3590 r9): this writer moves dates directly
+  // (not via the rebooker), so it repairs grouped membership itself — a
+  // moved child leaves a visit that stays on the old date. Runs LAST,
+  // after every query this tool issues for its own result (the helper is
+  // best-effort and self-contained). No-op for ungrouped rows.
+  for (const movedId of movedIds) {
+    try {
+      await require('../visit-groups').handleChildStopChanged(movedId);
+    } catch (vgErr) {
+      logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${movedId}: ${vgErr.message}`);
+    }
+  }
 
   if (!movedStops.length) {
     return {
