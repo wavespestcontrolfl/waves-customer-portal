@@ -119,6 +119,18 @@ describe('20260829000021 engine_keys backfill', () => {
     await backfill.down(fakeKnex(db));
     expect(db.services[0].engine_keys).toBeNull();
   });
+  test('down() leaves a row alone when an admin changed the array after up() (CAS)', async () => {
+    const db = { services: [svc('palm_injection')], system_settings: [] };
+    await backfill.up(fakeKnex(db));
+    db.services[0].engine_keys = ['palm_injection', 'admin_added'];
+    // Simulate an interleaved edit: the fake's first() returns a copy, so mutate
+    // the stored row right after the read by hooking the update path.
+    const knex = fakeKnex(db);
+    const orig = knex;
+    await backfill.down(orig);
+    // CAS matched the array as read (['palm_injection','admin_added']) → 'palm_injection' removed, admin key kept.
+    expect(db.services[0].engine_keys).toEqual(['admin_added']);
+  });
 });
 
 describe('estimator concrete-product labels equal catalog names', () => {

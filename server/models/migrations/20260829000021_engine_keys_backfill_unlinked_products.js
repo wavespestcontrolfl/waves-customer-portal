@@ -79,13 +79,19 @@ exports.down = async function down(knex) {
   let applied = [];
   try { applied = state ? (JSON.parse(state.value).applied || []) : []; } catch { applied = []; }
   await knex('system_settings').where({ key: STATE_KEY }).del();
+  // Same lock as up(): the read → guarded UPDATE span must not interleave
+  // with an admin edit (pre-push codex P1).
+  await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
   for (const rec of applied) {
     const row = await knex('services').where({ id: rec.id }).first('id', 'engine_keys');
     if (!row) continue;
     const current = parseKeys(row.engine_keys);
     const remaining = current.filter((k) => !rec.added.includes(k));
     if (remaining.length === current.length) continue; // admin already removed / changed it
+    // Compare-and-set on the array just read — an edit landing in between
+    // leaves the row alone rather than being overwritten.
     await knex('services').where({ id: rec.id })
+      .whereRaw('engine_keys = ?::jsonb', [JSON.stringify(current)])
       .update({ engine_keys: rec.wasNull && remaining.length === 0 ? null : JSON.stringify(remaining), updated_at: knex.fn.now() });
   }
 };
