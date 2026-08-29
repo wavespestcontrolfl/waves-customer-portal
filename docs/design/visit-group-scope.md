@@ -3,6 +3,8 @@
 **Date:** 2026-08-29 (rev 2, same day) · **Status:** scope for owner sign-off. **Not approved
 to build.** No code changes in this doc.
 **Branch:** `docs/visit-group-scope` (worktree `~/wt-visit-group`, off main `571ed7be8`).
+**Scope page:** https://claude.ai/code/artifact/5c963058-a2ff-469f-be99-96150178b8c2 ·
+**Screen renders:** https://claude.ai/code/artifact/351e2b0b-b25b-41da-b28e-e500b85fe905 (9 screens — tech route card, Complete Visit sheet, rodent exceptions, accepted; customer texts, visit page self-pay / partial + older balance / paid; dispatch card).
 
 **Product promise (owner, rev 2):** *One stop. One route card. One closeout. Two service
 reports. One summary link. One payment.* Not necessarily one literal invoice record.
