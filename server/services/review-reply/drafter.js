@@ -273,21 +273,21 @@ what when where whether which while who why wish with would yes you your you're 
 // bounded allowlist on purpose: a suffix / morphology heuristic cannot tell
 // Jennings, Sanders, Collins or Harding from an ordinary plural or gerund
 // (three pre-push hook rounds). Pest / lawn nouns, common gerunds, sentence
-// adverbs, abstract nouns; nothing that is also a personal name (Trust,
-// Peace, Grace, Hope, Will, May stay out). Added after the 2026-08-29 dry run
+// adverbs, abstract nouns — PLURAL / mass nouns only, because the singulars
+// (Roach, Palm, Ant) and some plurals (Moles) are surnames; nothing that is
+// also a personal name (Trust, Peace, Grace, Hope, Will, May stay out). Added after the 2026-08-29 dry run
 // ("Ants are relentless", "Finding a company you can count on", "Skipping the
 // contract" were half of all verifier rejections).
 const ORDINARY_OPENERS = new Set(`
-ants ant roaches roach cockroaches spiders spider termites termite mosquitoes mosquitos mosquito
-bugs bug pests pest rodents rodent rats rat mice fleas ticks wasps bees hornets silverfish
-earwigs millipedes centipedes scorpions bedbugs gnats flies moles armadillos grubs weeds fungus
-chinch sod grass lawns lawn yards yard turf shrubs shrub trees tree palms palm mulch
-finding keeping skipping having getting being knowing hearing seeing looking making taking staying
-protecting treating helping walking showing going coming letting giving working watching checking
-honestly thankfully hopefully truly really luckily fortunately clearly obviously usually typically
-sometimes between without within whatever whenever wherever neither none plus
-dependability reliability consistency communication service treatment treatments visits
-results protection prevention nothing something everything anything
+ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice fleas ticks
+wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
+armadillos grubs weeds fungus grass lawns yards turf shrubs trees mulch finding keeping skipping
+having getting being knowing hearing seeing looking making taking staying protecting treating
+helping walking showing going coming letting giving working watching checking honestly thankfully
+hopefully truly really luckily fortunately clearly obviously usually typically sometimes between
+without within whatever whenever wherever neither none plus dependability reliability consistency
+communication service treatment treatments visits results protection prevention nothing something
+everything anything
 `.split(/\s+/).filter(Boolean));
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);

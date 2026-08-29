@@ -435,6 +435,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, we are glad our technician roaches could help with your ants.'), grounding({ firstName: null, mentionedTechNames: [] }))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nPeace is glad Marcus handled the ants.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nTrust is glad Marcus handled the ants.'))).toBe('unlisted_name');
+    // hook: singular nouns / surname-shaped plurals are not on the list.
+    expect(verify(good('Hi Dana,\n\nRoach says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nPalm was glad to help alongside Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nMoles are no match for Marcus.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt whatever follows it.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
