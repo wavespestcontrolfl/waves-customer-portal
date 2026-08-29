@@ -1056,9 +1056,14 @@ async function claimVisitNotification(row, kind) {
   const token = require('crypto').randomBytes(16).toString('hex');
   try {
     return await db.transaction(async (t) => {
-      const visit = await t('service_visits').where({ id: row.visit_id }).first();
+      let visit = await t('service_visits').where({ id: row.visit_id }).first();
       if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
       await lockStop(t, visit.stop_base_key);
+      // Re-read the parent AFTER the lock (codex #3603 r14): a whole-visit
+      // reassignment / window recompute that committed while we waited
+      // must be judged on the current parent, not the pre-lock snapshot.
+      visit = await t('service_visits').where({ id: row.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
       // Full stop tuple, not just the id (codex r9): a same-day window move
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
@@ -1239,9 +1244,12 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   let fan = null;
   try {
     fan = await db.transaction(async (t) => {
-      const visit = await t('service_visits').where({ id: primary.visit_id }).first();
+      let visit = await t('service_visits').where({ id: primary.visit_id }).first();
       if (!visit || String(visit.status) !== 'open') return null;
       await lockStop(t, visit.stop_base_key);
+      // Re-read the parent after the lock (codex r14) — see claimVisitNotification.
+      visit = await t('service_visits').where({ id: primary.visit_id }).first();
+      if (!visit || String(visit.status) !== 'open') return null;
       // Revalidate the PRIMARY under the stop lock (codex #3603 r2): a split
       // or stop change can detach it between the tracker's row load and
       // this lock — the tracker CAS does not predicate on visit_id. Only a
@@ -1412,7 +1420,24 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   // claimVisitNotification, so its guard stays open. Claim-state outcomes
   // (in flight / error / lease expired / not attempted) likewise leave the
   // siblings to the owner's own reconciliation.
-  const noticeHandled = ['sent', 'suppressed', 'gate_off', 'already_handled', 'covered'].includes(String(smsOutcome));
+  let noticeHandled = ['sent', 'suppressed', 'gate_off', 'already_handled', 'covered'].includes(String(smsOutcome));
+  if (noticeHandled && String(smsOutcome) === 'already_handled') {
+    // The primary's guard being stamped does not prove the VISIT notice was
+    // delivered (codex r14: a retryable arrival miss whose guard release
+    // failed leaves the guard stamped while the effect is `failed`). Only a
+    // terminal effect — or no visit effect at all (legacy per-row send) —
+    // covers the siblings.
+    try {
+      const effectType0 = kind === 'en_route' ? 'tracker_en_route' : 'tracker_arrived';
+      const eff = await db('visit_effects')
+        .where({ visit_id: fan.visitId, effect_type: effectType0, dedupe_key: `${fan.visitId}:${effectType0}` })
+        .first('status');
+      noticeHandled = !eff || ['sent', 'suppressed'].includes(String(eff.status));
+    } catch (err) {
+      noticeHandled = false;
+      logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: effect status read failed: ${err.message}`);
+    }
+  }
   if (fan.covered.length && noticeHandled) {
     try {
       // Fenced to THIS visit attempt (codex r5): a sibling force-rescheduled
@@ -1440,6 +1465,18 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
     const fin = await finalizeVisitNotification(fan.visitId, kind, smsOutcome, lifecycleAt, claimToken);
     if (fin.ok) effect = { effectType: fin.effectType, status: fin.status };
     else trackerFailures.push({ id: 'effect_finalize', reason: fin.reason });
+  }
+  // Structural skips (stop tuple / technician no longer match the visit)
+  // mean a detach seam did not run — repair membership durably NOW through
+  // the canonical seam (codex r14); a row that still is not detached
+  // afterwards is an incomplete stop (alert / 409), never silent success.
+  for (const x of fan.skipped.filter((k) => k.reason === 'technician' || k.reason === 'stop_changed')) {
+    try {
+      const detached = await handleChildStopChanged(x.id);
+      if (!detached) trackerFailures.push({ id: x.id, reason: `structural_skip_unrepaired:${x.reason}` });
+    } catch (err) {
+      trackerFailures.push({ id: x.id, reason: `structural_skip_repair_failed:${err.message}` });
+    }
   }
   if (fan.skipped.length) {
     logger.warn(`[visit-groups] visit ${fan.visitId} ${kind}: ${fan.skipped.length} sibling(s) left as-is: ${fan.skipped.map((x) => `${x.id}=${x.reason}`).join(',')}`);

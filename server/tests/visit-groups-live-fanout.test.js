@@ -10,6 +10,8 @@ jest.mock('../models/db', () => {
     const chain = {
       _ops: [],
       where() { chain._ops.push(['where', ...arguments]); return chain; },
+      leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
+      count() { chain._ops.push(['count', ...arguments]); return chain; },
       whereIn() { chain._ops.push(['whereIn', ...arguments]); return chain; },
       whereNot() { chain._ops.push(['whereNot', ...arguments]); return chain; },
       whereNotIn() { chain._ops.push(['whereNotIn', ...arguments]); return chain; },
@@ -84,7 +86,10 @@ describe('fanOutLiveTransition', () => {
       },
     };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', actorType: 'tech', actorId: 't1', smsOutcome: 'sent', notificationOwner: true });
-    expect(out.ok).toBe(true);
+    // s3/s4 are STRUCTURAL skips (technician): the canonical detach seam is
+    // run for them and, unrepaired on this fake db, the stop is incomplete (r14)
+    expect(out.ok).toBe(false);
+    expect(out.trackerFailures.map((f) => f.id).sort()).toEqual(['s3', 's4']);
     expect(out.visitId).toBe('v1');
     expect(out.siblingIds).toEqual(['s1']);
     expect(out.trackerIds).toEqual(['s1', 's5']);
@@ -169,7 +174,8 @@ describe('fanOutLiveTransition', () => {
       const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome, notificationOwner: owner });
       expect(out.ok).toBe(true);
       expect(out.effect).toBe(null);
-      expect(db.__calls.some((c) => c.table === 'visit_effects')).toBe(false);
+      // reads (coverage check) are fine; no WRITE to the ledger
+      expect(db.__calls.some((c) => c.table === 'visit_effects' && ['insert', 'merge', 'update'].includes(c.op))).toBe(false);
     }
   });
 
@@ -228,6 +234,31 @@ describe('fanOutLiveTransition', () => {
     expect(out.skipped).toEqual([{ id: 's3', reason: 'stop_changed' }]);
   });
 
+  test('a structural skip triggers the canonical detach seam and is INCOMPLETE if the row is still attached', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [
+        { scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'confirmed', technician_id: 't9', track_state: 'scheduled' },
+      ] },
+    };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route' });
+    expect(out.skipped).toEqual([{ id: 's1', reason: 'technician' }]);
+    expect(out.ok).toBe(false);
+    expect(out.trackerFailures[0].id).toBe('s1');
+    expect(out.trackerFailures[0].reason).toMatch(/^structural_skip_(unrepaired|repair_failed)/);
+  });
+
+  test('already_handled covers siblings only when the visit effect is terminal (a failed effect keeps their guards open)', async () => {
+    const sib = [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }];
+    db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => sib }, visit_effects: { first: () => ({ status: 'failed' }) } };
+    await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'already_handled' });
+    expect(db.__calls.some((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.track_sms_sent_at)).toBe(false);
+    db.__calls.length = 0;
+    db.__script.visit_effects = { first: () => ({ status: 'sent' }) };
+    await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'already_handled' });
+    expect(db.__calls.some((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.track_sms_sent_at)).toBe(true);
+  });
+
   test('a sibling whose stop tuple changed (reschedule committed, detach seam not yet run) is skipped', async () => {
     db.__script = {
       service_visits: { first: () => VISIT },
@@ -243,6 +274,8 @@ describe('fanOutLiveTransition', () => {
     // s3: same-day window moved off the primary's 09-10 (r7); s4: withdrawn placeholder never advanced
     expect(out.skipped.map((x) => x.reason)).toEqual(['stop_changed', 'stop_changed', 'stop_changed', 'status:rescheduled']);
     expect(transitionJobStatus).not.toHaveBeenCalled();
+    // structural skips are repaired through the canonical seam; unrepaired ⇒ incomplete (r14)
+    expect(out.ok).toBe(false);
   });
 
   test('a primary whose operational status lags the tracker is reported incomplete, not benign', async () => {
@@ -305,6 +338,8 @@ describe('claimVisitNotification (visit-scoped at-most-once claim, under the sto
     expect(owner.state).toBe('owner');
     expect(owner.token).toMatch(/^[0-9a-f]{32}$/);
     expect(db.__rawCalls[0][1]).toEqual(['visit.stop', 'p1:2026-08-30']);
+    // parent re-read after the lock (r14)
+    expect(db.__calls.filter((c) => c.table === 'service_visits' && c.op === 'first').length).toBe(2);
     const ins = db.__calls.find((c) => c.table === 'visit_effects' && c.op === 'insert');
     expect(ins.values).toMatchObject({ visit_id: 'v1', effect_type: 'tracker_en_route', dedupe_key: 'v1:tracker_en_route', status: 'claimed', attempts: 0, claim_token: owner.token });
     // a `failed` row is RECLAIMED (the retry); sent/suppressed/claimed are taken
