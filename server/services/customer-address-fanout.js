@@ -199,8 +199,12 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // minutes until the settings are re-saved for the new home (codex #3565
   // gh-r19). Only the stamp is written — the settings themselves stay for
   // the customer to reconfirm or edit.
+  // A unit is a distinct premise (the report's plan binding treats it so):
+  // moving between units in one building is a move too — hook P1 on
+  // 75b90bf11. Normalized keys, so a formatting correction never counts.
   const homeMoved = !!before && (
     addressMatchKey(before.address_line1) !== addressMatchKey(after.address_line1)
+    || unitKey(before.address_line2) !== unitKey(after.address_line2)
     || addressMatchKey(before.zip) !== addressMatchKey(after.zip)
     || addressMatchKey(before.city) !== addressMatchKey(after.city)
   );

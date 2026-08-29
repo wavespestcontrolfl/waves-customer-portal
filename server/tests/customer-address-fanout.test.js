@@ -563,9 +563,14 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at']); // never touches the settings themselves
     expect(counts.property_preferences).toBe(0); // mock: no prefs row
   });
-  test('a same-home correction (unit / formatting only) does not stamp', async () => {
+  test('a unit-to-unit move in the same building stamps too (a unit is a distinct premise)', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
-    await propagateCustomerAddressChange({ before: BEFORE, after: { ...BEFORE, address_line2: 'Unit 4' } }, conn);
+    await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);
+    expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeTruthy();
+  });
+  test('a formatting-only correction of the same home (case, unit spelling) does not stamp', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Apt 4' }, after: { ...BEFORE, address_line1: BEFORE.address_line1.toUpperCase(), address_line2: '#4' } }, conn);
     expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeUndefined();
   });
 });
