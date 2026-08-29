@@ -302,6 +302,16 @@ treatment treatments visits results protection prevention nothing something ever
 // adverb syntax ("Honestly, we…") and surnames the list audit missed still
 // fail on shape.
 const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|come|go|get|keep|make|take|know|seem|look|stay|find|want|like|thrive|show|mean|matter|help|a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|of|in|on|at|to|for|from|by|about|around|down|up|out|off|over|under|into|through|after|before|during|without|within|you|we|it|they|us|them|than|as)\b|(?:and|or|but|nor|with)\s+(?!(?:his|her|their|hers|theirs|our|ours|your|yours|my|mine|its|the|an?|one|he|she|they|i|we|team|teams|crew|crews|staff|colleagues?|partners?|coworkers?|co-workers?|helpers?|assistants?|everyone|everybody|company|office|family|guys|folks|associates?)\b)\p{Ll}|[,;:]\s+(?!(?:our|the|an?|your|my|his|her|their|who|whose|one|from|owner|tech\w*|alongside|with|and|or|plus|together|along)\b)\p{Ll})/u;
+// …and when the evidence went through a conjunction or comma, the word after
+// it may not be a name in ANY case (codex #3580 r3: "Roaches and marcus" —
+// the lowercase allowed name would otherwise vouch for the opener).
+function ordinaryFollows(rest, names) {
+  if (!ORDINARY_FOLLOWER_RE.test(rest)) return false;
+  const coord = /^\s*(?:and|or|but|nor|with|[,;:])\s+([\p{Ll}'-]+)/u.exec(rest);
+  if (!coord) return true;
+  const next = coord[1].toLowerCase();
+  return !(names.has(next) || COMMON_FIRST_NAMES.has(next));
+}
 
 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
@@ -570,6 +580,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
     return 'unlisted_name';
   }
+  const nameWords = new Set([...allowedNames, ...knownNames]);
   // Title-case words AND all-caps words ("KEVIN") both need provenance.
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;
@@ -585,7 +596,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
-    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ordinaryFollows(body.slice(pn.index + pn[0].length), nameWords)) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in
