@@ -515,6 +515,18 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, bait_consumption: 'Light feeding' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(true);
     // an explicit activity selection is the select's own reading — not a reconciliation
     expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Active termites present' }, typedReportType: 'termite_bait_station' }).statusReconciled).toBe(false);
+    // "Previous feeding noted" promoted to current activity by a live sign
+    // chip is a reconciliation too — the trend/score describe the historical
+    // select, and a frozen "No action needed" step is replaced (codex P2 r37)
+    const promoted = buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted', activity_signs: 'Mud tubing in station' }, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' });
+    expect(promoted.status.key).toBe('action');
+    expect(promoted.statusReconciled).toBe(true);
+    expect(promoted.nextStep).toMatch(/re-check the active stations/);
+    // …while the historical select standing on its own is NOT reconciled
+    const historical = buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted', activity_signs: 'Previous feeding evidence' }, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' });
+    expect(historical.status.key).toBe('evidence');
+    expect(historical.statusReconciled).toBe(false);
+    expect(historical.nextStep).toBe('No action needed.');
     // frozen evidence also replaces a contradictory no-action step
     expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_with_activity: 2 }, typedReportType: 'termite_bait_station', nextStep: 'No action needed.' }).nextStep).toBe('We will re-check the active stations at your next monitoring visit.');
     // current activity pins escalate the historical evidence state too — and mark it reconciled

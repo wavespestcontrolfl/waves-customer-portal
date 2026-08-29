@@ -537,7 +537,20 @@ function buildTermiteReportV2({
   // "None observed" — means the activity gauge (score / trend computed from
   // that select) and a frozen "No action needed" step describe a reading the
   // report no longer shows (codex P2 #3600 r22 / r25).
+  // Generalized (codex P2 #3600 r37): the gauge is computed from the SELECT
+  // alone, so the comparison is against the status that bare select yields
+  // — no sign chips, feeding, frozen count or location. Any promotion away
+  // from it is a reconciliation ("Previous feeding noted" + a "Mud tubing in
+  // station" chip is current activity, not the historical reading the
+  // trend describes), not only promotions away from "None observed".
+  const selectOnlyStatus = resolveTermiteStatus({
+    termiteActivity: values.termite_activity || null,
+    baitConsumption: null,
+    checked,
+    inaccessible,
+  });
   const statusReconciled = statusEscalatedByPins
+    || statusBase.key !== selectOnlyStatus.key
     || (values.termite_activity === ACTIVITY_VALUES.NONE && statusBase.key !== 'protected');
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const feedingNoted = statusBase.key === 'monitoring'
