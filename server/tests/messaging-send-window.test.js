@@ -213,10 +213,21 @@ describe('checkSendWindow validator', () => {
       'referral_engine_invite',
       'referrals_legacy_invite',
       'referrals_v2_invite',
-      'stripe_webhook',
     ]) {
       expect(checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET)).toEqual({ ok: true });
     }
+  });
+
+  test('stripe_webhook splits on customerInitiated provenance — autopay stays fenced', () => {
+    // The shared webhook entry point serves both the customer's own
+    // payments and machine-initiated off-session charges (autopay ACH
+    // debits, no-show fees). Only sends the handler marked
+    // customerInitiated pass at night; unmarked ones — the autopay
+    // collection notices — hold and ride the scheduled rail.
+    expect(checkSendWindow({ ...SMS, entryPoint: 'stripe_webhook', customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
+    const machine = checkSendWindow({ ...SMS, entryPoint: 'stripe_webhook' }, null, null, EVENING_ET);
+    expect(machine.ok).toBe(false);
+    expect(machine.code).toBe('QUIET_HOURS_HOLD');
   });
 });
 

@@ -27,14 +27,20 @@
  *   - customer-action entry points (CUSTOMER_ACTION_ENTRY_POINTS) — sends
  *     that answer an action the customer just took themselves (self-serve
  *     estimate extension, estimate/quote request, estimate acceptance,
- *     portal service request, payment receipts and payment-lifecycle
- *     notices, the lead-response agent's reply, referral invites). Owner
- *     rulings 2026-08-29: a customer acting at night chose the moment, and
- *     our communication back must not be held to 8 AM. This supersedes the
- *     2026-08-07 fencing of the lead-webhook form auto-reply and the
- *     lead-response agent. Purely schedule-driven outreach (crons,
- *     reminders, follow-up sequences, recovery/retry lanes) stays fenced —
+ *     portal service request, payment receipts, the lead-response agent's
+ *     reply, referral invites). Owner rulings 2026-08-29: a customer
+ *     acting at night chose the moment, and our communication back must
+ *     not be held to 8 AM. This supersedes the 2026-08-07 fencing of the
+ *     lead-webhook form auto-reply and the lead-response agent. Purely
+ *     schedule-driven outreach (crons, reminders, follow-up sequences,
+ *     recovery/retry lanes, autopay collection notices) stays fenced —
  *     see the set's comment.
+ *   - input `customerInitiated: true` — explicit customer-provenance for
+ *     SHARED entry points serving both customer-initiated and
+ *     machine-initiated sends (the Stripe webhook's payment-lifecycle
+ *     notices). Same trust model as operatorInitiated / the allowlists:
+ *     only a handler that verified the upstream action was the customer's
+ *     may set it.
  *
  * Blocked results carry { retryable, deferred, nextAllowedAt } so callers
  * that already understand deferral (review requests, card-request nudges)
@@ -92,17 +98,22 @@ const OPERATOR_ENTRY_POINTS = new Set([
 // a portal click, a tokened-page acceptance or payment — and the send goes
 // out immediately, at any hour: the customer chose the moment. That
 // includes the responses that ride a customer action indirectly: the
-// lead-response agent's reply to a fresh estimate request, the Stripe
-// webhook's notices for a payment the customer initiated (ACH failure,
-// requires-action, setup-failure), payment receipts, and the invite a
-// customer sends a friend (owner-confirmed 2026-08-29: the friend gets it
-// immediately, not at 8 AM). Same fail-closed posture as
-// OPERATOR_ENTRY_POINTS: new customer-action surfaces must opt in here.
-// Deliberately ABSENT: every purely schedule-driven entry point — crons,
-// reminders, follow-up sequences, abandon recovery, autopay retries,
-// referral reward/milestone notices — where a machine, not a person,
-// picks the moment. Those are the night-blast incidents this window
-// exists to stop; unfencing them is a new owner ruling, not a PR nit.
+// lead-response agent's reply to a fresh estimate request, payment
+// receipts, and the invite a customer sends a friend (owner-confirmed
+// 2026-08-29: the friend gets it immediately, not at 8 AM). Same
+// fail-closed posture as OPERATOR_ENTRY_POINTS: new customer-action
+// surfaces must opt in here. Deliberately ABSENT:
+//   - stripe_webhook — that entry point serves BOTH the customer's own
+//     payments AND machine-initiated off-session charges (autopay ACH
+//     debits, no-show fees), and a night autopay failure is exactly the
+//     schedule-driven collection text the window fences (Codex P1 on
+//     PR #3598). Its handlers pass the customerInitiated marker below
+//     when the PaymentIntent's provenance is the customer's own payment.
+//   - every purely schedule-driven entry point — crons, reminders,
+//     follow-up sequences, abandon recovery, autopay retries, referral
+//     reward/milestone notices — where a machine, not a person, picks
+//     the moment. Those are the night-blast incidents this window exists
+//     to stop; unfencing them is a new owner ruling, not a PR nit.
 const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'customer_service_request',
   'estimate_accept_annual_prepay',
@@ -119,7 +130,6 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'referral_engine_invite',
   'referrals_legacy_invite',
   'referrals_v2_invite',
-  'stripe_webhook',
 ]);
 
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {
@@ -142,6 +152,14 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   // automated caller passing operatorInitiated:true defeats the window
   // and is a review-blocking bug.
   if (input.operatorInitiated === true) return { ok: true };
+  // Explicit customer-provenance marker for SHARED entry points that serve
+  // both customer-initiated and machine-initiated sends (the Stripe
+  // webhook: the customer's own payment vs an autopay/no-show off-session
+  // charge). Same trust model as operatorInitiated: only a handler that
+  // verified the upstream action was the customer's may set it — an
+  // automation passing customerInitiated:true defeats the window and is a
+  // review-blocking bug.
+  if (input.customerInitiated === true) return { ok: true };
   if (OPERATOR_ENTRY_POINTS.has(String(input.entryPoint || ''))) return { ok: true };
   if (CUSTOMER_ACTION_ENTRY_POINTS.has(String(input.entryPoint || ''))) return { ok: true };
   if (resolveTrustLevel(input, contactState) === 'admin_operator') return { ok: true };

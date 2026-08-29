@@ -41,11 +41,14 @@
  * removed — estimate_extension_deferred, lead_webhook_auto_reply_deferred,
  * customer_service_request_deferred, estimate_accept_onetime_booking_deferred,
  * public_quote_booking_sms_deferred, lead_response_auto_reply_deferred,
- * stripe_webhook_billing_deferred, referrals_v2_invite_deferred,
- * referrals_legacy_invite_deferred and referral_engine_invite_deferred no
- * longer gain new rows. Their entries stay to replay rows queued before
- * the ruling deployed; they can be deleted once prod's scheduled backlog
- * has drained.
+ * referrals_v2_invite_deferred, referrals_legacy_invite_deferred and
+ * referral_engine_invite_deferred no longer gain new rows. Their entries
+ * stay to replay rows queued before the ruling deployed; they can be
+ * deleted once prod's scheduled backlog has drained.
+ * (stripe_webhook_billing_deferred is NOT drain-only: machine-initiated
+ * payment notices — autopay ACH failures, no-show fees — stay behind the
+ * window and still enqueue there; only customer-initiated ones send at
+ * night via the customerInitiated marker.)
  */
 
 const db = require('../../models/db');

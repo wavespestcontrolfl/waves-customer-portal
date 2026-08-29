@@ -2,14 +2,21 @@
  * payment_intent.processing → detached ACH acknowledgment worker
  * (dispatchAchProcessingAcknowledgment).
  *
- * Contract pinned here (codex r13 P1, PR #3259; simplified by the
- * 2026-08-29 owner ruling that made stripe_webhook a customer-action entry
- * point — no send-window hold, no scheduled-rail requeue exists anymore):
+ * Contract pinned here (codex r13 P1, PR #3259): the worker runs inside a
+ * detached setImmediate — the webhook is ALREADY acked, so a rethrown
+ * BILLING_NOTICE_ENQUEUE_FAILED cannot fail the handler; it lands in the
+ * caller's log-only catch with the one-shot claim consumed and the email
+ * leg skipped, permanently losing the acknowledgment.
  *
- *  - the SMS goes straight out at any hour — a blocked/failed send is
- *    never requeued on the scheduled-SMS rail and never releases the
- *    claim (the documented no-retry trade-off for delivery-after-claim);
- *  - the email leg still runs in the same pass (channels independent).
+ *  - a failed durable ENQUEUE of a window-held SMS releases the claim
+ *    (ach_processing_notified_at → NULL, guarded by PI + status so a
+ *    meanwhile-succeeded payment is untouched) so a Stripe redelivery /
+ *    per-attempt clear can re-run the acknowledgment;
+ *  - the email leg still runs in the same pass (channels independent);
+ *  - a failed RELEASE is logged loudly but never rejects (the caller can
+ *    only log — nothing upstream retries a detached worker);
+ *  - plain delivery failures (sent:false, no enqueue throw) keep the claim
+ *    (the documented no-retry trade-off for delivery-after-claim).
  */
 jest.mock('stripe', () => jest.fn(() => ({
   // The r16 sweep gate reads the PI as its durable ACH evidence. Defaults
@@ -70,6 +77,8 @@ function resetMockState() {
       stripe_payment_intent_id: 'pi_1',
     },
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
+    failSmsLogInsert: false,
+    failRelease: false,
     sweepRows: [],
     emailAttemptRow: null,
     piRow: null,
@@ -100,9 +109,15 @@ function mockMakeBuilder(table) {
   };
   b.update = async (patch) => {
     mockState.updates.push({ table, wheres: b._wheres, patch });
+    if (table === 'invoices' && patch.ach_processing_notified_at === null && mockState.failRelease) {
+      throw new Error('release boom');
+    }
     return 1;
   };
-  b.insert = async () => [];
+  b.insert = async () => {
+    if (table === 'sms_log' && mockState.failSmsLogInsert) throw new Error('insert boom');
+    return [];
+  };
   return b;
 }
 
@@ -119,6 +134,7 @@ const {
 } = require('../routes/stripe-webhook');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const logger = require('../services/logger');
 
 const WORKER_INPUT = {
   invoiceId: 'inv-1',
@@ -149,7 +165,71 @@ test('happy path: claim stamped, SMS + email sent, no release', async () => {
   expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
 });
 
-test('plain delivery failure keeps the claim', async () => {
+test('customerInitiated provenance threads through to the send; absent by default (Codex P1, PR #3598)', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck({ ...WORKER_INPUT, customerInitiated: true });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
+
+  jest.clearAllMocks();
+  resetMockState();
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck(WORKER_INPUT);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ customerInitiated: true }));
+});
+
+test('machine-initiated PI discriminator: autopay and no-show fee charges are machine; pay-page PIs are not', () => {
+  const { _isMachineInitiatedPaymentIntent: isMachine } = require('../routes/stripe-webhook');
+  expect(isMachine({ metadata: { type: 'monthly_autopay' } })).toBe(true);
+  expect(isMachine({ metadata: { purpose: 'appointment_card_no_show_fee' } })).toBe(true);
+  expect(isMachine({ metadata: { purpose: 'card_hold_no_show_fee' } })).toBe(true);
+  expect(isMachine({ metadata: { waves_invoice_id: 'inv-1', save_card_opt_in: 'true' } })).toBe(false);
+  expect(isMachine({})).toBe(false);
+  expect(isMachine(null)).toBe(false);
+});
+
+test('window-held SMS whose rail enqueue fails releases the claim AND still emails', async () => {
+  sendCustomerMessage.mockResolvedValue({
+    sent: false,
+    blocked: true,
+    code: 'QUIET_HOURS_HOLD',
+    retryable: true,
+    deferred: true,
+    nextAllowedAt: '2026-08-08T12:00:00.000Z',
+  });
+  mockState.failSmsLogInsert = true;
+
+  await expect(dispatchAck(WORKER_INPUT)).resolves.toBeUndefined();
+
+  const releases = releaseUpdates();
+  expect(releases).toHaveLength(1);
+  // Guarded release: only the still-processing row bound to THIS PI.
+  expect(releases[0].wheres).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'inv-1', stripe_payment_intent_id: 'pi_1', status: 'processing' }),
+    { whereNotNull: 'ach_processing_notified_at' },
+  ]));
+  // Channels are independent — the email leg still runs in this pass.
+  expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('claim released for re-attempt'));
+});
+
+test('failed release never rejects — logged for manual follow-up, email still runs', async () => {
+  sendCustomerMessage.mockResolvedValue({
+    sent: false,
+    blocked: true,
+    code: 'QUIET_HOURS_HOLD',
+    retryable: true,
+    deferred: true,
+    nextAllowedAt: '2026-08-08T12:00:00.000Z',
+  });
+  mockState.failSmsLogInsert = true;
+  mockState.failRelease = true;
+
+  await expect(dispatchAck(WORKER_INPUT)).resolves.toBeUndefined();
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('needs manual follow-up'));
+  expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
+});
+
+test('plain delivery failure (no enqueue throw) keeps the claim', async () => {
   sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED' });
   await dispatchAck(WORKER_INPUT);
 
