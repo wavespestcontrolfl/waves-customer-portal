@@ -129,6 +129,13 @@ const CHANNEL_VALUES = ['sms', 'email', 'both'];
 const CHANNEL_DB_COLUMNS = [
   'appointment_confirmation_channel',
   'service_reminder_72h_channel',
+  // The explicit-choice stamp must travel WITH the channel it describes
+  // (pre-push #3588 P1): the PUT handler routes CHANNEL_DB_COLUMNS to the
+  // account's primary-profile row, and the reminder cron reads the stamp
+  // from that same owner-resolved row — a stamp left on a secondary row
+  // would be invisible to the cron and the promotion would override the
+  // owner's explicit Text choice.
+  'service_reminder_72h_channel_explicit',
   'service_reminder_24h_channel',
   'en_route_channel',
   'tech_arrived_channel',

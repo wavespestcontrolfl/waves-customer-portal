@@ -241,7 +241,7 @@ async function isOneTimeVisit(scheduledServiceId) {
   }
 }
 
-async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavailable = false, explicitChoice = false } = {}) {
+async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavailable = false, explicitChoice = false, emailEnabled = true } = {}) {
   const ch = apptChannel(prefChannel);
   if (ch !== 'sms') return ch;
   // Fail closed on an unreadable prefs row (pre-push hook P1): the 'sms'
@@ -254,6 +254,10 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
   // control keeps Text (Codex #3588 P1) — the stamp is written by the
   // notifications route on every explicit channel write.
   if (explicitChoice) return 'sms';
+  // Portal-wide email opt-out (pre-push #3588 P1): promotion must not route
+  // a reminder onto a channel the customer disabled — AppointmentEmail's
+  // transactional_required stream does not enforce the toggle itself.
+  if (emailEnabled === false) return 'sms';
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('reminder72hEmailFirst')) return 'sms';
   return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
@@ -1451,6 +1455,13 @@ async function getReminderPrefs(customerId) {
     // unknowable.
     unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
     smsEnabled: prefs?.sms_enabled !== false,
+    // Portal-wide email opt-out (pre-push #3588 P1): the email-first 72h
+    // promotion must not route around it — AppointmentEmail sends on the
+    // transactional_required stream and does not enforce this toggle
+    // itself. Same fail-open default shape as smsEnabled; the `unavailable`
+    // sentinel above already fails the promotion closed when this could
+    // not actually be read.
+    emailEnabled: prefs?.email_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
@@ -2391,6 +2402,7 @@ const AppointmentReminders = {
           const channel72 = await resolve72hChannel(prefs.reminder72hChannel, r.scheduled_service_id, {
             prefsUnavailable: prefs.unavailable,
             explicitChoice: prefs.reminder72hChannelExplicit,
+            emailEnabled: prefs.emailEnabled,
           });
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still

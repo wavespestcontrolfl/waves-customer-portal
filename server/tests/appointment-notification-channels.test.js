@@ -126,6 +126,13 @@ describe('resolve72hChannel — email-first promotion, one-time visits only (GAT
     await expect(resolve72hChannel('sms', 'ss1', { explicitChoice: false })).resolves.toBe('email');
   });
 
+  test('portal-wide email opt-out never promotes (email leg is transactional_required and skips the toggle)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { emailEnabled: false })).resolves.toBe('sms');
+    await expect(resolve72hChannel('sms', 'ss1', { emailEnabled: true })).resolves.toBe('email');
+  });
+
   test('fail-safe: missing row, missing id, or thrown lookup keeps sms', async () => {
     isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
     ssDb(null); // no scheduled_services row
