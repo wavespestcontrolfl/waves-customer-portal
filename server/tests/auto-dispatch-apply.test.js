@@ -233,11 +233,22 @@ test('the remaining per-run budget is handed to the unit move as maxUnitSize', a
 });
 
 describe('grouped member guard (codex #3609 r13 P1)', () => {
-  const fakeTrx = ({ siblings = [], caps = [] } = {}) => {
+  // scheduled_services: the first call answers the member row read
+  // (`siblings`), later calls are the per-sibling same-series date probes
+  // (`seriesClash`, keyed by the sibling id the probe's whereNotIn excludes
+  // is not observable, so one answer serves every probe).
+  const fakeTrx = ({ siblings = [], caps = [], seriesClash = null } = {}) => {
     const calls = [];
+    let ssCalls = 0;
     const trx = jest.fn((table) => {
       calls.push(table);
-      const api = { where: () => api, whereIn: () => api, select: async () => (table === 'scheduled_services' ? siblings : caps) };
+      const probe = table === 'scheduled_services' && ssCalls++ > 0;
+      const api = {
+        where: (w) => { if (typeof w === 'function') w.call(api); return api; },
+        orWhere: () => api, whereIn: () => api, whereNotIn: () => api,
+        select: async () => (table === 'scheduled_services' ? siblings : caps),
+        first: async () => (probe ? seriesClash : null),
+      };
       return api;
     });
     trx.__calls = calls;
@@ -289,14 +300,30 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const guard = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: true });
     let trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: false }] });
     await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
-    expect(trx.__calls).toEqual(['scheduled_services', 'technician_capabilities']);
+    expect(trx.__calls).toEqual(['scheduled_services', 'technician_capabilities']); // one-time sibling ⇒ no series probe
     trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: true }] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     const same = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: false });
-    trx = fakeTrx();
+    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }] });
     await expect(same({ trx, members })).resolves.toBeUndefined();
-    expect(trx).not.toHaveBeenCalled();
+    expect(trx.__calls).not.toContain('technician_capabilities');
+  });
+
+  test('same-series date: a sibling whose recurring series already has another visit on the target date refuses (codex r14 P1)', async () => {
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
+    let trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: 'p2', is_recurring: true }], seriesClash: { id: 'other-occurrence' } });
+    await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    expect(trx.__calls).toEqual(['scheduled_services', 'scheduled_services']); // member read, then the series probe
+    // a parent-template sibling probes its own children; a clean series passes
+    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: null, is_recurring: true }], seriesClash: null });
+    await expect(guard({ trx, members })).resolves.toBeUndefined();
+    expect(trx.__calls).toEqual(['scheduled_services', 'scheduled_services']);
+    // a one-time sibling has no series to probe
+    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: null, is_recurring: false }], seriesClash: { id: 'never-read' } });
+    await expect(guard({ trx, members })).resolves.toBeUndefined();
+    expect(trx.__calls).toEqual(['scheduled_services']);
   });
 });

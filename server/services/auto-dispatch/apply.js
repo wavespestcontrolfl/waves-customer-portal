@@ -103,6 +103,11 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     band, or an unreadable check, refuses (fail closed)
  *   - technician reassignment: the chosen tech must not be DEACTIVATED for
  *     a sibling's service category (the scorer's hard filter)
+ *   - same-series date (codex r14 P1): the target date must not already
+ *     hold another occurrence of a sibling's recurring series (the scorer's
+ *     HARD candidate-date exclusion, evaluated for the tapped row only) —
+ *     the rebooker checks time/technician occupancy, so a different-time
+ *     duplicate of the series would otherwise commit
  */
 function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   const refuse = (memberId, why) => Object.assign(
@@ -121,8 +126,22 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       const frozen = siblings.find((m) => freeze.frozen.has(m.id));
       if (frozen) throw refuse(frozen.id, 'is inside its 72-hour reminder window (frozen)');
     }
+    const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id)).select('id', 'service_type', 'recurring_parent_id', 'is_recurring');
+    const memberIds = (members || []).map((m) => m.id);
+    for (const r of rows) {
+      if (!r.recurring_parent_id && r.is_recurring !== true) continue;
+      const parentId = r.recurring_parent_id || r.id;
+      // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
+      // non-request row of the series except the members moving together.
+      const clash = await trx('scheduled_services')
+        .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
+        .whereNotIn('id', memberIds)
+        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .where('scheduled_date', best.date)
+        .first('id');
+      if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
+    }
     if (techChanged && best.technician_id) {
-      const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id)).select('id', 'service_type');
       const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
       if (categories.length) {
         const caps = await trx('technician_capabilities')

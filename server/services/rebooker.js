@@ -963,11 +963,20 @@ class SmartRebooker {
     // choke point with visitPolicy:'single'. "Just this service" is the
     // explicit split action, never a flag here. Gate-independent: existing
     // visits keep their lifecycle even if the creation gate is later unset.
+    // A grouped pre-read whose visit the mover declined (fewer than two
+    // live members, or not open) falls through to the single-row path —
+    // but the stop lock was released with the plan, so a sibling can join
+    // that same visit before this move commits (codex #3609 r14 P2). The
+    // move transaction re-takes the stop lock and re-counts the members
+    // (soloVisitRecheck below); a visit that gained a member re-enters
+    // through the unit mover.
+    let soloVisitRecheck = false;
     if (options.visitPolicy !== 'single' && service.visit_id) {
       const unit = await require('./visit-groups').moveVisitAsUnit({
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
       });
       if (unit) return unit;
+      soloVisitRecheck = true;
     }
     // Membership fence (codex #3609 r13 P2): the row read above was
     // ungrouped, so this request takes the single-row path — but
@@ -1136,6 +1145,29 @@ class SmartRebooker {
     let overlapWarned = false;
 
     await db.transaction(async (trx) => {
+      if (soloVisitRecheck) {
+        // Under the row's stop lock (serializes with createOrJoinVisit), an
+        // OPEN visit that now has another live member is a whole-visit
+        // move: surface it like the ungrouped membership miss so
+        // reschedule() re-enters through the unit mover. A stop that
+        // moved under us gets the same remedy (re-read + re-enter).
+        const vg = require('./visit-groups');
+        try {
+          await vg.lockStopForRow(trx, serviceId);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+          throw lockErr;
+        }
+        const visit = await trx('service_visits').where({ id: service.visit_id }).first('status');
+        if (visit && String(visit.status) === 'open') {
+          const members = await vg.openMembers(trx, service.visit_id);
+          if (members.some((m) => String(m.id) !== String(serviceId))) {
+            throw Object.assign(new Error('Cannot reschedule — another service joined this visit concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+          }
+        }
+      }
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
