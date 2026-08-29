@@ -325,6 +325,10 @@ export default function AppointmentPage() {
         body: JSON.stringify({
           date: data?.appointment?.date ?? null,
           windowStart: data?.appointment?.windowStart ?? null,
+          // How many services this page showed as one appointment: the
+          // server confirms only a stop of exactly that size (never
+          // siblings the page did not render).
+          serviceCount: data?.service?.visit?.serviceCount || 1,
         }),
       });
       const body = await res.json().catch(() => ({}));

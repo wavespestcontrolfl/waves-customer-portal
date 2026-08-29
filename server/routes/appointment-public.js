@@ -270,9 +270,30 @@ async function visitServicesFor(svc) {
       },
     };
   } catch (err) {
+    // Unknown membership is NOT "ungrouped" (local codex audit): rendering
+    // the token row alone while the confirm POST fans out to siblings the
+    // page never showed lets a customer confirm work they did not see.
+    // Fail closed — the page renders not_available, no confirm/reschedule.
     logger.warn(`[appointment-public] visit members lookup failed for ${svc.id}: ${err.message}`);
-    return {};
+    return { visitUnknown: true };
   }
+}
+
+// The confirm POST's shown-membership contract (local codex audit): the
+// page showed `serviceCount` services (absent/invalid ⇒ 1, the ungrouped
+// page). Under the stop lock the LIVE member set must be that size —
+// anything else means the page and the stop disagree, and the tap must
+// reload (CHANGED) rather than confirm services nobody saw. Returns the
+// live members.
+async function membersMatchShown(trx, svc, shown) {
+  const { openMembers } = require('../services/visit-groups');
+  const members = svc.visit_id ? await openMembers(trx, svc.visit_id) : [];
+  const shownCount = Math.max(1, parseInt(shown?.serviceCount, 10) || 1);
+  const liveCount = Math.max(1, members.length);
+  if (liveCount !== shownCount) {
+    throw Object.assign(new Error('visit membership differs from the page'), { code: 'VISIT_STOP_MOVED' });
+  }
+  return members;
 }
 
 // Confirm every other pending, customer-confirmable member of the token
@@ -342,8 +363,7 @@ async function confirmGroupedOrSolo(trx, svc, shown) {
   if (!confirmedRowStillShown(cur, svc, shown)) {
     throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
   }
-  const { openMembers } = require('../services/visit-groups');
-  const members = await openMembers(trx, svc.visit_id);
+  const members = await membersMatchShown(trx, svc, shown);
   if (members.length < 2) return { outcome: 'solo', row: cur };
   await confirmGroupedSiblings(trx, svc);
   return { outcome: 'fanned', row: cur };
@@ -463,8 +483,12 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const { state, phase } = pageState(svc);
-    const visitInfo = await visitServicesFor(svc);
+    const { state: liveState, phase } = pageState(svc);
+    const visitInfoRaw = await visitServicesFor(svc);
+    // Unknown membership fails closed: the page can't be changed online
+    // until the lookup works (never a solo page over a possibly grouped stop).
+    const { visitUnknown, ...visitInfo } = visitInfoRaw;
+    const state = visitUnknown ? 'not_available' : liveState;
     const base = {
       state,
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
@@ -811,7 +835,10 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // any other state are untouched.
       if (svc.visit_id) {
         // Stop lock already held (above) and the CAS just proved the row
-        // still belongs to svc.visit_id.
+        // still belongs to svc.visit_id. The live member set must be the
+        // size the page showed (membersMatchShown) — a mismatch rolls this
+        // confirm back and reloads the page (CHANGED).
+        await membersMatchShown(trx, svc, req.body);
         await confirmGroupedSiblings(trx, svc);
       }
     });
@@ -880,6 +907,7 @@ router._test = {
   calendarSummaryLabel,
   readConfirmedAnchorLocked,
   confirmGroupedOrSolo,
+  membersMatchShown,
   memberServiceLabel,
   confirmedRowStillShown,
 };

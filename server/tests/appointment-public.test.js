@@ -480,14 +480,38 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     return trx;
   };
 
-  test('one live member ⇒ solo with the locked row, no sibling write; two ⇒ fan-out', async () => {
+  test('one live member ⇒ solo with the locked row, no sibling write; two ⇒ fan-out (when the page showed two)', async () => {
     let trx = fakeTrx({ members: [{ id: 'a' }] });
     expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'solo', row: anchor });
     expect(trx.__log).toEqual([]);
     trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
-    expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'fanned', row: anchor });
+    expect(await confirmGroupedOrSolo(trx, svc, { ...shown, serviceCount: 2 })).toEqual({ outcome: 'fanned', row: anchor });
     expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert']);
     expect(trx.__log[0][2]).toMatchObject({ status: 'confirmed', customer_confirmed: true });
+  });
+
+  test('the live member count must equal what the page showed (local codex audit): a grouped stop behind a solo page, or a page that showed more than is live, reloads', async () => {
+    const { membersMatchShown } = appointmentRouter._test;
+    // page showed ONE (or an old client sent no count) but the stop has two ⇒ CHANGED, never a hidden fan-out
+    let trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
+    await expect(confirmGroupedOrSolo(trx, svc, shown)).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    expect(trx.__log).toEqual([]);
+    // direct calls: the member read is the FIRST scheduled_services query
+    const membersTrx = (members) => { const api = { where: () => api, whereNotIn: () => api, select: async () => members }; return jest.fn(() => api); };
+    await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { serviceCount: 'x' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    // page showed two but a sibling was cancelled since ⇒ CHANGED
+    await expect(membersMatchShown(membersTrx([{ id: 'a' }]), svc, { serviceCount: 2 })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    // matches ⇒ the live members come back; an ungrouped row never queries
+    expect((await membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { serviceCount: 2 })).map((m) => m.id)).toEqual(['a', 'b']);
+    trx = membersTrx([]);
+    expect(await membersMatchShown(trx, { id: 'a', visit_id: null }, { serviceCount: 1 })).toEqual([]);
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('an unreadable member lookup fails closed: visitUnknown, never an ungrouped payload', async () => {
+    const { visitServicesFor } = appointmentRouter._test;
+    mockDb.mockImplementation(() => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ select: async () => { throw new Error('db down'); } }) }) }) }));
+    expect(await visitServicesFor({ id: 'a', visit_id: 'v1' })).toEqual({ visitUnknown: true });
   });
 
   test('the anchor must still be at the shown slot either way', async () => {
