@@ -1706,7 +1706,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           return {
             id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
-            original: { date: dateOnly(m.scheduled_date), window: m.window_start ? `${norm(m.window_start)}-${norm(m.window_end) || norm(m.window_start)}` : null },
+            // Original bounds kept SEPARATELY (local audit): a null end must
+            // roll back as { start, end: null }, never as a zero-length
+            // "09:00-09:00" window.
+            original: { date: dateOnly(m.scheduled_date), start: norm(m.window_start) || null, end: norm(m.window_end) || null,
+              window: m.window_start ? (m.window_end ? `${norm(m.window_start)}-${norm(m.window_end)}` : { start: norm(m.window_start), end: null }) : null },
             // Per-member fence from the LOCKED row (codex r1): the caller's
             // expect / expectAnchor / expectOccurrenceIds pin the primary only.
             // visit_id + technician_id fence the member's own move to the
@@ -1849,17 +1853,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // another writer got there first — the row is reported stuck.
         const prev = String(t.previousStatus || '');
         if (prev && prev !== 'confirmed') {
-          const [os, oe] = String(t.original.window || '').split('-');
           const restored = await db('scheduled_services')
-            .where({ id, status: 'confirmed', visit_id: plan.visitId, scheduled_date: t.original.date, window_start: os || null, window_end: oe || null })
+            .where({ id, status: 'confirmed', visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start, window_end: t.original.end })
             .update({ status: prev, updated_at: db.fn.now() });
           if (Number(restored) !== 1) throw new Error(`status could not be restored to ${prev} (row changed)`);
           await db('job_status_history').insert({ job_id: id, from_status: 'confirmed', to_status: prev, transitioned_by: null });
         }
         if (!t.isPrimary) {
-          await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${(t.original.window || '').split('-')[0] || '08:00'}`, {
+          await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${t.original.start || '08:00'}`, {
             sendNotification: false, keepPendingConfirmation: true,
-            expectSchedule: { date: t.original.date, windowStart: (t.original.window || '').split('-')[0] || null },
+            expectSchedule: { date: t.original.date, windowStart: t.original.start },
           });
         }
       } catch (err) {

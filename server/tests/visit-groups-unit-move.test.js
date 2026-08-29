@@ -684,6 +684,17 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     }
   });
 
+  test('a null-ended member rolls back to { start, end: null } — never a zero-length window — and its status fence uses the original bounds (local audit)', async () => {
+    db.__script = script({ members: [member('a', { status: 'pending', window_end: null }), member('b')] });
+    const rebooker = fakeRebooker({ b: 'throw' });
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'admin' }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
+    const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
+    expect(rb[2]).toEqual({ start: '09:00', end: null });
+    const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
+    expect(restore.ops).toEqual([['where', { id: 'a', status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: null }]]);
+  });
+
   test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     const rebooker = { reschedule: jest.fn(async (id, date, win, reason) => {

@@ -382,6 +382,17 @@ async function confirmGroupedOrSolo(trx, svc, shown) {
   return { outcome: 'fanned', row: cur, confirmed: await visitAllConfirmed(trx, svc.visit_id) };
 }
 
+// Lost-race grouped confirm: prove the page's member set is still the live
+// one and report the visit's aggregate state, both under the stop lock.
+async function groupedAggregateUnderLock(svc, shown) {
+  let confirmed = null;
+  const ok = await underStopLock(svc, async (trx) => {
+    await membersMatchShown(trx, svc, shown);
+    confirmed = await visitAllConfirmed(trx, svc.visit_id);
+  });
+  return { ok, confirmed };
+}
+
 // The visit's aggregate state after a fan-out (codex r17 P2): a
 // dispatch-owned sibling stays pending, so the response must say what a
 // reload would say (allConfirmed), never an unconditional true.
@@ -899,6 +910,15 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         .where({ id: svc.id })
         .first('status', 'customer_confirmed', 'scheduled_date', 'window_start');
       if (confirmRaceVerdict(now) === 'idempotent_success' && slotMatchesShown(now, req.body)) {
+        if (svc.visit_id) {
+          // Grouped (local audit): the anchor alone proves nothing about the
+          // visit — a dispatch-owned sibling may still be pending, or the
+          // membership may have changed (which is what made the CAS miss).
+          // Same contract as the other grouped paths, under the stop lock.
+          const grouped = await groupedAggregateUnderLock(svc, req.body);
+          if (!grouped.ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+          return res.json({ success: true, confirmed: grouped.confirmed });
+        }
         return res.json({ success: true, confirmed: true });
       }
       return res.status(409).json({
@@ -932,6 +952,7 @@ router._test = {
   readConfirmedAnchorLocked,
   confirmGroupedOrSolo,
   visitAllConfirmed,
+  groupedAggregateUnderLock,
   membersMatchShown,
   membershipKeyFor,
   memberServiceLabel,

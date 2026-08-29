@@ -532,6 +532,31 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(await visitServicesFor({ id: 'a', visit_id: 'v1' })).toEqual({ visitUnknown: true });
   });
 
+  test('a lost-race grouped confirm re-proves the membership key and reports the aggregate under the stop lock (local audit)', async () => {
+    const { groupedAggregateUnderLock, membershipKeyFor } = appointmentRouter._test;
+    const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'b', status: bStatus, scheduled_date: '2026-08-05', window_start: '10:00' }];
+    const wire = (live) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, forUpdate: () => api,
+        first: async () => ({ property_id: 'p1', customer_id: 'c1', scheduled_date: '2026-08-05' }), // lockStopForRow peek + verify
+        select: async () => live,
+      };
+      const trx = jest.fn(() => api);
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      mockDb.transaction = jest.fn(async (fn) => fn(trx));
+      return trx;
+    };
+    const key = membershipKeyFor(members('pending'));
+    let trx = wire(members('pending'));
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: true, confirmed: false });
+    expect(trx.raw).toHaveBeenCalled(); // the stop advisory lock was taken
+    trx = wire(members('confirmed'));
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: membershipKeyFor(members('confirmed')) })).toEqual({ ok: true, confirmed: true });
+    // membership changed (that is what made the CAS miss) ⇒ not ok ⇒ CHANGED
+    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'c', status: 'pending', scheduled_date: '2026-08-05', window_start: '10:00' }]);
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: false, confirmed: null });
+  });
+
   test('the anchor must still be at the shown slot either way', async () => {
     const trx = fakeTrx({ members: [{ id: 'a' }] });
     await expect(confirmGroupedOrSolo(trx, svc, { date: '2026-08-06', windowStart: '09:00' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
