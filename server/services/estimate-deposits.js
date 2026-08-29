@@ -571,8 +571,9 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
     metadata: { original_message_type: 'deposit_receipt' },
   });
   if (!result.sent) {
-    // Deposits are commonly paid in the evening — a quiet-hours hold (or a
-    // transient provider failure) must not eat the only payment receipt.
+    // estimate_deposit_receipt is a customer-action entry point (owner
+    // ruling 2026-08-29), so quiet hours never hold it — but a transient
+    // provider/consent failure must not eat the only payment receipt.
     // Re-queue onto the scheduled-SMS rail; the cron replays it at
     // nextAllowedAt under the same policy the immediate send enforced —
     // payment_receipt for customer-linked rows, conversational + forwarded

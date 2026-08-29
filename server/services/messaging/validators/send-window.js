@@ -24,6 +24,18 @@
  *     (manual SMS, estimate sends, IB drafts) chose the moment on purpose;
  *     the owner works nights and the moratorium is for machine-initiated
  *     sends, not his own.
+ *   - customer-action entry points (CUSTOMER_ACTION_ENTRY_POINTS) — the
+ *     direct confirmation of an action the customer just took themselves
+ *     (self-serve estimate extension, estimate/quote request, estimate
+ *     acceptance, portal service request). Owner ruling 2026-08-29: a
+ *     customer acting at night chose the moment, and their confirmation
+ *     must not be held to 8 AM. This supersedes the 2026-08-07 fencing of
+ *     the lead-webhook form auto-reply — that send is the immediate
+ *     acknowledgment of the customer's own form fill, not a cold night
+ *     text. Machine-COMPOSED or machine-TIMED outreach stays fenced even
+ *     when a customer event sits upstream (the lead-response agent, crons,
+ *     reminders, follow-ups, abandon recovery, autopay/webhook billing
+ *     notices).
  *
  * Blocked results carry { retryable, deferred, nextAllowedAt } so callers
  * that already understand deferral (review requests, card-request nudges)
@@ -76,6 +88,35 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'intelligence_bar_email_sms_reply',
 ]);
 
+// Customer-action confirmations (owner ruling 2026-08-29): each of these
+// entry points fires synchronously from a customer's OWN action — a form
+// submit, a portal click, a tokened-page acceptance or payment — and the
+// send is the acknowledgment of that action, to that same person. The
+// customer chose the moment, so the confirmation goes out immediately, at
+// any hour. Same fail-closed posture as OPERATOR_ENTRY_POINTS: new
+// customer-action surfaces must opt in here. Deliberately ABSENT:
+//   - lead_response_auto_reply — the lead-response agent COMPOSES outreach
+//     on its own schedule; a customer event sits upstream but the machine
+//     picks the words and the moment.
+//   - stripe_webhook / invoice_receipt_sms — those paths serve autopay and
+//     machine-initiated charges alongside customer clicks, and the entry
+//     point can't tell them apart (the deposit receipt, which is always a
+//     customer click on the tokened estimate page, IS exempt).
+//   - referral invites — they text a THIRD PARTY, not the acting customer.
+//   - every cron/reminder/follow-up/recovery entry point — machine-timed.
+const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
+  'customer_service_request',
+  'estimate_accept_annual_prepay',
+  'estimate_accept_onetime_booking',
+  'estimate_accept_onetime_confirmed',
+  'estimate_deposit_receipt',
+  'lead_webhook_auto_reply',
+  'promotions_upsell_interest',
+  'public_estimate_add_service_request',
+  'public_estimate_extension_request',
+  'public_quote_booking_sms',
+]);
+
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
   month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -97,6 +138,7 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   // and is a review-blocking bug.
   if (input.operatorInitiated === true) return { ok: true };
   if (OPERATOR_ENTRY_POINTS.has(String(input.entryPoint || ''))) return { ok: true };
+  if (CUSTOMER_ACTION_ENTRY_POINTS.has(String(input.entryPoint || ''))) return { ok: true };
   if (resolveTrustLevel(input, contactState) === 'admin_operator') return { ok: true };
   if (isWithinSendWindowET(now)) return { ok: true };
 
