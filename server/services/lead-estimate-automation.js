@@ -353,9 +353,22 @@ function lineRequiresReview(line = {}) {
   );
 }
 
+// Keyed lead (C2): the draft is priced from the canonical service_key →
+// engine request, never from the label — a label-derived mapping priced
+// mosquito_seasonal as monthly, lawn_care_monthly as the 9-visit tier and
+// flea_tick as the two-visit package (GH codex #3585). A selectable key with
+// no instant request is quote-on-request: no automated draft.
+function mapServiceKeyToEstimateServices(serviceKey) {
+  const { quoteServicesForKey } = require('./public-services-menu');
+  const services = quoteServicesForKey(serviceKey);
+  if (!services) return { services: {}, supported: false, unsupportedReason: 'quote_on_request', review: [] };
+  return { services, supported: true, unsupportedReason: null, review: [] };
+}
+
 function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
-  const mapped = mapServiceInterestToEstimateServices(serviceInterest);
+  const serviceKey = readiness.serviceKey || null;
+  const mapped = serviceKey ? mapServiceKeyToEstimateServices(serviceKey) : mapServiceInterestToEstimateServices(serviceInterest);
   const automation = {
     status: 'not_generated',
     generated: false,
@@ -587,4 +600,5 @@ module.exports = {
   automationNote,
   hasConcreteServiceInterest,
   mapServiceInterestToEstimateServices,
+  mapServiceKeyToEstimateServices,
 };

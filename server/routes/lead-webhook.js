@@ -870,7 +870,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             intake,
             customer,
             body,
-            readiness: estimateAutomationReadiness,
+            readiness: { ...estimateAutomationReadiness, serviceKey: leadServiceKey },
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');

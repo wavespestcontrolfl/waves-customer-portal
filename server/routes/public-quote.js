@@ -1013,6 +1013,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // estimate paths, never here.
         system: 'trelona',
         monitoringTier: 'basic',
+        // Station rental is the website's termite number (owner 2026-08-29);
+        // only the literal 'rent' passes, and only a keyed request sends it.
+        ...(String(services.termite.ownership || '').toLowerCase() === 'rent' ? { ownership: 'rent' } : {}),
       };
     }
     if (services.rodentBait) {
@@ -1339,7 +1342,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // catalog — never derived from `services`, which is {} for on-request
       // (pre-push codex P1: that erased the customer's interest).
       const serviceInterestForCustomer = keyedService
-        ? compactServiceInterestPart(keyedService.name) || String(keyedService.name).slice(0, 32)
+        ? String(compactServiceInterestPart(keyedService.name) || keyedService.name).slice(0, 32)
         : buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
@@ -1861,7 +1864,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // estimateBlocksSelfBookLink adds two more no-link shapes: mixed
     // recurring + one-time quotes (the /book path would never bill the
     // one-time add-on) and bed bug (no right-sized bookable slot).
-    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
+    // A keyed product the Service Library has set booking_enabled=false
+    // prices instantly but never mints a self-book slot (GH codex #3585).
+    const keyedNotBookable = !!(keyedService && keyedService.booking_enabled === false);
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable) {
       try {
         let bookingServiceId;
         let recurringServiceLabelParam = null;

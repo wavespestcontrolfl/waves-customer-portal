@@ -16,7 +16,7 @@ function fakeConn(rows, { hasColumn = true, throws = false } = {}) {
       where(cond) { filters = { ...filters, ...cond }; return q; },
       orderBy() { return q; },
       async select() { if (throws) throw new Error('db down'); return rows.filter((r) => Object.entries(filters).every(([k, v]) => r[k] === v)).map((r) => ({ ...r })); },
-      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency } : null; },
+      async first() { if (throws) throw new Error('db down'); const r = rows.find((r) => Object.entries(filters).every(([k, v]) => r[k] === v)); return r ? { id: r.id, service_key: r.service_key, name: r.name, billing_type: r.billing_type, visits_per_year: r.visits_per_year, frequency: r.frequency, booking_enabled: r.booking_enabled } : null; },
     };
     return q;
   };
@@ -69,7 +69,8 @@ describe('keyed leads', () => {
   });
   test('a keyed lead derives its label from the catalog name (identity wins over the submitted label)', async () => {
     const rows = [row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service' })];
-    expect(await publicSelectableService('wdo_inspection', fakeConn(rows))).toEqual({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', instant: false });
+    expect(await publicSelectableService('wdo_inspection', fakeConn(rows))).toEqual({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', instant: false, booking_enabled: true });
+    expect((await publicSelectableService('wdo_inspection', fakeConn([row({ service_key: 'wdo_inspection', name: 'WDO Inspection Service', booking_enabled: false })]))).booking_enabled).toBe(false);
     expect(await publicSelectableService('pest_re_service', fakeConn(rows))).toBeNull();
   });
 });
@@ -103,11 +104,12 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
       'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat',
       'lawn_care_one_time', 'rodent_sanitation_light', 'rodent_sanitation_standard', 'rodent_sanitation_heavy', 'bee_wasp_removal',
-      'plugging', 'top_dressing']) {
+      'plugging', 'top_dressing', 'rodent_exclusion_only']) {
       expect({ k, instant: PUBLIC_INSTANT_QUOTE_KEYS.has(k) }).toEqual({ k, instant: false });
     }
   });
   test('CONTRACT: every advertised instant key prices to a positive, non-manual line on a plain property', () => {
+    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
     for (const key of PUBLIC_INSTANT_QUOTE_KEYS) {
       const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey(key) });
       const priced = (estimate.lineItems || []).filter((l) => !l.quoteRequired && !l.requiresCustomQuote
@@ -159,5 +161,24 @@ describe('keyed quote-on-request rides the standard manual-quote lifecycle', () 
     expect(est.lineItems[0]).toMatchObject({ service: 'wdo_inspection', name: 'WDO Inspection Service', reason: 'quote_on_request' });
     expect(est.summary).toMatchObject({ recurringMonthlyAfterDiscount: 0, oneTimeTotal: 0 });
     expect(est.property).toMatchObject({ homeSqFt: 1800, turfFlags: [] });
+  });
+});
+
+describe('termite bait quotes as station RENTAL (owner ruling 2026-08-29)', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1, yearBuilt: 2005 };
+  const tbRow = () => row({ service_key: 'termite_bait', name: 'Termite Bait Station Service', category: 'termite', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 });
+  test('the keyed request is the rental; with the gate on it prices a rental line and no installation charge', () => {
+    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
+    expect(quoteServicesForKey('termite_bait')).toEqual({ termite: { ownership: 'rent' } });
+    const est = generateEstimate({ ...BASE, services: { termite: { ownership: 'rent', system: 'trelona', monitoringTier: 'basic' } } });
+    expect(est.lineItems.map((l) => l.service)).toContain('termite_station_rental');
+    expect(Number(est.summary.installationTotal || 0)).toBe(0);
+    expect(menuItem(tbRow()).public_instant_quote).toBe(true);
+  });
+  test('with the rental gate off, termite bait is NOT instant (the engine would price purchase + install)', () => {
+    process.env.GATE_TERMITE_STATION_RENTAL = 'false';
+    expect(menuItem(tbRow()).public_instant_quote).toBe(false);
+    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
   });
 });
