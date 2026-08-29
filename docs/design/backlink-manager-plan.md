@@ -272,7 +272,7 @@ never deferred. **Invalidation is scoped per dimension by construction:** each d
 revision (`revision_payment` / `revision_communication` / `revision_execution`, §3.2) and its
 own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
 (price, renewal, payment flags → payment; recipient/draft → communication; `legal_attestation`/`legal_terms_hash` → EVERY dimension that lists them — payment, communication AND execution — since all three revisions bump on a terms change (regression tests for all three); type/URL →
-supersession, all dimensions). A dimension INSTANCE with `satisfied_at` set is validated by nothing further — it is done;
+supersession, all dimensions). A dimension INSTANCE with `satisfied_at` set is validated by nothing further — it is done — with ONE exception: a satisfied `accept_terms` instance is bound to the hash it accepted (`accepted_terms_hash` stored on the row), and an in-place revision that changes `legal_terms_hash` before the final submit applies the same hash-sensitive reopen as supersession (the instance is ended `terms_changed`, `terms:n+1` opened, the placement re-parked for the new agreement) — acceptance of an old agreement never satisfies a newly discovered one;
 but satisfaction is per action instance: a renewal (`instance_key` = `${renewal_period_key}:${generation}`)
 and the follow-up (`instance_key` = `followup:${generation}`) are new rows — generation-bearing
 exactly like the initial `-:${generation}`, so a failed renewal/follow-up can open generation
@@ -383,7 +383,7 @@ locations can neither select nor overwrite each other's login. Readable only by 
 runner's create/resume path, and **never** written to `seo_link_attempts.detail`, logs,
 evidence, or LLM prompts.
 The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
-(`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths.
+(`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths — REFACTORED in step 3, not called as-is: today it is gated by `backlinkAgent`, reads `BACKLINK_AGENT_EMAIL` and writes only the retired `backlink_agent_queue`; the step-3 change points its IMAP read at the v2 inbox (`HERMES_SIGNUP_EMAIL`), gates it on the runner gate, and persists a found verification link into the v2 flow — the placement's `activate_verification` attempt/idempotency row + persisted session (§3.3b/§12) — so a verification message actually advances the acquisition instead of updating a table nothing reads.
 
 ### 3.6b Approvals — `seo_link_approvals` (immutable terms snapshot)
 
@@ -829,7 +829,7 @@ revision — so approval never invalidates itself), and then **recomputes the re
 aggregate rules; `rejected` ONLY when no placement is authorized, pending, awaiting the owner
 or acquired (a single `DENY` beside an approved sibling never rejects the domain); `INVALID`
 on every placement → back to `investigating`. Per-placement outcomes are stored on the
-placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a RENEWAL payment dimension: a `placed`/`live`/`indexed` placement keeps its Judge-owned status untouched while the renewal card is pending — the pending approval is attached to the renewal authority instance/reservation, the verifier keeps monitoring it and the renewal claim stays eligible — and EXCEPT a communication dimension decided
+placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a DEFERRED payment dimension on an outreach path (§3.3b: `OWNER_MANUAL_PAYMENT`/`OWNER_PAYMENT` before the publisher has exposed a checkout): the placement stays in its communication flow (`prospect`/`contacted`/`negotiating`, drafts and sends proceed) and is parked for the payment card only when it reaches `ready_for_payment`; EXCEPT a RENEWAL payment dimension: a `placed`/`live`/`indexed` placement keeps its Judge-owned status untouched while the renewal card is pending — the pending approval is attached to the renewal authority instance/reservation, the verifier keeps monitoring it and the renewal claim stays eligible — and EXCEPT a communication dimension decided
 to ANY unsatisfied owner-gated level (`OWNER_OUTREACH` or `OWNER_LEGAL` on the communication
 dimension) while no draft exists yet: that placement stays `prospect` with no card so the
 draft-only claim (`mode=draft`, which leases `prospect` rows regardless of authority) can
@@ -872,6 +872,7 @@ t.integer('amount_cents').notNullable();            // reserved amount, integer 
 t.string('currency').notNullable();                 // the currency of amount_cents/final_cents — ALWAYS 'USD': CHECK (currency = 'USD'); automated rows copy it from the path at reservation (a reservation cannot exist in any other currency, and the pre-mint/pre-submit read verifies the live checkout currency against it); a manual settlement's amount_cents/final_cents = the USD amount actually settled on the owner's own statement/receipt (what budgets and cost reporting count)
 t.string('original_currency'); t.integer('original_minor_units'); // FOREIGN MANUAL SETTLEMENTS ONLY (currency='foreign' paths): the merchant's currency (ISO 4217) and the charged amount in its minor units as shown on the receipt, for audit — CHECK ((original_currency IS NULL) = (original_minor_units IS NULL)) AND CHECK (original_currency IS NULL OR state = 'manual_charged'); never used for budgets, which read the USD settled amount only; no conversion is ever computed by the system — the owner enters both figures from the receipt
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
+t.integer('captured_cents');                        // the AUTHORITATIVE sum actually captured per the issuer's transaction record (all captures/adjustments on issuer_card_id summed), written by the reconciler before charged/reconciled_charged; CHECK (captured_cents IS NULL OR captured_cents >= 0); budgets and cost reporting read COALESCE(captured_cents, final_cents, amount_cents) once settled
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
 t.uuid('failed_purchase_id');                       // → seo_link_purchases (path_retry only): the charged-but-never-acquired purchase this retry replaces; CHECK ((purchase_kind = 'path_retry') = (failed_purchase_id IS NOT NULL))
 t.uuid('loss_event_id');                            // → seo_backlink_events (the EXISTING durable loss ledger; FK to its verified `lost` event row — no new table); CHECK ((purchase_kind = 'reacquisition') = (loss_event_id IS NOT NULL)) — the reacquisition idempotency/duplicate key component
@@ -1106,8 +1107,12 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   keep consuming the month's budget until `reconcile` settles them on **issuer evidence
   only** (the issuer's transaction record for `issuer_card_id` — fetched by API or attached
   by the owner from the issuer portal; the owner card can present and confirm that evidence,
-  never substitute for it): `reconciled_charged` when a
-  capture exists; `reconciled_not_charged` **only when (a) the issuer's full settlement/presentment
+  never substitute for it): `reconciled_charged` only when the issuer record shows a capture AND the reconciler has
+  summed every capture/adjustment on the card into `captured_cents` and validated it —
+  `captured_cents ≤ max_payable_cents` (owner) / the per-card ceiling (auto) — settling on
+  the money actually taken, never on the checkout total; a partial, adjusted or multiple
+  capture whose sum exceeds the ceiling stays `ambiguous` and parks an owner card (the issuer
+  ceiling should have made this impossible, so it is an incident, not a settlement); `reconciled_not_charged` **only when (a) the issuer's full settlement/presentment
   window (`policy.presentment_window_days`, default 10, ≥ the issuer's documented late-
   presentment allowance) has elapsed since the LAST card exposure (`card_exposed_at`, stamped atomically with `card_exposed=true` — NOT `submitting_at`, which is set before the mint, so a delayed or resumed mint can never shorten the wait), AND
   (b) an authoritative issuer check after that window confirms the card is irrevocably
