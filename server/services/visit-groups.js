@@ -115,7 +115,9 @@ function canDissolve(activity) {
 function canSplit(activity) {
   if (!activity) return { ok: false, reason: 'missing' };
   if (String(activity.status) !== 'open') return { ok: false, reason: 'visit_not_open' };
-  if (activity.activePacket) return { ok: false, reason: 'packet_in_flight' };
+  // ANY packet — active, done, or failed — freezes membership: a failed
+  // packet can be retried against its recorded items (doc rev 5d).
+  if (activity.activePacket || activity.anyPacket) return { ok: false, reason: 'packet_in_flight' };
   if (activity.childRecords || activity.childInvoices || activity.childReports) {
     return { ok: false, reason: 'child_artifacts' };
   }
@@ -251,6 +253,30 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     if (Object.keys(patch).length) {
       await t('service_visits').where({ id: visit.id }).update(patch);
       Object.assign(visit, patch);
+    }
+
+    // Serialize with legacy completion (codex r2 P0): lock the rows, then
+    // refuse any row that is already completed/cancelled or that has a
+    // live or succeeded completion attempt. The legacy handler claims its
+    // attempt (committed) BEFORE re-reading membership under the same row
+    // lock, so every interleaving resolves: either we see the claim here
+    // and refuse, or the handler sees our committed stamp and 409s.
+    const locked = await t('scheduled_services')
+      .whereIn('id', rows.map((r) => r.id))
+      .forUpdate()
+      .select('id', 'status', 'visit_id');
+    for (const l of locked) {
+      if (['completed', 'cancelled'].includes(String(l.status))) {
+        throw new Error('visit membership conflict: a row is already terminal');
+      }
+    }
+    const liveAttempt = await t('service_completion_attempts')
+      .whereIn('service_id', rows.map((r) => r.id))
+      .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'])
+      .first('id')
+      .catch(() => null);
+    if (liveAttempt) {
+      throw new Error('visit membership conflict: a completion attempt is in flight');
     }
 
     // Never silently transfer a row already attached elsewhere — membership

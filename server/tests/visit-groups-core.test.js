@@ -123,6 +123,9 @@ describe('canSplit (rev 5d membership freeze)', () => {
   test('reminder/tracker effects do NOT block a split', () => {
     expect(canSplit({ ...untouched, effectsStarted: true, enRouteAt: '2026-08-30T13:00:00Z' }).ok).toBe(true);
   });
+  test('a done or failed packet also freezes membership (retry safety)', () => {
+    expect(canSplit({ ...untouched, anyPacket: true })).toEqual({ ok: false, reason: 'packet_in_flight' });
+  });
   test.each([
     ['packet_in_flight', { activePacket: true }],
     ['child_artifacts', { childInvoices: true }],

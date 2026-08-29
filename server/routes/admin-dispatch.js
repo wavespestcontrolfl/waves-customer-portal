@@ -5274,6 +5274,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
 
+    // Visit-group membership re-check, now that the durable claim is
+    // committed (codex r2 P0). Stamping (visit-groups.js) locks the row
+    // FOR UPDATE and then refuses rows with a live claim, so taking the
+    // same row lock here and re-reading membership closes every
+    // interleaving: either stamping saw our claim and refused, or we see
+    // its committed stamp here and stop before any side effect.
+    if (claim.action === 'proceed') {
+      const groupedNow = await db.transaction(async (trx) => {
+        const lockedRow = await trx('scheduled_services')
+          .where({ id: svc.id }).forUpdate().first('visit_id');
+        if (!lockedRow || !lockedRow.visit_id) return null;
+        const parent = await trx('service_visits')
+          .where({ id: lockedRow.visit_id }).first('id', 'status');
+        return (!parent || String(parent.status) !== 'dissolved') ? lockedRow.visit_id : null;
+      });
+      if (groupedNow) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error('visit_grouped'),
+        ).catch(() => {});
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: groupedNow,
+        });
+      }
+    }
+
     // Deferred photo-caption banned-copy gate (captions were sanitized above).
     // Run only after replay/conflict handling so idempotent retries of an
     // already-final response do not start failing due to a later profile/copy
