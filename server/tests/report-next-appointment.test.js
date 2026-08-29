@@ -679,3 +679,89 @@ test('termite report: the lookup never runs (no catalog reads) when the gate is 
   const live = await build(TERMITE_SERVICE, LIVE_V2);
   expect(live.data.termiteNextMonitoringVisit?.serviceType).toBe('Termite Bait Station Service');
 });
+
+describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage', () => {
+  const original = process.env.COCKROACH_REPORT_V2;
+  beforeEach(() => { process.env.COCKROACH_REPORT_V2 = 'true'; });
+  afterEach(() => {
+    if (original === undefined) delete process.env.COCKROACH_REPORT_V2;
+    else process.env.COCKROACH_REPORT_V2 = original;
+  });
+
+  const ROACH_SERVICE = {
+    ...BASE_SERVICE,
+    id: 'service-roach-2',
+    scheduled_service_id: 'scheduled-current',
+    service_type: 'German Roach Cleanout',
+    service_date: '2026-05-16',
+    service_data: JSON.stringify({
+      completedServiceKey: 'german_roach',
+      typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', visitSequence: 3, values: { species: 'German', activity_level: 'Low', work_completed: ['Bait placement'] } },
+    }),
+  };
+  const fixtures = () => ({
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-gr', service_key: 'german_roach', name: 'German Roach Cleanout', short_name: 'German Roach', category: 'pest_control' },
+      { id: 'svc-cc', service_key: 'cockroach_control', name: 'Cockroach Treatment', short_name: 'Cockroach', category: 'pest_control' },
+    ],
+    service_completion_profiles: [
+      { service_key: 'german_roach', active: true, completion_mode: 'service_report', project_type: 'cockroach' },
+      { service_key: 'cockroach_control', active: true, completion_mode: 'service_report', project_type: 'cockroach' },
+    ],
+    scheduled_services: [
+      // the visit this report covers: sold on estimate A
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', source_estimate_id: 'est-A' },
+      // earlier visit of THIS program (estimate A)
+      { id: 'scheduled-prev-a', customer_id: 'customer-1', scheduled_date: '2026-05-02', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', source_estimate_id: 'est-A' },
+      // same package bought earlier this spring on ANOTHER estimate — not this program
+      { id: 'scheduled-prev-old', customer_id: 'customer-1', scheduled_date: '2026-03-20', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', source_estimate_id: 'est-OLD' },
+      // upcoming: a same-key visit from a DIFFERENT estimate lands first on the calendar
+      { id: 'scheduled-next-other', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'German Roach Cleanout', window_start: '09:00:00', service_id: 'svc-gr', source_estimate_id: 'est-B' },
+      // upcoming: a different cockroach package on the SAME estimate — same lineage, wrong key
+      { id: 'scheduled-next-cc', customer_id: 'customer-1', scheduled_date: '2999-01-04', status: 'confirmed', service_type: 'Cockroach Treatment', window_start: '09:00:00', service_id: 'svc-cc', source_estimate_id: 'est-A' },
+      // upcoming: THIS program's next treatment
+      { id: 'scheduled-next-a', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'German Roach Cleanout', window_start: '10:00:00', service_id: 'svc-gr', source_estimate_id: 'est-A' },
+    ],
+    service_records: [
+      { id: 'rec-prev-a', customer_id: 'customer-1', status: 'completed', service_date: '2026-05-02', service_type: 'German Roach Cleanout', scheduled_service_id: 'scheduled-prev-a', service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: {} } }) },
+      { id: 'rec-prev-old', customer_id: 'customer-1', status: 'completed', service_date: '2026-03-20', service_type: 'German Roach Cleanout', scheduled_service_id: 'scheduled-prev-old', service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: {} } }) },
+    ],
+  });
+
+  test('treatment number and the next treatment follow the SALE (source_estimate_id), not the catalog key', async () => {
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-program', makeKnex(fixtures()), LIVE_V2);
+    // one earlier visit on estimate A → this is treatment 2 (the est-OLD visit is another program;
+    // the customer-wide gauge visitSequence of 3 is NOT the treatment number)
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2 });
+    // only the est-A german_roach row counts: not the est-B visit that lands first, not the
+    // cockroach_control package sold on the same estimate
+    expect(data.cockroachUpcomingRoachVisits).toBe(1);
+    expect(data.cockroachNextTreatmentVisit).toEqual({ serviceType: 'German Roach Cleanout', scheduledDate: '2999-01-05', windowStart: '10:00:00' });
+  });
+
+  test('pdf/static builds carry the program position and the upcoming count, never the date', async () => {
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-program-pdf', makeKnex(fixtures()), { mode: 'pdf' });
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2 });
+    expect(data.cockroachUpcomingRoachVisits).toBe(1);
+    expect(data).not.toHaveProperty('cockroachNextTreatmentVisit');
+  });
+
+  test('a follow-up child linked to this visit is the next treatment even without an estimate on the child row', async () => {
+    const fx = fixtures();
+    fx.scheduled_services = fx.scheduled_services.filter((r) => !/^scheduled-next/.test(r.id)).concat([
+      { id: 'scheduled-child', customer_id: 'customer-1', scheduled_date: '2999-01-06', status: 'pending', service_type: 'German Roach Cleanout', window_start: '13:00:00', service_id: 'svc-gr', followup_source_service_id: 'scheduled-current' },
+    ]);
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-child', makeKnex(fx), LIVE_V2);
+    expect(data.cockroachNextTreatmentVisit?.scheduledDate).toBe('2999-01-06');
+    expect(data.cockroachUpcomingRoachVisits).toBe(1);
+  });
+
+  test('gate off → no program fields at all', async () => {
+    process.env.COCKROACH_REPORT_V2 = 'false';
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-off', makeKnex(fixtures()), LIVE_V2);
+    expect(data).not.toHaveProperty('cockroachProgramPosition');
+    expect(data).not.toHaveProperty('cockroachUpcomingRoachVisits');
+    expect(data).not.toHaveProperty('cockroachNextTreatmentVisit');
+  });
+});
