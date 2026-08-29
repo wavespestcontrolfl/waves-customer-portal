@@ -165,6 +165,26 @@ function seriesAnchorId(visit) {
  * Callers that only need the safe fallback use buildSecurePlanContext
  * below, which keeps the historical never-throws contract.
  */
+/**
+ * The non-member bait-station setup a DIRECT (non-estimate) rodent bait
+ * series owes (owner 2026-08-29; codex #3591 r9/r28): live
+ * RODENT.baitSetupFee when the account has no OTHER qualifying recurring
+ * family (rodent never self-waives), else 0. Estimate-origin series made
+ * their billing choice at accept (0 here). ONE resolver for every
+ * activation path — the /secure plan page, the saved-card auto-secure, and
+ * the admin prepay-on-book — so none can activate or prepay the series
+ * without the obligation. Lookup failures propagate (callers fail closed).
+ */
+async function resolveDirectRodentSetupObligation(database, visit = {}) {
+  if (!visit || !visit.customer_id || visit.source_estimate_id) return 0;
+  if (recurringServiceKey({ name: visit.service_type }) !== 'rodent_bait') return 0;
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, visit.customer_id) || [])
+    .filter((key) => key !== 'rodent_bait');
+  if (otherQualifiers.length > 0) return 0;
+  return cents(Math.max(0, Number(RODENT.baitSetupFee) || 0));
+}
+
 async function deriveSecurePlanContext({ request, visitId }) {
   if (!isEnabled('securePlanChoice')) return null;
   const visit = await loadPlanVisit(visitId || request.scheduled_service_id);
@@ -235,10 +255,7 @@ async function deriveSecurePlanContext({ request, visitId }) {
   // fee disabled. Lookup failures propagate → card-only page (fail closed).
   let unwaivedSetupFee = 0;
   if (serviceKey === 'rodent_bait') {
-    const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-    const otherQualifiers = (await loadExistingQualifyingServiceKeys(db, visit.customer_id) || [])
-      .filter((key) => key !== 'rodent_bait');
-    if (otherQualifiers.length === 0) unwaivedSetupFee = Number(RODENT.baitSetupFee) || 0;
+    unwaivedSetupFee = await resolveDirectRodentSetupObligation(db, visit);
     // Consume the DISCLOSED setup (accepted_setup_fee, stamped at render —
     // codex #3591 r15 P1): never above what the customer saw. A row without
     // a stamp (first render, or pre-column rows) prices live.
@@ -705,6 +722,7 @@ module.exports = {
   // Shared with the admin booking modal's prepay preview — one incentive
   // formula and one service→incentive-class whitelist across both lanes.
   computeSeriesPrepayPricing,
+  resolveDirectRodentSetupObligation,
   PLAN_CLASS_BY_SERVICE_KEY,
   // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a
   // third copy of the coverage-holding status list is a drift bug waiting

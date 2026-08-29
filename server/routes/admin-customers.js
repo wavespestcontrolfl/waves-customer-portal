@@ -4437,6 +4437,15 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const parsedAmount = parseAnnualPrepayAmount(req.body?.amount);
     if (parsedAmount.error) return res.status(400).json({ error: parsedAmount.error });
     const amount = parsedAmount.amount;
+    // Optional one-time setup (rodent bait station setup) billed on the same
+    // invoice as its own line. Relayed from the prepay-on-book preview's
+    // mintPayload; excluded from the term's coverage basis below.
+    const setupFeeRaw = req.body?.setupFeeAmount;
+    const setupFeeAmount = setupFeeRaw === undefined || setupFeeRaw === null ? 0 : Number(setupFeeRaw);
+    if (!Number.isFinite(setupFeeAmount) || setupFeeAmount < 0
+      || Math.round(setupFeeAmount * 100) !== setupFeeAmount * 100) {
+      return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
+    }
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -4634,18 +4643,29 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         database: trx,
         customerId: customer.id,
         title: `${coverageServiceType} - Annual Prepay`,
-        lineItems: [{
-          description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
-          quantity: 1,
-          unit_price: amount,
-          category: 'Annual prepay',
-        }],
+        lineItems: [
+          {
+            description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
+            quantity: 1,
+            unit_price: amount,
+            category: 'Annual prepay',
+          },
+          ...(setupFeeAmount > 0 ? [{
+            description: 'Bait Station Setup — one-time setup fee',
+            quantity: 1,
+            unit_price: setupFeeAmount,
+            category: 'Setup fee',
+          }] : []),
+        ],
         notes: invoiceNotes,
         dueDate,
         ...(pendingCredit
           ? { depositCredit: { amount: pendingCredit.amount, estimateId: pendingCredit.estimateId } }
           : {}),
       });
+      const setupShareOfTotal = setupFeeAmount > 0 && (amount + setupFeeAmount) > 0
+        ? Math.round((Number(invoice.total) * (setupFeeAmount / (amount + setupFeeAmount))) * 100) / 100
+        : 0;
       // Consume exactly what create() applied (it caps the request; payer-billed
       // invoices apply 0 and the ledger stays untouched). A mismatch means the
       // ledger moved under us — roll the whole mint back rather than leave a
@@ -4739,7 +4759,9 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         // estimate-accept path: the deposit is prior payment toward the same
         // year, so the net invoice total alone would understate the plan by
         // the deposit.
-        prepayAmount: Math.round((Number(invoice.total) + appliedDepositCredit) * 100) / 100,
+        // Minus the setup line's share of the total (tax-proportional): the
+        // one-time setup is not coverage and must not be split across visits.
+        prepayAmount: Math.round((Number(invoice.total) + appliedDepositCredit - setupShareOfTotal) * 100) / 100,
         termStart,
         termEnd,
         coverageServiceType,

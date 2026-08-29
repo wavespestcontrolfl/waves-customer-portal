@@ -2926,10 +2926,26 @@ async function createSelfBooking(payload = {}) {
                       .where({ id: freshPricingEst.id })
                       .update({ archived_at: sp.fn.now(), updated_at: sp.fn.now() });
                   } else {
+                    // Preserve the decision's KIND (codex #3591 r28 P1): the
+                    // accept-time resolver honors a zero rodent decision only
+                    // when kind survives — and strip the rodent setup row +
+                    // its one-time share from the frozen draft (and the
+                    // onetime_total scalar), or a later staff conversion
+                    // scans the leftover row and charges the waived setup.
+                    const priorKind = estData?.setupFeeQuote?.kind;
+                    const frozenData = { ...estData, setupFeeQuote: { amount: 0, waived: waivedReason, ...(priorKind ? { kind: priorKind } : {}) } };
+                    let removedSetup = 0;
+                    if (priorKind === 'rodent_bait_setup') {
+                      const { stripWaivedRodentSetupFromDraft } = require('./public-quote')._internals;
+                      removedSetup = stripWaivedRodentSetupFromDraft(frozenData);
+                    }
                     await sp('estimates')
                       .where({ id: freshPricingEst.id })
                       .update({
-                        estimate_data: { ...estData, setupFeeQuote: { amount: 0, waived: waivedReason } },
+                        estimate_data: frozenData,
+                        ...(removedSetup > 0
+                          ? { onetime_total: Math.max(0, Math.round(((Number(freshPricingEst.onetime_total) || 0) - removedSetup) * 100) / 100) || null }
+                          : {}),
                         updated_at: sp.fn.now(),
                       });
                   }

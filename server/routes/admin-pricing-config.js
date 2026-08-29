@@ -855,7 +855,10 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     // it) but skip the typed mirror into pricing_config.rodent_waveguard —
     // exactly the billing-vs-estimate policy split the mirror exists to
     // prevent.
-    if (updates.tier_qualifier !== undefined && updates.tier_qualifier !== null && typeof updates.tier_qualifier !== 'boolean') {
+    // null included (codex #3591 r28 P2): Postgres would store a NULL the
+    // discount engine reads as non-qualifying while the typed mirror keeps
+    // the previous pricing-config value.
+    if (updates.tier_qualifier !== undefined && typeof updates.tier_qualifier !== 'boolean') {
       return res.status(400).json({ error: 'tier_qualifier must be a boolean' });
     }
     const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();

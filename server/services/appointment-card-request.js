@@ -356,6 +356,19 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
       }
       deferredEnrollmentEmail = enrollment.sendEnrollmentConfirmation || null;
+      // A DIRECT rodent bait series auto-secured from a saved card never
+      // reaches the plan page that stamps its non-member setup — resolve the
+      // same obligation here and stamp it on the series anchor (whereNull-
+      // guarded), so the first completion mint bills it (codex #3591 r28
+      // P1). A resolver failure rolls back and skips (fail closed).
+      const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+      const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
+      if (directRodentSetup > 0) {
+        await trx('scheduled_services')
+          .where({ id: visit.recurring_parent_id || visit.id })
+          .whereNull('pending_setup_fee')
+          .update({ pending_setup_fee: directRodentSetup, updated_at: new Date() });
+      }
       const inserted = await trx('appointment_card_requests')
         .insert({
           scheduled_service_id: visit.id,

@@ -103,6 +103,39 @@ beforeEach(() => {
   setTables({ visit: { ...baseVisit }, customer: { ...baseCustomer } });
 });
 
+describe('resolveDirectRodentSetupObligation — one resolver for every activation path (codex #3591 r28)', () => {
+  const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
+  const db = require('../models/db');
+  const rodentVisit = { customer_id: 'c1', service_type: 'Rodent Bait Stations', source_estimate_id: null };
+
+  test('direct rodent series with NO other qualifying family owes the live setup fee', async () => {
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('rodent never self-waives: an existing rodent series is not "another" qualifier', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('another qualifying recurring family waives it', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait', 'pest_control'];
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(0);
+  });
+
+  test('estimate-origin series made its billing choice at accept → 0; non-rodent → 0; no customer → 0', async () => {
+    mockQualifyingKeys = async () => [];
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, source_estimate_id: 'est-1' })).resolves.toBe(0);
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, service_type: 'Quarterly Pest Control' })).resolves.toBe(0);
+    await expect(resolveDirectRodentSetupObligation(db, { ...rodentVisit, customer_id: null })).resolves.toBe(0);
+  });
+
+  test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {
+    mockQualifyingKeys = async () => { throw new Error('db down'); };
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');
+  });
+});
+
 describe('buildSecurePlanContext', () => {
   test('gate off → null (page payload stays card-only)', async () => {
     mockGateOn = false;

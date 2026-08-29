@@ -145,6 +145,28 @@ describe('annual-prepay preview — pricing', () => {
     expect(body.setupFee).toBeNull();
   });
 
+  test('direct rodent bait series: the shared resolver\'s setup rides the mint payload as its own line, outside the coverage amount (codex #3591 r28)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    try {
+      const { status, body } = await preview({ serviceType: 'Rodent Bait Stations', price: '99' });
+      expect(status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        customer_id: 'cust-1', service_type: 'Rodent Bait Stations', source_estimate_id: null,
+      }));
+      expect(body.mintPayload.setupFeeAmount).toBe(99);
+      // Coverage amount = the applications only; the mint bills the setup separately.
+      expect(body.mintPayload.amount + 99).toBe(body.prepayTotal);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('pest series: no setup line on the mint payload', async () => {
+    const { body } = await preview({});
+    expect(body.mintPayload.setupFeeAmount).toBeUndefined();
+  });
+
   test('the mint payload carries server-derived money + the booked visit as the coverage anchor', async () => {
     const { body } = await preview({});
     expect(body.mintPayload).toMatchObject({

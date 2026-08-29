@@ -42,8 +42,10 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     // never waived by account-level membership (codex #3591 r18 P1).
     expect(booking).toMatch(/if \(activeMember && !rodentSetupQuote\) \{\s*\n\s*await retireOrWaiveDraft\('existing_member'\);/);
     expect(booking).toMatch(/await retireOrWaiveDraft\('fee_already_queued'\);/);
-    // Non-invoiceable solo visits keep the draft LIVE with the frozen waiver.
-    expect(booking).toMatch(/setupFeeQuote: \{ amount: 0, waived: waivedReason \}/);
+    // Non-invoiceable solo visits keep the draft LIVE with the frozen waiver —
+    // kind preserved and the rodent setup row stripped (codex #3591 r28 P1).
+    expect(booking).toMatch(/setupFeeQuote: \{ amount: 0, waived: waivedReason, \.\.\.\(priorKind \? \{ kind: priorKind \} : \{\}\) \}/);
+    expect(booking).toMatch(/if \(priorKind === 'rodent_bait_setup'\) \{\s*\n\s*const \{ stripWaivedRodentSetupFromDraft \} = require\('\.\/public-quote'\)\._internals;/);
   });
 
   test('consumed-handoff retry identity comes ONLY from the contact-bound shared recovery', () => {

@@ -253,6 +253,39 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('direct rodent series: auto-secure stamps the resolved setup obligation on the series anchor (codex #3591 r28)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(99);
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.action).toBe('auto_secured');
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }));
+      const stamp = touches('scheduled_services')
+        .map((t) => t.chain.calls)
+        .find((calls) => calls.some(([op, patch]) => op === 'update' && patch && patch.pending_setup_fee === 99));
+      expect(stamp).toBeDefined();
+      // whereNull-guarded: never overwrites an obligation already stamped.
+      expect(stamp.some(([op, col]) => op === 'whereNull' && col === 'pending_setup_fee')).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('no obligation (0) → no scheduled_services stamp', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);
+    try {
+      mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+      await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+      const stamped = touches('scheduled_services')
+        .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
+      expect(stamped).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('already_enrolled counts as secured', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
     mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'already_enrolled' });

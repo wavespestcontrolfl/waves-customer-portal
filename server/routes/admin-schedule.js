@@ -12562,6 +12562,7 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,
       annualPrepayOverlapStatusClause,
+      resolveDirectRodentSetupObligation,
     } = require('../services/secure-appointment-plans');
 
     // Local-calendar date-only reads (NOT toISOString) — a UTC slice on a
@@ -12911,7 +12912,17 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       if (!resolved.ok) return blocked(resolved.blockReason);
     }
 
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+    // Rodent bait booked directly (no estimate) owes the one-time setup
+    // unless ANOTHER qualifying recurring service already exists — the same
+    // shared resolver the secure-plan page and autoSecure run, so the
+    // prepay-on-book lane cannot activate the series without collecting it.
+    // Estimate-anchored series carry their own frozen decision (0 here).
+    const unwaivedSetupFee = await resolveDirectRodentSetupObligation(conn, {
+      customer_id: customerId,
+      service_type: coverageServiceType,
+      source_estimate_id: anchorEstimateId || null,
+    });
+    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
     // The setup fee is only real — and therefore only waivable — when it is
@@ -12961,7 +12972,10 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
       // relays server-derived values instead of composing an amount itself.
       mintPayload: {
-        amount: pricing.prepay.total,
+        amount: pricing.prepay.coverageTotal,
+        // Billed as its own invoice line by the mint; never folded into the
+        // coverage basis the term splits across visits.
+        ...(pricing.prepay.setupAmount > 0 ? { setupFeeAmount: pricing.prepay.setupAmount } : {}),
         visitCount: visitsPerYear,
         coverageCadence,
         serviceType: coverageServiceType,
