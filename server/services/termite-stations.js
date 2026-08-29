@@ -708,10 +708,6 @@ function buildStationMapReportContext({
   if (!programRows.length) {
     return { available: false, reason: 'no_stations' };
   }
-  if (!satelliteMap?.available || !satelliteMap.live?.url) {
-    return { available: false, reason: satelliteMap?.fallbackReason || 'satellite_unavailable' };
-  }
-
   const statusByStationId = new Map();
   for (const check of Array.isArray(checkRows) ? checkRows : []) {
     if (check?.station_id != null && STATION_STATUSES.includes(check.status)) {
@@ -721,6 +717,24 @@ function buildStationMapReportContext({
 
   const visitRows = selectStationRowsForVisit(programRows, statusByStationId, serviceDate);
   if (!visitRows.length) return { available: false, reason: 'no_stations' };
+
+  // The visit's check evidence, counted from the persisted check rows —
+  // INDEPENDENT of whether a basemap can render. A transient map-provider
+  // outage must not erase activity-marked check rows from the report's
+  // status (codex P2 #3600 r15); the unavailable branch below carries it as
+  // `checkSummary` so status builders can still reconcile against it.
+  const visitStatuses = visitRows.map((row) => statusByStationId.get(String(row.id)) || null);
+  const summary = {
+    total: visitStatuses.length,
+    checked: visitStatuses.filter((status) => status && status !== 'inaccessible').length,
+    activity: visitStatuses.filter((status) => status === 'activity').length,
+    serviced: visitStatuses.filter((status) => status === 'serviced').length,
+    inaccessible: visitStatuses.filter((status) => status === 'inaccessible').length,
+  };
+
+  if (!satelliteMap?.available || !satelliteMap.live?.url) {
+    return { available: false, reason: satelliteMap?.fallbackReason || 'satellite_unavailable', checkSummary: summary };
+  }
 
   const resolved = resolveZoneRowsImageDrift(visitRows, imageContext);
   const pins = [];
@@ -750,13 +764,8 @@ function buildStationMapReportContext({
     return { available: false, reason: 'marks_stale' };
   }
 
-  const summary = {
-    total: pins.length,
-    checked: pins.filter((pin) => pin.status && pin.status !== 'inaccessible').length,
-    activity: pins.filter((pin) => pin.status === 'activity').length,
-    serviced: pins.filter((pin) => pin.status === 'serviced').length,
-    inaccessible: pins.filter((pin) => pin.status === 'inaccessible').length,
-  };
+  // (pins.length === visitRows.length was enforced above, so the pin
+  // statuses and `summary` describe the same rows.)
 
   return {
     available: true,

@@ -492,6 +492,27 @@ describe('termiteBaitSnapshotOf / companion snapshots (combined visits)', () => 
     expect(data.termiteReportV2.aiSummary).toBeNull();
   });
 
+  it('an installation-stage visit keeps the typed record (no dashboard) and consumes the stage field', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+    const install = attachTermiteReportV2({ typedReport: { type: 'termite_bait_station', visitSequence: 1 }, termiteBaitStage: 'installation' }, service);
+    expect(install.termiteReportV2).toBeUndefined();
+    expect(install).not.toHaveProperty('termiteBaitStage');
+    const monitoring = attachTermiteReportV2({ typedReport: { type: 'termite_bait_station', visitSequence: 2 }, termiteBaitStage: 'monitoring' }, service);
+    expect(monitoring.termiteReportV2.status.label).toBe('No termite activity observed');
+    expect(monitoring).not.toHaveProperty('termiteBaitStage');
+  });
+
+  it('reconciles against the persisted check rows even when only the basemap failed (checkSummary)', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'termite_bait_station', values: CLEAN_VALUES } }) };
+    const data = attachTermiteReportV2({
+      typedReport: { type: 'termite_bait_station', visitSequence: 2 },
+      stationMap: { available: false, reason: 'provider_unavailable', checkSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 } },
+    }, service);
+    expect(data.termiteReportV2.status.label).toBe('Termite activity observed at 2 stations');
+  });
+
   it('a companion the payload filtered out (internal_only) yields no dashboard', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
     expect(attachTermiteReportV2({ typedReport: { type: 'cockroach' }, companionReports: [] }, internalOnly).termiteReportV2).toBeUndefined();
@@ -523,6 +544,13 @@ describe('termiteReportV2PdfSignature — PDF cache-key component', () => {
     expect(termiteReportV2PdfSignature(baitRecord)).toBe('-termv2');
     // object-shaped service_data (already parsed by a caller)
     expect(termiteReportV2PdfSignature({ service_data: { typedReportSnapshot: { type: 'termite_bait_station' } } })).toBe('-termv2');
+  });
+
+  it('is empty for installation / setup visits (the typed record stands)', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Station Installation' })).toBe('');
+    expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Setup' })).toBe('');
+    expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Station Service' })).toBe('-termv2');
   });
 
   it('is empty for other typed types, records without a snapshot, and malformed service_data', () => {

@@ -417,7 +417,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.', body: 'We treated the kitchen.' }, findings: [] },
       companionReports: [{
         type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
-        todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body.', nextStep: 'Recheck active stations sooner.' },
+        // body FOLDS the next step in (the snapshot builder's normal shape)
+        todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body. Recheck active stations sooner.', nextStep: 'Recheck active stations sooner.' },
         findings: [
           { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
           { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
@@ -453,6 +454,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).toMatch(/2 of the 12 stations inspected/);
     expect(text).not.toMatch(/Termite activity was high today/);
     expect(text).not.toMatch(/Companion typed body/);
+    // the required next step prints even though the body (which normally
+    // folds it in) is suppressed — the dashboard's reconciled nextStep wins
     expect(text).toMatch(/Recheck active stations sooner/);
     expect(text).toMatch(/Station condition issues: Station obstructed/);
     expect(text).not.toMatch(/Stations checked: 12/);

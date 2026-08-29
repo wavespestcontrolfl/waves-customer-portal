@@ -502,7 +502,15 @@ function attachTermiteReportV2(data, service = {}) {
   // the PDF signature). The name-derived serviceLine is not consulted: a
   // catalog short name such as "Bait Annual" detects as 'pest' while its
   // profile and snapshot are termite_bait_station (codex P1 #3600 r12).
+  // report-data resolves the visit STAGE from the completion profile: the
+  // termite_installation_setup profile also freezes termite_bait_station,
+  // and an installation is not a monitoring check — its pins and counts
+  // must never read as "stations inspected" (codex P1 #3600 r15). The
+  // typed cards stand for installations; the dashboard is monitoring-only.
+  const stage = data.termiteBaitStage || null;
+  delete data.termiteBaitStage;
   if (process.env.TERMITE_REPORT_V2 !== 'true') return data;
+  if (stage === 'installation') return data;
   const resolved = termiteBaitSnapshotOf(service);
   if (!resolved) return data;
   // The customer-visible report entry that matches the snapshot: the
@@ -518,7 +526,10 @@ function attachTermiteReportV2(data, service = {}) {
     const termiteReportV2 = buildTermiteReportV2({
       typedSnapshotValues: resolved.snapshot.values || null,
       typedReportType: TERMITE_BAIT_TYPED_TYPE,
-      stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
+      // Visit-check evidence rides the map when it rendered and
+      // `checkSummary` when only the basemap failed — either way the
+      // persisted check rows reconcile the status (codex P2 #3600 r15).
+      stationSummary: data.stationMap?.summary || data.stationMap?.checkSummary || null,
       visitSequence: report.visitSequence || 1,
       // The dashboard replaces the typed Today's Result card, so it must
       // carry the tech's required next-step commitment itself.
@@ -554,8 +565,15 @@ function attachTermiteReportV2(data, service = {}) {
  * bait-station profile; codex P2 #3600 r1). Bump the suffix whenever the
  * termite-line report COMPOSITION changes.
  */
+// Installation / setup visits keep the typed record (see
+// attachTermiteReportV2). The signature only sees the record row, so the
+// service name is the available signal here; report-data's profile-backed
+// stage is the render-side authority.
+const INSTALLATION_NAME_RE = /\b(install|installation|setup|set-up)\b/i;
+
 function termiteReportV2PdfSignature(service = {}) {
   if (process.env.TERMITE_REPORT_V2 !== 'true') return '';
+  if (INSTALLATION_NAME_RE.test(String(service.service_type || ''))) return '';
   return termiteBaitSnapshotOf(service) ? '-termv2' : '';
 }
 

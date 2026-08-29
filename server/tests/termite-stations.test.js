@@ -751,6 +751,27 @@ test('report context gates: wrong visit type, no stations, satellite down, env k
   }
 });
 
+test('a basemap outage keeps the visit-check evidence as checkSummary (status builders reconcile without a map)', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3)),
+      stationRow('st-2', 2, pin(0.5, 0.5)),
+      stationRow('st-3', 3, pin(0.8, 0.6)),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'ok' },
+      { station_id: 'st-2', status: 'activity' },
+      { station_id: 'st-3', status: 'serviced' },
+    ],
+    satelliteMap: { available: false, fallbackReason: 'provider_unavailable' },
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+  });
+  expect(context).toMatchObject({ available: false, reason: 'provider_unavailable' });
+  expect(context.checkSummary).toEqual({ total: 3, checked: 3, activity: 1, serviced: 1, inaccessible: 0 });
+  expect(context.summary).toBeUndefined();
+});
+
 test('a companion termite_bait_station type also renders (combined pest+termite visits)', () => {
   const context = buildStationMapReportContext({
     stationRows: [stationRow('st-1', 1, pin(0.2, 0.3))],

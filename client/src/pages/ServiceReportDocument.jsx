@@ -1371,12 +1371,22 @@ export default function ServiceReportDocument({ data, token }) {
                 builder usually folds nextStep into the body, so only print it
                 when it adds something — but never drop the companion
                 service's instruction entirely. */}
-            {companion.todaysResult?.nextStep
-              && !String(companion.todaysResult.body || '').includes(companion.todaysResult.nextStep) && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-                {companion.todaysResult.nextStep}
-              </p>
-            )}
+            {/* A dashboard-owned bait companion has its body suppressed
+                above, so its required next step prints unconditionally
+                (the dashboard's reconciled nextStep first) — codex P2
+                #3600 r15. */}
+            {termiteV2Companion && companion.type === 'termite_bait_station'
+              ? ((termiteV2?.nextStep || companion.todaysResult?.nextStep) && (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {termiteV2?.nextStep || companion.todaysResult.nextStep}
+                </p>
+              ))
+              : (companion.todaysResult?.nextStep
+                && !String(companion.todaysResult.body || '').includes(companion.todaysResult.nextStep) && (
+                <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                  {companion.todaysResult.nextStep}
+                </p>
+              ))}
             {(companion.findings || [])
               .filter((finding) => String(finding?.customerValueLabel ?? finding?.value ?? '').trim())
               .filter((finding) => !(termiteV2Companion && companion.type === 'termite_bait_station') || !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(finding?.fieldKey))

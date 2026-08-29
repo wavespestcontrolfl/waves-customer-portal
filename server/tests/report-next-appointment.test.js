@@ -477,6 +477,37 @@ test('the live termite bond lookup runs for a combined visit whose bait snapshot
   }
 });
 
+test('termiteBaitStage: the completion profile decides installation vs monitoring; name tokens only without a profile', async () => {
+  const fixtures = {
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-install', service_key: 'termite_installation_setup', name: 'Termite Bait Station Installation', short_name: 'Install', category: 'termite' },
+      { id: 'svc-monitor', service_key: 'termite_bait', name: 'Termite Bait Station Service', short_name: 'Bait', category: 'termite' },
+    ],
+    service_completion_profiles: [
+      { service_key: 'termite_installation_setup', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+      { service_key: 'termite_bait', active: true, completion_mode: 'service_report', project_type: 'termite_bait_station' },
+    ],
+  };
+  const install = await buildReportV1Data(
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-install' },
+    'token-stage-install',
+    makeKnex({ ...fixtures, scheduled_services: [{ id: 'sched-install', customer_id: 'customer-1', service_id: 'svc-install', service_type: 'Termite Bait Station Installation', scheduled_date: '2026-08-27', status: 'completed' }] }),
+    LIVE_V2,
+  );
+  expect(install.termiteBaitStage).toBe('installation');
+  const monitor = await buildReportV1Data(
+    { ...TERMITE_SERVICE, scheduled_service_id: 'sched-monitor' },
+    'token-stage-monitor',
+    makeKnex({ ...fixtures, scheduled_services: [{ id: 'sched-monitor', customer_id: 'customer-1', service_id: 'svc-monitor', service_type: 'Termite Bait Station Service', scheduled_date: '2026-08-27', status: 'completed' }] }),
+    LIVE_V2,
+  );
+  expect(monitor.termiteBaitStage).toBe('monitoring');
+  // a non-bait record carries no stage at all
+  const pest = await buildReportV1Data(BASE_SERVICE, 'token-stage-pest', makeKnex({ ...fixtures, scheduled_services: [] }), LIVE_V2);
+  expect(pest.termiteBaitStage).toBeNull();
+});
+
 test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,

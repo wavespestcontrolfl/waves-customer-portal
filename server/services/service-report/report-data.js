@@ -4888,6 +4888,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
     termiteNextMonitoringVisit,
+    // Visit stage for a bait-station snapshot, from the completion profile
+    // (termite_installation_setup also freezes termite_bait_station):
+    // 'installation' keeps the typed record; 'monitoring' may render the
+    // dashboard. Consumed and removed by attachTermiteReportV2. Name tokens
+    // decide only when no profile resolved (fail toward the typed record).
+    termiteBaitStage: termiteBaitSnapshotOf(service)
+      ? ((laneProfile?.serviceKey === 'termite_installation_setup'
+        || (!laneProfile && /\b(install|installation|setup|set-up)\b/i.test(`${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`)))
+        ? 'installation'
+        : 'monitoring')
+      : null,
     termiteBonds,
     relatedDocuments,
     visitTimeline,

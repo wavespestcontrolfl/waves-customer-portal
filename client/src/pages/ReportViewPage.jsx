@@ -5493,10 +5493,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // render as ONE box, not two stacked cards. When the gauge will render,
   // the trend embeds inside it (replacing the gauge's own history chart);
   // the standalone trend card remains only for layouts with no gauge.
+  // (a COMPANION termite dashboard leaves the primary pest gauge in place —
+  // only a primary termite dashboard replaces it; codex P2 #3600 r15)
   const pressureGaugeVisible = !data.activity
     && !data.pestReportV2
     && !data.mosquitoReportV2
-    && !data.termiteReportV2
+    && !(data.termiteReportV2 && data.termiteReportV2.source !== 'companion')
     && !!data.pestPressure
     && data.pestPressure.enabled !== false
     && data.pestPressure.showOnCustomerReport !== false;
