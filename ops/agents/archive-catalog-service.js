@@ -39,7 +39,9 @@ const { getServiceByKey, getServiceReferences, deactivateService } = require(pat
     process.exit(1);
   }
   if (!EXECUTE) { console.log('DRY RUN: archive would succeed (is_active=false, is_archived=true + audit row). Re-run with --execute.'); process.exit(0); }
-  const after = await deactivateService(row.id, { audit: { changed_by: 'ops/agents/archive-catalog-service.js', reason: 'owner ruling 2026-08-29' } });
+  // writeCatalogAudit reads actorId / ipAddress / userAgent — anything else
+  // is silently dropped, so the operator identity rides in userAgent.
+  const after = await deactivateService(row.id, { audit: { actorId: null, userAgent: 'ops/agents/archive-catalog-service.js (owner-run; ruling 2026-08-29)' } });
   console.log(`ARCHIVED: ${after.service_key} | ${after.name} | active=${after.is_active} archived=${after.is_archived}`);
 })().catch(async (e) => { console.error(e.message, e.details ? JSON.stringify(e.details) : ''); process.exit(1); })
   .finally(() => db.destroy().catch(() => {}));
