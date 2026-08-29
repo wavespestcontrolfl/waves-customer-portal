@@ -439,15 +439,21 @@ function buildAftercare(applications) {
   // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
   // we never publish a do-not-water instruction the label doesn't back.
   let watering;
+  let neutral = false;
   if (waterInRequired === true) {
     watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
   } else if (productNote) {
     watering = productNote;
   } else {
-    watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+    // Non-label fallback — the report rewrites it to defer to the weekly
+    // plan when one is on the card (see buildLawnReportV2).
+    watering = NEUTRAL_AFTERCARE;
+    neutral = true;
   }
-  return { watering, reentry, waterInRequired };
+  return { watering, reentry, waterInRequired, neutral };
 }
+const NEUTRAL_AFTERCARE = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+const NEUTRAL_AFTERCARE_WITH_PLAN = 'No special watering is needed because of today’s treatment — follow this week’s watering plan.';
 
 // Short topic phrase for the headline, from the top issue card's category.
 const ISSUE_TOPIC = {
@@ -672,6 +678,12 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // above target the report tells the customer to EASE BACK on irrigation, and a
   // bare "give the lawn a normal watering" instruction two cards later reads like a
   // contradiction. Name the exception explicitly so both instructions survive.
+  // Neutral (non-label) aftercare never tells a customer to "keep your normal
+  // schedule" under a plan — a hold plan may be lower than, or the order may
+  // forbid, that schedule (codex #3565 gh-r28). Label instructions stay.
+  if (aftercare.neutral && water && water.weekPlan && water.weekPlan.title) {
+    aftercare.watering = NEUTRAL_AFTERCARE_WITH_PLAN;
+  }
   // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
@@ -698,4 +710,4 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, grassLabelFor, mapWater, buildRootCause };
+module.exports = { buildLawnReportV2, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

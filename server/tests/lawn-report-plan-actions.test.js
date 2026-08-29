@@ -4,7 +4,7 @@
  * the root-cause sentence, the surplus watering-in aftercare clause.
  */
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
-const { buildRootCause } = require('../services/service-report/lawn-report-v2');
+const { buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
 
 const PLAN = { title: 'This week: check the rain before you water', detail: '…' };
 
@@ -39,5 +39,19 @@ describe('surplus aftercare clause', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
     expect(src).toMatch(/after it, follow this week’s watering plan\.'/);
     expect(src).toMatch(/weekPlan: water \? water\.weekPlan : null \}\);/);
+  });
+});
+
+describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
+  test('buildAftercare flags its non-label fallback; label copy is never flagged', () => {
+    expect(buildAftercare([])).toMatchObject({ neutral: true, waterInRequired: null });
+    expect(buildAftercare([{ product: { irrigation_required: true } }])).toMatchObject({ neutral: false, waterInRequired: true });
+    expect(buildAftercare([{ product: { irrigation_notes: 'Do not water for 24 hours.' } }])).toMatchObject({ neutral: false, watering: 'Do not water for 24 hours.' });
+  });
+  test('source pin: with a plan the neutral copy is rewritten, label copy untouched', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
+    expect(src).toMatch(/if \(aftercare\.neutral && water && water\.weekPlan && water\.weekPlan\.title\) \{\s*aftercare\.watering = NEUTRAL_AFTERCARE_WITH_PLAN;/);
+    expect(NEUTRAL_AFTERCARE_WITH_PLAN).toMatch(/follow this week’s watering plan/);
+    expect(NEUTRAL_AFTERCARE_WITH_PLAN).not.toMatch(/normal schedule/);
   });
 });
