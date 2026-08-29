@@ -4786,6 +4786,20 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
+  test('opensDefinitelyHidden: attribute scans are quote-aware; falsy literals are case-sensitive; a spread after a hidden style makes it unprovable (#3593 r2)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // `open` inside ANOTHER attribute's quoted value is not an attribute — the element stays closed.
+    expect(keep('<details open={false} title="Click to open details"><summary>S</summary>![h](/x.webp)</details>')).not.toContain('![h]');
+    // `style=` inside a quoted title is not a style attribute — visible.
+    expect(keep(`<div title="literal style='display:none' example">![v](/x.webp)</div>`)).toContain('![v]');
+    // Identifiers are case-sensitive: {FALSE} may be truthy — unprovable, open.
+    expect(keep('<details open={FALSE}><summary>S</summary>![v2](/x.webp)</details>')).toContain('![v2]');
+    // A spread after a literal hidden style may override it — unprovable, visible.
+    expect(keep("<div style={{ display: 'none' }} {...props}>![v3](/x.webp)</div>")).toContain('![v3]');
+    // …spread BEFORE the literal is overridden by it — still hidden.
+    expect(keep("<div {...props} style={{ display: 'none' }}>![h2](/x.webp)</div>")).not.toContain('![h2]');
+  });
+
   test('opensDefinitelyHidden: style matching is bounded to the style VALUE with token boundaries; spreads make `open` unprovable (#3593 r1)', () => {
     const { blankDefinitelyHiddenContent: keep } = guardrails;
     // Keyword in a DIFFERENT attribute, or as a substring — visible.

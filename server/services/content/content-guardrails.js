@@ -136,7 +136,64 @@ const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalis
 // attribute in HTML and stays open; only a falsy literal MDX expression
 // counts as absent. An expression we cannot prove ({isOpen}) counts as
 // open here — the certainty walker must never blank possibly-visible text.
-const FALSY_EXPR_RE = /^\{\s*(?:false|0|null|undefined|''|"")\s*\}$/i;
+// Case-SENSITIVE: JavaScript literals are lowercase; `{FALSE}` is an
+// identifier that may be truthy, so it stays unprovable (#3593 r2).
+const FALSY_EXPR_RE = /^\{\s*(?:false|0|null|undefined|''|"")\s*\}$/;
+// Length-preserving masks over an attrs string so attribute-NAME scans
+// cannot match words inside quoted values or {…} expressions (#3593 r2).
+// `keepBraces`: mask string contents only (spread detection needs the
+// braces themselves visible).
+function maskAttrRegions(attrs, { keepBraces = false } = {}) {
+  const a = String(attrs || '');
+  const out = a.split('');
+  for (let i = 0; i < a.length; i += 1) {
+    const c = a[i];
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c;
+      let j = i + 1;
+      while (j < a.length && a[j] !== q) j += 1;
+      for (let k = i + 1; k < j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+      i = j;
+      continue;
+    }
+    if (c === '{' && !keepBraces) {
+      let d = 0;
+      let j = i;
+      for (; j < a.length; j += 1) {
+        const ch = a[j];
+        if (ch === '"' || ch === "'" || ch === '`') { const q = ch; j += 1; while (j < a.length && a[j] !== q) j += a[j] === '\\' ? 2 : 1; continue; }
+        if (ch === '{') d += 1;
+        else if (ch === '}') { d -= 1; if (d === 0) break; }
+      }
+      for (let k = i + 1; k < j && k < a.length; k += 1) if (out[k] !== '\n') out[k] = ' ';
+      i = j;
+      continue;
+    }
+  }
+  return out.join('');
+}
+// The value that starts at `pos` in the ORIGINAL attrs: a balanced {…}
+// expression, a quoted string, or a bare token.
+function attrValueAt(attrs, pos) {
+  const a = String(attrs || '');
+  const ch = a[pos];
+  if (ch === '{') {
+    let d = 0;
+    let j = pos;
+    for (; j < a.length; j += 1) {
+      const c = a[j];
+      if (c === '"' || c === "'" || c === '`') { const q = c; j += 1; while (j < a.length && a[j] !== q) j += a[j] === '\\' ? 2 : 1; continue; }
+      if (c === '{') d += 1;
+      else if (c === '}') { d -= 1; if (d === 0) break; }
+    }
+    return a.slice(pos, Math.min(j + 1, a.length));
+  }
+  if (ch === '"' || ch === "'" || ch === '`') {
+    const end = a.indexOf(ch, pos + 1);
+    return end === -1 ? a.slice(pos) : a.slice(pos, end + 1);
+  }
+  return (a.slice(pos).match(/^[^\s>/]*/) || [''])[0];
+}
 // A spread ({...props}) can carry `open`, so its presence makes the final
 // value unprovable — and the certainty walker must then treat the element
 // as OPEN (never blank possibly-visible text, #3593 r1). JSX evaluates
@@ -146,14 +203,24 @@ const FALSY_EXPR_RE = /^\{\s*(?:false|0|null|undefined|''|"")\s*\}$/i;
 const SPREAD_RE = /\{\s*\.\.\./;
 function hasTrueOpenAttr(attrs) {
   const a = String(attrs || '');
-  const re = /(?:^|\s)open(?:\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>/]+))?(?=[\s>/]|$)/gi;
+  // Attribute NAMES are located on a masked copy — `open` inside a quoted
+  // value (`title="Click to open"`) or an expression is not an attribute
+  // (#3593 r2); values are then read from the ORIGINAL at the same offsets.
+  const masked = maskAttrRegions(a);
+  const spreadable = maskAttrRegions(a, { keepBraces: true }); // strings masked, braces kept
+  // `open` either carries `=` (value follows — any delimiter) or the
+  // attribute ends at whitespace / `>` / `/`.
+  const re = /(?:^|\s)open(\s*=\s*|(?=[\s>/]|$))/gi;
   let m = null;
   let last = null;
-  while ((m = re.exec(a)) !== null) last = m;
-  if (!last) return SPREAD_RE.test(a); // no literal `open`: a spread may add one
-  if (SPREAD_RE.test(a.slice(last.index + last[0].length))) return true; // later spread may override
-  if (last[1] === undefined) return true; // bare `open`
-  return !FALSY_EXPR_RE.test(last[1].trim());
+  while ((m = re.exec(masked)) !== null) last = m;
+  if (!last) return SPREAD_RE.test(spreadable); // no literal `open`: a spread may add one
+  const valueStart = /=/.test(last[1] || '') ? last.index + last[0].length : -1;
+  const value = valueStart >= 0 ? attrValueAt(a, valueStart) : undefined;
+  const afterEnd = valueStart >= 0 ? valueStart + (value ? value.length : 0) : last.index + last[0].length;
+  if (SPREAD_RE.test(spreadable.slice(afterEnd))) return true; // later spread may override
+  if (value === undefined) return true; // bare `open`
+  return !FALSY_EXPR_RE.test(value.trim());
 }
 
 function opensDefinitelyHidden(tag) {
@@ -177,30 +244,23 @@ function opensDefinitelyHidden(tag) {
 const HIDDEN_STYLE_KEYWORD_RE = /(?:^|[^a-z0-9_-])display\s*:\s*['"`]?\s*none(?![a-z0-9_-])|(?:^|[^a-z0-9_-])visibility\s*:\s*['"`]?\s*hidden(?![a-z0-9_-])/i;
 function hiddenStyleValue(attrs) {
   const a = String(attrs || '');
+  // The style ATTRIBUTE is located on the masked copy — a `style=` inside
+  // another attribute's quoted value is not an attribute (#3593 r2).
+  const masked = maskAttrRegions(a);
   const re = /(?:^|\s)style\s*=\s*/gi;
   let m = null;
   let last = null;
-  while ((m = re.exec(a)) !== null) last = m;
+  while ((m = re.exec(masked)) !== null) last = m;
   if (!last) return false;
-  const v = a.slice(last.index + last[0].length);
-  const ch = v[0];
-  let val = '';
-  if (ch === '"' || ch === "'" || ch === '`') {
-    const end = v.indexOf(ch, 1);
-    val = end === -1 ? v.slice(1) : v.slice(1, end);
-  } else if (ch === '{') {
-    let d = 0;
-    let j = 0;
-    for (; j < v.length; j += 1) {
-      const c = v[j];
-      if (c === '"' || c === "'" || c === '`') { const q = c; j += 1; while (j < v.length && v[j] !== q) j += v[j] === '\\' ? 2 : 1; continue; }
-      if (c === '{') d += 1;
-      else if (c === '}') { d -= 1; if (d === 0) break; }
-    }
-    val = v.slice(1, j);
-  } else {
-    val = (v.match(/^[^\s>]*/) || [''])[0];
-  }
+  const valueStart = last.index + last[0].length;
+  const rawValue = attrValueAt(a, valueStart);
+  // A spread AFTER the literal style may override it (props.style =
+  // display:'block') — hidden is then unprovable and the certainty walker
+  // keeps the content (#3593 r2), mirroring the `open` handling.
+  const spreadable = maskAttrRegions(a, { keepBraces: true });
+  if (SPREAD_RE.test(spreadable.slice(valueStart + rawValue.length))) return false;
+  const ch = rawValue[0];
+  const val = (ch === '"' || ch === "'" || ch === '`' || ch === '{') ? rawValue.slice(1, -1) : rawValue;
   return HIDDEN_STYLE_KEYWORD_RE.test(val);
 }
 
