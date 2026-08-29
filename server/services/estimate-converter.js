@@ -508,11 +508,7 @@ function explicitServiceCadence(svc = {}) {
 // never as the single recurring unit the per-application stamp is derived
 // from (codex #3591 r19 P0: a disclosed $49/mo plan would otherwise become
 // a $147 per-completion charge under billing_mode per_application).
-function isPinnedLegacyRodentRow(svc = {}) {
-  return svc?.legacyPinnedReplay === true
-    && String(svc?.service || '').toLowerCase() === 'rodent_bait'
-    && svc?.perApplicationBilled !== true;
-}
+const { isPinnedLegacyRodentRow } = require('./billing-cadence');
 
 function supplementalCompanionLines(estimateData = {}) {
   const result = estimateData.result || {};

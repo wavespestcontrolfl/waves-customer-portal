@@ -1156,9 +1156,12 @@ const EDIT_FALLBACK_SERVICES = [
       {
         name: "Rodent Bait Station Service",
         serviceKey: "rodent_bait_quarterly",
-        // rodent_bait joined WaveGuard 2026-08-29 (owner directive) and is
-        // percent-DISCOUNTABLE — the stale exclusion here made the fallback
-        // preview show a higher total than the server persists on save.
+        // Percent-exclusion is a LIVE policy (pricing_config.rodent_waveguard,
+        // admin-editable) — the offline fallback cannot know it, so it stays
+        // unknown here and the percentage preview is disabled while the
+        // live catalog is unavailable (codex #3591 r20 P2); the server
+        // applies the live exclusion on save.
+        excludedFromPercentDiscount: null,
       },
     ],
   },
@@ -1357,6 +1360,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [cancelNotificationType, setCancelNotificationType] = useState("text");
   const [cancelling, setCancelling] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
+  // True once the live service catalog loaded; the static fallback carries
+  // no server-derived percent-exclusion flags, so percentage previews are
+  // withheld until it does (codex #3591 r20 P2).
+  const [catalogLive, setCatalogLive] = useState(false);
   const [expandedCategory, setExpandedCategory] = useState(null);
   // Which service line's picker is open: null | 'primary' | line._key
   const [pickerKey, setPickerKey] = useState(null);
@@ -1581,7 +1588,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (async () => {
       try {
         const r = await adminFetch("/admin/schedule/services-dropdown");
-        if (r.groups?.length) setServiceGroups(r.groups);
+        if (r.groups?.length) {
+          setServiceGroups(r.groups);
+          setCatalogLive(true);
+        }
       } catch {
         /* keep fallback */
       }
@@ -3629,6 +3639,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
+                {discountType === "percentage" &&
+                  discountAmount !== "" &&
+                  !catalogLive && (
+                    <div
+                      style={{
+                        minWidth: 220,
+                        fontSize: 12,
+                        color: D.muted,
+                      }}
+                    >
+                      Live service catalog unavailable — percentage exclusions
+                      (e.g. rodent bait) aren&apos;t previewed here; the server
+                      applies the live rules on save.
+                    </div>
+                  )}
                 {discountType &&
                   discountAmount !== "" &&
                   percentExcludedLines.length > 0 && (

@@ -75,7 +75,12 @@ async function audit(knex, configKey, oldValue, newValue, reason) {
 }
 
 async function updateRow(knex, configKey, mutate, reason) {
-  const row = await knex('pricing_config').where({ config_key: configKey }).first();
+  // Row lock (codex #3591 r20 P2): the admin writer serializes on
+  // forUpdate() (admin-pricing-config PUT) — honoring the same lock here
+  // keeps an admin edit landing mid-deploy from being overwritten by a
+  // full-object write built from a stale read. Knex runs migrations inside
+  // a transaction, so the lock is held until the migration commits.
+  const row = await knex('pricing_config').where({ config_key: configKey }).forUpdate().first();
   if (!row) return;
   const oldData = parseData(row);
   const newData = mutate({ ...oldData });

@@ -153,6 +153,19 @@ function frequencyFromService(service) {
   return null;
 }
 
+// A PINNED pre-realignment rodent bait row (legacyPinnedReplay, no
+// per-application marker) is the legacy MONTHLY-billed plan: its visitsPerYear
+// is an operational cadence, not a billing unit. It never drives the billing
+// cadence — with it, a rodent-only legacy accept inferred "quarterly" and
+// stamped annual ÷ 4 ($147) where the disclosed lane is the monthly figure
+// ($49). Shared with the converter, which routes the same rows through the
+// legacy supplement path (codex #3591 r19/r20 P0).
+function isPinnedLegacyRodentRow(svc = {}) {
+  return svc?.legacyPinnedReplay === true
+    && String(svc?.service || '').toLowerCase() === 'rodent_bait'
+    && svc?.perApplicationBilled !== true;
+}
+
 function collectRecurringServices(estimateData) {
   const data = parseEstimateData(estimateData);
   const lists = [
@@ -161,7 +174,8 @@ function collectRecurringServices(estimateData) {
     data.results?.recurring?.services,
     data.services,
   ];
-  return lists.flatMap((list) => (Array.isArray(list) ? list : []));
+  return lists.flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((svc) => !isPinnedLegacyRodentRow(svc));
 }
 
 function inferFrequencyKeyFromEstimateData(estimateData) {
@@ -290,6 +304,7 @@ module.exports = {
   collectRecurringServices,
   customerPreservesMonthlyMembership,
   displayForFrequencyKey,
+  isPinnedLegacyRodentRow,
   frequencyKeyFromVisitsPerYear,
   inferFrequencyKeyFromEstimateData,
   intervalPriceFromAnnual,

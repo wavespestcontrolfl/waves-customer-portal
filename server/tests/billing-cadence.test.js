@@ -87,3 +87,22 @@ describe('billing cadence helpers', () => {
     expect(resolveBillingCadence({ monthlyRate: 32.67, frequencyKey: 'quarterly' }).amount).toBe(98.01);
   });
 });
+
+describe('pinned legacy rodent rows never drive the billing cadence (codex #3591 r19/r20 P0)', () => {
+  const { resolveBillingCadence, isPinnedLegacyRodentRow, collectRecurringServices } = require('../services/billing-cadence');
+  const pinned = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, monthly: 49, annual: 588, visitsPerYear: 4, legacyPinnedReplay: true, discountable: false };
+  const fresh = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, monthly: 29.67, annual: 356, visitsPerYear: 4, perApplicationBilled: true, stations: 5 };
+  test('a rodent-only pre-realignment accept stays on the monthly lane: cadence monthly, charge = the disclosed monthly figure', () => {
+    expect(isPinnedLegacyRodentRow(pinned)).toBe(true);
+    expect(collectRecurringServices({ result: { recurring: { services: [pinned] } } })).toEqual([]);
+    const cadence = resolveBillingCadence({ monthlyRate: 49, annualRate: 588, estimateData: { result: { recurring: { services: [pinned] } } } });
+    expect(cadence.frequencyKey).toBe('monthly');
+    expect(cadence.amount).toBe(49);
+  });
+  test('a new-model rodent row keeps its per-application (quarterly) cadence', () => {
+    expect(isPinnedLegacyRodentRow(fresh)).toBe(false);
+    const cadence = resolveBillingCadence({ monthlyRate: 29.67, annualRate: 356, estimateData: { result: { recurring: { services: [fresh] } } } });
+    expect(cadence.frequencyKey).toBe('quarterly');
+    expect(cadence.amount).toBe(89);
+  });
+});
