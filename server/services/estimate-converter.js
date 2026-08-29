@@ -2623,6 +2623,20 @@ function shouldSuppressRecurringConversion({
     && !services.some(recurringRowRequiresQuote);
 }
 
+// True when the estimate carries a PRICED commercial scoped one-time line
+// (GATE_COMMERCIAL_ONETIME_SCOPED marking: isCommercial + auto_estimate).
+// Drives the commercial property_type stamp for one-time-only accepts — the
+// recurring stamp never sees these rows (codex #3594 P1). A manual commercial
+// QUOTE row does not count: nothing commercial was priced or accepted.
+function estimateHasCommercialOneTime(estimateData = {}) {
+  return estimateOneTimeItemsFromData(estimateData).some(
+    (item) => item
+      && item.isCommercial === true
+      && item.commercialPricingMode === 'auto_estimate'
+      && item.quoteRequired !== true
+  );
+}
+
 function firstPositiveNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -3666,6 +3680,12 @@ const EstimateConverter = {
     const hasCommercialRecurring = recurringServicesForConversion.some(
       (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_')
     );
+    // Scoped one-time commercial lines (GATE_COMMERCIAL_ONETIME_SCOPED) carry
+    // commercial identity on ONE-TIME rows only — a commercial estimate with
+    // no recurring line (the motivating pre-slab case) must still stamp the
+    // customer commercial, or InvoiceService reads the customer as residential
+    // and zeroes the FL tax on a taxable accepted line (codex #3594 P1).
+    const hasCommercialOneTime = estimateHasCommercialOneTime(estimateData);
     // A plan is commercial-only (non-member) when it has a commercial recurring
     // line and NO WaveGuard-qualifying recurring service. Commercial keys are
     // never qualifying, so serviceCount===0 means there is no qualifying
@@ -3966,12 +3986,13 @@ const EstimateConverter = {
           // tier with a positive monthly_rate falls through those predicates'
           // legacy rate>0 fallback and would be treated/rendered as Bronze.
           waveguard_tier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
-          // A commercial recurring plan means the property is commercial — mark
-          // it so InvoiceService applies FL sales tax to taxable commercial
-          // services (e.g. commercial pest = nonresidential_pest_control 7%).
-          // Without this the customer reads residential and tax is forced to $0.
+          // A commercial recurring plan OR a priced commercial scoped one-time
+          // means the property is commercial — mark it so InvoiceService
+          // applies FL sales tax to taxable commercial services (e.g.
+          // commercial pest = nonresidential_pest_control 7%). Without this
+          // the customer reads residential and tax is forced to $0.
           // Only SET it for commercial; never downgrade a residential customer.
-          ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
+          ...(hasCommercialRecurring || hasCommercialOneTime ? { property_type: 'commercial' } : {}),
           // Ledger authority (gate on + seeded): the scalar is the ledger
           // SUM — a same-family re-quote touches only its own family's
           // slice (the customer row lock above serializes concurrent
@@ -4101,6 +4122,22 @@ const EstimateConverter = {
     if (suppressRecurringConversion === true) {
       await require('./plan-rate-ledger')
         .syncScalarWriteToLedger(database, customerId, null, { source: 'one_time_accept' });
+    }
+
+    // Commercial identity persistence for one-time-only accepts (codex #3594
+    // P1): the recurring customer-update block below only runs when recurring
+    // conversion happens, so a commercial estimate whose only lines are priced
+    // scoped one-times (the motivating pre-slab case) would leave the customer
+    // residential and InvoiceService would zero the FL tax on the accepted
+    // taxable line. Same one-way rule as the recurring stamp: only ever SET
+    // commercial — the WHERE makes this a no-op when the customer already
+    // reads commercial (including a stamp from the recurring block on mixed
+    // estimates), and a residential customer is never downgraded elsewhere.
+    if (hasCommercialOneTime) {
+      await database('customers')
+        .where({ id: customerId })
+        .whereRaw("coalesce(property_type, '') <> 'commercial'")
+        .update({ property_type: 'commercial' });
     }
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
@@ -6264,6 +6301,7 @@ module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;
 module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
+module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.

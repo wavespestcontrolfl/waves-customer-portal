@@ -951,7 +951,11 @@ function generateEstimate(input) {
 
   // Palm Injection
   const palmService = services.palmInjection || services.palm;
-  if (palmService && !useCommercialManualQuote(palmService, 'lawn_care', { scopedOneTime: true })) {
+  // Palm stays commercial-manual: it is an annual recurring program, and the
+  // v1 legacy mapper rebuilds it as a plain residential palm_injection row
+  // (commercial identity dropped), which can seed the residential semiannual
+  // auto-schedule on accept (codex #3594 P1).
+  if (palmService && !useCommercialManualQuote(palmService, 'lawn_care')) {
     const palmOptions = serviceOptions(palmService);
     const palmCountResolution = resolvePalmCount(property, palmOptions);
     if (!Number.isInteger(palmCountResolution.palmCount) || palmCountResolution.palmCount <= 0) {
@@ -1399,7 +1403,11 @@ function generateEstimate(input) {
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
-  if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control', { scopedOneTime: true })) {
+  // WDO stays commercial-manual: priceWDO brackets off resolvePestFootprint
+  // (residential home-size brackets), and the public quote route can supply a
+  // synthetic 2,000 sqft homeSqFt for an unmeasured commercial building —
+  // an unmeasured warehouse would get a firm residential price (codex #3594 P1).
+  if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
     const result = priceWDO(property);
     lineItems.push(result);
   }
@@ -1526,7 +1534,13 @@ function generateEstimate(input) {
   // (equivalent points, mesh LF) even though the estimate now carries the
   // V2 exclusion as per-section line items rather than one combined row.
   let rodentExclusionV2Summary = null;
-  if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control')) {
+  if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
+    // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
+    // floors) — this is the LIVE producer shape (property-lookup-v2 sends
+    // services.exclusion with pricingVersion:'v2'; codex #3594 P1). V1 keeps
+    // the manual quote: its minimum floors key off HOME sqft.
+    scopedOneTime: services.exclusion.pricingVersion === 'v2',
+  })) {
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.sanitation
     );
@@ -1819,6 +1833,34 @@ function generateEstimate(input) {
       if (item.total) {
         item.totalBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.total;
         item.totalAfterDiscount = item.total;
+      }
+      continue;
+    }
+
+    // Flat-commercial guard (codex #3594 P1): getEffectiveDiscount resolves by
+    // service key + customer status and cannot see per-line flags, so a
+    // commercial-marked line whose KEY is discount-allowlisted (e.g. a scoped
+    // one-time re-marked by the commercial post-pass) would still receive the
+    // 15% recurring-customer perk. Guard on discountable:false ONLY — the
+    // weaker excludeFromPctDiscount flag also rides on residential palm and
+    // rodent-bait lines that still earn their FLAT credits (Gold+ $10/palm,
+    // rodent setup credit) through getEffectiveDiscount.
+    if (item.discountable === false) {
+      item.discount = {
+        serviceKey,
+        waveGuardTier: waveGuardTier.tier,
+        appliedDiscounts: [],
+        effectiveDiscount: 0,
+        totalDiscount: 0,
+        discountable: false,
+      };
+      if (item.annual) {
+        item.annualBeforeDiscount = item.annual;
+        item.annualAfterDiscount = item.annual;
+      }
+      if (item.price) {
+        item.priceBeforeDiscount = item.price;
+        item.priceAfterDiscount = item.price;
       }
       continue;
     }

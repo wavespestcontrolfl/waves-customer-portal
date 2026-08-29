@@ -1386,8 +1386,12 @@ const gates = {
   // markCommercialOneTimeLine. Extends owner directive 2026-06-29 ("ALL
   // commercial pricing is auto") to the scoped one-time family; the recurring
   // foam bypass (owner 2026-06-25) is the precedent. Home-size-bracket
-  // one-times (one-time pest/lawn, roach programs, WDO, rodent trapping, flea)
+  // one-times (one-time pest/lawn, roach programs, rodent trapping, flea)
   // stay manual — they need commercial bases and owner-approved numbers first.
+  // WDO also stays manual (footprint-BRACKETED, and public quote can supply a
+  // synthetic 2,000 sqft for unmeasured commercial buildings), as does palm
+  // injection (recurring program whose legacy-mapper round trip drops the
+  // commercial identity) — both codex #3594 P1s.
   // Off everywhere until the owner verifies a priced commercial estimate —
   // pricing gates are env-only in every environment (GATE_UNIT_BAND_PRICING /
   // GATE_BERMUDA_SUPPRESSION convention); the engine re-reads the env at call

@@ -244,10 +244,16 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
 // properties — the work is the same scoped work — and carry commercial line
 // marking from markCommercialOneTimeLine. Every key must match the pricer's
 // own `service` value; an unlisted service stays on the manual-quote path
-// (fail closed). Home-size-bracket one-times (one_time_pest, one_time_lawn,
-// german_roach*, wdo, flea, rodent_trapping family, dethatching/top-dressing/
-// plugging) are deliberately NOT here — they need commercial sizing bases and
-// owner-approved numbers before they can auto-price.
+// (fail closed). Deliberately NOT here: home-size-bracket one-times
+// (one_time_pest, one_time_lawn, german_roach*, flea, rodent_trapping family,
+// dethatching/top-dressing/plugging) need commercial sizing bases and
+// owner-approved numbers first; WDO is footprint-BRACKETED (resolvePestFootprint
+// picks residential brackets, and the public quote route can synthesize a
+// 2,000 sqft home value for an unmeasured commercial building — codex #3594
+// P1); palm_injection is an annual recurring program whose legacy-mapper round
+// trip drops the commercial identity and can seed the residential semiannual
+// auto-schedule (codex #3594 P1) — both return only with their own commercial
+// handling. exclusion V1 stays manual (minimum floors key off HOME sqft).
 const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
   'pre_slab_termiticide',
   'trenching',
@@ -256,24 +262,23 @@ const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
   'termite_foam',
   'stinging_insect',
   'stinging_insect_v2',
-  'exclusion_v2', // V1 'exclusion' stays manual — its minimum floors key off HOME sqft
+  // The live V2 exclusion shape (services.exclusion + pricingVersion:'v2')
+  // emits per-section rows keyed 'rodent_exclusion'; 'exclusion_v2' covers the
+  // alternate services.exclusionV2 spelling's pricer.
+  'rodent_exclusion',
+  'exclusion_v2',
   'rodent_wire_mesh',
   'rodent_bird_box',
   'rodent_sanitation',
   'bed_bug',
   'rodent_inspection',
-  'wdo_inspection',
-  'palm_injection',
 ]);
 
-// palm_injection follows the lawn/ornamental FL tax family (like
-// COMMERCIAL_LAWN / COMMERCIAL_TREE_SHRUB). Inspections follow the existing
-// service_taxability rows (termite/wdo inspection is_taxable=false, FL
-// §212.08(6) professional services) — the commercial-inspections taxability
-// question is an open owner ruling; until it lands the table is the
-// authority. Everything else is nonresidential pest control, which FL taxes.
-const COMMERCIAL_LAWN_FAMILY_ONETIME = new Set(['palm_injection']);
-const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['wdo_inspection', 'rodent_inspection']);
+// rodent_inspection follows the existing service_taxability rows (inspection
+// rows carry is_taxable=false) — commercial-inspection taxability is an open
+// owner/CPA ruling; until it lands the table is the authority. Everything else
+// here is nonresidential pest control, which FL taxes.
+const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['rodent_inspection']);
 
 // Re-marks a residential-pricer line for a commercial property: commercial
 // identity fields, FL tax family, and the flat-commercial discount rules the
@@ -283,7 +288,6 @@ const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['wdo_inspection', 'rodent_
 // the pricer's own detail/disclaimer.
 function markCommercialOneTimeLine(result, property = {}, options = {}) {
   if (!result || typeof result !== 'object') return result;
-  const isLawnFamily = COMMERCIAL_LAWN_FAMILY_ONETIME.has(result.service);
   const isExemptInspection = COMMERCIAL_EXEMPT_INSPECTION_ONETIME.has(result.service);
   return {
     ...result,
@@ -293,10 +297,8 @@ function markCommercialOneTimeLine(result, property = {}, options = {}) {
     commercialPricingMode: 'auto_estimate',
     discountable: false,
     excludeFromPctDiscount: true,
-    taxable: !isLawnFamily && !isExemptInspection,
-    taxCategory: isLawnFamily
-      ? 'lawn_spraying_or_treatment'
-      : (isExemptInspection ? (result.taxCategory || null) : 'nonresidential_pest_control'),
+    taxable: !isExemptInspection,
+    taxCategory: isExemptInspection ? (result.taxCategory || null) : 'nonresidential_pest_control',
   };
 }
 
