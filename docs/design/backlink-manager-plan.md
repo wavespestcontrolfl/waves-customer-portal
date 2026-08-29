@@ -264,7 +264,7 @@ prerequisite only from `ready_for_payment` onward (`OWNER_MANUAL_PAYMENT` parks 
 never deferred. **Invalidation is scoped per dimension by construction:** each dimension has its own path
 revision (`revision_payment` / `revision_communication` / `revision_execution`, §3.2) and its
 own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
-(price, renewal, payment/legal flags → payment; recipient/draft → communication; type/URL →
+(price, renewal, payment flags → payment; recipient/draft → communication; `legal_attestation`/`legal_terms_hash` → EVERY dimension that lists them — payment, communication AND execution — since all three revisions bump on a terms change (regression tests for all three); type/URL →
 supersession, all dimensions). A dimension INSTANCE with `satisfied_at` set is validated by nothing further — it is done;
 but satisfaction is per action instance: a renewal (`instance_key` = `${renewal_period_key}:${generation}`)
 and the follow-up (`instance_key` = `followup:${generation}`) are new rows — generation-bearing
