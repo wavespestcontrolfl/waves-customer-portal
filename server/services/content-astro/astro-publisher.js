@@ -1768,7 +1768,18 @@ async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
 // valid, ≥ minimum distinct, distinct pictures) — a PR opened while the gate
 // was OFF must not auto-merge hero-only the moment the gate flips.
 // Returns { ok, reason }; anything unreadable fails closed.
-async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
+// Result contract: `{ ok: true }` (or `gate_off`), `{ ok: false, reason }`
+// for a completed contract miss (deterministic — callers withhold/park), or
+// `{ ok: false, transient: true, reason }` when the check could not complete
+// (GitHub read failure) — callers defer and retry, never park.
+async function assertBodyImagesAtHead(args) {
+  try {
+    return await assertBodyImagesAtHeadInner(args);
+  } catch (err) {
+    return { ok: false, reason: err.message, transient: err?.code !== 'BLOG_BODY_IMAGES_FAILED' };
+  }
+}
+async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
   if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
   if (!branch) return { ok: false, reason: 'PR head branch unknown' };
   // Assets are validated as the MERGE will carry them: a path the PR did
@@ -1834,16 +1845,21 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
   try { parsed = fm.parse(found.file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
   const body = String(parsed?.content || '');
   const heroSrc = String(parsed?.data?.hero_image?.src || '');
-  try {
-    const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs });
-    if (!valid.ok) return { ok: false, reason: valid.reason };
-    if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
-    const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
-    if (!pictures.ok) return { ok: false, reason: pictures.reason };
-  } catch (err) {
-    return { ok: false, reason: err.message };
-  }
+  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs });
+  if (!valid.ok) return { ok: false, reason: valid.reason };
+  if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
+  const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
+  if (!pictures.ok) return { ok: false, reason: pictures.reason };
   return { ok: true, reason: null, baseSha };
+}
+
+// An image-generation error is transient when any provider attempt was
+// retryable (5xx / rate limit / timeout) or the failure is a network-shaped
+// error around the download — nothing about the content caused it.
+function isTransientImageError(err) {
+  const attempts = Array.isArray(err?.attempts) ? err.attempts : [];
+  if (attempts.length) return attempts.some((a) => a?.result?.retryable === true || a?.retryable === true);
+  return /\b(?:5\d\d|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|timeout|timed out|rate limit)\b/i.test(String(err?.message || '')) || /^E(?:CONN|TIMEDOUT|NOTFOUND|AI_AGAIN)/.test(String(err?.code || ''));
 }
 
 async function nearDuplicateOf(buffer, siblings) {
@@ -2404,8 +2420,13 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
       } catch (err) {
         if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
         const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
-        bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
         bodyErr.cause = err;
+        // Deterministic ONLY when nothing about a retry could change the
+        // outcome (every provider attempt non-retryable, or a decode/
+        // compression failure on the bytes). A provider 5xx / network blip
+        // stays untagged so the scheduler and the autonomous runner retry it
+        // — the same posture as the hero's generation failures.
+        if (!isTransientImageError(err)) bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
         throw bodyErr;
       }
       const dup = await nearDuplicateOf(buffer, seen);

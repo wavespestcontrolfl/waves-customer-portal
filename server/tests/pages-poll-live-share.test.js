@@ -213,4 +213,24 @@ describe('pollPost scheduler auto-merge: body-image contract at the HEAD (GH r19
     expect(r2).toMatchObject({ ok: true, autoMerged: true });
     expect(merge).toHaveBeenCalledWith('post-1', expect.objectContaining({ expectHeadSha: 'abc' }));
   });
+
+  test('a TRANSIENT check failure defers without touching the claim; a moved base tip defers too (hook P1)', async () => {
+    mockBranchDeploy();
+    const updates = setupDb();
+    const merge = jest.spyOn(publisher, 'mergeAstro').mockResolvedValue({});
+    const check = jest.spyOn(publisher, 'assertBodyImagesAtHead').mockResolvedValue({ ok: false, transient: true, reason: 'GitHub 503' });
+    const post = makePost({ astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'content/blog-x', slug: 'test-post', astro_requires_human_merge: false });
+    expect(await pagesPoll.pollPost(post)).toMatchObject({ ok: true, mergeDeferred: true, reason: 'body_image_check_transient' });
+    expect(merge).not.toHaveBeenCalled();
+    expect(updates.find((u) => u.updates.publish_status === 'pending_review')).toBeUndefined();
+
+    const ghc = require('../services/content-astro/github-client');
+    jest.spyOn(ghc, 'env').mockReturnValue({ defaultBranch: 'main' });
+    const tip = jest.spyOn(ghc, 'getBranchSha').mockResolvedValue('main-tip-2');
+    check.mockResolvedValue({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    expect(await pagesPoll.pollPost(post)).toMatchObject({ ok: true, mergeDeferred: true, reason: 'base_moved_during_gating' });
+    expect(merge).not.toHaveBeenCalled();
+    tip.mockResolvedValue('main-tip-1');
+    expect(await pagesPoll.pollPost(post)).toMatchObject({ ok: true, autoMerged: true });
+  });
 });

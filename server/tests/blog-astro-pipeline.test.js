@@ -4384,6 +4384,19 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
   });
 
+  test('assertBodyImagesAtHead: an operational read error is reported transient; a contract miss is not (hook P1)', async () => {
+    const { assertBodyImagesAtHead } = AstroPublisher._internals;
+    gh.getFile.mockImplementation(async () => { throw new Error('GitHub 503'); });
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: 'src/content/blog/ant-trails-bradenton.md' });
+    expect(res).toMatchObject({ ok: false, transient: true });
+    expect(res.reason).toContain('GitHub 503');
+    const md = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: 'T', hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## A\n\nProse only.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/blog-x' && path === 'src/content/blog/ant-trails-bradenton.md' ? { content: md, sha: 'm' } : null));
+    const miss = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: 'src/content/blog/ant-trails-bradenton.md' });
+    expect(miss.ok).toBe(false);
+    expect(miss.transient).toBeFalsy();
+  });
+
   test('assertBodyImagesAtHead: an explicit filePath (scheduler lane) is validated on the PR branch (GH r19)', async () => {
     const { assertBodyImagesAtHead } = AstroPublisher._internals;
     const md = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: 'T', hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## A\n\nProse only.\n');
@@ -4568,7 +4581,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
-  test('fail-closed: body image generation failure throws BLOG_BODY_IMAGES_FAILED with the provider chain, before any branch is cut', async () => {
+  test('fail-closed: body image generation failure throws with the provider chain before any branch is cut — a retryable provider failure stays TRANSIENT (no code), a non-retryable one is BLOG_BODY_IMAGES_FAILED (hook P1)', async () => {
     gh.getFile.mockResolvedValue(null);
     heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
       if (mode === 'blog-hero') return { dataUrl: PATTERNS[0], model: 'm' };
@@ -4578,11 +4591,21 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     });
     let thrown;
     try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
-    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown?.code).toBeUndefined();
     expect(thrown.message).toContain('"Reading the pellets"');
     expect(thrown.message).toContain('gpt-image-2');
     expect(gh.createBranch).not.toHaveBeenCalled();
     expect(gh.commitFiles).not.toHaveBeenCalled();
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
+      if (mode === 'blog-hero') return { dataUrl: PATTERNS[0], model: 'm' };
+      const err = new Error('image-generator: all providers failed');
+      err.attempts = [{ provider: 'gpt-image-2', result: { retryable: false, status: 400 } }];
+      throw err;
+    });
+    thrown = undefined;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('variation: a generated body image must also differ from a DRAFT-authored committed image (hook r9)', async () => {

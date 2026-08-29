@@ -249,13 +249,38 @@ async function pollPost(post, { allowMerge = true } = {}) {
             try {
               check = await pub.assertBodyImagesAtHead({ frontmatter: {}, branch: post.astro_branch_name, filePath: pub.scheduledBlogFilePath(post.slug) });
             } catch (checkErr) {
-              check = { ok: false, reason: `body-image check failed: ${checkErr.message}` };
+              check = { ok: false, transient: true, reason: `body-image check failed: ${checkErr.message}` };
+            }
+            if (!check.ok && check.transient) {
+              // Operational (GitHub 5xx / network) — the claim stays armed
+              // and the next tick re-checks; only a completed contract miss
+              // parks below.
+              logger.warn(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — body-image check could not complete: ${check.reason}`);
+              return { ok: true, url, mergeDeferred: true, reason: 'body_image_check_transient' };
             }
             if (!check.ok) {
               await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
                 .update({ publish_status: 'pending_review', astro_publish_error: `body images: ${check.reason}`.slice(0, 1000), updated_at: new Date() });
               logger.warn(`[pages-poll] auto-merge WITHHELD for ${post.slug || post.id} — body images: ${check.reason}; PR left open for admin merge`);
               return { ok: true, url, bodyImagesWithheld: true };
+            }
+            // Unchanged assets were validated as the DEFAULT branch carried
+            // them at that moment (same posture as autonomous-pr-poller
+            // step 3.7): a base push since then could swap one under the
+            // merge — re-read the tip and let the next tick re-validate.
+            if (check.baseSha) {
+              let tip = null;
+              try {
+                const ghc = require('./github-client');
+                tip = await ghc.getBranchSha(ghc.env().defaultBranch);
+              } catch (tipErr) {
+                logger.warn(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — default-branch tip unavailable: ${tipErr.message}`);
+                return { ok: true, url, mergeDeferred: true, reason: 'base_tip_unavailable' };
+              }
+              if (tip && tip !== check.baseSha) {
+                logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — base moved during gating (${String(check.baseSha).slice(0, 9)} → ${String(tip).slice(0, 9)})`);
+                return { ok: true, url, mergeDeferred: true, reason: 'base_moved_during_gating' };
+              }
             }
           }
         }
