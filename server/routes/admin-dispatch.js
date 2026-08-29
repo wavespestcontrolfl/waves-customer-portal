@@ -13412,6 +13412,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');
+const { collectiveMoveGateOn } = require('../services/rebooker');
 const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
@@ -13490,7 +13491,22 @@ function rescheduleExpectPredicate(observed) {
 
 // `observed`, when passed, is filled with the row this resolution actually
 // read (see rescheduleExpectPredicate) — a full explicit window reads nothing
-// and leaves it untouched.
+// and leaves it untouched; callers that need a pin regardless call
+// ensureObservedAnchor afterwards.
+// A full explicit window derives nothing, so resolveRescheduleWindow reads
+// nothing — but the move still needs the anchor it OBSERVED (date, window,
+// duration) as its pin: the series path tells a legitimate round trip
+// (A→B, B→A, A→B) from a stale retry by the observed date, and fences the
+// delta basis on it (codex r18 P2). Reads the row only when the resolution
+// did not.
+async function ensureObservedAnchor(serviceId, observed) {
+  if (!observed || observed.read) return observed;
+  const row = await db('scheduled_services').where({ id: serviceId })
+    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring');
+  if (row) Object.assign(observed, row, { read: true });
+  return observed;
+}
+
 async function resolveRescheduleWindow(serviceId, window, observed = null) {
   const record = (row) => {
     if (observed && row) Object.assign(observed, row, { read: true });
@@ -13544,10 +13560,18 @@ function rescheduleReminderTime(date, window) {
   return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
 }
 
-async function syncRescheduleReminder(serviceId, date, window, { willNotify = false } = {}) {
+// Returns true when the reminder row was synced, 'stale' when the caller's
+// expectSchedule pin no longer matched (the visit was rescheduled AGAIN
+// since — that newer move owns the reminder; nothing of this move's is
+// left to sync, close or re-arm on it), false when the sync failed or
+// handleReschedule reported no row (it resolves null on its failure
+// paths) — callers that record completion (applySeriesMoveEffects) stamp
+// only on true/'stale'; single-visit callers keep their fire-and-forget
+// contract.
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    await AppointmentReminders.handleReschedule(
+    const synced = await AppointmentReminders.handleReschedule(
       serviceId,
       rescheduleReminderTime(date, window),
       // This route sends its own reschedule SMS (below) rather than letting
@@ -13556,20 +13580,38 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
       // cron can't fire a duplicate reminder in the gap. A non-notifying move
       // leaves the 24h reminder pending so the cron still reminds the customer.
-      { sendNotification: false, coverDueWindows: willNotify },
+      { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
+    if (synced && synced.skippedStale === true) return 'stale';
+    if (synced !== null) return true;
+    // handleReschedule resolves null both for a failure and for a visit that
+    // simply has no appointment_reminders row (legacy visits predate the
+    // table). A confirmed missing row is a completed no-op — nothing to
+    // sync — not a reason to keep the operation retryable forever.
+    const reminderRow = await db('appointment_reminders').where({ scheduled_service_id: serviceId }).first('id');
+    if (!reminderRow) {
+      logger.info(`[dispatch] no appointment_reminders row for ${serviceId} — reminder sync is a no-op`);
+      return true;
+    }
+    return false;
   } catch (err) {
     logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
+    return false;
   }
 }
 
-async function markRescheduleReminderNotified(serviceIds) {
+// Returns true when the close ran (markRescheduleNoticeSent swallows its
+// own errors and resolves null — that is a failed close, reported false);
+// single-visit callers ignore it, the series effects retry on it.
+async function markRescheduleReminderNotified(serviceIds, options = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    await AppointmentReminders.markRescheduleNoticeSent(serviceIds);
+    const outcome = await AppointmentReminders.markRescheduleNoticeSent(serviceIds, options);
+    return outcome !== null && outcome !== undefined;
   } catch (err) {
     const count = Array.isArray(serviceIds) ? serviceIds.length : 1;
     logger.warn(`[dispatch] Reschedule SMS sent for ${count} appointment(s), but reminder notice sync failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -13652,6 +13694,10 @@ async function captureReminderGuards(serviceIds) {
 // reschedule re-stamped the row mid-send; skipping the re-arm instead risks
 // the customer never hearing about the new time at all. Prefer the re-arm,
 // accept the narrow double-text window, and log loudly.
+// Returns { ok } — false when any applicable re-arm write failed (or a
+// failed snapshot had no fallback scope), so a durable caller can keep its
+// operation retryable instead of concluding over covered windows (codex
+// r14 P1). Single-visit callers ignore it.
 async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
   const snapshotFailed = Boolean(guards) && !Array.isArray(guards) && guards.failed === true;
   const list = (snapshotFailed
@@ -13661,9 +13707,13 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
   if (!list.length) {
     // Failure marker but no caller-supplied scope: never fall back to an
     // unscoped update — surface the stuck-suppressed risk instead.
-    if (snapshotFailed) logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
-    return;
+    if (snapshotFailed) {
+      logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
+      return { ok: false };
+    }
+    return { ok: true };
   }
+  let failed = 0;
   // Shared boundary predicates — never a local copy of the cron's cutoffs.
   const { reminder72hStillReachable, reminder24hStillReachable } = require('../services/appointment-reminders');
   // Same update-builder shape as reschedule-sms.js's rearmUpdateFor: each
@@ -13719,9 +13769,11 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
       }
       await query.update(rearmUpdate);
     } catch (err) {
+      failed += 1;
       logger.error(`[dispatch] reminder re-arm after failed notice failed (${g.scheduledServiceId}): ${err.message}`);
     }
   }
+  return { ok: failed === 0 };
 }
 
 // GET /api/admin/dispatch/:serviceId/reschedule-options
@@ -13992,6 +14044,563 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Post-commit effects of a COMMITTED series move, shared by every staff
+// surface that lands one (dispatch drag, edit modal, a choke-point delegation
+// from a single-visit call): the schedule_conflict card for occurrences that
+// went windowless, each occurrence's reminder sync with its guard snapshot
+// captured IMMEDIATELY after (an awaited board broadcast between a sync and
+// its capture would capture a concurrent dispatcher's newer reschedule as
+// "ours" and a later SMS failure would re-arm against it — double-texting
+// the customer), board broadcasts only after every sync→capture pair, then
+// ONE appointment_series_rescheduled text.
+//
+// Idempotency (series_moves row, rebooker.rescheduleSeries): ONE pass holds a
+// short lease on the row (effects_lease_until) while it runs; each effect
+// runs only when its completion marker (conflict_card_at /
+// reminders_synced_at / notified_at) is still NULL and stamps it AFTER
+// landing. A replayed operation (same operation_key), a retried pass, or a
+// second concurrent pass therefore never double-cards or double-texts; a
+// pass that dies mid-way leaves an expired lease + unfinished markers, so
+// the next retry finishes exactly the incomplete effects. The lease carries
+// an owner token: stamps and the release are fenced on it, so a pass that
+// outlives its lease can neither stamp over nor release a successor's. The
+// one remaining window is provider-send → notified_at stamp (at-least-once
+// by design).
+// `notify` is explicit and suppresses ONLY the immediate customer text —
+// reminder re-sync, tracker refresh and board broadcasts always run.
+const SERIES_EFFECTS_LEASE_MS = 5 * 60 * 1000;
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText }) {
+  const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+  // The text is driven by the intent the OPERATION was recorded with
+  // (result.notifyRequested — set by the move, carried by a replay, read
+  // from the row by the reconciler); the caller's flag only applies to a
+  // result that carries none (codex r13 P2: a retry with a different
+  // notifyCustomer must not send a text the original move did not ask
+  // for, or drop one it did).
+  const notify = typeof result.notifyRequested === 'boolean' ? result.notifyRequested : notifyArg;
+  const seriesMoveId = result.seriesMoveId || null;
+  const conflicts = occurrences
+    .filter((occ) => occ.conflicted)
+    .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+  // Advisory overlaps the move accepted (staff surfaces) — same card, same
+  // marker: the operator learns about every double-booking the sweep
+  // committed, and a dying pass leaves it for the reconciler.
+  const overlapDates = Array.isArray(result.overlapDates) ? result.overlapDates.map((d) => String(d).split('T')[0]) : [];
+  // Call-created follow-ups the move shifted with the primary: their
+  // reminder rows sync (and their boards refresh) with the cadence rows,
+  // but they are never texted, closed or re-armed here — nothing covers
+  // them but the reminder cron (codex r19 P1).
+  const followUps = Array.isArray(result.followUpOccurrences) ? result.followUpOccurrences : [];
+  const leaseOwner = crypto.randomUUID();
+  // Every marker write is fenced on the owner token: only the pass holding
+  // the CURRENT lease can stamp or release.
+  const ownedRow = (q) => q.where({ id: seriesMoveId, effects_lease_owner: leaseOwner });
+  let markers = { conflict_card_at: null, reminders_synced_at: null, notified_at: null };
+  if (seriesMoveId) {
+    // Lease: NULL or expired → ours. A marker-store failure resolves to
+    // running the effects — a possible duplicate beats a silent skip (the
+    // same call the guard-snapshot fallback below makes).
+    try {
+      const leased = await db('series_moves')
+        .where({ id: seriesMoveId })
+        .where((q) => q.whereNull('effects_lease_until').orWhere('effects_lease_until', '<', db.fn.now()))
+        .update({ effects_lease_until: new Date(Date.now() + SERIES_EFFECTS_LEASE_MS), effects_lease_owner: leaseOwner });
+      if (Number(leased) === 0) {
+        return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
+      }
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface')) || markers;
+    } catch (err) {
+      // Without a held lease no marker write can land (they are fenced on
+      // the owner), so effects run here would be unrecorded and repeated by
+      // the reconciler — and could race a concurrent pass. The committed row
+      // IS the durable retry: report retryable and let the reconciler run it.
+      logger.warn(`[dispatch] series_moves lease unavailable for ${seriesMoveId} — effects deferred to the reconciler: ${err.message}`);
+      return { notificationSent: false, notificationError: 'lease_unavailable', conflicts, seriesMoveId, inProgress: true };
+    }
+  }
+  const stampMarker = async (col, extra = {}) => {
+    if (!seriesMoveId) return;
+    try {
+      const stamped = await ownedRow(db('series_moves')).whereNull(col).update({ [col]: db.fn.now(), ...extra });
+      if (Number(stamped) === 0) {
+        logger.warn(`[dispatch] series_moves ${col} stamp lost the lease for ${seriesMoveId} — the effect ran past the lease; a successor may repeat it`);
+      }
+    } catch (err) {
+      logger.warn(`[dispatch] series_moves ${col} stamp failed for ${seriesMoveId}: ${err.message}`);
+    }
+  };
+  const releaseLease = async () => {
+    if (!seriesMoveId) return;
+    try {
+      await ownedRow(db('series_moves')).update({ effects_lease_until: null, effects_lease_owner: null });
+    } catch (err) {
+      logger.warn(`[dispatch] series_moves lease release failed for ${seriesMoveId}: ${err.message}`);
+    }
+  };
+
+  try {
+    // A SUPERSEDED operation (a later move under the same derived key
+    // retired it) still owes the operator its conflict card when it died
+    // before ringing it: the successor kept those siblings windowless but
+    // probed nothing, so it recorded no conflicts of its own. Reminders and
+    // the customer text belong to the successor — this pass rings the card
+    // for the rows STILL windowless and concludes (codex r10 P1).
+    const cardOnly = markers.status === 'superseded';
+    let dueConflicts = conflicts;
+    if (cardOnly && conflicts.length && !markers.conflict_card_at) {
+      const stillWindowless = new Set((await db('scheduled_services')
+        .whereIn('id', conflicts.map((c) => c.id))
+        .whereNull('window_start')
+        .whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show'])
+        .select('id')).map((r) => String(r.id)));
+      dueConflicts = conflicts.filter((c) => stillWindowless.has(String(c.id)));
+      if (!dueConflicts.length) await stampMarker('conflict_card_at');
+    }
+    // Occurrences the rebooker committed WITHOUT a window (their projected
+    // window held a seeded placeholder beyond the clash horizon): date and
+    // tech are kept; the operator sets a time from dispatch. Those rows often
+    // land outside the reloaded week view — surface them in the response AND
+    // ring the bell so a series move can't silently leave untimed visits.
+    if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        const parts = [];
+        if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
+        if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        const notif = await NotificationService.notifyAdmin(
+          'schedule_conflict',
+          dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
+          `A series move shifted a recurring plan: ${parts.join('; ')}.`,
+          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
+        );
+        if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
+        else await stampMarker('conflict_card_at');
+      } catch (err) {
+        logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
+      }
+    }
+
+    if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
+    const seriesReminderGuards = [];
+    let seriesGuardSnapshotFailed = false;
+    const remindersThisPass = !markers.reminders_synced_at;
+    let allRemindersSynced = true;
+    // The reminder time THIS move recorded per occurrence — exactly what
+    // syncRescheduleReminder stamps. An occurrence rescheduled AGAIN since
+    // (the sync reports it stale, or its guard reads another time on a
+    // retry pass) belongs to that newer move: its reminder is neither
+    // closed under the series notice nor re-armed here — closing would
+    // silence the newer schedule's reminders, re-arming would clear flags
+    // the newer move owns and duplicate its texts (codex r8 P1).
+    const recordedReminderTimeById = new Map(occurrences.map((occurrence) => [
+      String(occurrence.id),
+      parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })).getTime(),
+    ]));
+    const staleOccurrenceIds = new Set();
+    const ownsRecordedTime = (guard) => {
+      const recorded = recordedReminderTimeById.get(String(guard.scheduledServiceId));
+      const at = new Date(guard.appointmentTime).getTime();
+      return recorded !== undefined && Number.isFinite(at) && at === recorded;
+    };
+    // Keeps the guards still on this move's time; a guard on another time
+    // marks its occurrence stale. The failure marker passes through as-is.
+    const ownedGuards = (guards) => {
+      if (!Array.isArray(guards)) return guards;
+      const owned = [];
+      for (const guard of guards) {
+        if (ownsRecordedTime(guard)) owned.push(guard);
+        else staleOccurrenceIds.add(String(guard.scheduledServiceId));
+      }
+      return owned;
+    };
+    // Close/re-arm scope: owned occurrences that HAVE a window. A conflicted
+    // (windowless) landing, or any windowless row, carries a placeholder
+    // reminder the DB sync trigger holds preclosed (windows_preclosed);
+    // closing it through markRescheduleNoticeSent would recompute flags
+    // from the synthetic 08:00 time, and re-arming it would clear the held
+    // flags — either way a reminder for a window nobody set (hook r20 P1).
+    // The sync itself still runs for them (handleReschedule keeps the
+    // marker carve-out); only the close and the re-arm skip them.
+    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
+      && occurrence.conflicted !== true && !!occurrence.windowStart);
+    if (remindersThisPass) {
+      for (const occurrence of occurrences) {
+        // expectSchedule: the reminder moves only if the visit still sits on
+        // the slot THIS move recorded — a replayed/retried pass whose
+        // occurrence was rescheduled again in between must not drag its
+        // reminder back to the superseded slot.
+        const synced = await syncRescheduleReminder(
+          occurrence.id,
+          occurrence.date,
+          { start: occurrence.windowStart, end: occurrence.windowEnd },
+          {
+            willNotify: notify,
+            expectSchedule: {
+              date: String(occurrence.date).split('T')[0],
+              windowStart: occurrence.windowStart ? String(occurrence.windowStart).slice(0, 5) : null,
+            },
+          },
+        );
+        if (synced === 'stale') {
+          staleOccurrenceIds.add(String(occurrence.id));
+          continue;
+        }
+        if (!synced) allRemindersSynced = false;
+        const occurrenceGuards = await captureReminderGuards(occurrence.id);
+        if (Array.isArray(occurrenceGuards)) {
+          seriesReminderGuards.push(...ownedGuards(occurrenceGuards));
+        } else {
+          // Per-occurrence snapshot read failed — degrade the WHOLE set to the
+          // unguarded fallback below. rearmRescheduleReminderWindows' failure
+          // marker is all-or-nothing; a partially-guarded list would silently
+          // skip the re-arm for the failed occurrence, and silence is worse
+          // than a possible duplicate.
+          seriesGuardSnapshotFailed = true;
+        }
+      }
+      for (const followUp of followUps) {
+        const synced = await syncRescheduleReminder(
+          followUp.id,
+          followUp.date,
+          { start: followUp.windowStart, end: followUp.windowEnd },
+          { willNotify: false, expectSchedule: { date: String(followUp.date).split('T')[0], windowStart: followUp.windowStart ? String(followUp.windowStart).slice(0, 5) : null } },
+        );
+        if (!synced) allRemindersSynced = false;
+      }
+      let allBroadcast = true;
+      for (const occurrence of [...occurrences, ...followUps]) {
+        try {
+          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
+        } catch (err) {
+          allBroadcast = false;
+          logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
+        }
+      }
+      // Completion means EVERY occurrence's reminder synced AND every board
+      // broadcast went out — a swallowed failure of either leaves the marker
+      // unstamped so the next pass re-runs both (the sync is idempotent for
+      // already-synced rows; a re-emit is harmless).
+      if (allRemindersSynced && allBroadcast) await stampMarker('reminders_synced_at');
+      else logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder sync or board broadcast incomplete — reminders_synced_at left unstamped for retry`);
+    }
+
+    let notificationSent = false;
+    let notificationError = null;
+    // notified_at = the notification attempt CONCLUDED (sent, or a definitive
+    // non-send: no customer, opted out / no eligible recipient, appointment
+    // terminal or moved again, anchor superseded); customer_notified says
+    // whether a text actually went out. Only transient failures (provider
+    // deferral, thrown error) leave it NULL for the reconciler to retry —
+    // otherwise a permanent non-send would be re-attempted forever, starve
+    // newer rows, and could send a stale notice months later if eligibility
+    // ever changed.
+    let definitiveNonSend = false;
+    // The text and the reminder close are recorded as SEPARATE steps:
+    // customer_notified = the series text went out (written before the
+    // close is attempted); notified_at = the effect CONCLUDED, close
+    // included. markRescheduleNoticeSent swallows its own errors, so a
+    // close that fails must leave notified_at NULL for the reconciler to
+    // redo the close — and only the close: a row with customer_notified
+    // already true never sends again (hook r16 P1).
+    const recordCustomerNotified = async () => {
+      if (!seriesMoveId) return;
+      try {
+        const stamped = await ownedRow(db('series_moves')).update({ customer_notified: true });
+        if (Number(stamped) === 0) logger.warn(`[dispatch] series_moves customer_notified stamp lost the lease for ${seriesMoveId}`);
+      } catch (err) {
+        logger.warn(`[dispatch] series_moves customer_notified stamp failed for ${seriesMoveId}: ${err.message}`);
+      }
+    };
+    // Guarded close: each reminder row is closed only if it still carries
+    // the state THIS pass synced (or, on a retry pass, the state read just
+    // before the close) — a row a concurrent reschedule moved on keeps its
+    // own flags.
+    // Close scope: every owned occurrence — except for a Quick Move
+    // operation, whose text is its OWN anchor-only moved-SMS: the siblings
+    // were synced with notifications off and never covered by that text,
+    // so a close-only recovery after a failed anchor close must not
+    // suppress their still-due reminders (codex r18 P1).
+    const closeScope = () => (markers.source_surface === 'quick_move'
+      ? ownedOccurrences().filter((occurrence) => String(occurrence.id) === String(serviceId))
+      : ownedOccurrences());
+    const closeSeriesReminders = async () => {
+      const closeGuards = seriesReminderGuards.length && markers.source_surface !== 'quick_move'
+        ? seriesReminderGuards
+        : ownedGuards(await captureReminderGuards(closeScope().map((occurrence) => occurrence.id)));
+      const guardsByServiceId = Array.isArray(closeGuards)
+        ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
+        : null;
+      // Only the occurrences still on this move's slot close — an id
+      // absent from the guard map closes UNGUARDED, so a stale one must
+      // leave the list, not just the map — and when a snapshot exists at
+      // all, only ids IN it close: a per-occurrence snapshot failure
+      // (partial map) must not turn into an unguarded close of that
+      // occurrence over a newer reschedule (codex r9 P2). An occurrence
+      // with no reminder row has nothing to close anyway.
+      const closeIds = closeScope()
+        .map((occurrence) => occurrence.id)
+        .filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));
+      const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});
+      if (!closed) {
+        logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder close failed after the series text — notified_at left unstamped for the reconciler to redo the close`);
+        return false;
+      }
+      await stampMarker('notified_at', { customer_notified: true });
+      return true;
+    };
+    // Quick Move sends its own moved-SMS live and CLAIMS it on the row
+    // (notified_at with customer_notified=false, see rain-out); a claim
+    // older than the lease horizon is a pass that died before sending —
+    // not a concluded non-send — and the recovery text is this pass's
+    // series confirmation (codex r14 P1). Other surfaces' notified_at with
+    // customer_notified=false is a definitive non-send and stays concluded.
+    const staleQuickMoveClaim = markers.source_surface === 'quick_move'
+      && markers.customer_notified === false
+      && !!markers.notified_at
+      && new Date(markers.notified_at).getTime() < Date.now() - SERIES_EFFECTS_LEASE_MS;
+    if (notify && markers.notified_at && !staleQuickMoveClaim) {
+      notificationSent = markers.customer_notified === true;
+      if (!notificationSent) notificationError = 'notification concluded earlier without a send';
+    } else if (notify && markers.customer_notified === true) {
+      // The text went out on an earlier pass that died (or failed) before
+      // the close concluded — redo the close only.
+      notificationSent = true;
+      await closeSeriesReminders();
+    } else if (notify) {
+      // Recipient routing, opt-in/opt-out and service-contact delivery come
+      // from the shared appointment sender (AppointmentReminders.
+      // safeSendAppointment — the same path sendRescheduleNoticeForVisit
+      // uses), never a direct customers.phone text: a primary who opted out,
+      // has no phone, or routes appointment texts to an authorized service
+      // contact gets exactly what the single-visit notice would do.
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start');
+      const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
+      // The text quotes the slot the series move RECORDED for the anchor —
+      // date and arrival window. A replayed/retried pass whose anchor was
+      // corrected since (another date, or another window on the same date)
+      // must not send the obsolete slot; the later move's own notice covers
+      // the customer.
+      const anchorOcc = occurrences.find((occ) => String(occ.id) === String(serviceId));
+      const hm = (t) => (t ? String(t).slice(0, 5) : null);
+      const recordedStart = anchorOcc ? hm(anchorOcc.windowStart) : hm(parseRescheduleWindow(newWindow).start);
+      const anchorStillOnRecordedSlot = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0]
+        && (!anchorOcc || hm(row.window_start) === recordedStart);
+      if (!customer) {
+        notificationError = 'Customer not found';
+        definitiveNonSend = true;
+      } else if (!anchorStillOnRecordedSlot(svc)) {
+        notificationError = 'anchor_changed';
+        definitiveNonSend = true;
+      } else {
+        const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
+          .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+        // The anchor's landing window (the caller's, or its own kept window on
+        // a date-only move) — window_text quotes the 2-hour arrival promise
+        // from that start, never the job-duration block (see sms-time-format).
+        const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
+        const arrivalRange = arrivalWindowRange(startForText);
+        const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
+        // sendOutcome: the sender reports a DEFERRED send (send window,
+        // provider hold) separately from a definitive non-send, and
+        // providerAccepted once ANY recipient's handoff succeeded — read in
+        // the catch too, because a fan-out can accept one contact and then
+        // throw on a later one.
+        const sendOutcome = {};
+        try {
+          const AppointmentReminders = require('../services/appointment-reminders');
+          const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+            return renderRequiredTemplate('appointment_series_rescheduled', {
+              first_name: firstName,
+              start_date: displayDate,
+              window_text: windowText,
+            }, {
+              workflow: 'dispatch_series_reschedule',
+              entity_type: 'scheduled_service',
+              entity_id: serviceId,
+            });
+          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText }, {
+            // Authenticated staff explicitly asked to notify the customer of
+            // the series move — exempt from the 8AM-8PM send window like the
+            // neighboring rain-out and quick-move actions. A CUSTOMER-driven
+            // move (an SMS reply) is not staff action: it stays inside the
+            // quiet-hours window like the single-visit reply path, and a
+            // held send is a deferral (notified_at stays NULL) the
+            // reconciler retries once the window opens (hook r19 P1). The
+            // row's recorded source decides — the same on a live pass and
+            // on reconciliation.
+            operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),
+            sendOutcome,
+            preDispatchCheck: async () => {
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+              if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
+              if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
+                return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
+              }
+              return anchorStillOnRecordedSlot(row)
+                ? { ok: true }
+                : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
+            },
+          });
+          if (!notificationSent) {
+            notificationError = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+            // Only a definitive non-send concludes the effect: a quiet-hours
+            // deferral OR a retryable provider failure (Twilio 429/5xx —
+            // the sender sets sendOutcome.retryable) leaves notified_at
+            // unstamped so the reconciler retries the text (codex r9 P1).
+            definitiveNonSend = sendOutcome.lastDeferred !== true && sendOutcome.retryable !== true;
+          }
+          if (notificationSent) {
+            // The send is recorded BEFORE the close is attempted, so a
+            // pass that dies or fails between the two is redone as a
+            // close-only pass, never as a second text.
+            await recordCustomerNotified();
+            await closeSeriesReminders();
+          }
+        } catch (err) {
+          notificationError = err.message;
+          logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
+          if (sendOutcome.providerAccepted === true) {
+            // A recipient already accepted the text before the throw: the
+            // delivery stands — record it and close, or a retry would send
+            // that recipient a duplicate (codex r14 P1).
+            notificationSent = true;
+            notificationError = null;
+            await recordCustomerNotified();
+            await closeSeriesReminders();
+          }
+        }
+      }
+      if (!notificationSent) {
+        // Nothing went out, so the due windows the sync covered above (this
+        // pass, or an earlier pass that died before texting) must be handed
+        // back to the reminder cron. A retry pass holds no snapshot of the
+        // earlier pass's sync, so it reads one NOW — the rows as they stand,
+        // kept only where the time is still this move's — and re-arms
+        // guarded on that. Fallback scope — a failed guard snapshot — is
+        // each owned occurrence's NEW time, recomputed exactly as
+        // syncRescheduleReminder stamped it; a possible duplicate beats a
+        // customer with neither a confirmation nor a reminder.
+        let guardsForRearm = seriesReminderGuards;
+        if (seriesGuardSnapshotFailed) {
+          guardsForRearm = { failed: true, guards: seriesReminderGuards };
+        } else if (!remindersThisPass) {
+          const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
+          guardsForRearm = Array.isArray(retryGuards) ? retryGuards : { failed: true, guards: [] };
+        }
+        const rearm = await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({
+          scheduledServiceId: occurrence.id,
+          appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
+        })));
+        // The terminal marker lands only AFTER the compensation, and only
+        // when it actually landed: a pass that dies between the two, or a
+        // failed re-arm write, leaves the row selectable for the reconciler
+        // (re-arm is idempotent) — never covered windows under a concluded
+        // non-send (codex r14 P1).
+        if (definitiveNonSend && rearm?.ok !== false) await stampMarker('notified_at', { customer_notified: false });
+        else if (definitiveNonSend) logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder re-arm incomplete — notified_at left unstamped for retry`);
+      }
+    }
+    return { notificationSent, notificationError, conflicts, seriesMoveId };
+  } finally {
+    await releaseLease();
+  }
+}
+
+// Durable recovery for the post-commit effects: a pass that died after the
+// series committed (process exit between the trx and the effects, a webhook
+// worker restart) leaves a committed series_moves row with unstamped
+// markers. The 15-minute cron calls this to finish exactly the incomplete
+// effects of every such row from the operation's own recorded result —
+// only for surfaces whose effects run through applySeriesMoveEffects (the
+// customer web page and Quick Move keep their own effect paths).
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];
+// Surfaces whose series text is an authenticated staff action (quiet-hours
+// exempt); every customer-driven surface stays inside the send window.
+const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);
+async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
+  // Committed rows with any unfinished effect, plus SUPERSEDED rows that
+  // still owe their conflict card (applySeriesMoveEffects runs card-only
+  // for those). Ordered by the LAST ATTEMPT (effects_attempted_at, else
+  // created_at) and stamped before running, so a class of rows that keeps
+  // failing retryably (a destination Twilio keeps 5xx-ing) rotates to the
+  // back and can never monopolize the fixed batch (codex r10 P2).
+  const rows = await db('series_moves')
+    .whereIn('source_surface', RECONCILE_SURFACES)
+    .where('created_at', '<', new Date(Date.now() - olderThanMs))
+    .where((q) => q
+      .where((c) => c.where({ status: 'committed' }).where((u) => u
+        .whereNull('reminders_synced_at')
+        .orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at'))
+        .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at'))
+        // Rewound rows whose tech pointer release never completed.
+        .orWhere((q4) => q4.whereNull('cleanup_done_at').whereRaw("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0"))
+        // A Quick Move text claimed by a pass that died before sending.
+        .orWhere((q5) => q5.where({ source_surface: 'quick_move', notify_requested: true, customer_notified: false })
+          .where('notified_at', '<', new Date(Date.now() - SERIES_EFFECTS_LEASE_MS)))))
+      .orWhere((s) => s.where({ status: 'superseded' }).where((d) => d
+        .where((cc) => cc.where('conflict_count', '>', 0).whereNull('conflict_card_at'))
+        // Cleanup debt survives supersession (codex r16 P1).
+        .orWhere((cl) => cl.whereNull('cleanup_done_at').whereRaw("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0")))))
+    .orderByRaw('COALESCE(effects_attempted_at, created_at) asc')
+    .limit(limit)
+    .select('id', 'anchor_service_id', 'customer_id', 'new_date', 'result', 'rows', 'notify_requested', 'status', 'cleanup_done_at', 'conflict_count', 'conflict_card_at');
+  if (rows.length) {
+    try {
+      await db('series_moves').whereIn('id', rows.map((r) => r.id)).update({ effects_attempted_at: db.fn.now() });
+    } catch (err) {
+      logger.warn(`[dispatch] series move effects attempt stamp failed: ${err.message}`);
+    }
+  }
+  let finished = 0;
+  for (const row of rows) {
+    const stored = row.result && typeof row.result === 'object' ? row.result : null;
+    if (!stored) continue;
+    try {
+      // A pass that died between the commit and the rebooker's post-commit
+      // loop left rewound techs pinned / trackers stale — the same
+      // idempotent cleanup an operation_key replay runs (codex r10 P1),
+      // owed by committed AND superseded rows alike (codex r16 P1).
+      if (!row.cleanup_done_at && Array.isArray(stored.rewoundIds) && stored.rewoundIds.length) {
+        await require('../services/rebooker').replaySeriesMoveCleanup(row);
+      }
+      // A superseded row selected for cleanup debt alone owes no card pass.
+      if (row.status === 'superseded' && !(Number(row.conflict_count) > 0 && !row.conflict_card_at)) { finished += 1; continue; }
+      const out = await applySeriesMoveEffects({
+        result: { ...stored, seriesMoveId: row.id },
+        serviceId: row.anchor_service_id,
+        newDate: row.new_date instanceof Date ? row.new_date.toISOString().slice(0, 10) : String(row.new_date).slice(0, 10),
+        newWindow: null,
+        notify: row.notify_requested === true,
+        actorId: null,
+        reasonText: null,
+      });
+      if (!out.inProgress) finished += 1;
+    } catch (err) {
+      logger.error(`[dispatch] series move effects reconcile failed for ${row.id}: ${err.message}`);
+    }
+  }
+  return { candidates: rows.length, finished };
+}
+
+// GET /api/admin/dispatch/:serviceId/series-move-preview?newDate=YYYY-MM-DD
+// The server contract a surface renders before a collective move ("Move
+// visit + N future visits") — counts come from the rebooker's own sibling
+// selection and projector, never from the client.
+router.get('/:serviceId/series-move-preview', async (req, res, next) => {
+  try {
+    const newDate = validScheduleDate(req.query.newDate);
+    if (!newDate) return res.status(400).json({ error: 'newDate must be a valid upcoming YYYY-MM-DD date' });
+    const preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
+    res.json({ ...preview, enabled: collectiveMoveGateOn() });
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/:serviceId/reschedule
 // A reschedule to a date already in the past is always a mistake (a
 // week-off click in the calendar UI) — and the customer notice would
@@ -14010,6 +14619,11 @@ function pastRescheduleDateError(newDate) {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // Client-minted idempotency key for the series operation (see
+    // rebooker.rescheduleSeries operationKey) — optional, string only.
+    const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
+      ? req.body.operationKey
+      : null;
 
     const pastDateError = pastRescheduleDateError(req.body.newDate);
     if (pastDateError) {
@@ -14033,156 +14647,43 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // sibling aborts the whole move).
       const observedAnchor = {};
       await resolveRescheduleWindow(req.params.serviceId, newWindow, observedAnchor);
+      await ensureObservedAnchor(req.params.serviceId, observedAnchor);
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
+        sourceSurface: 'dispatch_board',
+        notifyRequested: notifyCustomer !== false,
+        ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
         // Same staleness fence via the series writer's own expectAnchor
-        // mechanism: the anchor whose window this route just validated must
-        // still be the anchor the trx moves.
-        ...(observedAnchor.read
-          ? {
-            expectAnchor: {
-              ...(observedAnchor.scheduled_date ? { scheduled_date: observedAnchor.scheduled_date } : {}),
-              window_start: observedAnchor.window_start ?? null,
-            },
-          }
+        // mechanism, on the FULL pin the resolution read (date, start, end,
+        // duration — rescheduleExpectPredicate, the shape the non-series
+        // branch already passes): a start-only/date-only move derived its
+        // window from window_end / estimated_duration_minutes, so an edit
+        // to either between the resolution and the series trx must fail the
+        // fence, not commit the stale derived window over it (codex r9 P1).
+        ...(rescheduleExpectPredicate(observedAnchor)
+          ? { expectAnchor: rescheduleExpectPredicate(observedAnchor) }
           : {}),
       });
-      const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
-      // The rebooker unassigns any shifted sibling whose kept tech would
-      // double-book its recomputed date (occ.conflicted). Those rows often
-      // land outside the reloaded week view — surface them in the response
-      // AND ring the bell so a dispatcher's series drag can't silently
-      // strand unassigned visits.
-      const unassignedConflicts = occurrences
-        .filter((occ) => occ.conflicted)
-        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-      if (unassignedConflicts.length) {
-        try {
-          const NotificationService = require('../services/notification-service');
-          const notif = await NotificationService.notifyAdmin(
-            'schedule_conflict',
-            'Series move left visits unassigned',
-            `A series reschedule shifted ${unassignedConflicts.length} future visit(s) onto already-booked windows; they were left UNASSIGNED (${unassignedConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
-            { metadata: { scheduledServiceId: req.params.serviceId, conflicts: unassignedConflicts } }
-          );
-          if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${req.params.serviceId}: ${JSON.stringify(unassignedConflicts)}`);
-        } catch (err) {
-          logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
-        }
-      }
-      // Sync each occurrence's reminder and snapshot its guard IMMEDIATELY
-      // after — capture must sit adjacent to its own sync, before ANY awaited
-      // board broadcast. A snapshot taken after the emits would capture a
-      // concurrent dispatcher's newer reschedule of an occurrence as "our"
-      // state, and a later SMS failure would then re-arm against it —
-      // clearing the newer reschedule's covered flags and double-texting the
-      // customer (the guard exists precisely so zero rows match in that case).
-      const seriesReminderGuards = [];
-      let seriesGuardSnapshotFailed = false;
-      for (const occurrence of occurrences) {
-        await syncRescheduleReminder(
-          occurrence.id,
-          occurrence.date,
-          { start: occurrence.windowStart, end: occurrence.windowEnd },
-          { willNotify: notifyCustomer !== false },
-        );
-        const occurrenceGuards = await captureReminderGuards(occurrence.id);
-        if (Array.isArray(occurrenceGuards)) {
-          seriesReminderGuards.push(...occurrenceGuards);
-        } else {
-          // Per-occurrence snapshot read failed — degrade the WHOLE set to
-          // the unguarded fallback below. rearmRescheduleReminderWindows'
-          // failure marker is all-or-nothing (same semantics as the previous
-          // single whole-series snapshot query failing); a partially-guarded
-          // list would silently skip the re-arm for the failed occurrence,
-          // and silence is worse than a possible duplicate.
-          seriesGuardSnapshotFailed = true;
-        }
-      }
-      // Board broadcasts only AFTER every sync→capture pair — an awaited emit
-      // between a sync and its capture would reopen the snapshot gap above.
-      for (const occurrence of occurrences) {
-        try {
-          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
-        } catch (err) {
-          logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
-        }
-      }
-
-      let notificationSent = false;
-      let notificationError = null;
-      if (notifyCustomer !== false) {
-        const svc = await db('scheduled_services')
-          .where('scheduled_services.id', req.params.serviceId)
-          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-          .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-          .first();
-        if (!svc?.phone) {
-          notificationError = 'Customer phone unavailable';
-        } else {
-          const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
-            .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-          const win = parseRescheduleWindow(newWindow);
-          // window_text quotes the 2-hour arrival promise from the new start.
-          // win.end is the job-duration block the dispatcher sized the visits
-          // with — never the customer-facing window (see sms-time-format).
-          const arrivalRange = arrivalWindowRange(win.start);
-          const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
-          try {
-            const body = await renderRequiredTemplate('appointment_series_rescheduled', {
-              first_name: svc.first_name || 'there',
-              start_date: displayDate,
-              window_text: windowText,
-            }, {
-              workflow: 'dispatch_series_reschedule',
-              entity_type: 'scheduled_service',
-              entity_id: req.params.serviceId,
-            });
-            const msg = await sendCustomerMessage({
-              to: svc.phone,
-              body,
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'appointment',
-              customerId: svc.customer_id,
-              identityTrustLevel: 'phone_matches_customer',
-              // Authenticated dispatcher explicitly asked to notify the
-              // customer of the series move — exempt from the 8AM-8PM send
-              // window like the neighboring rain-out and quick-move actions
-              // (nothing re-enqueues this exact message; a held night send
-              // would silently drop the notice for a next-morning move).
-              operatorInitiated: true,
-              metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
-            });
-            notificationSent = !(msg?.blocked || msg?.sent === false);
-            if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
-            if (notificationSent) {
-              await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
-            }
-          } catch (err) {
-            notificationError = err.message;
-            logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
-          }
-        }
-        if (!notificationSent) {
-          // Fallback scope for a failed guard snapshot: each occurrence's NEW
-          // time, recomputed exactly as syncRescheduleReminder stamped it above.
-          const guardsForRearm = seriesGuardSnapshotFailed
-            ? { failed: true, guards: seriesReminderGuards }
-            : seriesReminderGuards;
-          await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
-            scheduledServiceId: occurrence.id,
-            appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
-          })));
-        }
-      }
-
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: req.params.serviceId,
+        newDate,
+        newWindow,
+        notify: notifyCustomer !== false,
+        actorId: req.technicianId,
+        reasonText,
+      });
       const { rescheduledOccurrences, ...response } = result;
-      return res.json({ ...response, notificationSent, notificationError, unassignedConflicts });
+      return res.json({
+        ...response,
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+        unassignedConflicts: effects.conflicts,
+      });
     }
 
     // Staff-initiated reschedules may override live lifecycle states
@@ -14218,13 +14719,80 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // the RescheduleModal's deriveWindowFromCurrentVisit opt-in).
     const observedForMove = {};
     const effectiveWindow = await resolveRescheduleWindow(req.params.serviceId, newWindow, observedForMove);
+    await ensureObservedAnchor(req.params.serviceId, observedForMove);
     // Pin the fields that resolution derived from into the rebooker's CAS.
     const movePin = rescheduleExpectPredicate(observedForMove);
     if (movePin) rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), ...movePin };
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
+    rescheduleOptions.sourceSurface = 'dispatch_board';
+    rescheduleOptions.notifyRequested = notifyCustomer !== false;
+    if (operationKey) rescheduleOptions.operationKey = operationKey;
+    // Disclosure contract (PR2 wires it): the collective choke point would
+    // widen this singular move to the whole series. A surface that sent
+    // `scope: 'this_only'` without `seriesAck: true` has not shown the
+    // operator what moves — refuse with the preview counts so it can, and
+    // re-submit with the ack (or `scope: 'series'`, which is the explicit
+    // "Reschedule series" choice). Gate off: unchanged single-visit move.
+    // The ack is bound to the previewed set (`seriesAckCount` = the
+    // movableCount shown): a plan that changed since is refused with a
+    // refreshed preview, and the count is enforced again inside the series
+    // transaction (codex r18 P2).
+    if (collectiveMoveGateOn()) {
+      // The observed anchor (read above, or by the resolution) answers the
+      // recurrence + date questions — one read, one snapshot.
+      const job = observedForMove.is_recurring !== undefined
+        ? observedForMove
+        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+      const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+        let preview = null;
+        try {
+          preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
+        } catch {
+          preview = null;
+        }
+        // Bound to the previewed OCCURRENCE SET (seriesAckIds), never a count.
+        const ids = Array.isArray(req.body.seriesAckIds) ? req.body.seriesAckIds.map(String) : null;
+        const have = preview && Array.isArray(preview.occurrenceIds) ? new Set(preview.occurrenceIds.map(String)) : null;
+        const acked = req.body.seriesAck === true && ids && have && ids.length === have.size && ids.every((id) => have.has(id));
+        if (!acked) {
+          const changed = req.body.seriesAck === true && ids && have;
+          return res.status(409).json({
+            error: changed
+              ? `The recurring plan changed since the preview — it now moves ${Math.max((preview?.movableCount || 1) - 1, 0)} later visit(s) (a different set). Review the refreshed preview and confirm again.`
+              : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
+            code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
+            preview: preview || null,
+          });
+        }
+        rescheduleOptions.expectOccurrenceIds = preview.occurrenceIds.map(String);
+      }
+    }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    if (result.seriesMoveId) {
+      // The collective choke point (GATE_ADMIN_COLLECTIVE_MOVE) turned this
+      // date move into a series move regardless of the scope the client sent
+      // — the server enforces the ruling; the client only describes it.
+      // Series effects, not the single-visit notice.
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: req.params.serviceId,
+        newDate,
+        newWindow: effectiveWindow,
+        notify: notifyCustomer !== false,
+        actorId: req.technicianId,
+        reasonText,
+      });
+      const { rescheduledOccurrences, ...response } = result;
+      return res.json({
+        ...response,
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+        unassignedConflicts: effects.conflicts,
+      });
+    }
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
@@ -15462,6 +16030,8 @@ module.exports = router;
 // its failed-send compensation is the same guarded re-arm this route uses
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
+module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,

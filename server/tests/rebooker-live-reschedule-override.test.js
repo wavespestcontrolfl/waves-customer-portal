@@ -5,6 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+  planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -81,6 +82,7 @@ function chain(overrides = {}) {
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
 }
@@ -110,9 +112,11 @@ function wireRescheduleMocks(service) {
   const logCount = chain({ first: jest.fn().mockResolvedValue({ count: '1' }) });
 
   const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
     if (table === 'scheduled_services') return updateQuery;
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -123,6 +127,8 @@ function wireRescheduleMocks(service) {
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
+    // The series writer always looks up a prior operation_key first — none here.
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected db table ${table}`);
   });
 
@@ -353,11 +359,15 @@ describe('live-status reschedule override (allowLive)', () => {
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, ...updates];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, ...updates];
     const trx = jest.fn((table) => {
+      // The locked (FOR SHARE) re-read of the preference answers the same
+      // verdict the pre-trx read did.
+      if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -375,6 +385,8 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'property_preferences') {
         return chain({ first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
       }
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -492,7 +504,7 @@ describe('live-status reschedule override (allowLive)', () => {
     }));
   });
 
-  test('rescheduleSeries start-only move: EACH occurrence derives its end from its OWN span (60 vs 120 min), never the anchor\'s', async () => {
+  test('rescheduleSeries start-only move: the ANCHOR derives its end from its own span; siblings KEEP their own windows (date-only sweep)', async () => {
     const { updates } = wireSeriesMocks('confirmed', [
       { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '10:00:00' },
       { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
@@ -506,8 +518,11 @@ describe('live-status reschedule override (allowLive)', () => {
 
     expect(result.success).toBe(true);
     expect(updates[0].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '14:00' });
-    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '15:00' });
-    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ window_start: '13:00', window_end: '14:30' });
+    // A series move mutates the DATE dimension only (owner ruling 2026-08-28):
+    // siblings keep their stored window — a null end stays null — and their
+    // status; only the anchor takes the caller's window.
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: '11:00:00', status: 'confirmed' });
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: null });
   });
 
   test('rescheduleSeries (adminWindowRules): a sibling with a 07:00 window moves with the series — no day-start floor', async () => {
@@ -704,11 +719,13 @@ describe('live-status reschedule override (allowLive)', () => {
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -719,6 +736,8 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -771,12 +790,14 @@ describe('live-status reschedule override (allowLive)', () => {
     // Under the kill switch the tech guard skips, so its probe query never
     // consumes a slot in the trx queue.
     const scheduledQueue = techGuardRuns
-      ? [siblingsQuery, seriesClashProbe, techOverlapProbe, anchorUpdate]
-      : [siblingsQuery, seriesClashProbe, anchorUpdate];
+      ? [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, techOverlapProbe, anchorUpdate]
+      : [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
+    if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -787,6 +808,8 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
     return { trx, techOverlapProbe, anchorUpdate };

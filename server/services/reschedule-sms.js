@@ -142,6 +142,9 @@ class RescheduleSMS {
     // FUTURE candidate dates the appointment isn't on yet, so this never short-
     // circuits a genuine move.
     let alreadyOnSlot = false;
+    // The schedule this reply OBSERVED — the move below carries it as its
+    // expect pin.
+    let observedSchedule = null;
     if (selectedOption) {
       const svc = await db('scheduled_services')
         .where({ id: pending.scheduled_service_id })
@@ -168,6 +171,11 @@ class RescheduleSMS {
       // widened/edited off the reply option still re-books to the tight target
       // instead of being silently confirmed as-is. Exclude every non-live status
       // (completed/cancelled/skipped) so a reply can't "confirm" a dead visit.
+      // Date, start AND end: alreadyOnSlot treats an edited end as a real
+      // change, so the pin must too — an end edited after this read fails
+      // the move's CAS/fence and the reply takes the office-follow-up path
+      // instead of overwriting the newer end (codex r13 P2).
+      observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null, window_end: svc.window_end ?? null } : null;
       alreadyOnSlot = !!svc
         && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
         && normTime(svc.window_start) === normTime(selectedOption.window?.start)
@@ -176,11 +184,31 @@ class RescheduleSMS {
         && withinQuotedWindow;
     }
 
+    let smsMoveResult = null;
     if (selectedOption && !alreadyOnSlot) {
       try {
-        await SmartRebooker.reschedule(
+        // notifyRequested: a date reply on a cadence visit shifts the future
+        // series through the collective choke point, and the customer's
+        // confirmation of THAT move is the durable series text below (the
+        // series_moves row records it, so the reconciler can finish it).
+        // A single move ignores the flag and keeps this path's own
+        // confirmation send.
+        // expect: the schedule this reply observed rides along as the
+        // move's pin. The single path CASes on it; the series path's
+        // retry-key resolution needs it to tell a legitimate return move
+        // (A→B, B→C, then C→B — observed at C) from a stale retry of the
+        // original A→B (observed at A), which it otherwise refuses as
+        // SERIES_MOVE_STALE and this valid reply lands in office follow-up
+        // (codex r8 P2). A pin that no longer holds surfaces as the 409
+        // the catch below routes to follow-up.
+        smsMoveResult = await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
-          selectedOption.window, pending.reason_code, 'customer_sms'
+          selectedOption.window, pending.reason_code, 'customer_sms',
+          {
+            sourceSurface: 'sms_reply',
+            notifyRequested: true,
+            ...(observedSchedule ? { expect: observedSchedule } : {}),
+          },
         );
       } catch (err) {
         // The offer was computed without a route check — rebooker can now
@@ -205,8 +233,10 @@ class RescheduleSMS {
       // syncRescheduleReminder in routes/admin-dispatch.js). sendNotification
       // false: the confirmation SMS below is the customer notice;
       // coverDueWindows keeps the 15-min cron from firing a duplicate
-      // day-before text for a window that notice already covers.
-      if (selectedOption) {
+      // day-before text for a window that notice already covers. A series
+      // move syncs every occurrence (the anchor included) inside the shared
+      // effects pass below instead.
+      if (selectedOption && !smsMoveResult?.seriesMoveId) {
         try {
           const AppointmentReminders = require('./appointment-reminders');
           await AppointmentReminders.handleReschedule(
@@ -218,6 +248,48 @@ class RescheduleSMS {
           logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
         }
       }
+    }
+
+    // A date reply on a cadence visit shifted the future series through the
+    // collective choke point. EVERY post-commit effect — the customer's
+    // confirmation (the appointment_series_rescheduled text: new start plus
+    // "your recurring appointments" — the single confirmation copy below
+    // would misdescribe a series shift), per-occurrence reminder sync with
+    // due-window cover, reminder close / re-arm, the windowless-sibling
+    // operator card, board broadcasts — runs through the shared, DURABLE
+    // effects pass keyed on the series_moves row (notify_requested recorded
+    // on the row). A worker that dies anywhere after the commit — including
+    // before the confirmation went out — leaves unstamped markers the
+    // 15-minute reconciler finishes; nothing here is a parallel send the
+    // next webhook could never recover (the pending offer is already marked
+    // responded above).
+    if (selectedOption && smsMoveResult?.seriesMoveId) {
+      let effects = null;
+      try {
+        const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+        effects = await applySeriesMoveEffects({
+          result: smsMoveResult,
+          serviceId: pending.scheduled_service_id,
+          newDate: selectedOption.date,
+          newWindow: selectedOption.window,
+          notify: true,
+          actorId: null,
+          reasonText: null,
+        });
+      } catch (err) {
+        logger.error(`[reschedule-sms] series effects failed for ${pending.scheduled_service_id} (reconciler will retry): ${err.message}`);
+      }
+      await db('reschedule_log').where({ id: pending.id }).update({
+        new_date: selectedOption.date,
+        new_window: `${selectedOption.window.start}-${selectedOption.window.end}`,
+      });
+      return {
+        handled: true,
+        action: 'rescheduled',
+        newDate: selectedOption.date,
+        smsSent: effects?.notificationSent === true,
+        seriesMoveId: smsMoveResult.seriesMoveId,
+      };
     }
 
     if (selectedOption) {

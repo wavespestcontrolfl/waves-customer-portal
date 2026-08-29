@@ -713,6 +713,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
+            sourceSurface: 'customer_web',
+            // The confirmation is the series pass's durable text (below).
+            notifyRequested: true,
           }
         )
         : await SmartRebooker.reschedule(
@@ -721,7 +724,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           newWindow,
           'customer_request',
           'customer_self_serve',
-          { technicianId: slot.technician_id }
+          // This page discloses its series scope to the customer (the
+          // seriesScopeMismatch consent pin above) and decides it here —
+          // the collective choke point must not widen a disclosed single move.
+          { technicianId: slot.technician_id, seriesPolicy: 'single' }
         );
     } catch (err) {
       if (err?.statusCode) {
@@ -761,170 +767,38 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     }
 
-    // Post-commit, best-effort reminder + notification sync.
+    // Post-commit reminder + notification sync.
     //
     // Single visit: handleReschedule re-arms reminders AND sends the standard
     // appointment_rescheduled confirmation text.
     //
-    // Series re-anchor: mirror the admin dispatch series path — re-arm every
-    // shifted occurrence WITHOUT per-occurrence texts (sendNotification:false,
-    // coverDueWindows so the 15-min cron can't double-remind in the gap), then
-    // send ONE appointment_series_rescheduled confirmation and mark the
-    // reschedule notice sent for every shifted row.
+    // Series re-anchor: every post-commit effect — sibling + anchor reminder
+    // sync, board broadcasts, the conflict card for windowless landings, and
+    // the ONE appointment_series_rescheduled confirmation (the same template
+    // this route rendered by hand before) — runs through the shared durable
+    // pass (applySeriesMoveEffects): marker-fenced on the series_moves row,
+    // so an operation_key replay (timeout retry, double submit) never texts
+    // twice, and a pass that dies after the commit is finished by the
+    // 15-minute reconciler (customer_web is a reconciled surface). A
+    // quiet-hours hold is a deferral the reconciler retries once the window
+    // opens (hook r25 P1 — the existing mechanism, not a parallel path).
     const AppointmentReminders = require('../services/appointment-reminders');
+    let seriesNoticeSent = false;
     if (shiftedOccurrences) {
-      for (const occ of shiftedOccurrences) {
-        // A flagged occurrence committed WINDOWLESS and its reminder row was
-        // pre-closed inside the rebooker trx — never re-arm it here at a
-        // fabricated time (the anchor's slot is not this visit's window).
-        if (occ.conflicted) continue;
-        try {
-          // coverDueWindows:true — same duplicate-reminder race guard the
-          // admin series path uses: an already-due 24h window must not let
-          // the 15-min cron text a standard reminder in the gap before our
-          // series SMS lands. The no-send hole this opens (no phone,
-          // template missing, send blocked) is closed below: every no-send
-          // path explicitly RE-ARMS the covered windows so the cron still
-          // reminds — the customer never ends up with silence.
-          await AppointmentReminders.handleReschedule(
-            occ.id,
-            `${String(occ.date).split('T')[0]}T${hhmm(occ.windowStart) || slot.start_time}`,
-            { sendNotification: false, coverDueWindows: true }
-          );
-        } catch (err) {
-          logger.error(`[reschedule-public] series reminder sync failed for ${occ.id}: ${err.message}`);
-        }
-      }
-      let seriesNoticeSent = false;
       try {
-        const smsTemplatesRouter = require('./admin-sms-templates');
-        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-        const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
-        const customer = await db('customers').where({ id: svc.customer_id }).first('phone');
-        if (customer?.phone && typeof smsTemplatesRouter.getTemplate === 'function') {
-          const displayDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
-            weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York',
-          });
-          const arrivalRange = arrivalWindowRange(slot.start_time);
-          const body = await smsTemplatesRouter.getTemplate('appointment_series_rescheduled', {
-            first_name: svc.cust_first_name || 'there',
-            start_date: displayDate,
-            window_text: arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '',
-          }, {
-            workflow: 'customer_self_serve_series_reschedule',
-            entity_type: 'scheduled_service',
-            entity_id: svc.id,
-          });
-          if (body) {
-            const msg = await sendCustomerMessage({
-              to: customer.phone,
-              body,
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'appointment',
-              customerId: svc.customer_id,
-              identityTrustLevel: 'phone_matches_customer',
-              metadata: { original_message_type: 'reschedule_series_confirmation', source: 'reschedule_public' },
-            });
-            if (!(msg?.blocked || msg?.sent === false)) {
-              seriesNoticeSent = true;
-              await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
-            } else if (msg?.code === 'QUIET_HOURS_HOLD' && msg?.deferred && msg?.nextAllowedAt) {
-              // Send-window hold on a customer self-serve series move
-              // (codex r23): nothing re-fires this confirmation — the
-              // re-arm below only restores the ordinary 72h/24h reminder
-              // windows, which can be DAYS away, so the customer would
-              // never be told their series actually moved. Queue the exact
-              // rendered body on the scheduled rail for the window open,
-              // under the shared visit-anchored replay entry (its recheck
-              // re-validates the visit is still upcoming and the number is
-              // still an authorized contact). A successful enqueue OWNS
-              // delivery, so the covered windows stay covered exactly as
-              // they would after an immediate send; a failed enqueue falls
-              // through to the re-arm so the customer is never left silent.
-              try {
-                const TWILIO_NUMBERS = require('../config/twilio-numbers');
-                const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
-                const recipientStamp = await recipientRefreshStamp({
-                  customerId: svc.customer_id,
-                  recipientPhone: customer.phone,
-                  customerRow: customer,
-                  label: 'reschedule-public',
-                });
-                await db('sms_log').insert({
-                  customer_id: svc.customer_id,
-                  direction: 'outbound',
-                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                  to_phone: customer.phone,
-                  message_body: body,
-                  status: 'scheduled',
-                  scheduled_for: new Date(msg.nextAllowedAt),
-                  message_type: 'reschedule_series_confirmation',
-                  metadata: JSON.stringify({
-                    entry_point: 'appointment_notice_contact_deferred',
-                    scheduled_service_id: svc.id,
-                    original_block_code: msg.code,
-                    replay_purpose: 'appointment',
-                    // The slot this body announces (codex r25): a second
-                    // move before 08:00 — including SmartRebooker, which
-                    // forces status back to 'confirmed' — must suppress
-                    // the frozen first-move copy at replay. Compare against
-                    // the ANCHOR visit's own committed slot (the queued row
-                    // is anchored to svc.id), falling back to the requested
-                    // series slot exactly like the reminder-sync loop.
-                    ...(() => {
-                      const anchorOcc = shiftedOccurrences.find((o) => String(o.id) === String(svc.id));
-                      const slotDate = String(anchorOcc?.date || date).slice(0, 10);
-                      const slotStart = hhmm(anchorOcc?.windowStart) || String(slot?.start_time || '').slice(0, 5);
-                      return {
-                        ...(slotDate ? { slot_scheduled_date: slotDate } : {}),
-                        ...(slotStart ? { slot_window_start: slotStart } : {}),
-                      };
-                    })(),
-                    ...recipientStamp,
-                    resolve_from_by_customer: true,
-                  }),
-                });
-                seriesNoticeSent = true;
-                await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
-                logger.info(`[reschedule-public] series confirmation for ${svc.id} held outside the 8AM-8PM ET send window — queued for ${msg.nextAllowedAt}`);
-              } catch (queueErr) {
-                logger.error(`[reschedule-public] held series confirmation requeue failed for ${svc.id}: ${queueErr.message} — re-arming reminder windows instead`);
-              }
-            }
-          }
-        }
+        const { applySeriesMoveEffects } = require('./admin-dispatch');
+        const effects = await applySeriesMoveEffects({
+          result,
+          serviceId: svc.id,
+          newDate: date,
+          newWindow,
+          notify: true,
+          actorId: null,
+          reasonText: null,
+        });
+        seriesNoticeSent = effects.notificationSent === true;
       } catch (err) {
-        logger.warn(`[reschedule-public] series confirmation SMS failed for ${svc.id}: ${err.message}`);
-      }
-      if (!seriesNoticeSent) {
-        // No-send path (no phone / template missing / blocked / send threw):
-        // the covered 24h/72h flags above would otherwise suppress due
-        // reminders entirely. Re-arm them so the 15-min cron still reminds
-        // the customer of the new times — a possible duplicate was the risk
-        // covering guards against; silence is worse.
-        try {
-          await db('appointment_reminders')
-            .whereIn('scheduled_service_id', shiftedOccurrences.map((occ) => occ.id))
-            // A sibling-suppressed row is suppressed BY SETTING both sent
-            // flags — clearing them would put it back in the cron's send set
-            // alongside the slot's owner (duplicate reminders), and a
-            // windowless pre-closed placeholder (windows_preclosed, which
-            // implies suppressed) would start texting the 08:00 placeholder
-            // time nobody chose. A cancelled row must stay silent too. Same
-            // carve-outs as the dispatch route's no-send re-arm
-            // (rearmRescheduleReminderWindows).
-            .where({ suppressed_by_sibling: false, cancelled: false })
-            .update({
-              reminder_72h_sent: false,
-              reminder_72h_sent_at: null,
-              reminder_24h_sent: false,
-              reminder_24h_sent_at: null,
-              updated_at: db.fn.now(),
-            });
-        } catch (err) {
-          logger.error(`[reschedule-public] series reminder re-arm failed for ${svc.id}: ${err.message}`);
-        }
+        logger.error(`[reschedule-public] series effects pass failed for ${svc.id}: ${err.message} — the reconciler finishes it`);
       }
     } else {
       try {
@@ -934,11 +808,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     }
 
-    // Live dispatch-board refresh, same broadcast the admin reschedule emits
-    // (every shifted occurrence on a series re-anchor).
     {
       const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-      const jobIds = shiftedOccurrences ? shiftedOccurrences.map((occ) => occ.id) : [svc.id];
+      // The series pass already broadcast every occurrence.
+      const jobIds = shiftedOccurrences ? [] : [svc.id];
       // Per-occurrence isolation (same as the admin series path): one socket
       // failure must not leave the remaining shifted visits stale.
       for (const jobId of jobIds) {
@@ -962,21 +835,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       .filter((occ) => occ.conflicted)
       .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
     if (siblingConflicts.length) {
+      // The schedule_conflict card itself is rung (marker-fenced) by the
+      // series effects pass above; this is the log line only.
       logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) windowless (projected window held a seeded placeholder): ${JSON.stringify(siblingConflicts)}`);
-      try {
-        const NotificationService = require('../services/notification-service');
-        const notif = await NotificationService.notifyAdmin(
-          'schedule_conflict',
-          'Series re-anchor needs a look',
-          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) projected onto a window already holding another plan's placeholder (${siblingConflicts.map((c) => c.date).join(', ')}). They kept their dates but have NO time window — set a time from dispatch as those dates approach.`,
-          { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
-        );
-        if (!notif) {
-          logger.error(`[reschedule-public] schedule_conflict notification insert FAILED for ${svc.id} — flagged occurrences: ${JSON.stringify(siblingConflicts)}`);
-        }
-      } catch (err) {
-        logger.error(`[reschedule-public] schedule_conflict notification failed for ${svc.id}: ${err.message} — flagged occurrences: ${JSON.stringify(siblingConflicts)}`);
-      }
     }
 
     // Office alert — same internal ping a new self-booked appointment fires.

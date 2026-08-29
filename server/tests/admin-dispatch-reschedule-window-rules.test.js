@@ -44,6 +44,8 @@ jest.mock('../services/rebooker', () => ({
   reschedule: jest.fn().mockResolvedValue({ success: true }),
   rescheduleSeries: jest.fn().mockResolvedValue({ success: true, rescheduledOccurrences: [] }),
   applyLiveMovePostCommitEffects: jest.fn(),
+  collectiveMoveGateOn: () => process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
+  previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, occurrenceIds: ['o1', 'o2', 'o3', 'o4'], skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
@@ -79,7 +81,52 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; });
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+
+describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
+  const recurringRow = () => ({ is_recurring: true, scheduled_date: etDateString(addETDays(new Date(), 2)), window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
+
+  test('gate on: a this_only date move of a recurring visit without seriesAck is refused with the preview — nothing moves', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
+    expect(status).toBe(409);
+    expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(body.preview).toMatchObject({ movableCount: 4 });
+    expect(body.error).toMatch(/3 later visit/);
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the same move WITH seriesAck reaches the rebooker (the choke point widens it server-side)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckIds: ['o4', 'o3', 'o2', 'o1'] });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ expectOccurrenceIds: ['o1', 'o2', 'o3', 'o4'] });
+  });
+
+  test('gate on: an ack whose occurrence set no longer matches the plan (a cancel + an auto-extend since the preview — same count, different visits) is refused with the REFRESHED preview — nothing moves', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true, seriesAckIds: ['o1', 'o2', 'o3', 'o9'] });
+    expect(status).toBe(409);
+    expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(body.error).toMatch(/changed since the preview/);
+    expect(body.preview).toMatchObject({ movableCount: 4 });
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = { ...recurringRow(), is_recurring: false };
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } })).status).toBe(200);
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    mockVisitRow = recurringRow();
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } })).status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+  });
+});
 
 test('a 06:30 drop is refused with 422 INVALID_APPOINTMENT_WINDOW before the rebooker runs', async () => {
   const { status, body } = await reschedule({ newDate: TARGET, newWindow: '06:30-07:30' });
@@ -184,12 +231,14 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
     expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', {
       allowLive: true,
       adminWindowRules: true,
+      sourceSurface: 'dispatch_board',
+      notifyRequested: false,
       // Staff surface — occupancy clashes commit with a warning (owner
       // ruling 2026-08-25, rebooker.overlapAdvisory).
       overlapAdvisory: true,
       // The anchor state this route's window resolution read, pinned through
       // the series writer's existing expectAnchor fence.
-      expectAnchor: { window_start: '09:00:00' },
+      expectAnchor: { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null },
     },
   );
 });
@@ -274,10 +323,13 @@ describe('the resolved window is fenced by the rebooker CAS (options.expect)', (
     expect(status).toBe(200);
   });
 
-  test('a FULL explicit window reads no row and pins nothing (it derived from nothing stored)', async () => {
+  test('a FULL explicit window derives nothing stored but still pins the OBSERVED anchor', async () => {
     mockVisitRow = { ...ROW };
     const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
     expect(status).toBe(200);
-    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expect');
+    // It derived nothing stored, but the move still pins the anchor it
+    // OBSERVED (ensureObservedAnchor): the series path needs the observed
+    // date to tell a round trip from a stale retry (codex #3562 r18 P2).
+    expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({ scheduled_date: '2026-08-01', window_start: '19:00:00' });
   });
 });

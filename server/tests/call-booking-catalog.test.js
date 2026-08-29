@@ -1181,7 +1181,19 @@ describe('extraction plumbing for the new booking fields', () => {
   });
 });
 
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }),
+}));
+jest.mock('../services/scheduling/occupancy', () => ({
+  ...jest.requireActual('../services/scheduling/occupancy'),
+  acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
+  findConflictingVisits: jest.fn().mockResolvedValue([]),
+}));
+const occupancy = require('../services/scheduling/occupancy');
+
 describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () => {
+  beforeEach(() => { occupancy.acquireOccupancyLocks.mockClear(); occupancy.findConflictingVisits.mockClear(); occupancy.findConflictingVisits.mockResolvedValue([]); });
+
   // Chain-recording fake knex conn: captures the where filter, whereIn ids,
   // update payload, raw calls, and advisory-lock keys; the child SELECT
   // resolves to canned kid rows and update() to the canned row count.
@@ -1243,6 +1255,86 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     // by a concurrent writer misses instead of being double-shifted.
     expect(log.wheres).toContainEqual({ id: 'kid-1' });
     expect(log.wheres).toContainEqual(expect.objectContaining({ bindings: ['2026-07-16'] }));
+  });
+
+  test('takes rung-1 date-occupancy locks for every destination day itself (own transaction) — unless the caller holds them', async () => {
+    const { conn } = fakeConn();
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(occupancy.acquireOccupancyLocks).toHaveBeenCalledWith(expect.anything(), ['2026-07-19']);
+    occupancy.acquireOccupancyLocks.mockClear();
+    await shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19' }] });
+    expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
+  });
+
+  test('a child whose destination block is already booked is NOT written onto it — it keeps its date and is reported; a windowless child is not probed', async () => {
+    const kids = [
+      { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90 },
+      { id: 'kid-2', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: null, window_end: null, estimated_duration_minutes: null },
+    ];
+    const { conn, log } = fakeConn({ kids, updatedCount: 1 });
+    occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    const report = {};
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report });
+    // The durable card rings for every caller — a report only adds the response warning.
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(occupancy.findConflictingVisits).toHaveBeenCalledTimes(1);
+    expect(occupancy.findConflictingVisits.mock.calls[0][0]).toMatchObject({ date: '2026-07-19', windowStart: '09:00', windowEnd: '10:30', excludeServiceIds: ['kid-1'] });
+    expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19' }]);
+    expect(shifted).toBe(1); // only the windowless child moved
+    expect(log.wheres).toContainEqual({ id: 'kid-2' });
+    expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
+  });
+
+  test('re-reads each child UNDER the locks: a child whose tech/day changed meanwhile is skipped, and the write CASes on the locked tech/window/duration', async () => {
+    const before = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 };
+    // First select (pre-lock plan) → t1; second select (locked re-read) → the tech changed to t2.
+    let selects = 0;
+    const { conn, log } = fakeConn({ kids: [before] });
+    const origConn = conn;
+    const trxWrap = (table) => { const c = origConn(table); const sel = c.select; c.select = () => { selects += 1; return sel().then((rows) => (selects === 2 ? [{ ...before, technician_id: 't2' }] : rows)); }; return c; };
+    trxWrap.raw = origConn.raw; trxWrap.fn = origConn.fn; trxWrap.transaction = (cb) => cb(trxWrap);
+    const shifted = await shiftCallFollowUpsForParentMove({ conn: trxWrap, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(selects).toBe(2);
+    expect(shifted).toBe(0);
+    expect(log.update).toBeNull();
+
+    // Unchanged under the locks → written, with the locked values in the CAS.
+    const { conn: conn2, log: log2 } = fakeConn({ kids: [before] });
+    await shiftCallFollowUpsForParentMove({ conn: conn2, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(log2.wheres).toContainEqual({ technician_id: 't1', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
+    expect(log2.update).toMatchObject({ route_order: null });
+  });
+
+  test('occupancyHeld consumes the caller\'s locked plan (no pre-lock read of its own) and requires it; a child that differs from the plan under the locks is skipped', async () => {
+    await expect(shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true }))
+      .rejects.toThrow(/requires the plan/);
+    const planned = { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: null, window_end: null, estimated_duration_minutes: null };
+    // Locked re-read: the child moved to a different destination since the plan → skipped.
+    let selects = 0;
+    const { conn, log } = fakeConn({ kids: [{ ...planned, new_day: '2026-07-20' }] });
+    const counting = (table) => { const c = conn(table); const sel = c.select; c.select = () => { selects += 1; return sel(); }; return c; };
+    counting.raw = conn.raw; counting.fn = conn.fn; counting.transaction = (cb) => cb(counting);
+    const report = {};
+    const shifted = await shiftCallFollowUpsForParentMove({ conn: counting, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true, plan: [planned], report });
+    expect(selects).toBe(1);
+    expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
+    expect(shifted).toBe(0);
+    expect(log.update).toBeNull();
+    // Plan drift is reported like a booked slot (warning + durable card), never silent.
+    expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19', reason: 'changed' }]);
+  });
+
+  test('a booked-slot skip with NO report rings the durable schedule_conflict card itself', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const kids = [{ id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 }];
+    const { conn } = fakeConn({ kids });
+    occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(shifted).toBe(0);
+    expect(notifyAdmin).toHaveBeenCalledWith('schedule_conflict', expect.stringContaining('kept its date'), expect.stringContaining('2026-07-16 → 2026-07-19'), expect.objectContaining({ metadata: expect.objectContaining({ parentServiceId: 'svc-parent' }) }));
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {

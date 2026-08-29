@@ -1056,6 +1056,11 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
 // next daily run (ACT email), so a preference missed during an outage
 // surfaces for repair within a day.
 const WEEKDAY_PREF_VALUES = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday']);
+// Pure verdict over a property_preferences row — shared with the series
+// writer's locked re-check (it reads the row FOR SHARE inside its trx).
+function preferenceRowBlocksWeekends(row) {
+  return WEEKDAY_PREF_VALUES.has(String(row?.preferred_day || '').toLowerCase());
+}
 async function customerPrefersNoWeekends(conn, customerId) {
   if (!conn || !customerId) return false;
   try {
@@ -1068,7 +1073,7 @@ async function customerPrefersNoWeekends(conn, customerId) {
     const row = conn.isTransaction && typeof conn.transaction === 'function'
       ? await conn.transaction((sp) => read(sp))
       : await read(conn);
-    return WEEKDAY_PREF_VALUES.has(String(row?.preferred_day || '').toLowerCase());
+    return preferenceRowBlocksWeekends(row);
   } catch {
     return false;
   }
@@ -1213,6 +1218,7 @@ module.exports = {
   checkActiveSeriesLocked,
   sourceEstimateForScope,
   customerPrefersNoWeekends,
+  preferenceRowBlocksWeekends,
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,

@@ -8,6 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
+const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
@@ -5961,9 +5962,25 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
                 throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
               }
+              // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this
+              // bulk mover writes ONE row and cannot shift the sister visits,
+              // so with the gate on a DATE move of a cadence visit is refused
+              // rather than silently applied per-visit (refuse-don't-drop,
+              // same as the IB tool); the bulk series path is a follow-up.
+              if (collectiveMoveGateOn() && svc.is_recurring === true && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                throw Object.assign(
+                  new Error('part of a recurring plan — with collective moves on, move it from Dispatch or the Edit appointment modal so its future visits follow'),
+                  { isValidation: true },
+                );
+              }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
-              const updates = { scheduled_date: bulkTargetDate };
+              const updates = {
+                scheduled_date: bulkTargetDate,
+                // Bulk board move of a cadence row = a this-visit-only date
+                // exception (rebooker.dateExceptionStamp) when the date changes.
+                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? dateExceptionStamp(svc, 'admin_bulk') : {}),
+              };
               // Same validate-then-persist-the-normalized-value rule as the
               // date above: an unnormalized time Postgres happens to accept
               // ("2:00 PM") would store 14:00 while the reminderSyncTime below
@@ -6538,8 +6555,176 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
 // (assignmentScope, recurrence config, spawnRecurringChildren, payer/pricing
 // fields) can propagate to recurring siblings and children — rows a per-visit
 // ownership check on :id alone cannot vouch for.
+// Collective series move from the Edit appointment modal (owner ruling
+// 2026-08-28, GATE_ADMIN_COLLECTIVE_MOVE): a DATE change on a cadence visit
+// is a series move. PLAN it up front (is this save a collective date move?)
+// so the per-row edit transaction saves the remaining fields as a same-slot
+// edit, then COMMIT the series through the rebooker's choke point only
+// after that transaction succeeded — every 400/403/404 the handler can
+// still raise (unknown technician, missing add-on service, …) happens
+// BEFORE any visit moves or any customer is texted. The series effects
+// (reminders, board, ONE series text when the office ticked notify) replace
+// this handler's single-visit notice. Returns null when the save is not a
+// collective date move (gate off, one-time/booster row, same date, terminal
+// row = record correction, or a date the handler's own validation must
+// answer) — the handler then runs exactly as before.
+// The surface's acknowledgement of a collective move is bound to the
+// previewed OCCURRENCE SET: `seriesAck: true` + `seriesAckIds` (the
+// preview's occurrenceIds). Returns { ok, changed } against a fresh preview.
+function seriesAckMatches(body, preview) {
+  const ids = Array.isArray(body?.seriesAckIds) ? body.seriesAckIds.map(String) : null;
+  if (body?.seriesAck !== true || !ids || !preview || !Array.isArray(preview.occurrenceIds)) return { ok: false, changed: false };
+  const want = new Set(ids);
+  const have = new Set(preview.occurrenceIds.map(String));
+  const ok = want.size === have.size && [...want].every((id) => have.has(id));
+  return { ok, changed: !ok };
+}
+async function planCollectiveEditDateMove(req) {
+  const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
+  if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
+  const target = validScheduleDate(scheduledDate);
+  if (!target) return null;
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes');
+  if (!row || row.is_recurring !== true) return null;
+  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
+  if (target === dateOnly(row.scheduled_date)) return null;
+  // Canonical window intake — the same presence/clear/malformed semantics
+  // the handler applies: a half-cleared window is left for the handler's own
+  // 422 (nothing moves); an explicit clear of BOTH bounds stays the
+  // handler's write (its body keys are kept) and the series then moves the
+  // windowless anchor; a supplied start is validated NOW, before anything
+  // saves, exactly as the handler would.
+  let intake;
+  try {
+    intake = windowIntakeFromBody(req.body);
+  } catch {
+    return null;
+  }
+  const clearWindow = intake.clearBoth === true;
+  // Disclosure contract (PR2 wires it): a gated collective date move must be
+  // acknowledged by the surface — `seriesAck: true` PLUS `seriesAckCount`,
+  // the previewed movableCount the operator confirmed — so the ack is bound
+  // to the set that was shown, not a bare boolean: a plan that changed
+  // since the preview (auto-extend, a length edit) is refused with a
+  // REFRESHED preview, and the count is enforced again inside the series
+  // transaction (expectMovableCount) against the locked sibling set
+  // (codex r18 P2). Without the ack the save is refused up front — nothing
+  // saved, nothing moved.
+  let ackedIds = null;
+  {
+    let preview = null;
+    try {
+      preview = await require('../services/rebooker').previewSeriesMove(row.id, target);
+    } catch {
+      preview = null;
+    }
+    const { ok, changed } = seriesAckMatches(req.body, preview);
+    if (!ok) {
+      throw Object.assign(
+        httpError(409, changed
+          ? `The recurring plan changed since the preview — it now moves ${Math.max((preview?.movableCount || 1) - 1, 0)} later visit(s) (a different set). Review the refreshed preview and confirm again. Nothing was changed.`
+          : `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Confirm the series move to continue. Nothing was changed.`),
+        { code: 'COLLECTIVE_MOVE_ACK_REQUIRED', preview: preview || null },
+      );
+    }
+    ackedIds = preview.occurrenceIds.map(String);
+  }
+  let win = { start: null, end: null };
+  const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
+  if (!clearWindow && intake.windowStart) {
+    const normalized = assertAdminAppointmentWindow({
+      windowStart: intake.windowStart,
+      windowEnd: intake.windowEnd || null,
+      durationMinutes: submittedDuration
+        || windowDurationMinutes(row.window_start, row.window_end, row.estimated_duration_minutes),
+    });
+    win = { start: normalized.window_start, end: normalized.window_end };
+  } else if (!clearWindow && intake.windowEnd) {
+    throw Object.assign(
+      httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+      { code: 'INVALID_APPOINTMENT_WINDOW' },
+    );
+  }
+  const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
+    ? req.body.operationKey
+    : null;
+  // The duration the anchor carries when the series commits: the per-row
+  // edit ahead of it writes the submitted value under the handler's own
+  // presence predicate (`estimatedDuration !== undefined && !== ''`), else
+  // the row keeps what the plan read.
+  const postEditDuration = (req.body.estimatedDuration !== undefined && req.body.estimatedDuration !== '')
+    ? parseInt(req.body.estimatedDuration, 10)
+    : (row.estimated_duration_minutes ?? null);
+  return {
+    async commit() {
+      const SmartRebooker = require('../services/rebooker');
+      // Same predicate the choke point evaluates (gate + cadence row + date
+      // delta), so this call always lands as a series move.
+      const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
+        allowLive: true,
+        adminWindowRules: true,
+        overlapAdvisory: true,
+        sourceSurface: 'edit_modal',
+        notifyRequested: notifyCustomer === true,
+        // The acknowledged occurrence set, enforced against the locked sweep.
+        expectOccurrenceIds: ackedIds,
+        ...(operationKey ? { operationKey } : {}),
+        // An explicit two-bound clear rides IN the series transaction with
+        // the date move — never persisted ahead of it by the per-row edit.
+        ...(clearWindow ? { clearAnchorWindow: true } : {}),
+        // Pin the anchor to EVERY scheduling field the plan derived `win`
+        // from — date, start, end and duration — not just date + start
+        // (codex r8 P1): the per-row edit and this commit are separate
+        // transactions, and an edit landing between them that changed only
+        // window_end or the duration would otherwise pass the fence and be
+        // overwritten by a window derived from the older values. The
+        // per-row edit never touches the date or the window, so those pin
+        // at the plan's read; the duration pins at its post-edit value.
+        expect: {
+          scheduled_date: dateOnly(row.scheduled_date),
+          window_start: row.window_start ?? null,
+          window_end: row.window_end ?? null,
+          estimated_duration_minutes: postEditDuration,
+        },
+      });
+      const { applySeriesMoveEffects } = require('./admin-dispatch');
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: row.id,
+        newDate: target,
+        newWindow: win,
+        notify: notifyCustomer === true,
+        actorId: req.technicianId,
+        reasonText: null,
+      });
+      return {
+        seriesMoveId: result.seriesMoveId || null,
+        occurrencesRescheduled: result.occurrencesRescheduled || 0,
+        deltaDays: result.deltaDays || 0,
+        skippedCount: result.skippedCount || 0,
+        exceptionCount: result.exceptionCount || 0,
+        conflicts: effects.conflicts,
+        warnings: Array.isArray(result.warnings) ? result.warnings : [],
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+      };
+    },
+  };
+}
+
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
+    const seriesMovePlan = await planCollectiveEditDateMove(req);
+    if (seriesMovePlan) {
+      // The series commit lands the date and the window (supplied, kept, or
+      // explicitly cleared) after the per-row edit below; that edit saves
+      // the remaining fields as a same-slot edit (windowIntakeFromBody reads
+      // req.body, so the window keys go too).
+      delete req.body.scheduledDate;
+      delete req.body.windowStart;
+      delete req.body.windowEnd;
+    }
     const {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
@@ -7824,6 +8009,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         let liveEditWasLive = false;
         if (dateActuallyMoves) {
           const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+          // A this-visit-only DATE move of a cadence row from the modal is a
+          // deliberate exception to its series — stamped here too (this path
+          // runs while the collective gate is dark, or for rows the planner
+          // left to it), so the first collective move shifts it instead of
+          // regenerating it from cadence.
+          Object.assign(updates, dateExceptionStamp(preTupleRow, 'admin'));
           liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
           if (liveEditWasLive) {
             Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });
@@ -9234,6 +9425,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');
     }
 
+    // Collective series move — committed only now that everything else in
+    // this save validated and landed (planCollectiveEditDateMove). A series
+    // that cannot shift (concurrent move, plan-level clash) answers with the
+    // rebooker's own status; the field edits above stay saved and the
+    // response says so — nothing customer-facing has happened by then.
+    let seriesMove = null;
+    if (seriesMovePlan) {
+      try {
+        seriesMove = await seriesMovePlan.commit();
+      } catch (err) {
+        if (!err?.statusCode) throw err;
+        return res.status(err.statusCode).json({
+          error: `${err.message} — the other appointment details were saved; the date did not change.`,
+          ...(err.code ? { code: err.code } : {}),
+          ...(err.subcode ? { subcode: err.subcode } : {}),
+        });
+      }
+    }
+
     // Immediate reschedule text — only when the edit actually moved the
     // visit's date/window AND the caller explicitly opted in (the Edit
     // appointment modal's "Client booking notifications" choice). The
@@ -9330,6 +9540,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         },
       } : {}),
       ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
+      // Present when the date change committed as a collective series move
+      // (GATE_ADMIN_COLLECTIVE_MOVE) — the series text replaced the
+      // single-visit notice, so its send result wins.
+      ...(seriesMove ? {
+        seriesMove,
+        notificationSent: seriesMove.notificationSent,
+        notificationError: seriesMove.notificationError,
+      } : {}),
       // Present only when a 'following' price/service scope actually rewrote
       // sibling visits — lets the modal report how many future visits moved.
       ...(priceServicePropagatedCount != null
@@ -9346,7 +9564,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
     if (err.status) {
-      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.conflicts ? { conflicts: err.conflicts } : {}),
+        ...(err.preview ? { preview: err.preview } : {}),
+      });
     }
     next(err);
   }

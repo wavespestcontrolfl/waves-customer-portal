@@ -1493,6 +1493,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  *                                            a future autonomous caller can't
  *                                            text at night by omission.
  */
+// How long a Quick Move series-text claim (series_moves.notified_at with
+// customer_notified=false) stays exclusive before a retry may reclaim it.
+const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;
 async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
@@ -1741,6 +1744,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
     let shiftedOccurrences = null;
+    // An operation_key REPLAY (a concurrent identical Quick Move lost the
+    // unique-index race, or a retry) hands back the ORIGINAL move's
+    // occurrences: the scheduling write is deduplicated, and so must these
+    // in-memory effects be — the winner already ran (or is running) the
+    // reminder sync, cards, board emits and the moved-SMS (codex r13 P1).
+    let seriesReplayed = false;
+    let seriesResultForEffects = null;
     // Staff surface (Quick Move / storm re-route): an occupancy clash COMMITS
     // with a warning instead of 409ing (owner ruling 2026-08-27, extending
     // the 2026-08-25 dispatch ruling — see rebooker.overlapAdvisory). The
@@ -1754,6 +1764,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
             overlapAdvisory: true,
+            sourceSurface: 'quick_move',
+            // The intent is recorded WITH the operation (durable): the live
+            // pass sends Quick Move's own moved-SMS (claimed on the row
+            // below), and a pass that dies before claiming or sending is
+            // recovered by the reconciler with the series confirmation
+            // (codex r14 P1).
+            notifyRequested: notifyCustomer === true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
@@ -1761,34 +1778,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
             : null;
+          seriesResultForEffects = seriesResult;
+          seriesReplayed = seriesResult?.replayed === true;
+          if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
             memberWarnings.push(...seriesResult.warnings);
-            // A series shift that COMMITTED onto occupied windows on other
-            // dates (advisory) is not visible from today's board — file the
-            // same durable schedule_conflict card the unassigned-sibling
-            // path uses (existing mechanism), naming every clashing date,
-            // so those assigned double-bookings stay actionable after the
-            // sheet closes.
-            const clashDates = [...new Set(seriesResult.warnings
-              .map((w) => (String(w).match(/\d{4}-\d{2}-\d{2}/) || [])[0])
-              .filter(Boolean))].sort();
-            if (clashDates.length) {
-              try {
-                const NotificationService = require('./notification-service');
-                const card = await NotificationService.notifyAdmin(
-                  'schedule_conflict',
-                  'Rain-out series shift overlaps other visits',
-                  `A rain-out shifted a recurring series with its moved visit; ${clashDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${clashDates.join(', ')}). Check those days' routes from dispatch.`,
-                  { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, overlapDates: clashDates, targetDate: target.date, reasonCode } },
-                );
-                if (!card) {
-                  logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series overlaps on ${clashDates.join(', ')} with no admin card`);
-                }
-              } catch (notifyErr) {
-                logger.error(`[rain-out] schedule_conflict (series overlap) notification failed for ${job.id}: ${notifyErr.message}`);
-              }
-            }
           }
+          // Accepted advisory overlaps ride on the operation itself
+          // (result.overlapDates) and the shared effects pass rings their
+          // schedule_conflict card, marker-fenced and reconciled — never an
+          // in-memory alert this pass could die before filing (codex r15).
         } catch (err) {
           logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
         }
@@ -1811,6 +1810,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           allowLive: true,
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
+          // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_
+          // ANCHOR and the explicit series branch above (its own sheet
+          // disclosure, its own effects + parking path). This single call is
+          // never widened by the rebooker's collective choke point: either
+          // it is the fallback after a series attempt (the visit moves ALONE
+          // by design) or the sheet asked for a single move.
+          seriesPolicy: 'single',
           ...(wantsSeriesShift
             ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
             : {}),
@@ -1865,76 +1871,33 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // reserved for callers that send their own notice). The anchor's
     // re-arm stays with the calling route.
     if (shiftedOccurrences) {
-      const AppointmentReminders = require('./appointment-reminders');
-      for (const occ of shiftedOccurrences) {
-        if (String(occ.id) === String(job.id)) continue;
-        try {
-          await AppointmentReminders.handleReschedule(
-            occ.id,
-            `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
-            {
-              sendNotification: false,
-              // Atomic stale-guard (codex P1): another actor can re-move a
-              // sibling between the series trx commit and this sequential
-              // loop — the re-arm must no-op unless the row still holds the
-              // slot we shifted it to, or the customer gets a reminder for
-              // the wrong appointment.
-              expectSchedule: {
-                date: String(occ.date).split('T')[0],
-                windowStart: toHHMM(occ.windowStart) || null,
-              },
-            }
-          );
-        } catch (err) {
-          logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
-        }
-      }
-      // Live boards track every shifted sibling, not just the loop's own
-      // jobs — the admin/tech callers broadcast only their route ids, so
-      // future-date siblings would sit stale on any open board (codex P2).
-      // Per-occurrence isolation like the public series path.
+      // Sibling effects — reminder sync (anchor included, idempotent), board
+      // broadcasts, the conflict card for windowless landings — run through
+      // the shared durable pass: marker-fenced on the series_moves row (a
+      // replay re-runs nothing that already landed) and finished by the
+      // 15-minute reconciler when this pass dies after the commit
+      // (quick_move is a reconciled surface). notify is OFF here on purpose:
+      // Quick Move's own moved-SMS below carries the customer text (hook r25
+      // P1 — the existing mechanism, not a parallel effects path).
       try {
-        const { emitDispatchJobUpdate } = require('./dispatch-assignment');
-        for (const occ of shiftedOccurrences) {
-          if (String(occ.id) === String(job.id)) continue;
-          try {
-            await emitDispatchJobUpdate({ jobId: occ.id, actorId: null });
-          } catch (err) {
-            logger.error(`[rain-out] board broadcast failed for ${occ.id}: ${err.message}`);
-          }
-        }
+        const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+        await applySeriesMoveEffects({
+          // The LIVE pass never texts through the shared pass — Quick Move's
+          // own moved-SMS below is the customer notice; the recorded intent
+          // stays on the row for recovery.
+          result: { ...seriesResultForEffects, notifyRequested: false },
+          serviceId: job.id,
+          newDate: target.date,
+          newWindow,
+          notify: false,
+          actorId: actorUserId || null,
+          reasonText: null,
+        });
       } catch (err) {
-        logger.error(`[rain-out] board broadcast unavailable: ${err.message}`);
-      }
-      // Kept-tech double-books were committed UNASSIGNED by the rebooker —
-      // park them for reassignment, same as the public series path.
-      const conflicted = shiftedOccurrences
-        .filter((occ) => occ.conflicted)
-        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-      if (conflicted.length) {
-        try {
-          const NotificationService = require('./notification-service');
-          const card = await NotificationService.notifyAdmin(
-            'schedule_conflict',
-            'Rain-out series shift needs a look',
-            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and were left UNASSIGNED (${conflicted.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
-            { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
-          );
-          if (!card) {
-            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — unassigned siblings with no admin card: ${JSON.stringify(conflicted)}`);
-          }
-        } catch (err) {
-          logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);
-        }
+        logger.error(`[rain-out] series effects pass failed for ${job.id}: ${err.message} — the reconciler finishes it`);
       }
     }
 
-    // Soft no-show: the rebooker just logged the occurrence (reason_code
-    // customer_noshow with the missed slot's original_date/window), but
-    // only the terminal path and nightly sweep ever ran the outreach
-    // threshold — two soft no-shows would accumulate without the promised
-    // 2-in-90-days task (codex r2). Evaluate WITHOUT inserting a second
-    // occurrence row. Best-effort: never fails the committed move.
     if (reasonCode === 'customer_noshow') {
       try {
         const MissedAppointment = require('./workflows/missed-appointment');
@@ -1949,7 +1912,37 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
 
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
-    if (notifyCustomer) {
+    // Quick Move's own moved-SMS for a SERIES move is tracked on the
+    // series_moves row with an EXPIRING claim: notified_at is the claim
+    // time while customer_notified is false, and becomes the conclusion
+    // once the text went out (customer_notified true). A retry sends only
+    // when the text is unclaimed OR the claim is stale (a pass that died
+    // between claiming and sending — SERIES_TEXT_CLAIM_MS, the effects
+    // lease horizon), so a lost send is recovered and a sent one is never
+    // duplicated (hook r26 + r27 P1). A definitive non-send releases the
+    // claim. The effects pass above never texts for quick_move
+    // (notify_requested is false), so these markers are this block's alone.
+    const seriesMoveId = seriesResultForEffects?.seriesMoveId || null;
+    let ownsSeriesText = !seriesMoveId;
+    if (notifyCustomer && seriesMoveId) {
+      try {
+        const claimed = await db('series_moves')
+          .where({ id: seriesMoveId })
+          .where((q) => q
+            .whereNull('notified_at')
+            .orWhere((stale) => stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))))
+          .update({ notified_at: db.fn.now(), customer_notified: false });
+        ownsSeriesText = Number(claimed) === 1;
+        if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
+      } catch (err) {
+        // Marker store unavailable: a fresh commit still texts (a possible
+        // duplicate beats a silent skip); a replay stays quiet.
+        logger.warn(`[rain-out] series text claim failed for ${seriesMoveId}: ${err.message}`);
+        ownsSeriesText = !seriesReplayed;
+        if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
+      }
+    }
+    if (notifyCustomer && ownsSeriesText) {
       try {
         const customer = job.id === serviceId
           ? {
@@ -1974,6 +1967,42 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };
+      }
+      if (seriesMoveId && ownsSeriesText) {
+        try {
+          let closeOwed = false;
+          if (sms.sent) {
+            // The anchor's reminder close is PART of this claimed effect —
+            // before the text concludes — so a pass that dies here leaves
+            // the claim (retried), never a concluded text beside a still-
+            // armed due reminder (codex r15 P1). The routes' later cover/
+            // close is idempotent over this. markRescheduleNoticeSent
+            // swallows its error and resolves null: then the TEXT is done
+            // but the close is owed — recorded as customer_notified with
+            // notified_at NULL, the state the reconciler's close-only
+            // branch finishes without re-sending (codex r16 P1).
+            const AppointmentReminders = require('./appointment-reminders');
+            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id]);
+            closeOwed = closed === null || closed === undefined;
+          }
+          if (closeOwed) {
+            await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true, notified_at: null });
+            logger.warn(`[rain-out] series text sent for ${job.id} but the reminder close failed — left for the reconciler to redo the close`);
+          } else if (sms.sent || sms.reason === 'QUIET_HOURS_HOLD') {
+            // Sent — or QUEUED: a quiet-hours hold is a deferral the sender
+            // delivers itself once the window opens, so the text is OWNED
+            // and concluded here (customer_notified true). Leaving it as a
+            // bare claim would read as an abandoned claim after the lease
+            // horizon and the reconciler would send a second confirmation
+            // beside the queued one (hook r29 P1).
+            await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true });
+          } else {
+            // Definitive non-send: release the claim so a retry may send.
+            await db('series_moves').where({ id: seriesMoveId }).update({ notified_at: null, customer_notified: false });
+          }
+        } catch (err) {
+          logger.warn(`[rain-out] series text marker update failed for ${seriesMoveId}: ${err.message}`);
+        }
       }
     }
 
