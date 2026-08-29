@@ -4404,6 +4404,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const res = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: AstroPublisher.scheduledBlogFilePath('ant-trails-bradenton') });
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/0 distinct in-article image/);
+    // EXACTLY the scheduler's .md is read — a stale .mdx sibling on the branch is never consulted (hook P1).
+    expect(gh.getFile).not.toHaveBeenCalledWith('src/content/blog/ant-trails-bradenton.mdx', 'content/blog-x');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/ant-trails-bradenton.md', 'content/blog-x');
     expect((await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-y', filePath: 'src/content/blog/ant-trails-bradenton.md' })).reason).toMatch(/not found on content\/blog-y/);
   });
 

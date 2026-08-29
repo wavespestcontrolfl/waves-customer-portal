@@ -1824,8 +1824,11 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
       try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { legacyHeroSrcs = []; }
     }
   } else if (filePath) {
-    // Scheduler lane: publishAstro writes a known flat path.
-    found = await resolveExistingAstroFile(filePath, { ref: branch });
+    // Scheduler lane: publishAstro writes a known flat `.md` path — read
+    // EXACTLY that file (resolveExistingAstroFile would prefer a stale
+    // `.mdx` sibling when both exist).
+    const file = await gh.getFile(filePath, branch);
+    found = file ? { path: filePath, file } : null;
     label = filePath;
   } else {
     // EXACTLY the file publishOrUpdatePage wrote: the route-matched existing
