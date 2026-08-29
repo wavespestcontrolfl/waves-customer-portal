@@ -1406,7 +1406,14 @@ async function fanOutLiveTransition({ primary, kind, actorType = 'tech', actorId
   // Covered-by-visit stamps on every reconciled sibling (whereNull ⇒
   // idempotent): no later per-row path re-texts the customer.
   const smsCol = kind === 'en_route' ? 'track_sms_sent_at' : 'arrival_sms_sent_at';
-  if (fan.covered.length) {
+  // Siblings are stamped covered ONLY when the visit notice is terminally
+  // handled (codex #3603 r13): after a retryable provider failure the effect
+  // is `failed` and reclaimable — a sibling's later signal must still reach
+  // claimVisitNotification, so its guard stays open. Claim-state outcomes
+  // (in flight / error / lease expired / not attempted) likewise leave the
+  // siblings to the owner's own reconciliation.
+  const noticeHandled = ['sent', 'suppressed', 'gate_off', 'already_handled', 'covered'].includes(String(smsOutcome));
+  if (fan.covered.length && noticeHandled) {
     try {
       // Fenced to THIS visit attempt (codex r5): a sibling force-rescheduled
       // after the transaction (guards cleared, new date, new row identity)

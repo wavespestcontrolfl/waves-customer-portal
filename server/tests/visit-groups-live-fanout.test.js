@@ -131,6 +131,17 @@ describe('fanOutLiveTransition', () => {
     expect(out.effect).toEqual({ effectType: 'tracker_arrived', status: 'suppressed' });
   });
 
+  test('after a retryable owner send, siblings are NOT stamped covered (the failed effect stays reclaimable from any member)', async () => {
+    db.__script = {
+      service_visits: { first: () => VISIT },
+      scheduled_services: { first: lockedPrimary(), select: () => [{ scheduled_date: '2026-08-30', customer_id: 'c1', property_id: 'p1', id: 's1', status: 'en_route', technician_id: 't1', track_state: 'en_route' }] },
+    };
+    const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: 'retry', notificationOwner: true });
+    expect(out.ok).toBe(true);
+    expect(out.effect).toEqual({ effectType: 'tracker_en_route', status: 'failed' });
+    expect(db.__calls.some((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.track_sms_sent_at)).toBe(false);
+  });
+
   test.each([['retry', 'failed'], ['suppressed', 'suppressed'], ['sent', 'sent']])('smsOutcome %s → effect %s', async (outcome, status) => {
     db.__script = { service_visits: { first: () => VISIT }, scheduled_services: { first: lockedPrimary(), select: () => [] } };
     const out = await fanOutLiveTransition({ primary: PRIMARY, kind: 'en_route', smsOutcome: outcome, notificationOwner: true });
