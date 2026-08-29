@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { publicSelectableService } = require('../services/public-services-menu');
 const TwilioService = require('../services/twilio');
 const PipelineManager = require('../services/pipeline-manager');
 const { createDefaultCustomerRows } = require('../services/customer-default-rows');
@@ -203,9 +204,17 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       anonId,
       firstName,
       lastName,
-      serviceInterest,
+      serviceInterest: submittedServiceInterest,
+      serviceKey,
       leadSource,
     } = intake;
+    // A keyed lead only when the key names a product a NEW customer may
+    // choose; anything else stays a prose-only lead (service_key NULL). On a
+    // keyed lead the display label is the catalog name — identity wins over
+    // the independently submitted label, so key and label never disagree.
+    const keyedService = serviceKey ? await publicSelectableService(serviceKey) : null;
+    const leadServiceKey = keyedService ? keyedService.service_key : null;
+    const serviceInterest = keyedService ? keyedService.name : submittedServiceInterest;
     // Human-readable note for triage / lead-response / owner alerts so the
     // extra-property ask can never be silently swallowed again (the ask used
     // to arrive as free text in the unit box and vanish).
@@ -505,6 +514,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       address: fullAddress || '',
       city: resolvedCity,
       service_interest: serviceInterest || null,
+      service_key: leadServiceKey,
       customer_id: customer.id,
       // The visitor just submitted from a browser carrying this unit id — a
       // call-pipeline lead attaching to a web submission gains the join too.
@@ -860,7 +870,21 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             intake,
             customer,
             body,
-            readiness: estimateAutomationReadiness,
+            // The live catalog verdict rides with the key: a cadence edit or the
+            // termite rental gate can turn an instant product into quote-on-
+            // request after the map was written, and the draft must follow the
+            // catalog as it is NOW, not the static map (pre-push codex P1).
+            // A submitted key that could NOT be verified (catalog read failed,
+            // or the key is not publicly selectable) must never fall back to
+            // label inference — the label lookalike is exactly the mispricing
+            // the key exists to prevent (GH codex #3585 r4 P1). The lead is
+            // still captured; only the automated draft parks.
+            readiness: {
+              ...estimateAutomationReadiness,
+              serviceKey: leadServiceKey,
+              serviceKeyInstant: keyedService ? keyedService.instant === true : null,
+              serviceKeyUnverified: !!serviceKey && !keyedService,
+            },
           });
           const crypto = require('crypto');
           const estimateToken = crypto.randomBytes(16).toString('hex');
@@ -960,6 +984,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           lead_source_id: leadSourceId,
           lead_type: 'form_submission',
           service_interest: serviceInterest || null,
+          service_key: leadServiceKey,
           extracted_data: JSON.stringify(webhookStage),
           first_contact_at: new Date(),
           first_contact_channel: 'form',
@@ -1079,7 +1104,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           if (!triageResult) return;
           try {
             const updates = {};
-            const triageServiceInterestUpdate = serviceInterestUpdateFromTriage(
+            // A keyed lead's label IS its catalog identity — triage prose must
+            // not rewrite it (or reprice the draft under a different service)
+            // while service_key stays put (pre-push codex P1).
+            const triageServiceInterestUpdate = leadServiceKey ? null : serviceInterestUpdateFromTriage(
               leadRecord.service_interest,
               triageResult.serviceInterest
             );
@@ -1585,6 +1613,7 @@ function buildLeadWebhookIntake(body = {}) {
   const firstName = capitalizeName(normalizedName.first_name || 'Unknown');
   const lastName = capitalizeName(normalizedName.last_name || '');
   const serviceInterest = normalizeLeadServiceInterest(body);
+  const serviceKey = normalizeLeadServiceKey(body);
   const leadSource = determineLeadSource(
     attribution.pageUrl,
     attribution.landingUrl,
@@ -1613,6 +1642,7 @@ function buildLeadWebhookIntake(body = {}) {
     firstName,
     lastName,
     serviceInterest,
+    serviceKey,
     leadSource,
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial
@@ -1725,6 +1755,15 @@ function normalizeExplicitServiceInterest(value) {
     }
   }
   return serviceLabelFor(raw);
+}
+
+// Optional catalog identity the keyed quote form posts alongside the label
+// (C2). Shape-checked here; the handler verifies it names a product a NEW
+// customer may choose (public_quote_selectable) before it reaches the row.
+function normalizeLeadServiceKey(body = {}) {
+  const raw = body.serviceKey ?? body.service_key ?? '';
+  const key = String(raw || '').trim().toLowerCase();
+  return /^[a-z0-9_]{1,80}$/.test(key) ? key : null;
 }
 
 function normalizeLeadServiceInterest(body = {}) {
@@ -1935,6 +1974,7 @@ module.exports._test = {
   buildLeadWebhookIntake,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
+  normalizeLeadServiceKey,
   formatServiceInterestForFrequency,
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,

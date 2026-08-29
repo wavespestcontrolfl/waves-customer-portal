@@ -583,6 +583,9 @@ app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/pricing-ranges', require('./routes/public-pricing-ranges'));
+// Catalog-derived product menu for the website quote form (C2) — public,
+// read-only, no engine keys on the wire.
+app.use('/api/public/services', require('./routes/public-services-menu'));
 // Public MCP read-only tool surface for AI agents — gated (404 when off),
 // rate-limited, read-only registry; see routes/public-mcp.js.
 app.use('/api/public/mcp', require('./routes/public-mcp'));

@@ -353,9 +353,33 @@ function lineRequiresReview(line = {}) {
   );
 }
 
+// Keyed lead (C2): the draft is priced from the canonical service_key →
+// engine request, never from the label — a label-derived mapping priced
+// mosquito_seasonal as monthly, lawn_care_monthly as the 9-visit tier and
+// flea_tick as the two-visit package (GH codex #3585). A selectable key with
+// no instant request is quote-on-request: no automated draft. The static map
+// is not the eligibility authority: `instant` is the LIVE catalog verdict
+// (publicSelectableService — cadence drift, termite rental gate) captured
+// at intake, and it fails closed — a keyed lead without a verified instant
+// verdict is quote-on-request, exactly like /api/public/quote/calculate.
+function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
+  const { quoteServicesForKey } = require('./public-services-menu');
+  const services = instant === true ? quoteServicesForKey(serviceKey) : null;
+  if (!services) return { services: {}, supported: false, unsupportedReason: 'quote_on_request', review: [] };
+  return { services, supported: true, unsupportedReason: null, review: [] };
+}
+
 function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}, readiness = {} } = {}) {
   const serviceInterest = firstNonEmpty(readiness.serviceInterest, intake.serviceInterest, customer.service_interest);
-  const mapped = mapServiceInterestToEstimateServices(serviceInterest);
+  const serviceKey = readiness.serviceKey || null;
+  // A key that was submitted but never verified (catalog read failed, or not
+  // publicly selectable) parks instead of degrading to label inference: the
+  // whole point of the key is that the label alone can name the wrong product.
+  const mapped = readiness.serviceKeyUnverified
+    ? { services: {}, supported: false, unsupportedReason: 'quote_on_request', review: ['Submitted service key could not be verified against the catalog'] }
+    : serviceKey
+      ? mapServiceKeyToEstimateServices(serviceKey, { instant: readiness.serviceKeyInstant })
+      : mapServiceInterestToEstimateServices(serviceInterest);
   const automation = {
     status: 'not_generated',
     generated: false,
@@ -587,4 +611,5 @@ module.exports = {
   automationNote,
   hasConcreteServiceInterest,
   mapServiceInterestToEstimateServices,
+  mapServiceKeyToEstimateServices,
 };

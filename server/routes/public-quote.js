@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
+const { publicSelectableService, quoteServicesForKey, mergeKeyedRequestOptions } = require('../services/public-services-menu');
 const logger = require('../services/logger');
 const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
@@ -493,7 +494,13 @@ function estimateBlocksBookingHandoff(estimate) {
 // with prep coordination, and bookingServiceFor('Bed Bug Treatment') falls
 // through to the generic 60-minute pest_control slot — undersized and
 // mis-labeled. These quotes show the price but the office schedules them.
-const NO_SELF_BOOK_LINE_SERVICES = new Set(['bed_bug']);
+const NO_SELF_BOOK_LINE_SERVICES = new Set([
+  'bed_bug',
+  // Cataloged booking_enabled=false (300–360 min visits): instant price,
+  // never a self-book slot (GH codex #3585).
+  'plugging',
+  'top_dressing',
+]);
 function estimateBlocksSelfBookLink(estimate) {
   return estimateBlocksBookingHandoff(estimate)
     || (estimate?.lineItems || []).some((l) => l && NO_SELF_BOOK_LINE_SERVICES.has(l.service));
@@ -583,6 +590,26 @@ function buildCompactCustomerServiceInterest(parts = []) {
   return kept.join(' + ') || compactParts[0]?.slice(0, 32) || null;
 }
 
+// Keyed, non-instant product (C2): a synthetic QUOTE-REQUIRED estimate so the
+// request rides the existing manual-quote lifecycle end to end — lead upsert
+// (with service_key + catalog name), customers upsert, ad attribution, the
+// quote_required response — instead of a parallel capture path (pre-push
+// codex P1; CLAUDE.md rule 15). isManualQuoteLine() treats the line as manual.
+function quoteOnRequestEstimate(keyedService, engineInput = {}) {
+  return {
+    lineItems: [{
+      service: keyedService.service_key,
+      serviceKey: keyedService.service_key,
+      name: keyedService.name,
+      quoteRequired: true,
+      reason: 'quote_on_request',
+    }],
+    summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 0, specialtyTotal: 0 },
+    property: { ...(engineInput.property || {}), turfFlags: [] },
+    quoteOnRequest: true,
+  };
+}
+
 function buildPublicQuoteServiceInterest(services = {}) {
   return [
     services.pest ? publicQuotePestLabel(services.pest) : null,
@@ -606,6 +633,7 @@ function buildPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Lawn Top Dressing Service' : null,
     services.lawnPestControl ? 'Lawn Pest Control' : null,
     services.bedBug ? 'Bed Bug Treatment Service' : null,
+    services.rodentInspection ? 'Rodent Inspection Service' : null,
   ].filter(Boolean).join(' + ');
 }
 
@@ -667,6 +695,7 @@ function buildCompactPublicQuoteServiceInterest(services = {}) {
     services.topDressing ? 'Top Dressing' : null,
     services.lawnPestControl ? 'Lawn Pest' : null,
     services.bedBug ? 'Bed Bug' : null,
+    services.rodentInspection ? 'Rodent Inspection' : null,
   ]);
 }
 
@@ -724,6 +753,9 @@ const PUBLIC_QUOTE_SERVICE_KEYS = [
   'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
   'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
   'lawnPestControl', 'bedBug',
+  // Rodent Inspection: flat $75, instant on the website (owner ruling
+  // 2026-08-29, quote-to-estimate alignment C2).
+  'rodentInspection',
 ];
 
 const quoteLimiter = rateLimit({
@@ -747,8 +779,27 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
       buildingSizeConfirmed,
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
-      enriched, services, attribution,
+      enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // Keyed quote (C2): a catalog service_key expands SERVER-SIDE into the
+    // exact engine request for that product (plus the few site-collected
+    // options the engine needs, e.g. lawn grass type), so the site never
+    // composes cadence/tier options and can never receive another product's
+    // price. Resolved here; a selectable-but-not-instant key is answered as
+    // quote-on-request AFTER contact validation, with the lead captured.
+    const requestedServiceKey = String(req.body?.serviceKey ?? req.body?.service_key ?? '').trim().toLowerCase() || null;
+    let keyedService = null;
+    if (requestedServiceKey) {
+      if (!/^[a-z0-9_]{1,80}$/.test(requestedServiceKey)) return res.status(400).json({ error: 'Unknown service.' });
+      keyedService = await publicSelectableService(requestedServiceKey);
+      if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
+    }
+    const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
+    // Keyed but not instant: no engine services — the request flows through
+    // the standard manual-quote lifecycle on a synthetic quote-required estimate.
+    const keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
+    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
+      : (keyedQuoteOnRequest ? {} : bodyServices);
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -790,7 +841,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    if (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k])) {
+    if (!keyedQuoteOnRequest && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -962,10 +1013,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // estimate paths, never here.
         system: 'trelona',
         monitoringTier: 'basic',
+        // Station rental is the website's termite number (owner 2026-08-29);
+        // only the literal 'rent' passes, and only a keyed request sends it.
+        ...(String(services.termite.ownership || '').toLowerCase() === 'rent' ? { ownership: 'rent' } : {}),
       };
     }
     if (services.rodentBait) {
       engineInput.services.rodentBait = {};
+    }
+    if (services.rodentInspection) {
+      engineInput.services.rodentInspection = {};
     }
     if (services.treeShrub) {
       // Only forward a real count. An explicit treeCount: 0 (the old ?? 0
@@ -1006,7 +1063,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.flea) {
-      engineInput.services.flea = {};
+      // Offer key is a whitelisted engine identity (single-visit knockdown vs
+      // the two-visit package); anything else falls to the engine default.
+      const FLEA_OFFERS = ['flea_knockdown_single', 'flea_elimination_two_visit'];
+      const fleaOffer = FLEA_OFFERS.includes(String(services.flea.offerKey || '').toLowerCase()) ? String(services.flea.offerKey).toLowerCase() : null;
+      engineInput.services.flea = fleaOffer ? { offerKey: fleaOffer } : {};
     }
     if (services.stinging) {
       engineInput.services.stinging = {
@@ -1071,7 +1132,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
-    const estimate = generateEstimate(engineInput);
+    const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
     );
@@ -1118,7 +1179,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? (commercialEstimatedLines[0].disclaimer || 'Estimated from property data — final price confirmed on site.')
       : null;
 
-    const serviceInterest = buildPublicQuoteServiceInterest(services);
+    // Keyed quotes carry the catalog name as the label — identity wins.
+    const serviceInterest = keyedService ? keyedService.name : buildPublicQuoteServiceInterest(services);
+    const leadServiceKey = keyedService ? keyedService.service_key : null;
     const attr = (attribution && typeof attribution === 'object') ? attribution : null;
     const gclid = attr?.gclid ? String(attr.gclid).slice(0, 255) : null;
     const wbraid = attr?.wbraid ? String(attr.wbraid).slice(0, 255) : null;
@@ -1183,6 +1246,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
+        service_key: leadServiceKey,
         monthly_value: leadMonthlyValue,
         // quote_wizard leads keep the historical replace semantics (each stage
         // snapshot supersedes the last). A lead the wizard ATTACHED to via the
@@ -1228,6 +1292,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         city: quoteCity || null,
         zip: quoteZip || null,
         service_interest: serviceInterest,
+        service_key: leadServiceKey,
         lead_type: 'quote_wizard',
         first_contact_channel: 'website_quote',
         lead_source_id: sourceMeta.leadSourceId,
@@ -1273,7 +1338,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
       // customers.lead_service_interest is varchar(32); a merged upsell string
       // ("Pest Control + Lawn Care + Mosquito...") will overflow. Truncate.
-      const serviceInterestForCustomer = buildCompactPublicQuoteServiceInterest(services);
+      // A keyed quote (instant or on-request) names its product from the
+      // catalog — never derived from `services`, which is {} for on-request
+      // (pre-push codex P1: that erased the customer's interest).
+      const serviceInterestForCustomer = keyedService
+        ? String(compactServiceInterestPart(keyedService.name) || keyedService.name).slice(0, 32)
+        : buildCompactPublicQuoteServiceInterest(services);
       // landing_page_url is varchar(500); UTM-heavy URLs can creep past it.
       const landingForCustomer = attr?.landing_url ? String(attr.landing_url).slice(0, 500) : null;
 
@@ -1768,9 +1838,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       const NotificationService = require('../services/notification-service');
       await NotificationService.notifyAdmin(
         'new_lead',
-        quoteRequired ? `Manual quote needed: ${contactFirstName} ${contactLastName}` : `Calculator quote: ${contactFirstName} ${contactLastName}`,
         quoteRequired
-          ? `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`
+          ? (quoteRequiredReason === 'quote_on_request' ? `Estimate requested: ${contactFirstName} ${contactLastName}` : `Manual quote needed: ${contactFirstName} ${contactLastName}`)
+          : `Calculator quote: ${contactFirstName} ${contactLastName}`,
+        quoteRequired
+          ? (quoteRequiredReason === 'quote_on_request'
+            ? `${serviceInterest} · quote on request (website product pick) · ${quoteFullAddress}`
+            : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
           : isOneTimeOnly
             ? `${serviceInterest} · $${Math.round(oneTimeTotal)} one-time · ${quoteFullAddress}`
             : `${serviceInterest} · $${monthly.toFixed(2)}/mo · ${quoteFullAddress}`,
@@ -1790,7 +1864,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // estimateBlocksSelfBookLink adds two more no-link shapes: mixed
     // recurring + one-time quotes (the /book path would never bill the
     // one-time add-on) and bed bug (no right-sized bookable slot).
-    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate)) {
+    // A keyed product the Service Library has set booking_enabled=false
+    // prices instantly but never mints a self-book slot (GH codex #3585).
+    const keyedNotBookable = !!(keyedService && keyedService.booking_enabled === false);
+    if (!quoteRequired && !commercialDetected && !estimateBlocksSelfBookLink(estimate) && !keyedNotBookable) {
       try {
         let bookingServiceId;
         let recurringServiceLabelParam = null;
@@ -2105,7 +2182,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         service: manualQuoteLine?.service || null,
         reason: quoteRequiredReason || 'commercial_property_manual_quote_required',
         service_interest: serviceInterest,
-        message: quoteRequiredReason === 'unit_in_multi_unit_building'
+        message: quoteRequiredReason === 'quote_on_request'
+          ? `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`
+          : quoteRequiredReason === 'unit_in_multi_unit_building'
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
@@ -2319,6 +2398,8 @@ module.exports._internals = {
   estimateBlocksSelfBookLink,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
+  quoteOnRequestEstimate,
+  isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
