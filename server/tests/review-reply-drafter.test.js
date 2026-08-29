@@ -483,6 +483,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nRoaches and ants and tasha appreciate your feedback. Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches, ants, and even Marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nRoaches, ants, and spiders all hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
+    // hook: a modifier before a possessive / role phrase does not hide it.
+    expect(verify(good('Hi Dana,\n\nRoaches and even his team are glad Marcus could help.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, ants, and especially the crew are glad Marcus could help.'))).toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.

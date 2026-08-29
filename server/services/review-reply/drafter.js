@@ -312,6 +312,7 @@ const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|
 // Words that may sit between a conjunction / comma and the coordinated word
 // without changing what it is ("and even Marcus", "and not just the ants").
 const COORD_MODIFIER_RE = /^(?:even|not|also|especially|particularly|certainly|definitely|truly|really|just|only|always|never|actually|still|again|maybe|perhaps|sometimes|often|usually|of\s+course)\s+/iu;
+const POSSESSIVE_ROLE_ITEMS = new Set(['his', 'her', 'hers', 'their', 'theirs', 'our', 'ours', 'your', 'yours', 'my', 'mine', 'its', 'the', 'a', 'an', 'one', 'team', 'teams', 'crew', 'crews', 'staff', 'colleague', 'colleagues', 'partner', 'partners', 'coworker', 'coworkers', 'co-worker', 'co-workers', 'helper', 'helpers', 'assistant', 'assistants', 'everyone', 'everybody', 'company', 'office', 'family', 'guys', 'folks', 'associate', 'associates', 'technician', 'technicians', 'tech', 'techs', 'owner', 'owners']);
 function ordinaryFollows(w, rest, names, allowed, reviewWords) {
   if (!ORDINARY_FOLLOWER_RE.test(rest)) {
     // An -ly adverb opener, a comma, then a name the reviewer wrote
@@ -338,6 +339,10 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
     if (/^\p{Lu}/u.test(nextM[1])) return false;
     const next = nextM[1].toLowerCase();
     if (names.has(next) || COMMON_FIRST_NAMES.has(next)) return false;
+    // A possessive / determiner / role item is an attribution phrase ("and even
+    // his team", "and the crew") — the same exclusion the follower regex applies
+    // before modifiers (hook).
+    if (POSSESSIVE_ROLE_ITEMS.has(next)) return false;
     if (!(SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next))) return false;
     tail = tail.slice(nextM[0].length);
     coord = COORD_RE.exec(tail);
