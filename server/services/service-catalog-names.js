@@ -15,7 +15,23 @@
  * tests import, and an unprimed cache simply falls back to the regex map.
  */
 
-let byLower = new Map();
+const { CADENCE_CONVENTION_RENAMES } = require('../config/service-name-aliases');
+
+// Migration-owned rename history is always resolvable, primed or not: an
+// unlinked terminal visit (service_id null, completed/cancelled) keeps its
+// pre-rename label by Invariant 1, and the history query below only learns
+// names from LINKED rows — without this seed those frozen labels would
+// collapse to a family label after the catalog rename (codex #3579 r1 P1).
+function renameSeed() {
+  const m = new Map();
+  for (const [from, to] of CADENCE_CONVENTION_RENAMES) {
+    m.set(from.toLowerCase(), from);
+    m.set(to.toLowerCase(), to);
+  }
+  return m;
+}
+
+let byLower = renameSeed();
 
 function canonicalCatalogName(text) {
   if (!text) return null;
@@ -30,7 +46,7 @@ async function refreshCatalogNames(conn = require('../models/db')) {
   const historical = await conn('scheduled_services')
     .whereNotNull('service_id')
     .distinct('service_type');
-  const next = new Map();
+  const next = renameSeed();
   for (const row of historical) {
     if (row.service_type) next.set(row.service_type.trim().toLowerCase(), row.service_type.trim());
   }
@@ -70,7 +86,7 @@ async function startCatalogNameRefresh(logger = console) {
 
 // Test seam — lets normalizer tests exercise the pass-through without a DB.
 function __setCatalogNamesForTest(names = []) {
-  byLower = new Map(names.map((n) => [n.trim().toLowerCase(), n.trim()]));
+  byLower = new Map([...renameSeed(), ...names.map((n) => [n.trim().toLowerCase(), n.trim()])]);
 }
 
 module.exports = { canonicalCatalogName, refreshCatalogNames, startCatalogNameRefresh, __setCatalogNamesForTest };

@@ -407,6 +407,25 @@ describe('20260829000011 termite_bait frequency', () => {
     await termiteFix.up(fakeKnex(db));
     expect(svc(db, 'termite_bait').frequency).toBe('semiannual');
   });
+  test('down() never rewrites a row up() did not change (pre-corrected quarterly stays quarterly)', async () => {
+    const db = seedDb();
+    svc(db, 'termite_bait').frequency = 'quarterly';
+    await termiteFix.up(fakeKnex(db));
+    await termiteFix.down(fakeKnex(db));
+    expect(svc(db, 'termite_bait').frequency).toBe('quarterly');
+    expect(db.system_settings.find((r) => r.key === 'migration.20260829000011.state')).toBeUndefined();
+  });
+});
+
+describe('display cache keeps migration-owned old names (unlinked terminal visits, Invariant 1)', () => {
+  const { normalizeServiceType } = require('../utils/service-normalizer');
+  const { __setCatalogNamesForTest } = require('../services/service-catalog-names');
+  afterAll(() => __setCatalogNamesForTest([]));
+  test.each(migration.RENAMES)('%s: the pre-rename label passes through verbatim even when no linked row carries it', (key, from, to) => {
+    __setCatalogNamesForTest([to]);
+    expect(normalizeServiceType(from)).toBe(from);
+    expect(normalizeServiceType(to)).toBe(to);
+  });
 });
 
 describe('runtime alias bridge (pre-deploy labels keep resolving the renamed rows, and vice versa)', () => {
