@@ -25,11 +25,17 @@ const APPROVED_KEYS = new Map([
 ]);
 
 // Never fall back to the OS-user / local default database: refuse to load
-// knex without an explicitly supplied URL (codex #3581 r1).
-if (!process.env.DATABASE_PUBLIC_URL && !process.env.DATABASE_URL) {
-  console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is not set — run via: railway run --service Postgres node ops/agents/archive-catalog-service.js --key=rodent_monitoring [--execute]');
+// knex without a USABLE explicitly supplied URL (codex #3581 r1 + r2). Same
+// rule as server/knexfile.js hasUsableDatabaseUrl — the literal strings
+// "undefined"/"null" and whitespace are what a broken shell export leaves
+// behind, and the knexfile deletes them, after which pg would silently
+// connect to the OS-user database.
+const usableUrl = (v) => { const u = String(v || '').trim(); return !!u && u !== 'undefined' && u !== 'null'; };
+if (!usableUrl(process.env.DATABASE_PUBLIC_URL) && !usableUrl(process.env.DATABASE_URL)) {
+  console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is not set to a usable value — run via: railway run --service Postgres node ops/agents/archive-catalog-service.js --key=rodent_monitoring [--execute]');
   process.exit(2);
 }
+if (!usableUrl(process.env.DATABASE_PUBLIC_URL)) delete process.env.DATABASE_PUBLIC_URL;
 // The app's knex reads DATABASE_URL; railway run injects the internal host,
 // which is unreachable from a local machine — use the public proxy, with TLS
 // (the public proxy needs it; the dev knexfile block passes only a string).
