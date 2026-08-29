@@ -374,9 +374,18 @@ async function confirmGroupedOrSolo(trx, svc, shown) {
     throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
   }
   const members = await membersMatchShown(trx, svc, shown);
-  if (members.length < 2) return { outcome: 'solo', row: cur };
+  if (members.length < 2) return { outcome: 'solo', row: cur, confirmed: true };
   await confirmGroupedSiblings(trx, svc);
-  return { outcome: 'fanned', row: cur };
+  return { outcome: 'fanned', row: cur, confirmed: await visitAllConfirmed(trx, svc.visit_id) };
+}
+
+// The visit's aggregate state after a fan-out (codex r17 P2): a
+// dispatch-owned sibling stays pending, so the response must say what a
+// reload would say (allConfirmed), never an unconditional true.
+async function visitAllConfirmed(trx, visitId) {
+  const { openMembers } = require('../services/visit-groups');
+  const after = await openMembers(trx, visitId);
+  return after.every((m) => String(m.status || '').toLowerCase() === 'confirmed');
 }
 
 // Locked re-read guard for the already-confirmed grouped fan-out (codex r12
@@ -744,7 +753,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         if (locked.outcome === 'solo' && confirmRaceVerdict(locked.row) !== 'idempotent_success') {
           return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
         }
-        return res.json({ success: true, confirmed: true });
+        return res.json({ success: true, confirmed: locked.confirmed !== false });
       }
       if (confirmRaceVerdict(svc) === 'idempotent_success') {
         return res.json({ success: true, confirmed: true });
@@ -786,6 +795,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // the history table is the canonical transition audit, so a lost row
     // must fail the confirm rather than silently succeed without it.
     let updated = 0;
+    let aggregateConfirmed = true; // grouped: the visit's state after the fan-out (codex r17 P2)
     // lockStopForRow's peek→lock→verify contract throws VISIT_STOP_MOVED
     // when the stop moved between the two reads; retry like every other
     // caller, and turn an exhausted retry into the page's CHANGED reload
@@ -850,6 +860,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         // confirm back and reloads the page (CHANGED).
         await membersMatchShown(trx, svc, req.body);
         await confirmGroupedSiblings(trx, svc);
+        aggregateConfirmed = await visitAllConfirmed(trx, svc.visit_id);
       }
     });
     for (;;) {
@@ -893,7 +904,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       });
     }
 
-    return res.json({ success: true, confirmed: true });
+    return res.json({ success: true, confirmed: aggregateConfirmed });
   } catch (err) {
     next(err);
   }
@@ -917,6 +928,7 @@ router._test = {
   calendarSummaryLabel,
   readConfirmedAnchorLocked,
   confirmGroupedOrSolo,
+  visitAllConfirmed,
   membersMatchShown,
   membershipKeyFor,
   memberServiceLabel,

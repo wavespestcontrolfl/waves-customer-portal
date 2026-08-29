@@ -71,7 +71,8 @@ test('the tapped row\'s bookkeeping is fenced on the landed slot; a miss skips E
   ];
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
-  expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00' });
+  // complete landed slot + customer_confirmed=false (codex r17): an admin/customer confirm at the same slot is never rewound
+  expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00', customer_confirmed: false });
   expect(plain).not.toHaveBeenCalled();  // no unfenced fallback stamp: the operator's newer state is not attributed to this run
   expect(insert).not.toHaveBeenCalled();
 });
@@ -209,7 +210,7 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
 
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
   // fenced on status AND the landed slot (local audit): a newer confirm/move is never rewound
-  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' });
+  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00', customer_confirmed: false });
   expect(updateSibPlain).not.toHaveBeenCalled(); // fence miss ⇒ no stamp at all (local audit)
   expect(insert).not.toHaveBeenCalled();
 });

@@ -231,6 +231,16 @@ describe('AppointmentPage non-upcoming states', () => {
     }
   });
 
+  it('a confirm answer of confirmed:false (a sibling stayed pending) does not flip the pill to Confirmed', async () => {
+    stubFetch({ post: jsonResponse({ success: true, confirmed: false }) });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm this appointment' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('Confirmed')).not.toBeInTheDocument();
+  });
+
   it('a past grouped visit gets the call/text guidance, never a "Pick a new time" link that /reschedule refuses', async () => {
     stubFetch({ get: jsonResponse({ state: 'past', service: { type: 'Pest Control' }, appointment: {} }) });
     renderPage();

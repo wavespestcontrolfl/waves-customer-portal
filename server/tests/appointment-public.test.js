@@ -460,8 +460,8 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
   const shown = { date: '2026-08-05', windowStart: '09:00' };
   const svc = { id: 'a', visit_id: 'v1' };
   const anchor = { visit_id: 'v1', status: 'confirmed', customer_confirmed: false, scheduled_date: '2026-08-05', window_start: '09:00:00' };
-  // scheduled_services call order: anchor FOR UPDATE read → openMembers select → sibling FOR UPDATE select → update
-  const fakeTrx = ({ members, pendingSiblings = [] }) => {
+  // scheduled_services call order: anchor FOR UPDATE read → openMembers select → sibling FOR UPDATE select → update → openMembers (aggregate)
+  const fakeTrx = ({ members, pendingSiblings = [], after = null }) => {
     const log = [];
     let ss = 0;
     const trx = jest.fn((table) => {
@@ -469,7 +469,7 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
       const api = {
         where: () => api, whereNot: () => api, whereNotIn: () => api, forUpdate: () => api,
         first: async () => anchor,
-        select: async () => (call === 1 ? members : pendingSiblings),
+        select: async () => (call === 2 ? pendingSiblings : (call >= 4 && after ? after : members)),
         update: async (v) => { log.push(['update', table, v]); return 1; },
         insert: async (v) => { log.push(['insert', table, v]); },
       };
@@ -482,12 +482,18 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
 
   test('one live member ⇒ solo with the locked row, no sibling write; two ⇒ fan-out (when the page showed two)', async () => {
     let trx = fakeTrx({ members: [{ id: 'a' }] });
-    expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'solo', row: anchor });
+    expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'solo', row: anchor, confirmed: true });
     expect(trx.__log).toEqual([]);
-    trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
-    expect(await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]) })).toEqual({ outcome: 'fanned', row: anchor });
+    const AB = appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]);
+    trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }], after: [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'confirmed' }] });
+    expect(await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: AB })).toEqual({ outcome: 'fanned', row: anchor, confirmed: true });
     expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert']);
     expect(trx.__log[0][2]).toMatchObject({ status: 'confirmed', customer_confirmed: true });
+    // a dispatch-owned sibling stays pending ⇒ the response reports the visit NOT confirmed (codex r17 P2)
+    trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: 'call_followup', customer_confirmed: false }], after: [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'pending' }] });
+    const res = await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: AB });
+    expect(res.outcome).toBe('fanned');
+    expect(res.confirmed).toBe(false);
   });
 
   test('the live member SET must be the one the page showed (membershipKey, local codex audit): a grouped stop behind a solo page, a swapped sibling, or a dropped sibling reloads', async () => {

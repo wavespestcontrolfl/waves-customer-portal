@@ -333,7 +333,10 @@ export default function AppointmentPage() {
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
-        setData((prev) => (prev ? { ...prev, confirmed: true } : prev));
+        // Grouped: the server reports the VISIT's state after the fan-out —
+        // a dispatch-owned sibling can stay pending, so the pill follows the
+        // answer a reload would give, not an assumed "Confirmed".
+        setData((prev) => (prev ? { ...prev, confirmed: body.confirmed !== false } : prev));
         return;
       }
       // The visit changed under us (cancelled, moved, started) — reload so

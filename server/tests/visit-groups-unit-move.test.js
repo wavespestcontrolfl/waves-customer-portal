@@ -92,8 +92,8 @@ describe('moveVisitAsUnit', () => {
 
   test('date + window move: members moved first (primary with caller options, siblings with their OWN fence), then the parent retargeted from the rows that landed', async () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
-      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' },
-      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00' },
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
     ] });
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', reason: 'rain', initiatedBy: 'admin', options: { allowLive: false, expect: { scheduled_date: '2026-08-30', window_start: '09:00' }, expectOccurrenceIds: ['x'], technicianId: 't1' } });
@@ -212,7 +212,7 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b')] });
     let rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1' });
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', visit_id: 'v1', technician_id: 't1', status: 'confirmed' });
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectAnchor: { scheduled_date: '2026-08-30' } } });
@@ -287,7 +287,8 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
-    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' }]);
+    // status rides in the contract too (local audit): a sibling gone en_route/terminal after the plan aborts the primary's move
+    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1', status: 'confirmed' }]);
     // the sibling's own move verifies the PRIMARY at its landed target (codex r6)
     expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toEqual([{ id: 'a', visit_id: 'v1', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }]);
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
@@ -349,7 +350,11 @@ describe('moveVisitAsUnit', () => {
   });
 
   test('three members: each sibling move excludes only rows still participating — a failed sibling is real occupancy again, a moved one is verified at its target', async () => {
-    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' }), member('c', { window_start: '11:00', window_end: '12:00' })] });
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' }), member('c', { window_start: '11:00', window_end: '12:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' },
+      { id: 'c', scheduled_date: '2026-09-02', window_start: '15:00', window_end: '16:00', technician_id: 't1' },
+    ] });
     const rebooker = fakeRebooker({ b: 'throw' });
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
     expect(out.visitMove.failed.map((f) => f.id)).toEqual(['b']);
@@ -519,7 +524,8 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
   });
 
   test('a technician change re-points every moved SIBLING through assignDispatchJob (own trx), never through the rebooker (P1)', async () => {
-    db.__script = script({ members: [member('a'), member('b'), member('c', { technician_id: 't9' })] });
+    const onT9 = (ids) => ids.map((id) => ({ id, scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' }));
+    db.__script = script({ members: [member('a'), member('b'), member('c', { technician_id: 't9' })], landed: onT9(['a', 'b', 'c']) });
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b', 'c'], failed: [] });
@@ -540,7 +546,8 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
   });
 
   test('a sibling whose reassignment fails is reported as a failed member (moved, wrong tech) — deadlocks retry', async () => {
-    db.__script = script({ members: [member('a'), member('b')] });
+    const onT9 = (ids) => ids.map((id) => ({ id, scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' }));
+    db.__script = script({ members: [member('a'), member('b')], landed: onT9(['a', 'b']) });
     assignDispatchJob
       .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: '40P01' }))
       .mockResolvedValueOnce({ changed: true });
@@ -548,14 +555,16 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(out.visitMove.failed).toEqual([]);
     expect(assignDispatchJob).toHaveBeenCalledTimes(2);
     jest.clearAllMocks(); db.__calls.length = 0;
-    db.__script = script({ members: [member('a'), member('b')] });
+    // b stays on t1 (its re-point failed): the retarget sees it diverged from the planned tech too
+    db.__script = script({ members: [member('a'), member('b')], landed: [...onT9(['a']), { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' }] });
     assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Technician is inactive'), { statusCode: 400 }));
     out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(out.visitMove.moved).toEqual(['a', 'b']);
     expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED' }]);
     expect(out.warnings.some((w) => /did not move with this stop/.test(w))).toBe(true);
     // a concurrent operator reassignment (ASSIGNMENT_STALE) is a failed member, not retried, not overwritten
-    jest.clearAllMocks(); db.__calls.length = 0; db.__script = script({ members: [member('a'), member('b')] });
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landed: [...onT9(['a']), { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' }] });
     assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Job was reassigned concurrently - the planned technician is stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
     out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(assignDispatchJob).toHaveBeenCalledTimes(1);
@@ -651,7 +660,41 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a', 'b'] }); // reported in move order; executed in reverse
     const rollbacks = rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0]);
     expect(rollbacks).toEqual(['b', 'a']);
-    // b's technician restore goes back through the canonical writer, fenced on the tech this move set
-    expect(assignDispatchJob).toHaveBeenLastCalledWith(expect.objectContaining({ jobId: 'b', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }));
+    // BOTH technicians restored through the canonical writer (the primary's rode its own move), fenced on the tech this move set
+    const restores = assignDispatchJob.mock.calls.filter((c) => c[0].technicianId === 't1').map((c) => c[0]);
+    expect(restores).toEqual([
+      expect.objectContaining({ jobId: 'b', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }),
+      expect.objectContaining({ jobId: 'a', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }),
+    ]);
+    // a technician-restore failure is a rollback failure (never "nothing was moved" with state still at the destination)
+    jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
+    assignDispatchJob
+      .mockRejectedValueOnce(Object.assign(new Error('stale'), { code: 'ASSIGNMENT_STALE' })) // b's re-point
+      .mockResolvedValueOnce({ changed: true })                                                  // b's restore
+      .mockRejectedValueOnce(new Error('restore boom'));                                          // a's restore
+    const err2 = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
+    expect(err2).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['b'], rollbackFailed: ['a'] });
+  });
+
+  test('a member that left the visit or moved again before the retarget is reported as failed, never as moved (codex r17)', async () => {
+    const base = { ...VISIT };
+    db.__script = {
+      service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : base) },
+      scheduled_services: {
+        select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [member('a'), member('b'), member('c')]
+          : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? [member('a'), member('b'), member('c')].map((m) => ({ ...m, visit_id: 'v1' }))
+            // at retarget: b is GONE from the visit (a newer assignment's seam detached it), c moved again to another window
+            : [{ id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+              { id: 'c', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' }]),
+      },
+    };
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove.moved).toEqual(['a']);
+    expect(out.visitMove.failed).toEqual([
+      { id: 'b', reason: 'left the visit before the visit record was retargeted', code: 'VISIT_MEMBER_DIVERGED' },
+      { id: 'c', reason: 'moved again before the visit record was retargeted', code: 'VISIT_MEMBER_DIVERGED' },
+    ]);
+    expect(out.visitMove.members.map((m) => m.id)).toEqual(['a']);
+    expect(out.warnings.some((w) => /2 grouped service\(s\) did not move with this stop/.test(w))).toBe(true);
   });
 });

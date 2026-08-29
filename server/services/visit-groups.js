@@ -1695,7 +1695,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             // visit_id + technician_id fence the member's own move to the
             // planned unit (codex r7): a row split from the visit or
             // reassigned after the plan fails ITS CAS instead of moving.
-            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null },
+            // status too (local audit): a sibling that went en_route / on_site
+            // / terminal after the plan released its locks fails ITS CAS and
+            // the primary's excludeExpect contract before the first write.
+            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null, status: String(m.status) },
           };
         });
         // Caller-supplied member guard (codex r13 P1): auto-dispatch's
@@ -1813,15 +1816,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           excludeServiceIds: plan.memberIds.map(String),
           expect: { ...(landedState[id] || {}), visit_id: plan.visitId },
         });
-        if (!t.isPrimary && options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
-          await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }))
-            .catch((e) => logger.warn(`[visit-groups] unit move rollback: technician restore for ${id} failed: ${e.message}`));
+        // Technician restore for EVERY member incl. the primary (the caller's
+        // technicianId rode the primary's own move) through the canonical
+        // writer, fenced on the tech this move set; a compensation failure
+        // (technician or reminder) is a rollback failure — the error must
+        // never claim "nothing was moved" while state still points at the
+        // failed destination (local audit).
+        if (options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
+          await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }));
         }
         if (!t.isPrimary) {
           await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${(t.original.window || '').split('-')[0] || '08:00'}`, {
             sendNotification: false, keepPendingConfirmation: true,
             expectSchedule: { date: t.original.date, windowStart: (t.original.window || '').split('-')[0] || null },
-          }).catch((e) => logger.warn(`[visit-groups] unit move rollback: reminder re-sync for ${id} failed: ${e.message}`));
+          });
         }
       } catch (err) {
         stuck.push(id);
@@ -1986,6 +1994,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+      // Every member reported MOVED must still be a member of this visit
+      // sitting at its landed target under these locks (codex r17): a
+      // newer assignment/move between a member's move and this retarget can
+      // detach it (its own seam) or move it again — the parent must not be
+      // retargeted from whichever rows remain while `moved` claims a whole
+      // visit. Divergent members become failed (partial), never silent.
+      {
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        for (const id of [...moved]) {
+          if (failed.some((f) => String(f.id) === String(id))) continue; // already reported (e.g. re-point failed)
+          const r = rows.find((x) => String(x.id) === String(id));
+          const want = landedState[id] || {};
+          const ok = !!r && dateOnly(r.scheduled_date) === newDateStr
+            && (want.window_start === undefined || norm(r.window_start) === norm(want.window_start))
+            && (want.window_end === undefined || norm(r.window_end) === norm(want.window_end))
+            && (options.technicianId === undefined || String(r.technician_id || '') === String(options.technicianId || ''));
+          if (!ok) {
+            moved.splice(moved.indexOf(id), 1);
+            const reason = r ? 'moved again before the visit record was retargeted' : 'left the visit before the visit record was retargeted';
+            failed.push({ id, reason, code: 'VISIT_MEMBER_DIVERGED' });
+            logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${id} ${reason}`);
+          }
+        }
+      }
       // A row that joined the visit AFTER the plan snapshot (the old stop
       // lock was released between plan and move — codex r2) is not part of
       // this move: detach it in place so it never trails a parent that

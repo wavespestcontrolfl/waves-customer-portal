@@ -267,8 +267,12 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     // pending, never stamped as this run's (a stale stamp would attribute
     // the operator's placement to auto-dispatch and skew drift/cooldown).
     // A fence miss skips ALL bookkeeping for the row.
+    // The pending restore also requires customer_confirmed=false (codex r17):
+    // an admin/customer confirm landing after the commit keeps status +
+    // slot but flips the marker — never rewound to pending. The complete
+    // landed slot (end too) is part of the fence.
     const stamped = await db('scheduled_services')
-      .where({ id: service.id, status: 'confirmed', scheduled_date: best.date, window_start: best.start_time })
+      .where({ id: service.id, status: 'confirmed', scheduled_date: best.date, window_start: best.start_time, window_end: best.end_time, ...(postStatus === 'pending' ? { customer_confirmed: false } : {}) })
       .update(postStatus === 'pending' ? { ...stamp, status: 'pending' } : stamp);
     if (Number(stamped) !== 1) {
       logger.warn(`[auto-dispatch] post-move bookkeeping skipped for ${service.id}: the row changed after the move (newer state kept)`);
@@ -317,7 +321,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
         continue;
       }
       const restore = sib.previousStatus === 'pending';
-      const stamped = await db('scheduled_services').where({ id: sib.id, status: 'confirmed', ...sib.landed }).update(restore ? { ...stamp, status: 'pending' } : stamp);
+      const stamped = await db('scheduled_services').where({ id: sib.id, status: 'confirmed', ...sib.landed, ...(restore ? { customer_confirmed: false } : {}) }).update(restore ? { ...stamp, status: 'pending' } : stamp);
       if (Number(stamped) !== 1) {
         logger.warn(`[auto-dispatch] post-move bookkeeping skipped for grouped sibling ${sib.id}: the row changed after the move (newer state kept)`);
       } else if (restore) {
