@@ -623,6 +623,11 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         .whereNotNull('property_id')
         .whereNull('visit_id')
         .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
+        // A windowless row is an UNPLACED placeholder (the booking wizard's
+        // occupancy sweep demotes a conflicting occurrence by clearing its
+        // window + tech for the office to place); windowless overlaps
+        // anything, so it must never be auto-grouped (codex #3590 r15).
+        .whereNotNull('window_start')
         .select('id');
       if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
       // Every linked row, in id order — a cap left rows beyond it with no

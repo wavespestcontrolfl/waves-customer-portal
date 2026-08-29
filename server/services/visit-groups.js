@@ -900,6 +900,12 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
     // Such rows group once property linkage stamps them (the linkage
     // regroup pass) or by explicit office action.
     if (!row.property_id) return null;
+    // A placed window is REQUIRED for automatic grouping (codex #3590
+    // r15): windowless overlaps anything, and a windowless row is by
+    // policy an unplaced placeholder (booking-wizard demotion clears the
+    // window + tech for the office). Office placement/explicit grouping
+    // is the path for those rows — as subject AND as partner.
+    if (!row.window_start) return null;
     if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
@@ -910,6 +916,7 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       .whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
       .where('svc.groupable', true)
       .where('svc.group_family', row.group_family)
+      .whereNotNull('ss.window_start')
       .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
       .select('ss.id', 'ss.visit_id');
     if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
