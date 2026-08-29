@@ -1,14 +1,21 @@
 # Visit groups — one stop, two services, one message, one payment
 
-**Date:** 2026-08-29 · **Status:** scope for owner sign-off. No code changes in this doc.
+**Date:** 2026-08-29 (rev 2, same day) · **Status:** scope for owner sign-off. **Not approved
+to build.** No code changes in this doc.
 **Branch:** `docs/visit-group-scope` (worktree `~/wt-visit-group`, off main `571ed7be8`).
 
-**Direction (owner, 2026-08-29):** when two services are scheduled at one property for the
-same stop — the worked example is Quarterly Pest Control + Rodent Bait Stations — the
-customer gets **two service reports, one text, one payment**, and the tech works **one
-stop**. Internally every service keeps its own record. This is Option B from the 08-28
-discussion, restructured as an explicit *visit group* rather than a same-day sibling
-heuristic with a tech-side "hold text" toggle (both rejected in the owner's memo).
+**Product promise (owner, rev 2):** *One stop. One route card. One closeout. Two service
+reports. One summary link. One payment.* Not necessarily one literal invoice record.
+
+**Rev 2 changes (owner review of rev 1):** (1) the phone sends ONE visit-completion packet,
+not one `/complete` per row; (2) the closeout is exception-driven, not two stacked forms;
+(3) the summary page and the one-message release ship behind the same gate; (4) payment is
+visit-scoped, never the first invoice's generic pay link; (5) group key includes the intended
+stop/window, outcomes gain `partially_completed` / `customer_declined` / `cancelled_by_office`
+and lose `not_required`, each outcome has a defined billing/report/comms/close effect; (6) the
+visit is the source of truth for every comms rail — children are `covered_by_visit`, and the
+pre-launch audit covers reminders, tracking, receipts, failures, dunning, review. Autopay
+customers are not grouped until grouped autopay ships.
 
 ---
 
@@ -21,67 +28,59 @@ hits in `server/` and `client/`).
 
 | Rail | Keyed on | Anchor | Consequence for two rows |
 |---|---|---|---|
-| Completion handler | one row | `server/routes/admin-dispatch.js:4293` `POST /:serviceId/complete` (one function, runs to :12872) | tech completes twice |
+| Completion handler | one row; already claims an `Idempotency-Key` per call | `server/routes/admin-dispatch.js:4293` `POST /:serviceId/complete` (one function to :12872; idempotency claim `:5236`; ~12 nested transactions + Stripe/PDF/SMS side effects — **not** one atomic transaction) | tech completes twice |
 | Service record + report + PDF | one record per row | `:7137` service_record insert · `:9878-9887` report token/URL · `:10001` PDF job | two reports — **wanted** |
 | Invoice mint | advisory lock `['schedule.invoice.mint', svc.id]` | `server/services/scheduled-invoice-mint.js:40-56`; FK `invoices.scheduled_service_id` (`20260420000002`) | two invoices |
-| Invoice lines | primary + `scheduled_service_addons` | `server/services/invoice.js:539-658` | n/a (add-ons are the *other* multi-service model — see §1) |
-| Completion SMS | per row; `service_complete*` templates | render `:11911-12041` · send `:12118` · state machine `service_records.structured_notes.completionSmsStatus` (`sending/deferred/blocked/failed/sent`, `:12076-12323`) | **two texts** |
+| Invoice lines | primary + `scheduled_service_addons` | `server/services/invoice.js:539-658` | n/a (add-ons are the *other* multi-service model — §1) |
+| Completion SMS | per row; `service_complete*` templates | render `:11911-12041` · send `:12118` · `service_records.structured_notes.completionSmsStatus` (`sending/deferred/blocked/failed/sent`, `:12076-12323`) | **two texts** |
 | Completion email | idempotency key derived from service_record | `server/services/service-report/email-delivery.js:177-185` | two emails |
-| Review request | dedupe per `service_record_id`; per-customer caps apply on the **manual** path only | `server/services/review-request.js:515-526` | **auto path can double-ask today** |
-| Autopay at completion | per invoice; refuses when no single accepted per-visit amount | `admin-dispatch.js:11086-11102` (`acceptedPerVisit == null → office review`), charge `:11171` | two charges, or two office-review parks |
-| Combined pay page | any open self-pay invoices, one PaymentIntent, per-invoice allocation in PI metadata | `server/services/pay-combined.js:1-41`; gate `payIncludeBalance` = `GATE_PAY_INCLUDE_BALANCE` (`server/config/feature-gates.js:251`); cap 8 siblings `:55` | **one payment already works** (gate must be on in prod — verify) |
-| Tech route | one card per row; `en_route → on_site` per row | `client/src/pages/tech/TechHomePage.jsx:13-24`, `:192`; `server/routes/tech-track.js:305` en-route, `:461` on-site; tracker SMS via `server/services/track-transitions.js` | two En Route taps, two "on the way" texts |
+| Review request | dedupe per `service_record_id`; per-customer caps on the **manual** path only | `server/services/review-request.js:515-526` | **auto path can double-ask today** |
+| Autopay at completion | per invoice; refuses when no single accepted per-visit amount | `admin-dispatch.js:11086-11102`, charge `:11171` | two charges, or two office-review parks |
+| Combined pay page | any open self-pay invoices, one PaymentIntent, per-invoice allocation; **each invoice keeps its own receipt** | `server/services/pay-combined.js:1-41` (`:8`); gate `payIncludeBalance` = `GATE_PAY_INCLUDE_BALANCE` (`feature-gates.js:251`); cap 8 `:55` | one payment works; may pull in unrelated invoices; N receipts |
+| Appointment reminders | per row (`dedupeKey` + `scheduled_service_id`) | `server/services/appointment-reminders.js:192,764` | two reminder texts |
+| Tech route + tracker | one card per row; `en_route → on_site` per row; tracker SMS via `track-transitions.js` | `client/src/pages/tech/TechHomePage.jsx:13-24`, `:192`; `server/routes/tech-track.js:305`, `:461` | two En Route taps, two "on the way" texts |
+| Dunning | account-level clock per customer (#3575) | `server/services/invoice-followups.js:1616-1629` | already deduped across invoices |
 | Customer appointment page | per row (`reschedule_token`) | `/api/public/appointment/:token` (AGENTS.md ~L1057) | two confirm links |
 
-**Grouping precedents that already exist** (none is a visit group, but each is a shape to copy):
-`recurring_parent_id` (series), `parent_service_id` (callback child, `20260401000106:13`),
-`series_moves` + the collective-move choke point (#3562, `20260828000030`),
-`visit_billing_dispositions` (FK → scheduled_services, `20260619000001:27-30`), and the
-"distinct visit dates, not rows" collapse in `server/services/review-reply/grounding.js:194-200`.
+**Grouping precedents** (none is a visit group, each is a shape to copy): `recurring_parent_id`
+(series), `parent_service_id` (callback child, `20260401000106:13`), `series_moves` + the
+collective-move choke point (#3562, `20260828000030`), `visit_billing_dispositions`
+(`20260619000001:27-30`), and the "distinct visit dates, not rows" collapse in
+`server/services/review-reply/grounding.js:194-200`.
 
 **Scheduling already knows "same trip".** At estimate accept the converter seeds standalone
-supplement rows (e.g. the rodent bait row) onto the reserved pest slot — same date, window,
-tech, zone — `server/services/estimate-converter.js:4578-4597` (`sameTrip`). That is the
-natural place to stamp a group id, so grouping is *declared at scheduling*, never inferred.
+supplement rows (the rodent bait row) onto the reserved pest slot — same date, window, tech,
+zone — `server/services/estimate-converter.js:4578-4597` (`sameTrip`). That is where the
+group id is stamped: grouping is *declared at scheduling*, never inferred.
 
-**History that bounds this lane.**
-- 2026-06-12: combined completions shipped (`docs/design/combined-service-completions.md`) —
-  ONE row named "Pest & Rodent Control" with a rodent companion section, one report.
-- 2026-07-04/12: owner retired `pest_rodent_quarterly` and the pest+rodent auto-combine
-  (`20260712600000_retire_pest_rodent_combined.js`; converter comment
-  `estimate-converter.js:247-251`). Rodent bait now schedules as its own row
-  (`STANDALONE_SUPPLEMENT_ROUTES`, `:321-327`).
-- 2026-08-28: owner on the remaining combo rows (`lawn_tree_shrub_combo`,
-  `pest_termite_bait_quarterly`): "I want to remove all of these" — ruling pending, with
-  "then combos schedule as separate visits, same trip" as the recommended follow-through.
-
-This lane is the follow-through: **separate rows, same trip, grouped.** It does not reverse
-the July decision; it completes it.
+**History that bounds this lane.** 06-12 combined completions shipped
+(`docs/design/combined-service-completions.md`) — ONE row "Pest & Rodent Control", companion
+section, one report. 07-04/12 owner retired `pest_rodent_quarterly` and the pest+rodent
+auto-combine (`20260712600000_retire_pest_rodent_combined.js`; `estimate-converter.js:247-251`);
+rodent bait schedules as its own row (`STANDALONE_SUPPLEMENT_ROUTES`, `:321-327`). 08-28 owner
+on the remaining combo rows: "I want to remove all of these" (ruling pending). This lane
+completes that direction — it never recombines pest and rodent into one scheduled service.
 
 ---
 
 ## 1. Why a row-level group and not `scheduled_service_addons`
 
 The codebase already has a "multiple services in one stop" model: one row plus add-on lines
-(`20260602000002_addon_duration.js:1-9` — lines share the row's tech/route stop; invoice lines
-are built primary + add-ons). Using it here would be the smaller change **but it cannot meet
-the requirement**: one row = one service_record = one report, one completion profile, one
-cadence. Rodent bait as an add-on line has no findings section of its own (stations, activity,
-consumption), no rodent report, no rodent service history, and no independent quarterly
-series. The June combined-service mechanism (companion sections) solves the findings half but
-still yields one report and forces matched cadences, which is exactly what the owner retired.
+(`20260602000002_addon_duration.js:1-9`; invoice lines built primary + add-ons). It is the
+smaller change and **cannot meet the requirement**: one row = one service_record = one report,
+one completion profile, one cadence. Rodent bait as an add-on has no station findings, no
+rodent report, no rodent history, no independent quarterly series. The June companion-section
+mechanism fixes the findings half but still yields one report and forces matched cadences —
+exactly what was retired.
 
 So the group lives **above** rows: each service keeps its row, record, report, invoice, and
-cadence; the group carries the *shared* things — the stop, the closeout, the customer message,
-the payment experience. Add-ons remain the model for true line items on one service
-(e.g. an interior treatment on the pest visit). Both coexist; a grouped row may still carry
-add-ons.
+cadence; the group carries the shared things — the stop, the closeout, the customer message,
+the payment experience. Add-ons remain the model for true line items on one service; a grouped
+row may still carry them.
 
 ---
 
 ## 2. Data model
-
-New table **`service_visits`** (the group) + one nullable FK on `scheduled_services`.
 
 ```
 service_visits
@@ -89,225 +88,252 @@ service_visits
   customer_id        uuid → customers
   property_id        uuid → customer_properties (nullable, mirrors rows)
   scheduled_date     date
-  technician_id      uuid → technicians (nullable; assignment may lag)
-  status             text CHECK: open | closed | dissolved
-  closed_at          timestamptz
-  close_reason       text  (all_resolved | operator | row_cancelled …)
-  summary_token      text unique  (customer visit-summary page, §5)
-  comms              jsonb  { completionSmsStatus, completionSmsAt, emailStatus,
-                              reviewRequestId, autopayStatus … }  — group-level one-shots
-  created_by         text  (converter | seeder | admin:<id> | dispatch)
+  window_start       time      ← intended stop (rev 2): same tech twice in a day ≠ one visit
+  technician_id      uuid → technicians (nullable until dispatch)
+  status             text CHECK: open | closing | closed | dissolved
+  closed_at · close_reason   (all_resolved | operator | row_cancelled …)
+  summary_token      text unique   — customer visit-summary page (§5)
+  completion_sms_status / completion_message_id / completion_email_id
+  review_request_id / autopay_status / payment_intent_id
+  created_by         converter | seeder | admin:<id> | dispatch
   created_at / updated_at
+
+visit_completion_packets                       ← rev 2 (§3)
+  id · visit_id · idempotency_key unique · payload jsonb · status
+  (accepted | processing | done | failed) · child_results jsonb · error · timestamps
 
 scheduled_services
   + visit_id  uuid → service_visits (nullable, indexed)
+
+service_records.structured_notes
+  completionSmsStatus += 'covered_by_visit' · visitMessageId   ← never 'sent' on a child
 ```
 
 Rules:
-- A group is **only ever created explicitly** — by the converter's same-trip seeding, by the
-  recurring seeder when it lands a row on a date where the customer already has an open
-  grouped/groupable row at the same property, or by an admin action. Same-customer-same-date
-  is never a runtime inference (the memo's objection stands: multi-property customers,
-  two techs, AM visit + PM callback, a rescheduled row that happens to share a date).
-- Group key = **customer + property + scheduled_date + technician** (technician may be null
-  until dispatch; assigning a tech to one row assigns the group).
-- A group with one open row is not a group — it auto-dissolves (rows keep working exactly as
-  today). Cancelling/skipping a row leaves the group; the last remaining row dissolves it.
-- `status` is derived from rows and materialized only at close; the close rule is in §4.
-- Migration: `server/models/migrations/2026MMDD…_service_visits.js`, idempotent guards,
-  reversible `down` (drop FK column, drop table). **No backfill** of historical rows —
-  deploy-forward, like every recent lane. Status strings on `scheduled_services` are untouched
-  (the CHECK-constraint P0 does not apply).
-
-Reschedule policy (owner ruling R3): moving one grouped row **moves the group** by default
-through the collective-move choke point from #3562 (`series_moves` recorded with a
-`visit_group` scope), with a "just this service" override that splits the row out of the
-group. Auto-dispatch / route-tier moves operate on the group as one unit.
+- A group is **only ever created explicitly**: converter same-trip seeding, the recurring
+  seeder landing a row on a date+window where the customer already has an open groupable row
+  at the same property, or an admin action. Same-customer-same-date is never inferred.
+- Group key = **customer + property + date + window/stop + technician**. Tech may be null
+  until dispatch; assigning a tech to one row assigns the group; a mismatch at assignment
+  splits.
+- One open row is not a group — it auto-dissolves and behaves exactly as today. Cancel/skip
+  leaves the group; the last remaining row dissolves it.
+- Reschedule (R3): moving one grouped row moves the group through the #3562 collective-move
+  choke point (`series_moves` with a `visit_group` scope); "just this service" splits it.
+  Auto-dispatch / route-tier moves treat the group as one unit.
+- Migrations in `server/models/migrations/`, idempotent, reversible, no backfill. No new
+  `scheduled_services` status strings.
 
 ---
 
-## 3. Tech experience — one stop
+## 3. Tech experience — one stop, one packet
 
-- **Route card.** `GET /api/admin/schedule` day view returns rows; the server adds `visitId`
-  and the client renders one card per group: "123 Main St · 2 services · ~55 min" with the
-  service names listed. Duration = sum of the rows' `estimated_duration_minutes` (already the
-  per-row whole-visit total; `admin-schedule.js:3691` sums the same way for windows).
-  Admin dispatch (`DispatchPageV2.jsx:342 ServiceCardV2`) gets the same grouped card;
-  the JobDrawer shows the rows as sections.
-- **En Route / Arrived once.** `POST /api/tech/services/:id/en-route` and `/on-site` fan out
-  to every row in the group inside one transaction (each row's CAS still runs — a row that
-  cannot transition reports back, the others proceed). The tracker "on the way" SMS is a
-  group-level one-shot: `track-transitions.js` fires for the first row only; sibling rows
-  carry `track_state` for the board but suppress the send. Deliberately **not** the
-  reverse (one row en-route, others pending): dispatch and the customer tracker must agree.
-- **One completion wizard, per-service sections.** The `CompletionPanel`
-  (`SchedulePage.jsx:9401`, mobile + desktop variants) opens for the group: a shared header
-  (property access, general note, overall photos) then one section per row, each rendering
-  exactly what that row's completion profile renders today (typed findings, chips, gauge,
-  materials, recommendations). Draft autosave is keyed per row, so nothing is lost if the
-  tech leaves the sheet.
-- **Finish Visit** submits the rows in order to the existing `/complete` handler — one call
-  per row, sequenced by the client, each carrying `visitId` and a `visitClose: true|false`
-  flag on the last call. The handler is 8,580 lines; this keeps validation, report build,
-  invoice mint, and PDF exactly as they are and adds only comms suppression (§4).
-  Per-section outcomes: `completed`, `unable_to_complete` (reason required; the existing
-  incomplete-visit path and follow-up seeding handle it), `not_required`. A whole-group
-  reschedule is the existing route-shift modal (`TechHomePage.jsx:1275-1378`) acting on the
-  group.
-- **No tech-side messaging controls.** Whether the customer gets one text is decided by
-  `visit_id`, not by the tech. The office keeps a single exception action: *Separate these
-  services into different visits* (splits the group).
+**Route card.** "123 Main St · 2 services · ~55 min", services listed; duration = sum of the
+rows' `estimated_duration_minutes`. `[En Route] [Arrived] [Complete Visit]`. Same grouped card
+on the dispatch board (`DispatchPageV2.jsx:342`), rows as sections in the JobDrawer.
 
----
+**En Route / Arrived once.** `/en-route` and `/on-site` fan out to every row in one
+transaction (each row's CAS still runs); the tracker "on the way" SMS is a visit one-shot.
 
-## 4. Customer comms — once per visit
+**One completion request (rev 2, build blocker #1).**
+`POST /api/tech/service-visits/:visitId/complete` (admin mirror under `/api/admin/dispatch`)
+with one payload: shared visit details, one section per child with its outcome and findings,
+one `Idempotency-Key`. The server:
+1. Validates the packet shape and every child section **synchronously** (typed findings,
+   chips, required-when rules — the same validators `/complete` runs, so the tech sees a
+   422 naming the section while still on the screen).
+2. Persists a `visit_completion_packets` row and returns **202 accepted**. The tech is back
+   on the route. Retries with the same key return the same packet.
+3. A worker processes children in server-controlled order by calling the per-row completion
+   logic — which requires **extracting the `/complete` handler body into a callable
+   service** (`server/services/dispatch-complete.js`), with the route becoming a thin
+   wrapper. Each child call carries a derived key (`<packet>:<rowId>`) so the existing
+   idempotency claim (`admin-dispatch.js:5236`) makes per-child replay safe. Report, PDF,
+   invoice mint, record: unchanged.
+4. When every child is terminal the visit closes (§4). A child failure marks the packet
+   `failed` with `child_results`, retries with backoff, and after exhaustion parks an admin
+   bell ("Visit closeout needs attention") — the visit stays `closing`, no customer message
+   goes out, and the tech is never asked to re-enter data.
 
-Inside `/complete`, when `svc.visit_id` is set and the group is not closing on this call:
-- Completion SMS is **not sent**; `completionSmsStatus = 'held_visit'` (new state in the
-  existing per-record machine; re-completion guards at `:11447-11455` treat it like
-  `deferred`).
-- Completion email enqueue is skipped; `serviceReportV1EmailStatus = 'held_visit'`.
-- Review enrollment is skipped; the group closer enrolls once against the **last** record
-  (fixes the existing double-ask on the auto path as a side effect).
-- Report, PDF, invoice mint, service record: unchanged.
+Why 202 + worker rather than one transaction: the per-row completion already spans ~12
+nested transactions plus Stripe, PDF, and SMS side effects; it cannot be made atomic, so the
+honest guarantee is *packet accepted exactly once, children processed exactly once each*.
 
-**Group close** — a small new service `server/services/visit-close.js`, invoked from the
-last `/complete` (`visitClose: true`) and from any row transition that resolves the group
-(cancel/skip/unable of a sibling when all others are already terminal). Under one advisory
-lock keyed on `visit_id`, it:
-1. Re-reads every row; closes only when every row is terminal (`completed`, `cancelled`,
-   `skipped`, or completed-with-incomplete). Otherwise returns `waiting`.
-2. Sends **one** SMS from a new DB template `visit_complete` (self-pay) /
-   `visit_complete_prepaid` (autopay/prepaid) with vars `first_name`, `service_list`
-   ("Quarterly Pest Control and Rodent Bait Station"), `visit_url` (short link, schemeless
-   portal host per the 08-01 SMS rule). One link only — the summary page carries the reports
-   and the pay button. Quiet-hours deferral and the deferred-send worker
-   (`dispatch-completion-deferred.js`) are reused at the group level.
-3. Enqueues **one** email (`visit_summary` template) linking the same page.
-4. Enrolls **one** review request.
-5. Records everything in `service_visits.comms` and mirrors `sent` onto each child
-   record's `completionSmsStatus` so dispatch's existing SMS badge stays truthful.
+**Exception-driven closeout (rev 2, #2).** Not two stacked forms:
+- Shared block once: access, overall visit note, shared photos. Each photo carries a tag set
+  — *Overall visit / Quarterly Pest Control / Rodent Bait Stations* — uploaded once, attached
+  to each tagged service record.
+- Each service starts **collapsed** with its routine preset first — *Routine service
+  completed* / *All stations inspected — no exceptions* — then *Record findings or
+  exceptions* expands the existing typed section for that row's completion profile.
+- **Preload facts, never claims.** Rodent preloads station count, names/locations, prior
+  inaccessible stations, prior activity, last bait condition (from the previous
+  `rodent_bait_station` snapshot and `service_activity_scores`). The tech still confirms.
+- Required unanswered items are highlighted; completed sections collapse; sticky *Finish
+  Visit*; drafts autosave per child (existing completion-draft mechanism) and survive app
+  close or signal loss.
+- Speed standard for a routine paired visit: the second service adds one confirmation tap
+  plus any real exceptions — no second arrival, lookup, note, photo, navigation, or closeout.
 
-**Partial outcome copy.** The template branches on the resolved sections, never on a timer:
-"Today's pest-control service is complete. We couldn't reach the rodent stations (gate
-locked) and will contact you to reschedule. View today's report: {visit_url}". The unable
-row's follow-up is created by the existing incomplete-visit machinery.
+**No tech-side messaging controls.** The office keeps one exception action: *Separate these
+services into different visits*.
 
-**Stuck groups.** A nightly sweep (existing sweep pattern) lists groups still `open` after
-the visit date with at least one completed row → admin bell "Visit not closed" with a
-one-click *Close & send* / *Separate*. The sweep never composes or sends the customer
-message on its own.
+**Outcomes per service section (rev 2, #5)** — `not_required` removed:
+
+| Outcome | Record | Invoice | Report | Follow-up | Visit message | Closes visit |
+|---|---|---|---|---|---|---|
+| `completed` | yes | yes (full) | full | no | "complete" | yes |
+| `partially_completed` (e.g. 8/10 stations, 2 inaccessible) | yes | yes (full unless office adjusts) | full, exceptions listed | yes — inaccessible items → follow-up row via existing incomplete-visit seeding | "completed, but we couldn't access all …" + next steps | yes |
+| `unable_to_complete` (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
+| `customer_declined` | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
+| `cancelled_by_office` | no | no (void if minted) | none | office decides | omitted | yes (row leaves group) |
 
 ---
 
-## 5. Customer visit-summary page
+## 4. Customer comms — the visit is the source of truth
 
-`/visit/:token` (SPA) + `GET /api/public/visit/:token`, token = `service_visits.summary_token`,
-same header posture as `/report/:token` (noindex, no-referrer, no-store), same rate-limit
-shape as `reports-public.js`. Dark behind `GATE_VISIT_SUMMARY_PAGE` (404 when off).
+When a child completes under a packet, `/complete` **never sends**: SMS, email, and review
+enrollment are suppressed and the record is stamped `completionSmsStatus = 'covered_by_visit'`
++ `visitMessageId` once the visit sends (dispatch badges treat `covered_by_visit` as delivered;
+analytics count one message). Report, PDF, invoice, record unchanged.
+
+**Visit close** — `server/services/visit-close.js`, advisory lock on `visit_id`, invoked by
+the packet worker after the last child and by any sibling transition that resolves the group.
+Closes only when every child is terminal; then:
+1. One SMS from a new DB template family `visit_complete` / `visit_complete_partial` /
+   `visit_complete_prepaid`, vars `first_name`, `service_count`, `visit_url` (schemeless
+   portal short link, 08-01 rule). **One link only.** Quiet-hours deferral reuses
+   `dispatch-completion-deferred.js` at the visit level.
+2. One email (`visit_summary`) with a button per report and the charges block.
+3. One review request, subject to the existing customer caps (fixes today's auto-path
+   double-ask as a side effect).
+4. Stamps `service_visits.completion_*` and each child's `covered_by_visit`.
+
+Copy (owner, rev 2):
+- Two services: *Hi James, today's 2 services are complete. View both reports and today's
+  charges: {short_link}*
+- One service (dissolved group — existing template untouched).
+- Partial: *Hi James, today's pest-control service was completed, but we couldn't access all
+  rodent stations. View the report and next steps: {short_link}*
+
+**Stuck visits.** Nightly sweep lists visits `open`/`closing` after the visit date with a
+completed child → admin bell with *Close & send* / *Separate*. Never composes or sends.
+
+**Pre-launch comms audit — every rail, once per visit (rev 2, #6):**
+
+| Rail | Today | Grouped rule | Where |
+|---|---|---|---|
+| Appointment reminders (72h/24h, confirm link) | per row | once per visit; `dedupeKey` gains `visit_id`; appointment page lists both services | `appointment-reminders.js:192` |
+| En-route / tracker SMS | per row | once per visit | `track-transitions.js` |
+| Completion SMS / email | per row | once per visit (above) | `admin-dispatch.js:11911-12395` |
+| Payment request | in completion SMS | in the summary page only | §5 |
+| Payment receipt | **one per invoice** on combined pay | one visit receipt (new `visit_receipt` email; per-invoice receipts suppressed under a visit PI) | `pay-combined.js:8, :883` |
+| Payment failure | per PI | once per visit payment attempt | `stripe-webhook.js:788` |
+| Overdue / dunning | account-level clock (#3575) | already deduped — verify the visit's two invoices share the clock | `invoice-followups.js:1616` |
+| Review request | per record (auto path uncapped) | at most once per visit, customer caps apply | `review-request.js:515-526` |
+
+---
+
+## 5. Customer visit-summary page — ships with the message
+
+`/visit/:token` + `GET /api/public/visit/:token`, token = `service_visits.summary_token`, same
+header posture as `/report/:token` (noindex, no-referrer, no-store), same rate-limit shape as
+`reports-public.js`. **Behind the same gate as the one-message release (rev 2, #3)** — without
+the page the single SMS would need two report links and a pay link, which is rejected.
 
 ```
-Today's Visit — Aug 29
-Quarterly Pest Control            [View report]
-Rodent Bait Stations · 10 checked [View report]
-Charges
+TODAY'S VISIT · AUGUST 29
+Quarterly Pest Control            Completed                 [View report]
+Rodent Bait Stations              10 expected · 8 inspected · 2 inaccessible   [View report]
+TODAY'S CHARGES
   Quarterly Pest Control   $128.00
   Rodent Bait Stations      $45.00
-  Today's total            $173.00      [Pay $173.00]   ← self-pay
-  (autopay: "Charged to card ending 4242 · View receipt")
+  Today's total            $173.00
+[Pay $173]                                       after payment: Paid · $173 · [View receipt]
+OTHER ACCOUNT BALANCE (only when present)
+  Previous balance         $128.00   [Pay full balance of $301]
 ```
 
-- Report links are the rows' existing `/report/:token` URLs (staff-viewer + suppression
-  rules unchanged). Nothing about the reports themselves changes.
-- The Pay button opens `/pay` for the first row's invoice; with `payIncludeBalance` on, that
-  page already itemizes the sibling and charges one PaymentIntent. Copy on the summary says
-  "today's total" — never "invoice", because two invoice numbers still exist.
-- Glass-UI tokens (customer-surface rule), no customer name in the payload beyond first
-  name in the SMS (the appointment page precedent greets nobody; ruling R6 decides whether
-  the summary page does).
+Permanent link: later visits to it show both reports, payment status, receipt, and follow-up
+status for any partial/unable service. Report links are the rows' existing `/report/:token`
+URLs — nothing about the reports changes. Glass-UI tokens. No customer name on the page (R6).
 
 ---
 
-## 6. Billing
+## 6. Billing — visit-scoped payment, two internal invoices
 
-**v1: two internal invoices, one customer payment.** Nothing changes in mint, ledger,
-receipts, void-on-cancel, dunning, or Sandy's account-level balance. The combined pay page
-is the payment experience. Requires `GATE_PAY_INCLUDE_BALANCE=true` in prod (verify — it
-shipped dark on #3427).
+**v1: two internal invoices, one customer payment, visit-scoped (rev 2, #4 — build blocker).**
+`POST /api/public/visit/:token/payment` selects **exactly the invoice ids belonging to the
+visit** and reuses the combined-PI machinery (`buildAllocation`/`encodeAllocation`
+`pay-combined.js:270-300`, `verifyAllocationLocked` `:339`, `settleCombinedPaymentIntent`
+`:788`). The generic balance-inclusion behaviour (`payIncludeBalance`) is **not** used for the
+primary button: *Pay $173* can never silently become $301. An older balance renders as a
+separate block with its own *Pay full balance* action (that path may use the existing combined
+sibling selection). Mint, ledger, void-on-cancel, dunning, and Sandy's account-level language
+are untouched. Copy says "today's charges / today's total", never "invoice".
 
-**v2 (Phase 4): one autopay charge per group.** Today the completion-side charge runs per
-invoice and, for a multi-row plan with no single per-visit amount, refuses and parks for
-office review (`admin-dispatch.js:11098-11102`). For grouped rows:
-- `/complete` skips the completion charge (`autopay_log` `skipped_visit_group_pending`).
-- The group closer, after all invoices are minted, builds the same allocation
-  `pay-combined.js` uses (`buildAllocation`/`encodeAllocation`, `:270-300`), charges one
-  PaymentIntent with the saved card, and settles through `settleCombinedPaymentIntent`
-  (`:788`) so each invoice is paid by allocation and one receipt goes out. Cap resolution
-  runs per row, then summed.
-- Dark behind `GATE_VISIT_GROUP_AUTOPAY`; until it is on, grouped autopay customers park for
-  office review exactly as today (one card charge, done by the office from the combined pay
-  page) — never two silent charges.
+**Receipts.** One visit receipt per successful visit payment; the per-invoice receipts the
+combined settle enqueues today (`:883`) are suppressed when the PI carries a `visit_id`.
+Ledger rows and invoice `receipt_url`s stay per invoice.
 
-**Not in this lane:** a single parent invoice with two service lines. It fights the mint
-lock, the FK, void/cancel, reconciliation, and Sandy's invoice-by-invoice collections
-language for no customer-visible gain over the summary page.
+**Autopay (rev 2).** Grouped autopay customers are **not parked for office review as the
+normal path**. Release rule (R7): visit groups are created only for self-pay customers until
+grouped autopay ships; the group closer then finalises both invoices, charges one PaymentIntent
+with the saved card, allocates across both invoices, sends one receipt, one failure notice.
+`autopay_log` codes `visit_charge_success` / `visit_charge_failed`. Office review remains the
+fallback only for exceptions (cap unresolved, card unusable) — never the steady state.
+
+**Not in this lane:** one parent invoice with two service lines. Only if commercial accounts
+or accounting genuinely require it.
 
 ---
 
-## 7. Phases
+## 7. Phases and gates
 
 | Phase | Ships | Gate | Depends on |
 |---|---|---|---|
-| **0 — sizing + rulings** | prod count (§8), R1–R7 | — | owner |
-| **1 — model + grouping** | `service_visits` migration, converter same-trip stamp, seeder join rule, admin group/split actions, collective-move scope, grouped route card (tech + dispatch), en-route/on-site fan-out | `GATE_VISIT_GROUPS` (off → no groups are ever created; existing rows unaffected) | — |
-| **2 — one closeout, one message** | grouped CompletionPanel, `/complete` hold states, `visit-close.js`, `visit_complete*` SMS + email templates, single review ask, stuck-group sweep + bell | same gate | 1 |
-| **3 — summary page** | `/visit/:token` + API, short link, Pay hand-off, glass UI | `GATE_VISIT_SUMMARY_PAGE` | 2 |
-| **4 — one autopay charge** | group closer charge via combined-PI allocation, receipts, `autopay_log` codes | `GATE_VISIT_GROUP_AUTOPAY` | 3 |
-| later | retire `COMBINED_SERVICE_ROUTES` + combo catalog rows (08-28 ruling), so termite-bait and T&S combos become grouped separate rows; optional combined visit PDF | — | 2 |
+| **0 — sizing + rulings** | prod count (§8), R1–R9 | — | owner |
+| **1 — model + grouping** | `service_visits` + `visit_completion_packets` migrations, converter stamp, seeder join rule (self-pay only), admin group/split, collective-move scope, grouped route card, en-route/on-site fan-out, reminder dedupe | `GATE_VISIT_GROUPS` — **stays off** until Phase 2 is merged; creates no groups | — |
+| **2 — one packet, one message, one page** | `/complete` body extracted to `dispatch-complete.js`; visit-complete endpoint + packet worker; exception-driven CompletionPanel; `visit-close.js`; `visit_complete*` templates; single review ask; `/visit/:token` page + visit-scoped payment + visit receipt; stuck-visit sweep | same gate; flipping it is the customer-visible launch | 1 |
+| **3 — grouped autopay** | closer charge via visit allocation, receipts, failure notice, `autopay_log` codes; seeder join rule extends to autopay customers | `GATE_VISIT_GROUP_AUTOPAY` | 2 |
+| later | retire `COMBINED_SERVICE_ROUTES` + combo catalog rows once groups are stable (08-28 ruling); combined visit PDF only if customers ask | — | 2 |
 
-Phases 1–2 are one PR pair (model, then closeout) — Phase 2 is where the customer-visible
-change lands, and Phase 1 alone is invisible. Each phase carries its own contract tests:
-completion-lane coverage is unaffected (no new catalog key), but the `/complete` hold
-states, the close rule, the SMS template presence, and the allocation math each need pinned
-tests in the style of `combined-completions` / `pay-combined` suites.
+Phase 2 is several PRs (extraction · endpoint+worker · panel · close+templates · page+payment)
+but one gate: the launch is the moment closeout, close, page, SMS, email, and payment all work
+together. Contract tests per PR: packet idempotency, child-order + failure parking, outcome
+table effects, close rule, template presence, visit-scoped allocation, receipt suppression,
+comms-audit rails.
 
 ---
 
 ## 8. Sizing — prod read Adam runs
 
-The classifier blocks prod reads from this session. Script `~/visit-pairs-2026-08-29.js`
-(read-only: counts customers with >1 open row on the same date over the next 120 days, how
-many share tech + window, top service pairs, and completed same-day pairs in the last 90 days):
+Classifier blocks prod reads from the session. `~/visit-pairs-2026-08-29.js` (read-only): open
+same-date pairs next 120d, share of same tech + window, top service pairs, completed same-day
+pairs last 90d.
 
 ```
 ! cd ~ && export DATABASE_PUBLIC_URL="$(railway variables -s Postgres --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).DATABASE_PUBLIC_URL))')" && NODE_PATH=~/wt-service-convention/node_modules node ~/visit-pairs-2026-08-29.js
 ```
 
-If the future count is small (a handful of customers), Phase 1's seeder join rule can start
-as admin-only grouping and the converter stamp; if it is dozens, the seeder rule ships in
-Phase 1.
-
 ---
 
-## 9. Rulings needed (owner)
+## 9. Rulings (owner rev-2 positions recorded; open items marked)
 
-| # | Question | Recommendation |
+| # | Question | Position |
 |---|---|---|
-| R1 | Group key: customer + property + date + tech? | Yes; tech may be null until dispatch; split on tech mismatch at assignment. |
-| R2 | Two internal invoices + combined pay page = the "one invoice"? | Yes for v1; summary says "today's total", never "invoice". |
-| R3 | Rescheduling one grouped row | Group moves as a unit by default (#3562 choke point); "just this service" splits it. |
-| R4 | Section outcomes | `completed / unable_to_complete (reason) / not_required`; unable seeds the existing follow-up. |
-| R5 | SMS shape | One link (`visit_url`); no report links or pay link in the text. Copy above. |
-| R6 | Summary page greets by first name? | Follow the appointment-page precedent: no name on the page; first name only in the SMS. |
-| R7 | Autopay rollout | Grouped autopay customers park for office review until Phase 4's gate is on; never two charges. |
-| R8 | Retire `COMBINED_SERVICE_ROUTES` + combo rows once Phase 2 is live (pending 08-28 ruling)? | Yes — same-trip grouped rows replace them. |
-
----
+| R1 | Group key | customer + property + date + window/stop + tech — **ruled (rev 2)** |
+| R2 | Two internal invoices + visit-scoped payment = the "one invoice" | **ruled**: yes for v1; never say "invoice" |
+| R3 | Rescheduling one grouped row | group moves as a unit; "just this service" splits — **open** |
+| R4 | Section outcomes | table in §3 — **ruled**; the per-outcome billing column (does `partially_completed` bill in full?) is **open** |
+| R5 | SMS shape | one link, short copy per §4 — **ruled** |
+| R6 | Summary page greets by name? | no name on page; first name in SMS only — **open** |
+| R7 | Autopay rollout | self-pay only until grouped autopay ships — **ruled** |
+| R8 | Retire combined routes + combo rows | after visit groups are stable — **ruled** |
+| R9 | Build blockers | one packet endpoint · page + message same gate · visit-scoped payment — **ruled** |
 
 ## 10. Explicitly out of scope
 
-- One parent invoice with multiple lines (§6).
-- Changing any report content, companion sections, or completion profiles.
-- Same-customer-same-date inference at completion time; any tech-facing hold/skip toggle.
-- Historical backfill of groups.
-- Combined visit PDF (possible later; the two PDFs already exist).
+One parent invoice; any change to report content, companion sections, or completion profiles;
+same-day inference at completion; tech-facing hold/skip toggle; historical backfill; combined
+visit PDF; a "Download all reports" bundle.
