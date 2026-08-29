@@ -201,11 +201,14 @@ function seedDb() {
       { id: 'i-l5', scheduled_service_id: 'l5', status: 'scheduled', title: 'Lawn + Pest Control Service', service_type: 'Pest Control Service', payer_statement_id: 'ps-open', updated_at: 'orig', line_items: null },
       // draft for an untouched visit — untouched
       { id: 'i-l4', scheduled_service_id: 'l4', status: 'draft', title: 'General Pest Control', service_type: 'General Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
-      // add-on-only parent's draft: line item carries the add-on name
-      { id: 'i-p-open', scheduled_service_id: 'p-open', status: 'draft', title: 'Mosquito Control + Quarterly Pest Control', service_type: 'Mosquito Control', payer_statement_id: null, updated_at: 'orig',
-        line_items: JSON.stringify([{ description: 'Mosquito Control', category: 'Mosquito Control' }, { description: 'Quarterly Pest Control', category: 'Quarterly Pest Control' }]) },
+      // add-on-only parent's draft: line items carry BOTH stale add-on names
+      // (two different (from → to) passes touch this one invoice)
+      { id: 'i-p-open', scheduled_service_id: 'p-open', status: 'draft', title: 'Mosquito Control + Quarterly Pest Control + Pest Control', service_type: 'Mosquito Control', payer_statement_id: null, updated_at: 'orig',
+        line_items: JSON.stringify([{ description: 'Mosquito Control', category: 'Mosquito Control' }, { description: 'Quarterly Pest Control', category: 'Quarterly Pest Control' }, { description: 'Pest Control', category: 'Pest Control' }]) },
       // UNATTACHED drafts: unambiguous label swaps; bare "Pest Control" is a guess → untouched
       { id: 'i-free-q', scheduled_service_id: null, status: 'draft', title: 'Quarterly Pest Control — first visit', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      // combined unattached draft with TWO unambiguous stale components
+      { id: 'i-free-2', scheduled_service_id: null, status: 'draft', title: 'Quarterly Pest Control + General Pest Control (Semiannual)', service_type: null, payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-amb', scheduled_service_id: null, status: 'draft', title: 'Pest Control', service_type: 'Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-sent', scheduled_service_id: null, status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
     ],
@@ -270,8 +273,12 @@ describe('20260829000040 backfill up()', () => {
     );
     // The add-on-only parent's copies carry the add-on name → swept too.
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
-    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service');
-    expect(JSON.parse(inv(db, 'i-p-open').line_items)[1]).toEqual({ description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service' });
+    // Both add-on passes touched the parent's draft — neither skipped the other.
+    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service + Quarterly Pest Control Service');
+    expect(JSON.parse(inv(db, 'i-p-open').line_items).slice(1)).toEqual([
+      { description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service' },
+      { description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service' },
+    ]);
     expect(inv(db, 'i-p-open').service_type).toBe('Mosquito Control');
   });
 
@@ -351,17 +358,32 @@ describe('20260829000040 backfill up()', () => {
     expect(inv(db, 'i-free-q').title).toBe('Quarterly Pest Control Service — first visit');
     expect(inv(db, 'i-free-amb').service_type).toBe('Pest Control');
     expect(inv(db, 'i-free-sent').service_type).toBe('Quarterly Pest Control');
+    // A combined unattached draft gets EVERY unambiguous component swapped.
+    expect(inv(db, 'i-free-2').title).toBe('Quarterly Pest Control Service + Semiannual Pest Control Service');
 
     const state = readState(db);
-    expect(state.invoices.map((r) => r.id).sort()).toEqual(['i-free-q', 'i-l5', 'i-p-open', 'i-u1']);
+    // One record per (invoice, pass): i-p-open and i-free-2 were each touched twice.
+    expect(state.invoices.map((r) => r.id).sort()).toEqual(['i-free-2', 'i-free-2', 'i-free-q', 'i-l5', 'i-p-open', 'i-p-open', 'i-u1']);
+    // Exact prior/written per field — the rollback chain, not an inverse swap.
     expect(state.invoices.find((r) => r.id === 'i-u1')).toEqual({
       id: 'i-u1',
-      changed: { title: true, service_type: true, items: [{ i: 0, description: true, category: true }] },
       from: 'Quarterly Pest Control',
       to: 'Quarterly Pest Control Service',
+      prior: {
+        title: 'Quarterly Pest Control — first visit',
+        service_type: 'Quarterly Pest Control',
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }]),
+      },
+      written: {
+        title: 'Quarterly Pest Control Service — first visit',
+        service_type: 'Quarterly Pest Control Service',
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', category: 'Quarterly Pest Control Service', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }]),
+      },
       visit_id: 'u1',
+      written_at: 'NOW', // the timestamp up() stamped — down() CASes on it
     });
     expect(state.invoices.find((r) => r.id === 'i-free-q').visit_id).toBeNull();
+    expect(state.invoices.filter((r) => r.id === 'i-free-2').map((r) => r.from).sort()).toEqual(['General Pest Control (Semiannual)', 'Quarterly Pest Control']);
   });
 
   test('skips a snapshot fanout whose table is missing, still relabels visits', async () => {
@@ -478,10 +500,34 @@ describe('20260829000040 down()', () => {
     expect(addon(db, 'a-linked').service_name).toBe('Quarterly Pest Control Service');
     expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service');
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control Service');
-    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service');
+    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control Service + Quarterly Pest Control Service');
   });
 
-  test('invoice reversal honors the updated_at CAS and a statement frozen since up()', async () => {
+  test('a name-only add-on under an add-on-only parent the owner re-cadenced since stays; the linked add-on beside it reverts', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    byId(db, 'p-open').recurring_pattern = 'monthly'; // cadence that justified the mapping is gone
+    await migration.down(knex);
+    expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service'); // kept
+    expect(addon(db, 'a-linked').service_name).toBe('Pest Control'); // catalog-linked, cadence-independent → reverted
+    expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control'); // parent still open → reverts
+  });
+
+  test('a combined draft touched by two passes unwinds BOTH components in one write', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    await migration.down(knex);
+    expect(inv(db, 'i-free-2').title).toBe('Quarterly Pest Control + General Pest Control (Semiannual)');
+    expect(inv(db, 'i-p-open').title).toBe('Mosquito Control + Quarterly Pest Control + Pest Control');
+    expect(JSON.parse(inv(db, 'i-p-open').line_items).slice(1)).toEqual([
+      { description: 'Quarterly Pest Control', category: 'Quarterly Pest Control' },
+      { description: 'Pest Control', category: 'Pest Control' },
+    ]);
+  });
+
+  test('invoice reversal compares against the timestamp up() WROTE (an owner edit since is theirs) and a statement frozen since up()', async () => {
     const db = seedDb();
     const knex = fakeKnex(db);
     await migration.up(knex);

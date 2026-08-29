@@ -173,65 +173,42 @@ function parseLineItems(raw) {
 }
 
 // Forward swap on an invoice snapshot's title, service_type, and line-item
-// descriptions/categories; returns the patch plus a `changed` map so the
-// rollback is restricted to exactly what up() touched.
+// descriptions/categories; returns the patch (only the fields that change).
 function relabelInvoiceSnapshot(inv, fromName, toName) {
   const patch = {};
-  const changed = { title: false, service_type: false, items: [] };
   const nextTitle = swapRenamedTitle(inv.title, fromName, toName);
-  if (nextTitle) { patch.title = nextTitle; changed.title = true; }
+  if (nextTitle) patch.title = nextTitle;
   const nextServiceType = swapRenamedPrefix(inv.service_type, fromName, toName);
-  if (nextServiceType) { patch.service_type = nextServiceType; changed.service_type = true; }
+  if (nextServiceType) patch.service_type = nextServiceType;
   const items = parseLineItems(inv.line_items);
   if (items) {
     let itemsChanged = false;
-    const next = items.map((item, i) => {
+    const next = items.map((item) => {
       if (!item || typeof item !== 'object') return item;
       const out = { ...item };
-      const rec = { i, description: false, category: false };
       const nd = swapRenamedTitle(out.description, fromName, toName);
-      if (nd) { out.description = nd; rec.description = true; itemsChanged = true; }
+      if (nd) { out.description = nd; itemsChanged = true; }
       const nc = swapRenamedPrefix(out.category, fromName, toName);
-      if (nc) { out.category = nc; rec.category = true; itemsChanged = true; }
-      if (rec.description || rec.category) changed.items.push(rec);
-      return out;
-    });
-    if (itemsChanged) patch.line_items = JSON.stringify(next);
-  }
-  return Object.keys(patch).length ? { patch, changed } : null;
-}
-
-// Inverse restricted to a recorded `changed` map.
-function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
-  const patch = {};
-  if (changed.title) {
-    const t = swapRenamedTitle(inv.title, fromName, toName);
-    if (t) patch.title = t;
-  }
-  if (changed.service_type) {
-    const st = swapRenamedPrefix(inv.service_type, fromName, toName);
-    if (st) patch.service_type = st;
-  }
-  const items = parseLineItems(inv.line_items);
-  if (items && Array.isArray(changed.items) && changed.items.length) {
-    let itemsChanged = false;
-    const next = items.map((item, i) => {
-      const rec = changed.items.find((r) => r && r.i === i);
-      if (!rec || !item || typeof item !== 'object') return item;
-      const out = { ...item };
-      if (rec.description) {
-        const nd = swapRenamedTitle(out.description, fromName, toName);
-        if (nd) { out.description = nd; itemsChanged = true; }
-      }
-      if (rec.category) {
-        const nc = swapRenamedPrefix(out.category, fromName, toName);
-        if (nc) { out.category = nc; itemsChanged = true; }
-      }
+      if (nc) { out.category = nc; itemsChanged = true; }
       return out;
     });
     if (itemsChanged) patch.line_items = JSON.stringify(next);
   }
   return Object.keys(patch).length ? patch : null;
+}
+
+// Invoice rollback is an EXACT prior/written chain per field, not an inverse
+// string swap: two different stale components can map to the SAME target
+// ("Quarterly Pest Control" and "Pest Control" both → "Quarterly Pest
+// Control Service"), after which a swap back cannot tell them apart.
+// line_items compare structurally (jsonb round-trips reorder nothing, but
+// the driver may hand back an object where up() wrote a string).
+function sameSnapshotValue(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  const pa = parseLineItems(a);
+  const pb = parseLineItems(b);
+  return pa !== null && pb !== null && JSON.stringify(pa) === JSON.stringify(pb);
 }
 
 // Frozen (non-open) payer statements among these invoices' links — their
@@ -256,10 +233,28 @@ const INVOICE_COLS = ['id', 'title', 'line_items', 'service_type', 'scheduled_se
 // Relabel one invoice under CAS + frozen-statement guard; records on success.
 async function relabelInvoice(knex, inv, frozen, from, to, state) {
   if (inv.payer_statement_id && frozen.has(inv.payer_statement_id)) return;
-  const result = relabelInvoiceSnapshot(inv, from, to);
-  if (!result) return;
-  const count = await invoiceCas(knex, inv).update({ ...result.patch, updated_at: knex.fn.now() });
-  if (count) state.invoices.push({ id: inv.id, changed: result.changed, from, to, visit_id: inv.scheduled_service_id || null });
+  const patch = relabelInvoiceSnapshot(inv, from, to);
+  if (!patch) return;
+  const count = await invoiceCas(knex, inv).update({ ...patch, updated_at: knex.fn.now() });
+  if (!count) return;
+  // Record exactly what this pass replaced and wrote, per field, plus the
+  // timestamp THIS write stamped: down() compares against that, never
+  // against a value re-read at rollback time (which would be the owner's
+  // later edit and would let the rollback clobber it — r4 P2).
+  const prior = {};
+  for (const field of Object.keys(patch)) prior[field] = inv[field] == null ? null : inv[field];
+  const after = await knex('invoices').where({ id: inv.id }).first(knex.raw('updated_at::text AS updated_at_cas'));
+  state.invoices.push({
+    id: inv.id,
+    from,
+    to,
+    prior,
+    written: patch,
+    visit_id: inv.scheduled_service_id || null,
+    written_at: after ? after.updated_at_cas : null,
+  });
+  // Later passes see this pass's result (the CAS timestamp and the labels).
+  Object.assign(inv, patch, after ? { updated_at_cas: after.updated_at_cas } : {});
 }
 
 // ---- snapshot fanout ---------------------------------------------------
@@ -357,12 +352,12 @@ async function relabelUnattachedInvoices(knex, from, to, state) {
       [from, `%${from}%`, from, `${from} (%`, `%${from}%`]
     )
     .select(...INVOICE_COLS, knex.raw('updated_at::text AS updated_at_cas'));
+  // Each (from → to) pass swaps its OWN component and records its own
+  // entry; a combined draft ("A + B") with two stale components is relabeled
+  // once per pass, never skipped after the first (r4 P1). The per-pass
+  // updated_at::text CAS is re-read fresh, so passes chain safely.
   const frozen = await frozenPayerStatementIds(knex, unattached);
-  const already = new Set(state.invoices.map((r) => r.id));
-  for (const inv of unattached) {
-    if (already.has(inv.id)) continue;
-    await relabelInvoice(knex, inv, frozen, from, to, state);
-  }
+  for (const inv of unattached) await relabelInvoice(knex, inv, frozen, from, to, state);
 }
 
 exports.up = async function up(knex) {
@@ -453,13 +448,17 @@ exports.up = async function up(knex) {
           .select('id', 'recurring_pattern')).map((v) => [v.id, v])
         : []
     );
-    const relabelAddon = async (a, to, identityScope) => {
+    const relabelAddon = async (a, to, identityScope, pattern) => {
       if (!openParents.has(a.scheduled_service_id)) return;
       const count = await identityScope(
         knex('scheduled_service_addons').where({ id: a.id, service_name: a.service_name })
       ).update({ service_name: to });
       if (count) {
-        state.addons.push({ id: a.id, from: a.service_name, to, parent_id: a.scheduled_service_id, service_id: a.service_id || null });
+        const rec = { id: a.id, from: a.service_name, to, parent_id: a.scheduled_service_id, service_id: a.service_id || null };
+        // A name-only add-on's mapping rests on the PARENT cadence — recorded
+        // so down() can re-check it (r4 P2).
+        if (pattern != null) rec.pattern = pattern;
+        state.addons.push(rec);
         noteRelabel(a.service_name, to, { id: a.scheduled_service_id, self_booking_id: null });
       }
     };
@@ -470,7 +469,7 @@ exports.up = async function up(knex) {
       const parent = openParents.get(a.scheduled_service_id);
       const to = parent ? mappingTarget(a.service_name, parent.recurring_pattern) : null;
       if (!to || !catalog.has(to)) continue;
-      await relabelAddon(a, to, (q) => q.whereNull('service_id'));
+      await relabelAddon(a, to, (q) => q.whereNull('service_id'), parent.recurring_pattern);
     }
   }
 
@@ -555,15 +554,24 @@ exports.down = async function down(knex) {
     ...invoiceRecs.map((r) => r && r.visit_id),
   ].filter((id) => id && !recordedVisits.has(id)))];
   const terminal = new Set();
+  const parentPattern = new Map();
   if (componentVisitIds.length) {
-    const visits = await knex('scheduled_services').whereIn('id', componentVisitIds).forUpdate().select('id', 'status');
-    for (const v of visits) if (TERMINAL_VISIT_STATUSES.includes(v.status)) terminal.add(v.id);
+    const visits = await knex('scheduled_services').whereIn('id', componentVisitIds).forUpdate().select('id', 'status', 'recurring_pattern');
+    for (const v of visits) {
+      if (TERMINAL_VISIT_STATUSES.includes(v.status)) terminal.add(v.id);
+      parentPattern.set(v.id, v.recurring_pattern);
+    }
   }
   const visitRevertible = (id) => (recordedVisits.has(id) ? revertedVisits.has(id) : !terminal.has(id));
 
   if (addonRecs.length && (await knex.schema.hasTable('scheduled_service_addons'))) {
     for (const rec of addonRecs) {
       if (!pair(rec) || !rec.parent_id || !visitRevertible(rec.parent_id)) continue;
+      // A name-only add-on was mapped through the parent's cadence: an
+      // add-on-only parent the owner re-cadenced since no longer justifies
+      // the old name (a relabeled parent already re-checked its cadence in
+      // its own reversal above).
+      if (rec.pattern != null && !recordedVisits.has(rec.parent_id) && parentPattern.get(rec.parent_id) !== rec.pattern) continue;
       let q = knex('scheduled_service_addons').where({ id: rec.id, service_name: rec.to });
       q = rec.service_id ? q.where({ service_id: rec.service_id }) : q.whereNull('service_id');
       await q.update({ service_name: rec.from });
@@ -609,15 +617,37 @@ exports.down = async function down(knex) {
       .whereIn('status', MUTABLE_INVOICE_STATUSES)
       .select(...INVOICE_COLS, knex.raw('updated_at::text AS updated_at_cas'));
     const frozen = await frozenPayerStatementIds(knex, invoices);
-    const byId = new Map(invoiceRecs.filter(Boolean).map((r) => [r.id, r]));
+    // EVERY record per invoice, in write order — a combined draft touched by
+    // several (from → to) passes has several (r4 P2). They unwind in reverse
+    // as ONE write: the current updated_at must equal the timestamp the LAST
+    // pass stamped (an owner edit since → the whole invoice is theirs), and
+    // each component reverts only under its own visit guard.
+    const recsById = new Map();
+    for (const rec of invoiceRecs) {
+      if (!rec || !pair(rec) || !rec.prior || !rec.written || typeof rec.written_at !== 'string') continue;
+      if (!recsById.has(rec.id)) recsById.set(rec.id, []);
+      recsById.get(rec.id).push(rec);
+    }
     for (const inv of invoices) {
-      const rec = byId.get(inv.id);
-      if (!rec || !rec.changed || !pair(rec)) continue;
-      // Unattached drafts (no visit) revert under the still-draft guard alone.
-      if (rec.visit_id && !visitRevertible(rec.visit_id)) continue;
+      const recs = recsById.get(inv.id);
+      if (!recs || !recs.length) continue;
       if (inv.payer_statement_id && frozen.has(inv.payer_statement_id)) continue;
-      const patch = rollbackInvoiceSnapshot(inv, rec.changed, rec.to, rec.from);
-      if (!patch) continue;
+      if (inv.updated_at_cas !== recs[recs.length - 1].written_at) continue;
+      // Walk the chain back: each step must find exactly what it wrote
+      // (the later step's prior IS this step's written), and stops at the
+      // first step whose visit guard fails — an earlier component cannot
+      // be restored underneath a retained later one. In practice every
+      // record of an attached invoice shares its one visit, and unattached
+      // drafts have none, so this is all-or-nothing per invoice.
+      const working = { ...inv };
+      const patch = {};
+      for (const rec of [...recs].reverse()) {
+        if (rec.visit_id && !visitRevertible(rec.visit_id)) break;
+        const fields = Object.keys(rec.written);
+        if (!fields.every((f) => sameSnapshotValue(working[f], rec.written[f]))) break;
+        for (const f of fields) { working[f] = rec.prior[f]; patch[f] = rec.prior[f]; }
+      }
+      if (!Object.keys(patch).length) continue;
       await invoiceCas(knex, inv).update({ ...patch, updated_at: knex.fn.now() });
     }
   }
