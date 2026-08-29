@@ -1390,6 +1390,27 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_COMMERCIAL_GLASS.
   estimateCommercialGlass: isProd ? process.env.GATE_ESTIMATE_COMMERCIAL_GLASS === 'true' : true,
 
+  // Commercial scoped one-time auto-pricing — one-time services whose price is
+  // already unit-scoped (slab sqft, linear ft, drill points, rooms, entry
+  // points, palm counts) price identically on commercial properties instead of
+  // collapsing to the generic manual-quote line, carrying commercial line
+  // marking (FL nonresidential pest tax flag, no residential discounts) from
+  // markCommercialOneTimeLine. Extends owner directive 2026-06-29 ("ALL
+  // commercial pricing is auto") to the scoped one-time family; the recurring
+  // foam bypass (owner 2026-06-25) is the precedent. Home-size-bracket
+  // one-times (one-time pest/lawn, roach programs, rodent trapping, flea)
+  // stay manual — they need commercial bases and owner-approved numbers first.
+  // WDO also stays manual (footprint-BRACKETED, and public quote can supply a
+  // synthetic 2,000 sqft for unmeasured commercial buildings), as does palm
+  // injection (recurring program whose legacy-mapper round trip drops the
+  // commercial identity) — both codex #3594 P1s.
+  // Off everywhere until the owner verifies a priced commercial estimate —
+  // pricing gates are env-only in every environment (GATE_UNIT_BAND_PRICING /
+  // GATE_BERMUDA_SUPPRESSION convention); the engine re-reads the env at call
+  // time via gateEnvValue so tests and gate flips take effect immediately.
+  // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
+  commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
+
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
   // proposal.pdf download, and the proposal email attachment render the React
   // EstimateProposalDocument (service-report-style document) through the

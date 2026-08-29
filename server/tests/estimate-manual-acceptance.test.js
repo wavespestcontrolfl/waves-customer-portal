@@ -34,6 +34,17 @@ jest.mock('../services/estimate-converter', () => ({
   annualPrepayRecurringUnitCount: jest.fn((data) => (
     (data?.recurring?.services || data?.engineResult?.lineItems || []).length
   )),
+  // Real-enough mirror of the one-time commercial stamp signal (codex #3594
+  // r3 P1): a PRICED scoped one-time row marked commercial auto_estimate in
+  // the mapped one-time container or the wizard engine rows.
+  estimateHasCommercialOneTime: jest.fn((data = {}) => {
+    const rows = [
+      ...(data?.result?.oneTime?.items || []),
+      ...(data?.engineResult?.lineItems || []).filter((li) => !(Number(li?.annual) > 0)),
+    ];
+    return rows.some((li) => li && li.isCommercial === true
+      && li.commercialPricingMode === 'auto_estimate' && li.quoteRequired !== true);
+  }),
 }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateAccepted: jest.fn() }));
 // Deposit-credit netting in the prepay invoiceTotal preview: default = no
@@ -164,6 +175,65 @@ describe('estimate manual acceptance', () => {
       source: 'verbal_yes',
       database,
     })).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  test('one-time-only commercial win stamps the customer commercial without the converter (codex #3594 r3)', async () => {
+    // Commercial trenching: the public accept route refuses it, staff marks it
+    // won — no monthly total, so the converter (and its stamp) never runs.
+    const estimate = {
+      id: 'estimate-ot-commercial',
+      status: 'sent',
+      customer_id: 'customer-res',
+      sent_at: '2026-08-20T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: null,
+      onetime_total: '640.00',
+      estimate_data: JSON.stringify({
+        result: {
+          oneTime: {
+            items: [{
+              service: 'trenching', price: 640, isCommercial: true,
+              propertyType: 'commercial', commercialPricingMode: 'auto_estimate', taxable: true,
+            }],
+          },
+        },
+      }),
+    };
+    const { database, updates } = makeDb(estimate);
+    const leadLinkService = { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() };
+    const estimateConverter = { convertEstimate: jest.fn() };
+
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database, leadLinkService, estimateConverter,
+    });
+
+    expect(estimateConverter.convertEstimate).not.toHaveBeenCalled();
+    const stamp = updates.find((u) => u.table === 'customers');
+    expect(stamp).toBeDefined();
+    expect(stamp.clause).toEqual({ id: 'customer-res' });
+    // One-way: only ever SETS commercial (no-op when already commercial).
+    expect(stamp.rawClause).toBe("coalesce(property_type, '') <> 'commercial'");
+    expect(stamp.patch).toEqual({ property_type: 'commercial' });
+  });
+
+  test('residential one-time win never touches property_type', async () => {
+    const estimate = {
+      id: 'estimate-ot-res',
+      status: 'sent',
+      customer_id: 'customer-2',
+      sent_at: '2026-08-20T12:00:00.000Z',
+      accepted_at: null,
+      monthly_total: null,
+      onetime_total: '99.00',
+      estimate_data: JSON.stringify({ result: { oneTime: { items: [{ service: 'one_time_pest', price: 99 }] } } }),
+    };
+    const { database, updates } = makeDb(estimate);
+    await markEstimateManuallyAccepted({
+      estimateId: estimate.id, adminUserId: 'admin-1', database,
+      leadLinkService: { markLinkedLeadEstimateAccepted: jest.fn().mockResolvedValue() },
+      estimateConverter: { convertEstimate: jest.fn() },
+    });
+    expect(updates.some((u) => u.table === 'customers')).toBe(false);
   });
 
   test('stamps accepted_at, clears lost metadata, and runs won hooks', async () => {

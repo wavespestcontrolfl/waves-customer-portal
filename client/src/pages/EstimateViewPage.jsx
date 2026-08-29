@@ -5627,9 +5627,16 @@ function EstimateViewPageInner() {
   // must not fall back to residential guarantee claims beside it (codex
   // #3281 r5; same payload-flag rule as the ProposalDetailCard render).
   const authoredProposalOnPage = data?.proposal?.enabled === true;
+  // cta.commercialOneTimePriced = scoped one-time rows priced for a commercial
+  // property (GATE_COMMERCIAL_ONETIME_SCOPED). Copy identity ONLY — it is
+  // deliberately absent from isCommercialEstimate/billsMonthly below, which
+  // carry the approval-only recurring-commercial billing semantics (codex
+  // #3594 r2 P1). Its rows are never all-pest-recurring, so it always lands
+  // on the terms-neutral commercial pack.
   const copyCommercial = commercialGlassActive()
     && (cta?.commercialProposal === true
       || cta?.commercialAutoPriced === true
+      || cta?.commercialOneTimePriced === true
       || cta?.quoteRequiredReason === 'commercial_proposal'
       || authoredProposalOnPage);
   // Truth scope WITHIN the commercial identity (codex #3281 r3): the
