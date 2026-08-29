@@ -3376,13 +3376,23 @@ export function calculateEstimate(inputs) {
       mo: R.rodBaitMo,
       perTreatment: R.rodBait.perVisit,
       visitsPerYear: R.rodBait.visitsPerYear,
+      // Billing-unit marker (mirrors the server pricer/mapper) — without it
+      // the canonical rodentBaitLineBillsMonthly gate reads this row as a
+      // legacy monthly plan and suppresses per-application provenance.
+      perApplicationBilled: true,
     });
-    if (ac === 1) {
+    // $99 setup only for NON-members: no other qualifying service on this
+    // estimate AND not a recognized existing recurring customer (the admin
+    // estimator passes isRecurringCustomer for known accounts — a member
+    // adding rodent bait alone must not save/send the fee).
+    if (ac === 1 && !isRC) {
       hasOT = true;
       otItems.push({
         service: 'rodent_bait_setup',
         name: 'Bait Station Setup',
         price: 99,
+        discountable: false,
+        excludeFromPctDiscount: true,
         detail: 'One-time $99 setup — waived for WaveGuard members',
       });
     }

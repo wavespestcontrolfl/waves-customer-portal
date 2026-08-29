@@ -991,7 +991,7 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // the retired minimums on a FRESH save (codex #3432 r3 P1). Stripped here
 // and re-derived server-side only under the declared persisted-replay
 // branch below — same lifecycle as treeShrubPricingKnobs.
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed'];
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -1122,6 +1122,11 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // (savedFloorReplayOverrides; codex r3 P0 — never a global re-arm).
     const commercialArmed = require('./commercial-floor-replay').commercialFloorBoundServices(estimateData);
     if (commercialArmed.length) v1Input.commercialFloorsArmedServices = commercialArmed;
+    // Legacy rodent-bait price pin (codex #3591 r2 P0): same stored-row
+    // evidence the public replay uses — a pre-realignment rodent line must
+    // keep its disclosed price through this authoritative recompute too.
+    const rodentPin = require('./rodent-bait-legacy-replay').rodentBaitLegacyReplaySignal(estimateData);
+    if (rodentPin) v1Input.rodentBaitLegacyReplay = rodentPin;
   }
 
   try {

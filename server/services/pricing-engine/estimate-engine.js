@@ -1131,8 +1131,68 @@ function generateEstimate(input) {
   }
 
   // Rodent Bait
+  // Saved-estimate legacy replay pin (codex #3591 r2 P0): a pre-2026-08-29
+  // estimate replayed through the CURRENT engine must reproduce its
+  // disclosed price, not the new bracket ladder. estimate-public's
+  // savedFloorReplayOverrides derives the pin from stored row evidence
+  // (a rodent line with no perApplicationBilled/stations marker) and
+  // threads it in as an input-level override; fresh pricing never carries
+  // it. A pinned line keeps the FULL legacy posture: monthly-billed, no
+  // tier count, no % discount — otherwise the replay would also move the
+  // OTHER lines' tier discounts on the same old quote.
+  const rodentLegacyPin = input.rodentBaitLegacyReplay && typeof input.rodentBaitLegacyReplay === 'object'
+    ? input.rodentBaitLegacyReplay
+    : null;
   if (services.rodentBait) {
-    if (propertyIsCommercial) {
+    if (propertyIsCommercial && Number(rodentLegacyPin?.commercialAnnual) > 0) {
+      const annual = Math.round(Number(rodentLegacyPin.commercialAnnual) * 100) / 100;
+      const visits = Number(rodentLegacyPin.commercialVisits) > 0 ? Number(rodentLegacyPin.commercialVisits) : 4;
+      lineItems.push({
+        service: 'commercial_rodent_bait',
+        name: 'Commercial Rodent Bait Stations',
+        originalRequestedService: 'rodent_bait',
+        propertyType: 'commercial',
+        isCommercial: true,
+        commercialPricingMode: 'auto_estimate',
+        estimatedPricing: true,
+        discountable: false,
+        excludeFromPctDiscount: true,
+        quoteRequired: false,
+        requiresManualReview: false,
+        detail: 'Commercial rodent bait-station program. Estimated from property data — final price confirmed on site.',
+        disclaimer: 'Estimated from property data — final price confirmed on site.',
+        frequency: visits,
+        visitsPerYear: visits,
+        annual,
+        monthly: Math.round(annual / 12 * 100) / 100,
+        perApp: Math.round(annual / visits * 100) / 100,
+        perVisit: Math.round(annual / visits * 100) / 100,
+        pricingBasis: 'LEGACY_PINNED_REPLAY',
+        legacyPinnedReplay: true,
+        taxable: true,
+        taxCategory: 'nonresidential_pest_control',
+      });
+      activeServiceKeys.push('commercial_rodent_bait');
+    } else if (!propertyIsCommercial && Number(rodentLegacyPin?.monthly) > 0) {
+      const monthly = Math.round(Number(rodentLegacyPin.monthly) * 100) / 100;
+      const annual = Math.round(monthly * 12 * 100) / 100;
+      lineItems.push({
+        service: 'rodent_bait',
+        name: 'Rodent Bait Stations',
+        monthly,
+        annual,
+        visitsPerYear: 4,
+        legacyPinnedReplay: true,
+        // Legacy posture in full: never tier-counted (no activeServiceKeys
+        // push below), never % discounted.
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+        excludeFromPctDiscount: true,
+        tierQualifier: false,
+      });
+    } else if (propertyIsCommercial) {
       // Commercial rodent bait stations auto-price off the building footprint;
       // with no real building size it falls back to a manual quote.
       const result = priceCommercialRodentBait(property, {
@@ -1633,7 +1693,7 @@ function generateEstimate(input) {
   // programs are never WaveGuard members, so a priced commercial line
   // carries the fee too (same pricing, owner directive). The old
   // rodentBaitSetupForce escape hatch is retired with the $199 fee.
-  if (services.rodentBait) {
+  if (services.rodentBait && !rodentLegacyPin) {
     const rodentLine = lineItems.find((i) => i.service === 'rodent_bait' || i.service === 'commercial_rodent_bait');
     const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
     const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices])]

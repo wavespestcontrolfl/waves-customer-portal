@@ -187,6 +187,10 @@ describe('revised rodent pricing rules', () => {
     expect(solo.summary.manualDiscount.amount).toBe(0);
     const soloSetup = solo.lineItems.find(i => i.service === 'rodent_bait_setup');
     expect(soloSetup.price).toBe(99);
+    // The recurring rodent line makes this customer a recurring customer,
+    // but the flat setup fee is excluded from the one-time 15% perk (codex
+    // #3591 r2 P1: it was billing $84.15).
+    expect(soloSetup.priceAfterDiscount ?? soloSetup.price).toBe(99);
 
     // Rodent + pest = Silver: BOTH lines take the 10% tier discount and the
     // setup fee is waived (WaveGuard member).
@@ -209,6 +213,58 @@ describe('revised rodent pricing rules', () => {
     expect(existing.waveGuard.tier).toBe('silver');
     expect(existingBait.discount.effectiveDiscount).toBe(0.10);
     expect(existing.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+  });
+
+  test('legacy replay pin reproduces the stored price with the full legacy posture', () => {
+    // Residential: a pre-realignment estimate pinned at $49/mo must replay
+    // at exactly that figure — monthly-billed, no tier count, no discount,
+    // and NO new $99 setup line appended to the old quote.
+    const replay = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+      rodentBaitLegacyReplay: { monthly: 49 },
+    }));
+    const bait = replay.lineItems.find(i => i.service === 'rodent_bait');
+    expect(bait.monthly).toBe(49);
+    expect(bait.annual).toBe(588);
+    expect(bait.legacyPinnedReplay).toBe(true);
+    // Legacy posture: rodent does NOT join the tier on a pinned replay, so
+    // the pest line keeps its originally disclosed Bronze pricing.
+    expect(replay.waveGuard.activeServices).toEqual(['pest_control']);
+    expect(replay.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+
+    // Commercial: pin the stored cost-buildup annual exactly.
+    const commercialReplay = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 20000,
+      services: { rodentBait: {} },
+      rodentBaitLegacyReplay: { commercialAnnual: 1080.61, commercialVisits: 4 },
+    }));
+    const commLine = commercialReplay.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(commLine.annual).toBe(1080.61);
+    expect(commLine.pricingBasis).toBe('LEGACY_PINNED_REPLAY');
+  });
+
+  test('rodentBaitLegacyReplaySignal pins legacy stored shapes and never new-model rows', () => {
+    const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    // Legacy scalar-only estimate → pin.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { rodentBaitMo: 49, services: [{ service: 'pest_control', mo: 50 }] } },
+    })).toEqual({ monthly: 49 });
+    // New-model row (marker/stations) → replay live.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { rodentBaitMo: 29.67, services: [{ service: 'rodent_bait', mo: 29.67, stations: 5, perApplicationBilled: true }] } },
+    })).toBe(null);
+    // Legacy commercial line → pin its stored annual.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { lineItems: [{ service: 'commercial_rodent_bait', annual: 1080.61, visitsPerYear: 4 }], recurring: {} },
+    })).toEqual({ commercialAnnual: 1080.61, commercialVisits: 4 });
+    // No rodent at all → nothing.
+    expect(rodentBaitLegacyReplaySignal({
+      result: { recurring: { services: [{ service: 'pest_control', mo: 50 }] } },
+    })).toBe(null);
   });
 
   test('commercial rodent bait uses the same brackets off the building footprint', () => {

@@ -947,8 +947,12 @@ function EstimateToolView() {
       "svcTs",
       "svcMosquito",
       "svcTermiteBait",
+      // Rodent bait is a full WaveGuard member since 2026-08-29 (owner
+      // directive): tier-counted and tier-discounted in this preview like
+      // in the engine.
+      "svcRodentBait",
     ];
-    const separateRecurringKeys = ["svcInjection", "svcRodentBait", "svcFoamRecurring"];
+    const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
     // ALL commercial pest-family services now auto-price as recurring lines
     // (lawn, pest, tree/shrub, mosquito, termite-bait, rodent-bait). None collapse
     // to a manual commercial quote.
@@ -989,7 +993,7 @@ function EstimateToolView() {
     const recurringCount = commercialDetected
       ? 0
       : qualifyingRecurringKeys.filter((k) => form[k]).length;
-    // For commercial, rodent-bait (a separate-recurring key) is now a commercial
+    // For commercial, palm/foam separate-recurring keys are counted here; a commercial
     // auto-priced line counted above — don't double-count it here.
     const separateRecurringCount = separateRecurringKeys
       .filter((k) => form[k] && !(commercialDetected && commercialAutoKeys.includes(k)))
@@ -1035,7 +1039,14 @@ function EstimateToolView() {
     if (form.svcMosquito && !commercialDetected)
       approx.mosquito = Math.max(40, Math.round(lotSqft * 0.005 + 15));
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
-    if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
+    if (form.svcRodentBait && !commercialDetected) {
+      // Footprint-bracket ladder (2026-08-29): per-visit × 4 ÷ 12 as a
+      // monthly-equivalent preview figure; engine is authoritative.
+      const rbPerVisit = sqft <= 1750 ? 79 : sqft <= 2750 ? 89 : sqft <= 3750 ? 99
+        : sqft <= 4750 ? 109 : sqft <= 5750 ? 119 : sqft <= 6750 ? 129
+          : 129 + Math.ceil((sqft - 6750) / 1000) * 10;
+      approx.rodentBait = Math.round((rbPerVisit * 4) / 12);
+    }
     if (form.svcFoamRecurring) {
       // Rough preview; engine is authoritative. One-time per-visit by tier
       // (no floor) × cadence multiplier × visits/yr ÷ 12.
@@ -1047,9 +1058,9 @@ function EstimateToolView() {
       approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
     }
 
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.rodentBait || 0) + (approx.foamRecurring || 0);
+    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0);
     const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "rodentBait" || key === "foamRecurring" ? 0 : value),
+      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" ? 0 : value),
       0,
     );
     const recurringMonthly = Math.round(

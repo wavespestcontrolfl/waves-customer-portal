@@ -3089,7 +3089,17 @@ function recurringServiceReceivesTierDiscount(svc = {}) {
     return svc.excludeFromPctDiscount !== true;
   }
   if (lineFlagsBlockPercentDiscount(svc) || svc.discount?.policy === 'LAWN_V2_NET_55_FLOOR_PRICE') return false;
-  if (key === 'palm_injection' || key === 'rodent_bait' || key === 'rodent') return false;
+  // rodent_bait follows the canonical predicates since 2026-08-29 (member;
+  // codex #3591 r2 P1) — but ONLY rows carrying new-model evidence
+  // (perApplicationBilled / stations). A bare legacy-shaped row (no flags,
+  // no marker) was priced with NO discount and must not have the tier %
+  // applied to it at view time — same conservative default as the
+  // rodentBaitLineBillsMonthly billing gate. The bare 'rodent' alias
+  // resolves non-qualifying through serviceCountsTowardWaveGuardTier.
+  if (key === 'rodent_bait'
+    && svc.perApplicationBilled !== true
+    && !(Number(svc.stations) > 0)) return false;
+  if (key === 'palm_injection') return false;
   if (serviceExcludedFromPercentDiscount(key)) return false;
   return serviceCountsTowardWaveGuardTier(key);
 }
@@ -14794,6 +14804,15 @@ function savedFloorReplayOverrides(estData) {
   const { commercialFloorBoundServices } = require('../services/commercial-floor-replay');
   const commercialArmed = commercialFloorBoundServices(estData);
   overrides.commercialFloorsArmedServices = commercialArmed.length ? commercialArmed : undefined;
+  // Saved rodent-bait pricing pin (codex #3591 r2 P0) — shared with the
+  // authoritative recompute (admin-estimate-persistence), see the module.
+  const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  // Set even when EMPTY (undefined) — same posture as
+  // commercialFloorsArmedServices above: the key's presence in the spread
+  // neutralizes any pin persisted inside the browser-controlled stored
+  // inputs; the pin is server-derived from stored-RESULT evidence on every
+  // replay, never trusted from a stored blob.
+  overrides.rodentBaitLegacyReplay = rodentBaitLegacyReplaySignal(estData) || undefined;
   return overrides;
 }
 

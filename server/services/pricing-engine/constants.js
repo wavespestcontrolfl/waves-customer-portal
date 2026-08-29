@@ -1102,7 +1102,8 @@ const RODENT = {
   // recurring service (on this estimate or already active). Standalone
   // rodent-bait-only customers pay it once.
   baitSetupFee: r(99),
-  baitPerStationOverage: r(8),
+  // (baitPerStationOverage retired 2026-08-29 with the bracket ladder — the
+  // per-bracket station allowance replaces per-station overage billing.)
 
   // ── Inspection / diagnosis ────────────────────────────────
   // $75 (owner directive 2026-08-26, down from $125) — fully creditable
@@ -2166,6 +2167,11 @@ const WAVEGUARD = {
     // it here stops the orchestrator discount loop from applying the 15% rc
     // perk a second time on the already-discounted $85.
     german_roach_initial: true,
+    // $99 one-time bait-station setup (2026-08-29): flat cost-recovery for
+    // non-WaveGuard members — never cut by the recurring-customer one-time
+    // perk or any % discount (codex #3591 r2 P1: the generic one-time loop
+    // was applying the 15% perk and charging $84.15).
+    rodent_bait_setup: true,
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,

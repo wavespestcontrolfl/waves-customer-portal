@@ -10003,7 +10003,7 @@ function MyPlanTab({ customer, focusService }) {
   // non-qualifying families — palm injection, rodent, and one-time work — to match the
   // server classifier (toQualifyingKey), so e.g. a recurring palm row never shows as
   // Tree & Shrub coverage. When nothing qualifies we fall back to the tier defaults.
-  const PLAN_NON_QUALIFIER_RE = /palm|rodent|one[\s_-]?time|onetime/;
+  const PLAN_NON_QUALIFIER_RE = /palm|one[\s_-]?time|onetime/;
   const PLAN_TERMINAL_STATUSES = new Set(['rescheduled', 'cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
   const isPlanCoverageRow = (s) => {
     if (!s || s.isRecurring !== true || s.isCallback === true) return false;
@@ -10011,7 +10011,13 @@ function MyPlanTab({ customer, focusService }) {
     // detected and, under the tier-limit slice, displace the customer's real plan.
     if (PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase())) return false;
     const text = (s.serviceType || s.service_type || s.type || '').toLowerCase();
-    return !PLAN_NON_QUALIFIER_RE.test(text);
+    if (PLAN_NON_QUALIFIER_RE.test(text)) return false;
+    // Rodent BAIT stations are WaveGuard plan coverage since 2026-08-29
+    // (owner directive) — mirrors the server classifier (toQualifyingKeys).
+    // Non-bait rodent work (trapping, exclusion, one-time) still never
+    // qualifies.
+    if (/rodent|rat\b|mice|mouse/.test(text) && !/bait|station|monitor/.test(text)) return false;
+    return true;
   };
   [nextService, ...upcomingServices].filter(isPlanCoverageRow).forEach(addDetectedService);
 
@@ -10036,23 +10042,10 @@ function MyPlanTab({ customer, focusService }) {
     .filter(Boolean);
   const numServices = includedServices.length;
 
-  // Rodent bait is billed separately from WaveGuard and deliberately excluded
-  // from plan-coverage detection, so it never counts toward the tier, its
-  // padding, numServices, or the savings copy. A live recurring rodent row on
-  // the visible schedule still earns a service row — appended after the tier
-  // services so rodent customers can see cadence, progress, and coverage.
-  const rodentBaitRow = [nextService, ...upcomingServices].find(s =>
-    s && s.isRecurring === true && s.isCallback !== true &&
-    !PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase()) &&
-    serviceMatches('rodent_bait', s));
-  const hasRodentBait = !!rodentBaitRow;
-  if (rodentBaitRow) {
-    const realName = rodentBaitRow.serviceType || rodentBaitRow.service_type || rodentBaitRow.type;
-    if (realName) detectedServiceNames.rodent_bait = realName;
-  }
-  const displayedServices = hasRodentBait
-    ? [...includedServices, SERVICE_CATALOG.find(svc => svc.id === 'rodent_bait')].filter(Boolean)
-    : includedServices;
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive) —
+  // bait rows flow through the normal plan-coverage detection above like
+  // any other qualifying service, so no separate append is needed.
+  const displayedServices = includedServices;
 
   const monthlyRate = customer.monthlyRate || 0;
   const annualPrepay = customer.annualPrepay || null;
@@ -10340,7 +10333,7 @@ function MyPlanTab({ customer, focusService }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             // 0% is not a perk — hide the discount tile entirely at zero
             // (eyeball 07-12 finding 6).
-            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: hasRodentBait ? 'off every plan service' : 'off every service' },
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every plan service' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].filter(Boolean).map((item, idx, arr) => (
             <div key={item.label} style={{
@@ -10449,9 +10442,9 @@ function MyPlanTab({ customer, focusService }) {
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
                               (owner 2026-07-11: no per-year totals). Rodent bait
-                              is billed separately from the plan, so the member
-                              rate must not be claimed on its row. */}
-                          {discount > 0 && svc.id !== 'rodent_bait' ? (
+                              is a WaveGuard member since 2026-08-29 and carries
+                              the tier label like every other plan service. */}
+                          {discount > 0 ? (
                             <div style={{ marginTop: 4, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
                               WaveGuard {tierName}
                             </div>

@@ -137,8 +137,32 @@ exports.up = async function up(knex) {
     return next;
   }, UP_REASON);
 
+  // 3b. Keep the Discount Rules tab's row in agreement (codex #3591 r2 P1):
+  // service_discount_rules is a LIVE reader (discount-engine
+  // applyTierDiscount) and the admin Pricing Logic tab edits it — leaving
+  // the old exclusion there would show operators the opposite of prod
+  // behavior AND zero the tier % on that path.
+  if (await knex.schema.hasTable('service_discount_rules')) {
+    const rule = await knex('service_discount_rules').where({ service_key: 'rodent_bait' }).first();
+    if (rule) {
+      await audit(knex, 'service_discount_rules.rodent_bait',
+        { tier_qualifier: rule.tier_qualifier, exclude_from_pct_discount: rule.exclude_from_pct_discount, notes: rule.notes },
+        { tier_qualifier: true, exclude_from_pct_discount: false }, UP_REASON);
+      await knex('service_discount_rules')
+        .where({ service_key: 'rodent_bait' })
+        .update({
+          tier_qualifier: true,
+          exclude_from_pct_discount: false,
+          notes: 'Owner directive 2026-08-29: full WaveGuard member — tier-counted and tier-discounted. Authoritative flags also live in pricing_config.rodent_waveguard; keep them in agreement.',
+        });
+    }
+  }
+
   // 4. Retire the dead knobs (audit rows keep the old values recoverable).
-  for (const configKey of ['rodent_monthly', 'rodent_post_exclusion']) {
+  // rodent_per_station_overage joins them (codex #3591 r2 P2): the bracket
+  // ladder's station allowance replaced per-station overage billing and no
+  // code path reads the value — an editable knob with zero effect.
+  for (const configKey of ['rodent_monthly', 'rodent_post_exclusion', 'rodent_per_station_overage']) {
     const row = await knex('pricing_config').where({ config_key: configKey }).first();
     if (!row) continue;
     await audit(knex, configKey, parseData(row), null, UP_REASON);
@@ -180,7 +204,12 @@ exports.down = async function down(knex) {
   if (!ownUp) return;
 
   // Restore retired rows from their audit snapshots.
-  for (const configKey of ['rodent_monthly', 'rodent_post_exclusion']) {
+  const RETIRED_ROW_NAMES = {
+    rodent_monthly: ['Rodent Bait Monthly Tiers (quarterly visits, billed monthly)', 1],
+    rodent_post_exclusion: ['Rodent Bait Post-Exclusion Modifier', 3],
+    rodent_per_station_overage: ['Rodent Per-Station Overage', 4],
+  };
+  for (const configKey of Object.keys(RETIRED_ROW_NAMES)) {
     const auditRow = await knex('pricing_config_audit')
       .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
       .orderBy('id', 'desc')
@@ -190,34 +219,44 @@ exports.down = async function down(knex) {
     if (exists) continue;
     await knex('pricing_config').insert({
       config_key: configKey,
-      name: configKey === 'rodent_monthly'
-        ? 'Rodent Bait Monthly Tiers (quarterly visits, billed monthly)'
-        : 'Rodent Bait Post-Exclusion Modifier',
+      name: RETIRED_ROW_NAMES[configKey][0],
       category: 'rodent',
-      sort_order: configKey === 'rodent_monthly' ? 1 : 3,
+      sort_order: RETIRED_ROW_NAMES[configKey][1],
       data: auditRow.old_value,
     });
     await audit(knex, configKey, null, JSON.parse(auditRow.old_value), DOWN_REASON);
   }
 
-  // Remove the bracket row only if this migration created it.
+  // Remove the bracket row only if this migration created it AND it still
+  // holds the migration's exact data (codex #3591 r2 P2: after an up/down/
+  // up cycle a stale first-cycle audit must never consume an
+  // administrator-authored or admin-edited bracket row).
   const bracketAudit = await knex('pricing_config_audit')
     .where({ config_key: 'rodent_bait_brackets', changed_by: MIGRATION_TAG, reason: UP_REASON })
     .first('id');
   if (bracketAudit) {
-    await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).del();
-    await audit(knex, 'rodent_bait_brackets', BRACKETS_DATA, null, DOWN_REASON);
+    const bracketRow = await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).first();
+    if (bracketRow && JSON.stringify(parseData(bracketRow)) === JSON.stringify(BRACKETS_DATA)) {
+      await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).del();
+      await audit(knex, 'rodent_bait_brackets', BRACKETS_DATA, null, DOWN_REASON);
+    }
   }
 
   // Restore waveguard/setup rows from their audit snapshots. A null
   // old_value means up() INSERTED the row (prod had none) — rollback
-  // deletes it instead of restoring.
+  // deletes it instead of restoring. VALUE-GUARDED (codex #3591 r2 P2):
+  // the row must still hold this migration's new_value — an admin edit
+  // after up() is authoritative and survives rollback untouched.
   for (const configKey of ['rodent_waveguard', 'rodent_setup_fee']) {
     const auditRow = await knex('pricing_config_audit')
       .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
       .orderBy('id', 'desc')
       .first();
     if (!auditRow) continue;
+    const currentRow = await knex('pricing_config').where({ config_key: configKey }).first();
+    const currentMatchesUp = currentRow
+      && JSON.stringify(parseData(currentRow)) === JSON.stringify(JSON.parse(auditRow.new_value || 'null'));
+    if (!currentMatchesUp) continue;
     if (!auditRow.old_value) {
       await knex('pricing_config').where({ config_key: configKey }).del();
       await audit(knex, configKey, JSON.parse(auditRow.new_value || 'null'), null, DOWN_REASON);
@@ -227,6 +266,24 @@ exports.down = async function down(knex) {
       .where({ config_key: configKey })
       .update({ data: auditRow.old_value, updated_at: knex.fn.now() });
     await audit(knex, configKey, JSON.parse(auditRow.new_value || 'null'), JSON.parse(auditRow.old_value), DOWN_REASON);
+  }
+
+  // Restore the Discount Rules row to the pre-realignment policy (only when
+  // it still holds this migration's values — same admin-edit guard).
+  if (await knex.schema.hasTable('service_discount_rules')) {
+    const rule = await knex('service_discount_rules').where({ service_key: 'rodent_bait' }).first();
+    if (rule && rule.tier_qualifier === true && rule.exclude_from_pct_discount === false) {
+      await knex('service_discount_rules')
+        .where({ service_key: 'rodent_bait' })
+        .update({
+          tier_qualifier: false,
+          exclude_from_pct_discount: true,
+          notes: 'Fully excluded from WaveGuard credits, coupons, setup credits, discounts, and tier benefits.',
+        });
+      await audit(knex, 'service_discount_rules.rodent_bait',
+        { tier_qualifier: true, exclude_from_pct_discount: false },
+        { tier_qualifier: false, exclude_from_pct_discount: true }, DOWN_REASON);
+    }
   }
 
   if (await knex.schema.hasTable('services')) {
