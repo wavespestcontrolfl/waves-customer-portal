@@ -2081,7 +2081,23 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         warnings.push(`${late.length} service(s) joined this stop during the move and were left at the old time — check the schedule`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detached late joiner(s) ${late.map((r) => r.id).join(',')}`);
       }
-      const landed = rows.filter((r) => plan.memberIds.map(String).includes(String(r.id)) ? dateOnly(r.scheduled_date) === newDateStr : atTargetStop(r));
+      // A planned member counts as landed only when its ACTUAL placement is
+      // the one this move wrote for it (landedState: moved or already at
+      // target) and it is not a failed member (local audit): on a same-day
+      // window move a failed sibling still sits on the date at its OLD
+      // window, and retargeting the parent from it would span both stops.
+      const normHHMM = (v) => (v ? String(v).slice(0, 5) : null);
+      const landedFor = (r) => {
+        const want = landedState[r.id];
+        if (!want) return false;
+        if (failed.some((f) => String(f.id) === String(r.id))) return false;
+        if (dateOnly(r.scheduled_date) !== newDateStr) return false;
+        if (want.window_start !== undefined && normHHMM(r.window_start) !== normHHMM(want.window_start)) return false;
+        if (want.window_end !== undefined && normHHMM(r.window_end) !== normHHMM(want.window_end)) return false;
+        if (options.technicianId !== undefined && String(r.technician_id || '') !== String(options.technicianId || '')) return false;
+        return true;
+      };
+      const landed = rows.filter((r) => (plan.memberIds.map(String).includes(String(r.id)) ? landedFor(r) : atTargetStop(r)));
       if (!landed.length) return;
       const starts = landed.map((r) => r.window_start).filter(Boolean).sort();
       const ends = landed.map((r) => r.window_end).filter(Boolean).sort();

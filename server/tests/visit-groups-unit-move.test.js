@@ -609,12 +609,12 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
 
 describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex audit)', () => {
   const FROZEN = { ...VISIT, summary_token_issued_at: '2026-08-28T12:00:00Z' }; // issued link ⇒ membership frozen
-  const script = ({ visit = FROZEN, members }) => ({
+  const script = ({ visit = FROZEN, members, landed = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
     scheduled_services: {
       select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
         : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
-          : members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))),
+          : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
     },
   });
 
@@ -750,6 +750,17 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], parentRetargetFailed: true });
     expect(out.warnings.some((w) => /visit parent retarget failed: visit v1 is dissolved/.test(w))).toBe(true);
     expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+  });
+
+  test('same-day window move: a failed sibling still on the date at its OLD window never feeds the parent retarget (local audit)', async () => {
+    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-08-30', stop_base_key: 'p1:2026-08-30' }, members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' }, // b failed: same day, old window
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00' });
+    expect(out.visitMove).toMatchObject({ moved: ['a'], failed: [expect.objectContaining({ id: 'b' })] });
+    const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.window_start);
+    expect(patch.values).toMatchObject({ scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00' }); // from a only — never 10:00–14:00
   });
 
   test('a member that left the visit or moved again before the retarget is reported as failed, never as moved (codex r17)', async () => {
