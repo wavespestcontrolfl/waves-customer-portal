@@ -590,43 +590,24 @@ function buildCompactCustomerServiceInterest(parts = []) {
   return kept.join(' + ') || compactParts[0]?.slice(0, 32) || null;
 }
 
-// Quote-on-request lead capture for a keyed, non-instant product (C2): the
-// same quote_wizard lead the priced path writes, minus pricing — the office
-// estimates from the key. Attaches to a client-supplied leadId only through
-// the same id+contact match the priced path uses.
-async function captureQuoteOnRequestLead({ leadId, keyedService, contact, address, attribution, anonId }) {
-  const attr = (attribution && typeof attribution === 'object') ? attribution : null;
-  const sourceMeta = await resolveLeadSource(attr);
-  const fields = {
-    first_name: contact.contactFirstName,
-    last_name: contact.contactLastName,
-    email: contact.contactEmail,
-    phone: contact.contactPhone,
-    address: address.quoteFullAddress,
-    city: address.quoteCity || null,
-    zip: address.quoteZip || null,
-    service_interest: keyedService.name,
-    service_key: keyedService.service_key,
+// Keyed, non-instant product (C2): a synthetic QUOTE-REQUIRED estimate so the
+// request rides the existing manual-quote lifecycle end to end — lead upsert
+// (with service_key + catalog name), customers upsert, ad attribution, the
+// quote_required response — instead of a parallel capture path (pre-push
+// codex P1; CLAUDE.md rule 15). isManualQuoteLine() treats the line as manual.
+function quoteOnRequestEstimate(keyedService, engineInput = {}) {
+  return {
+    lineItems: [{
+      service: keyedService.service_key,
+      serviceKey: keyedService.service_key,
+      name: keyedService.name,
+      quoteRequired: true,
+      reason: 'quote_on_request',
+    }],
+    summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 0, specialtyTotal: 0 },
+    property: { ...(engineInput.property || {}), turfFlags: [] },
+    quoteOnRequest: true,
   };
-  if (leadId) {
-    const rows = await db('leads')
-      .where({ id: leadId, email: contact.contactEmail })
-      .update({ ...fields, updated_at: new Date() })
-      .returning(['id']);
-    if (rows[0]) return rows[0];
-  }
-  const rows = await db('leads').insert({
-    ...fields,
-    lead_type: 'quote_wizard',
-    first_contact_channel: 'website_quote',
-    lead_source_id: sourceMeta.leadSourceId,
-    status: 'new',
-    gclid: attr?.gclid ? String(attr.gclid).slice(0, 255) : null,
-    fbclid: attr?.fbclid ? String(attr.fbclid).slice(0, 255) : null,
-    anon_id: anonId ? String(anonId).slice(0, 190) : null,
-    extracted_data: JSON.stringify({ stage: 'quote_on_request', service_key: keyedService.service_key }),
-  }).returning(['id']);
-  return rows[0] || null;
 }
 
 function buildPublicQuoteServiceInterest(services = {}) {
@@ -814,7 +795,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (!keyedService) return res.status(400).json({ error: 'Unknown service.' });
     }
     const keyedInstant = !!(keyedService && keyedService.instant && quoteServicesForKey(requestedServiceKey));
-    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices) : bodyServices;
+    // Keyed but not instant: no engine services — the request flows through
+    // the standard manual-quote lifecycle on a synthetic quote-required estimate.
+    const keyedQuoteOnRequest = !!(keyedService && !keyedInstant);
+    const services = keyedInstant ? mergeKeyedRequestOptions(quoteServicesForKey(requestedServiceKey), bodyServices)
+      : (keyedQuoteOnRequest ? {} : bodyServices);
     const normalizedAddress = normalizeLeadAddress({
       raw: address,
       line1: req.body.address_line1 || req.body.addressLine1,
@@ -856,16 +841,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    // Quote-on-request: the product is real but the public engine cannot
-    // price it — capture the keyed lead for the office, then say so.
-    if (keyedService && !keyedInstant) {
-      const lead = await captureQuoteOnRequestLead({
-        leadId, keyedService, contact: { contactFirstName, contactLastName, contactEmail, contactPhone },
-        address: { quoteFullAddress, quoteCity, quoteZip }, attribution, anonId: req.body?.anonId ?? req.body?.anon_id ?? null,
-      });
-      return res.status(409).json({ error: 'quote_on_request', service_key: keyedService.service_key, name: keyedService.name, leadId: lead?.id || null });
-    }
-    if (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k])) {
+    if (!keyedQuoteOnRequest && (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k]))) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -1153,7 +1129,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.bedBug = publicQuoteBedBugInput(services.bedBug);
     }
 
-    const estimate = generateEstimate(engineInput);
+    const estimate = keyedQuoteOnRequest ? quoteOnRequestEstimate(keyedService, engineInput) : generateEstimate(engineInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter((line) =>
       isManualQuoteLine(line)
     );
@@ -2405,6 +2381,8 @@ module.exports._internals = {
   estimateBlocksSelfBookLink,
   buildPublicQuoteServiceInterest,
   buildCompactPublicQuoteServiceInterest,
+  quoteOnRequestEstimate,
+  isManualQuoteLine,
   buildExistingCustomerPublicQuoteUpdates,
   buildCompactCustomerServiceInterest,
   derivePerApplication,

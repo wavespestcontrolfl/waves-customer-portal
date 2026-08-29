@@ -149,3 +149,15 @@ describe('catalog drift never leaks into an instant quote', () => {
     expect((await publicSelectableService('pest_general_bimonthly', fakeConn([pest6({ visits_per_year: 4 })]))).instant).toBe(false);
   });
 });
+
+describe('keyed quote-on-request rides the standard manual-quote lifecycle', () => {
+  const { _internals } = require('../routes/public-quote');
+  test('the synthetic estimate is a manual-quote line with zero totals', () => {
+    const est = _internals.quoteOnRequestEstimate({ service_key: 'wdo_inspection', name: 'WDO Inspection Service' }, { property: { homeSqFt: 1800 } });
+    expect(est.lineItems).toHaveLength(1);
+    expect(_internals.isManualQuoteLine(est.lineItems[0])).toBe(true);
+    expect(est.lineItems[0]).toMatchObject({ service: 'wdo_inspection', name: 'WDO Inspection Service', reason: 'quote_on_request' });
+    expect(est.summary).toMatchObject({ recurringMonthlyAfterDiscount: 0, oneTimeTotal: 0 });
+    expect(est.property).toMatchObject({ homeSqFt: 1800, turfFlags: [] });
+  });
+});
