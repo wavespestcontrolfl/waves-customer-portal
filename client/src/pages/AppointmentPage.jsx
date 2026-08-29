@@ -325,10 +325,10 @@ export default function AppointmentPage() {
         body: JSON.stringify({
           date: data?.appointment?.date ?? null,
           windowStart: data?.appointment?.windowStart ?? null,
-          // How many services this page showed as one appointment: the
-          // server confirms only a stop of exactly that size (never
-          // siblings the page did not render).
-          serviceCount: data?.service?.visit?.serviceCount || 1,
+          // Identity of the member set this page showed as one appointment:
+          // the server confirms exactly that set (never siblings the page
+          // did not render); null = the single-service page.
+          membershipKey: data?.service?.visit?.membershipKey ?? null,
         }),
       });
       const body = await res.json().catch(() => ({}));

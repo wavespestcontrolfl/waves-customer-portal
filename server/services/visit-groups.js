@@ -1608,6 +1608,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const primary = members.find((m) => String(m.id) === String(serviceId));
         if (!primary || members.length < 2) return null;
+        // Frozen membership (issued link, packet, artifacts, payment): the
+        // detach seam deliberately PRESERVES membership on such a visit, so
+        // a partial move could never self-heal into two consistent stops
+        // (local codex audit). A frozen visit therefore moves ALL-OR-NOTHING:
+        // a member failure rolls the landed members back and 409s.
+        const split = canSplit(await visitActivity(visit.id, t));
+        const frozen = !split.ok && split.reason !== 'visit_not_open';
         // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
         // its per-run change budget from an unlocked pre-read; the member
         // count that actually moves is decided here, under the stop lock,
@@ -1703,7 +1710,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
           customerId: visit.customer_id, propertyId: visit.property_id,
-          targets, memberIds: members.map((m) => m.id),
+          targets, memberIds: members.map((m) => m.id), frozen,
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primaryRecurring: primary.is_recurring === true,
         };
@@ -1791,6 +1798,53 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     }
   };
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
+  // Frozen visit compensation: move every landed member back to its original
+  // slot (reverse order, fenced on the slot THIS move wrote so a newer move
+  // is never undone), re-point a re-assigned sibling to its original tech,
+  // re-sync its reminder. Best-effort per row; a row that could not be
+  // rolled back is named in the thrown error (office escalation).
+  const rollbackMoved = async () => {
+    const stuck = [];
+    for (const id of [...moved].reverse()) {
+      const t = plan.targets.find((x) => String(x.id) === String(id));
+      try {
+        await rebooker.reschedule(id, t.original.date, t.original.window, 'visit_move_rollback', initiatedBy, {
+          ...siblingBase, visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true,
+          excludeServiceIds: plan.memberIds.map(String),
+          expect: { ...(landedState[id] || {}), visit_id: plan.visitId },
+        });
+        if (!t.isPrimary && options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
+          await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }))
+            .catch((e) => logger.warn(`[visit-groups] unit move rollback: technician restore for ${id} failed: ${e.message}`));
+        }
+        if (!t.isPrimary) {
+          await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${(t.original.window || '').split('-')[0] || '08:00'}`, {
+            sendNotification: false, keepPendingConfirmation: true,
+            expectSchedule: { date: t.original.date, windowStart: (t.original.window || '').split('-')[0] || null },
+          }).catch((e) => logger.warn(`[visit-groups] unit move rollback: reminder re-sync for ${id} failed: ${e.message}`));
+        }
+      } catch (err) {
+        stuck.push(id);
+        logger.error(`[visit-groups] unit move rollback of ${id} failed: ${err.message}`);
+      }
+    }
+    return stuck;
+  };
+  // A sibling that did not land (or could not be re-pointed): partial +
+  // warning on a splittable visit (staff contract, r3); ALL-OR-NOTHING on a
+  // frozen one — roll back and refuse.
+  const failSibling = async (target, err, reason) => {
+    if (!plan.frozen) {
+      failed.push({ id: target.id, reason, code: err.code || null });
+      logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${reason}`);
+      return;
+    }
+    const stuck = await rollbackMoved();
+    throw Object.assign(
+      new Error(`Cannot move this stop: a grouped service could not move with it (${reason}) — the visit has an issued link or records, so nothing was moved${stuck.length ? `; ${stuck.length} service(s) could NOT be moved back (${stuck.join(', ')}) — check the schedule` : ''}`),
+      { statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', memberId: target.id, isOperational: true, rolledBack: moved.filter((id) => !stuck.includes(id)), rollbackFailed: stuck },
+    );
+  };
   for (const target of ordered) {
     // The primary keeps the caller's own fence; a caller that supplied none
     // (the public self-reschedule path) gets the LOCKED plan's fence, so two
@@ -1865,8 +1919,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           break;
         }
       }
-      failed.push({ id: target.id, reason: `moved but its technician reassignment failed: ${lastErr.message}`, code: lastErr.code || 'ASSIGNMENT_FAILED' });
-      logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} technician reassignment failed: ${lastErr.message}`);
+      await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`);
     };
     const syncSiblingReminder = async () => {
       try {
@@ -1897,6 +1950,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (target.isPrimary) primaryResult = r;
       else { await alignSibling(); await syncSiblingReminder(); }
     } catch (err) {
+      // The frozen-visit refusal (failSibling → rollback → throw) raised from
+      // the re-point/reminder path above is final: never reconciled or
+      // rolled back a second time.
+      if (err && err.code === 'VISIT_MEMBER_MOVE_FAILED') throw err;
       // The rebooker COMMITS its move transaction and then runs post-commit
       // work (tech_status clear, follow-up shift, escalation, legacy
       // activation) that can reject after the row landed (codex r13 P1).
@@ -1914,8 +1971,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         continue;
       }
       if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
-      failed.push({ id: target.id, reason: err.message, code: err.code || null });
-      logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${err.message}`);
+      await failSibling(target, err, err.message);
     }
   }
 

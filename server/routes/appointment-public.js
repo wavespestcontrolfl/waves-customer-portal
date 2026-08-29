@@ -260,6 +260,8 @@ async function visitServicesFor(svc) {
     return {
       visit: {
         serviceCount: members.length,
+        // Handed back by the confirm POST — see membersMatchShown.
+        membershipKey: membershipKeyFor(members),
         services,
         windowStart: hhmm(parent?.window_start) || null,
         // Grouped state is the VISIT's, not the token row's (codex r11): the
@@ -279,18 +281,26 @@ async function visitServicesFor(svc) {
   }
 }
 
-// The confirm POST's shown-membership contract (local codex audit): the
-// page showed `serviceCount` services (absent/invalid ⇒ 1, the ungrouped
-// page). Under the stop lock the LIVE member set must be that size —
-// anything else means the page and the stop disagree, and the tap must
-// reload (CHANGED) rather than confirm services nobody saw. Returns the
-// live members.
+// Opaque identity of a member SET (sorted ids, hashed): the page carries it
+// and the confirm POST hands it back, so the server can prove the customer
+// saw exactly the services it is about to confirm — a count cannot tell
+// A+B from A+C (local codex audit). Never the raw ids on a public page.
+function membershipKeyFor(members) {
+  const ids = (members || []).map((m) => String(m.id)).sort();
+  if (ids.length < 2) return null;
+  return require('crypto').createHash('sha256').update(ids.join(',')).digest('hex').slice(0, 16);
+}
+
+// The confirm POST's shown-membership contract: the page showed the member
+// set identified by `membershipKey` (null ⇒ the ungrouped/solo page). Under
+// the stop lock the LIVE set must be exactly that one — anything else means
+// the page and the stop disagree, and the tap must reload (CHANGED) rather
+// than confirm services nobody saw. Returns the live members.
 async function membersMatchShown(trx, svc, shown) {
   const { openMembers } = require('../services/visit-groups');
   const members = svc.visit_id ? await openMembers(trx, svc.visit_id) : [];
-  const shownCount = Math.max(1, parseInt(shown?.serviceCount, 10) || 1);
-  const liveCount = Math.max(1, members.length);
-  if (liveCount !== shownCount) {
+  const shownKey = typeof shown?.membershipKey === 'string' && /^[0-9a-f]{16}$/.test(shown.membershipKey) ? shown.membershipKey : null;
+  if (membershipKeyFor(members) !== shownKey) {
     throw Object.assign(new Error('visit membership differs from the page'), { code: 'VISIT_STOP_MOVED' });
   }
   return members;
@@ -908,6 +918,7 @@ router._test = {
   readConfirmedAnchorLocked,
   confirmGroupedOrSolo,
   membersMatchShown,
+  membershipKeyFor,
   memberServiceLabel,
   confirmedRowStillShown,
 };

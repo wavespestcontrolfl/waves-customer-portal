@@ -383,7 +383,7 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     // each member carries its OWN pristine label (codex r15 P2) — the
     // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
+      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
@@ -485,26 +485,33 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(await confirmGroupedOrSolo(trx, svc, shown)).toEqual({ outcome: 'solo', row: anchor });
     expect(trx.__log).toEqual([]);
     trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
-    expect(await confirmGroupedOrSolo(trx, svc, { ...shown, serviceCount: 2 })).toEqual({ outcome: 'fanned', row: anchor });
+    expect(await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]) })).toEqual({ outcome: 'fanned', row: anchor });
     expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert']);
     expect(trx.__log[0][2]).toMatchObject({ status: 'confirmed', customer_confirmed: true });
   });
 
-  test('the live member count must equal what the page showed (local codex audit): a grouped stop behind a solo page, or a page that showed more than is live, reloads', async () => {
-    const { membersMatchShown } = appointmentRouter._test;
-    // page showed ONE (or an old client sent no count) but the stop has two ⇒ CHANGED, never a hidden fan-out
+  test('the live member SET must be the one the page showed (membershipKey, local codex audit): a grouped stop behind a solo page, a swapped sibling, or a dropped sibling reloads', async () => {
+    const { membersMatchShown, membershipKeyFor } = appointmentRouter._test;
+    const AB = membershipKeyFor([{ id: 'a' }, { id: 'b' }]);
+    expect(AB).toMatch(/^[0-9a-f]{16}$/);
+    expect(membershipKeyFor([{ id: 'b' }, { id: 'a' }])).toBe(AB); // order-free
+    expect(membershipKeyFor([{ id: 'a' }])).toBe(null);            // solo page carries no key
+    expect(membershipKeyFor([{ id: 'a' }, { id: 'c' }])).not.toBe(AB);
+    // page showed ONE (no key) but the stop has two ⇒ CHANGED, never a hidden fan-out
     let trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }] });
     await expect(confirmGroupedOrSolo(trx, svc, shown)).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     expect(trx.__log).toEqual([]);
     // direct calls: the member read is the FIRST scheduled_services query
     const membersTrx = (members) => { const api = { where: () => api, whereNotIn: () => api, select: async () => members }; return jest.fn(() => api); };
-    await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { serviceCount: 'x' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
-    // page showed two but a sibling was cancelled since ⇒ CHANGED
-    await expect(membersMatchShown(membersTrx([{ id: 'a' }]), svc, { serviceCount: 2 })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    // same COUNT, different member (A+B shown, A+C live) ⇒ CHANGED
+    await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'c' }]), svc, { membershipKey: AB })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    // page showed two but a sibling was cancelled since ⇒ CHANGED; garbage key ⇒ CHANGED
+    await expect(membersMatchShown(membersTrx([{ id: 'a' }]), svc, { membershipKey: AB })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { membershipKey: 'nope' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     // matches ⇒ the live members come back; an ungrouped row never queries
-    expect((await membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { serviceCount: 2 })).map((m) => m.id)).toEqual(['a', 'b']);
+    expect((await membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { membershipKey: AB })).map((m) => m.id)).toEqual(['a', 'b']);
     trx = membersTrx([]);
-    expect(await membersMatchShown(trx, { id: 'a', visit_id: null }, { serviceCount: 1 })).toEqual([]);
+    expect(await membersMatchShown(trx, { id: 'a', visit_id: null }, { membershipKey: null })).toEqual([]);
     expect(trx).not.toHaveBeenCalled();
   });
 

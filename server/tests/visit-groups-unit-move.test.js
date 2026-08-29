@@ -595,3 +595,63 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(expectMatchesRow(row, {})).toBe(true);
   });
 });
+
+describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex audit)', () => {
+  const FROZEN = { ...VISIT, summary_token_issued_at: '2026-08-28T12:00:00Z' }; // issued link ⇒ membership frozen
+  const script = ({ visit = FROZEN, members }) => ({
+    service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
+    scheduled_services: {
+      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+        : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
+          : members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))),
+    },
+  });
+
+  test('a sibling failure on a frozen visit rolls the landed primary back to its original slot (fenced on what this move wrote) and 409s; nothing is retargeted', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    const rebooker = fakeRebooker({ b: 'throw' });
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'admin' }).catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a'], rollbackFailed: [] });
+    expect(err.message).toMatch(/issued link or records, so nothing was moved/);
+    const calls = rebooker.reschedule.mock.calls;
+    expect(calls.map((c) => [c[0], c[1], c[3]])).toEqual([
+      ['a', '2026-09-02', undefined],                 // primary moved
+      ['b', '2026-09-02', undefined],                 // sibling failed
+      ['a', '2026-08-30', 'visit_move_rollback'],     // primary rolled back
+    ]);
+    expect(calls[2][2]).toBe('09:00-10:00');
+    expect(calls[2][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true, expect: { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1' } });
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+  });
+
+  test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    const rebooker = { reschedule: jest.fn(async (id, date, win, reason) => {
+      if (id === 'b') throw Object.assign(new Error('member b boom'), { code: 'SLOT_TAKEN' });
+      if (reason === 'visit_move_rollback') throw new Error('rollback boom');
+      return { success: true };
+    }) };
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: [], rollbackFailed: ['a'] });
+    expect(err.message).toMatch(/1 service\(s\) could NOT be moved back \(a\)/);
+    // not frozen ⇒ partial + warning (the r3 staff contract), no rollback call
+    db.__calls.length = 0;
+    db.__script = script({ visit: VISIT, members: [member('a'), member('b')] });
+    const rb = fakeRebooker({ b: 'throw' });
+    const out = await moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove).toMatchObject({ moved: ['a'], failed: [{ id: 'b', reason: 'member b boom', code: 'SLOT_TAKEN' }] });
+    expect(rb.reschedule.mock.calls.some((c) => c[3] === 'visit_move_rollback')).toBe(false);
+  });
+
+  test('a sibling whose technician re-point fails on a frozen visit is rolled back too (slot and technician)', async () => {
+    db.__script = script({ members: [member('a'), member('b')] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    const rebooker = fakeRebooker();
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a', 'b'] }); // reported in move order; executed in reverse
+    const rollbacks = rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0]);
+    expect(rollbacks).toEqual(['b', 'a']);
+    // b's technician restore goes back through the canonical writer, fenced on the tech this move set
+    expect(assignDispatchJob).toHaveBeenLastCalledWith(expect.objectContaining({ jobId: 'b', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }));
+  });
+});

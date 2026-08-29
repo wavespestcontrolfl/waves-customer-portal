@@ -58,7 +58,7 @@ test('applies the move and atomically increments the change count', async () => 
   expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false });
 });
 
-test('the tapped row\'s pending restore is fenced on the landed slot; a miss stamps without the status flip (local audit)', async () => {
+test('the tapped row\'s bookkeeping is fenced on the landed slot; a miss skips EVERY stamp (local audit)', async () => {
   const tappedWhere = jest.fn();
   const fenced = jest.fn().mockResolvedValue(0); // staff confirmed / moved it after the commit
   const plain = jest.fn().mockResolvedValue(1);
@@ -72,11 +72,11 @@ test('the tapped row\'s pending restore is fenced on the landed slot; a miss sta
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove({ ...SERVICE, status: 'pending' }, BEST, 'run1', {});
   expect(tappedWhere).toHaveBeenCalledWith({ id: 's1', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00' });
-  expect(plain.mock.calls[0][0].status).toBeUndefined();
+  expect(plain).not.toHaveBeenCalled();  // no unfenced fallback stamp: the operator's newer state is not attributed to this run
   expect(insert).not.toHaveBeenCalled();
 });
 
-test('a sibling reported without a landed slot is stamped but never rewound (cannot be fenced)', async () => {
+test('a sibling reported without a landed slot gets NO bookkeeping (cannot be fenced)', async () => {
   SmartRebooker.reschedule.mockResolvedValueOnce({
     success: true,
     visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
@@ -94,7 +94,7 @@ test('a sibling reported without a landed slot is stamped but never rewound (can
   ];
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
-  expect(updateSib.mock.calls[0][0].status).toBeUndefined();
+  expect(updateSib).not.toHaveBeenCalled();
   expect(insert).not.toHaveBeenCalled();
 });
 
@@ -210,7 +210,7 @@ test('a grouped sibling whose status moved on after the unit move (cancel/comple
   await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
   // fenced on status AND the landed slot (local audit): a newer confirm/move is never rewound
   expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed', scheduled_date: '2026-08-11', window_start: '08:00', window_end: '10:00' });
-  expect(updateSibPlain.mock.calls[0][0].status).toBeUndefined();
+  expect(updateSibPlain).not.toHaveBeenCalled(); // fence miss ⇒ no stamp at all (local audit)
   expect(insert).not.toHaveBeenCalled();
 });
 

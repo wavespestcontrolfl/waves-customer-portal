@@ -149,7 +149,7 @@ describe('AppointmentPage upcoming visit', () => {
     expect(String(posted[0])).toContain('/confirm');
     // The POST carries the slot on screen so the server can refuse to
     // confirm a visit an office bulk reschedule moved underneath it.
-    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00', serviceCount: 1 });
+    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00', membershipKey: null });
   });
 
   it('a grouped visit (no reschedule token) lists its services and offers the call/text path instead of a slot picker', async () => {
