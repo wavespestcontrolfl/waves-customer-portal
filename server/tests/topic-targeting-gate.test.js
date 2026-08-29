@@ -1035,6 +1035,18 @@ describe('PR codex r22 (b4db7a542)', () => {
       expect(gate.classifyGeoScope('a flag on the lawn in sarasota').scope).toBe('footprint');
     });
   });
+  test('NYC boroughs / Long Island; audience suffixes survive the turf scrub; a slug is judged on its leaf (r35)', () => {
+    for (const t of ['Brooklyn pest control', 'Bronx termite treatment', 'pest control in Long Island', 'Manhattan bed bugs', 'pest control in Queens', 'Queens, NY exterminator', 'weeds in St. Augustine homes', 'chinch bugs in St Augustine neighborhoods', 'lawn fungus in St Augustine properties']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['queen ants in a sarasota colony', 'termite queens and their colonies', 'weeds in st augustine lawns', 'chinch bugs in st augustine']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    // The category segment of a slug is taxonomy, not framing.
+    expect(gate._internals.slugWords('/lawn-care/st-augustine-mowing-mistakes/')).toBe('st augustine mowing mistakes');
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'st augustine mowing height', title: '7 St. Augustine Mowing Mistakes That Are Quietly Wrecking Venice Lawns', slug: '/lawn-care/st-augustine-mowing-mistakes/', category: 'lawn-care' }, { requireCorpus: false });
+    expect(r.findings.map((f) => f.code)).not.toContain(gate.CODES.GEO_OUT_OF_AREA);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

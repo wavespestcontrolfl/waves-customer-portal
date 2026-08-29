@@ -207,6 +207,8 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   // "The Villages" is an ordinary phrase in prose ("the villages around
   // Lakewood Ranch") — the town only with geo / service context.
   'The Villages',
+  // Queens (NYC) vs queen ants / queen termites — context only.
+  'Queens',
   // Major metros that are also names / words (PR #3549 codex r11).
   'Jackson', 'Lincoln', 'Madison', 'Aurora', 'Mesa', 'Buffalo',
   'Arlington', 'Springfield', 'Salem', 'Eugene', 'Tyler', 'Garland', 'Irving',
@@ -335,7 +337,9 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // service-first search forms. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
 // activity") are excluded: both read as ordinary words before a service.
 // (Reading too: "Reading pest control labels" is a gerund, not Reading, PA.)
-const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading'].includes(n));
+// (Queens too: "termite queens" / "ant queens" are the insects — the borough
+// counts with a preposition or a state only.)
+const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading', 'Queens'].includes(n));
 // "St. Augustine" must match "St Augustine" / "St. Augustine" (cityRe's rule).
 const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+').replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+').replace(/^Mount\\s\+/, '(?:Mount|Mt\\.?)\\s+');
 // Footprint forms of a contextual name: never the out-of-footprint city.
@@ -589,10 +593,10 @@ function evaluateDraftFraming(draft = {}) {
   const keyword = String(fm.primary_keyword || '').trim();
   const findings = geoFindingsForParts([
     { text: title, where: 'Draft title', framing: true },
-    { text: slug.replace(/[-/]+/g, ' '), where: 'Draft slug', framing: true },
+    { text: slugWords(slug), where: 'Draft slug', framing: true },
     { text: keyword, where: 'Draft primary_keyword', framing: false },
   ]);
-  const geo = classifyGeoScope([title, keyword, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
+  const geo = classifyGeoScope([title, keyword, slugWords(slug)].filter(Boolean).join(' '));
   return { ok: findings.length === 0, findings, geo, checked: { title, slug, primary_keyword: keyword } };
 }
 
@@ -779,6 +783,15 @@ function slugLeaf(url) {
 }
 
 // Blog URLs are /{category}/{leaf}/ — the category is the first segment.
+// The words of a slug that carry its framing: the LEAF. The category
+// segment is taxonomy, not targeting — "lawn-care/st-augustine-mowing-
+// mistakes" must not read as "lawn care <St. Augustine>" (a service-first
+// city form). A slug without a category segment is its own leaf.
+function slugWords(slug) {
+  const leaf = slugLeaf(slug);
+  return (leaf || String(slug || '')).replace(/[-/]+/g, ' ').trim();
+}
+
 function categoryFromSlug(slug) {
   const m = normalizeSlug(slug).match(/^\/([a-z0-9-]+)\/[a-z0-9-]+\/$/);
   return m ? m[1] : null;
@@ -954,7 +967,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // must not mask a drifted emitted city).
   const cities = [...new Set((Array.isArray(candidate.city) ? candidate.city : [candidate.city]).map((c) => String(c || '').trim()).filter(Boolean))];
   const city = cities.join(' ');
-  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' '), ...cities].filter(Boolean).join(' '));
+  const geo = classifyGeoScope([query, title, slugWords(slug), ...cities].filter(Boolean).join(' '));
   // Pre-draft, statewide is judged only on PINNED framing (an operator
   // working title or slug), each on its own. A bare query is demand — the
   // writer localizes it and evaluateDraftFraming judges the result.
@@ -963,7 +976,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   const findings = ownershipOnly ? [] : geoFindingsForParts([
     { text: query, where: 'Primary keyword', framing: false },
     { text: title, where: 'Pinned title', framing: true },
-    { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
+    { text: slugWords(slug), where: 'Pinned slug', framing: true },
     ...cities.map((c) => ({ text: c, where: 'Row city', framing: false })),
   ]);
   // The city is a SEMANTIC field the writer is prompted with ("City:
@@ -1087,4 +1100,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { CONTEXT_PLACE_NAMES, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { CONTEXT_PLACE_NAMES, slugWords, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
