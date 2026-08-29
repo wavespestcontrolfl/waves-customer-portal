@@ -1741,7 +1741,21 @@ async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
 async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
   if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
   if (!branch) return { ok: false, reason: 'PR head branch unknown' };
-  const getFile = (path) => gh.getFile(path, branch);
+  // Assets are validated as the MERGE will carry them: a path the PR did
+  // not change resolves to the default branch's current blob (that is what
+  // the merge takes), only PR-changed paths resolve on the head. The
+  // default branch tip is captured here so the merge step can refuse when
+  // the base moved after this check (`baseSha`).
+  let changed = new Set();
+  let baseSha = null;
+  if (typeof gh.compareFiles === 'function') {
+    const cmp = await gh.compareFiles(branch);
+    changed = new Set(cmp?.files || []);
+  }
+  if (typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
+    baseSha = await gh.getBranchSha(gh.env().defaultBranch) || null;
+  }
+  const getFile = (path) => (changed.size === 0 || changed.has(path) ? gh.getFile(path, branch) : gh.getFile(path));
   let found = null;
   let label = '';
   let legacyHeroSrcs = [];
@@ -1795,7 +1809,7 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
   } catch (err) {
     return { ok: false, reason: err.message };
   }
-  return { ok: true, reason: null };
+  return { ok: true, reason: null, baseSha };
 }
 
 async function nearDuplicateOf(buffer, siblings) {
@@ -1853,8 +1867,10 @@ function imageRefsInText(text, defs) {
     for (; cursor < span.start; cursor += 1) if (str[cursor] === '\n') line += 1;
     const alt = str.slice(span.labelStart + 1, span.labelEnd).replace(/\s+/g, ' ').trim();
     if (span.kind === 'inline') {
-      const dest = contentGuardrails.parseLinkDestination(str.slice(span.destStart, span.destEnd + 1));
-      if (dest) out.push({ alt, src: decodeDestination(dest), line });
+      // An EMPTY destination still renders (empty src) → surfaced as '' so
+      // validation rejects it rather than the image vanishing from the scan.
+      const dest = contentGuardrails.parseLinkDestination(str.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
+      if (dest !== null) out.push({ alt, src: decodeDestination(dest), line });
       continue;
     }
     if (span.kind === 'malformed') continue;
@@ -1896,10 +1912,13 @@ function blankJsxAndExpressions(text) {
 // reference-style image (`![alt][label]`) resolves to its destination.
 function renderedBodyView(body) {
   const { text, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
-  // Children of a container a reader may never see (<script>, <template>,
-  // <div hidden>, closed <details>, …) are blanked by the guardrails'
-  // visibility walker — the same judgement the attribution rules use.
-  const visible = normalizeAngleDestinations(contentGuardrails.blankHiddenContent(text));
+  // Children of a container a reader DEFINITELY never sees (<script>,
+  // <template>, <div hidden>, aria-hidden, display:none, closed <details>,
+  // …) are blanked by the guardrails' certainty-only walker. The
+  // attribution rules' stricter walker (any class/style = unprovable) is
+  // the wrong tool here: a picture inside a merely styled <div> IS
+  // rendered and must be validated, not dropped from the scan.
+  const visible = normalizeAngleDestinations(contentGuardrails.blankDefinitelyHiddenContent(text));
   const defs = contentGuardrails.markdownReferenceDefinitions(visible);
   const rendered = blankJsxAndExpressions(
     contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),

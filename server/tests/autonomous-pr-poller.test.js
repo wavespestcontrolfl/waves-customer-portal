@@ -22,6 +22,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   mergePr: jest.fn(),
   listPrFiles: jest.fn(),
   getFile: jest.fn(),
+  getBranchSha: jest.fn(),
+  env: jest.fn(() => ({ defaultBranch: 'main' })),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -745,6 +747,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'brief-r', draft_payload: JSON.stringify({ page_url: draftUrl }) })).toBe(briefUrl);
     expect(await refreshTargetUrlForRun({ id: 'r', brief_id: null, draft_payload: JSON.stringify({ page_url: draftUrl, frontmatter: { canonical: briefUrl } }) })).toBe(draftUrl);
     expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'missing', draft_payload: JSON.stringify({ target_url: draftUrl, frontmatter: { canonical: draftUrl } }) })).toBeNull();
+  });
+
+  test('body-image check reports the base tip it validated against; a base push before the merge call defers the merge to the next tick (GH r14)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    gh.getBranchSha.mockResolvedValueOnce('main-tip-2');
+
+    let res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'base_moved_during_gating' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-2' });
+    gh.getBranchSha.mockResolvedValueOnce('main-tip-2');
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {

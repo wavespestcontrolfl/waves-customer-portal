@@ -293,12 +293,20 @@ const LINK_DESTINATION_RE = /^\s*(?:<([^<>\n]*)>|(\S+))(?:\s+(?:"(?:[^"\\]|\\.)*
 // optional quoted/parenthesized title and nothing else. Returns the
 // destination, or null when the text is not a valid destination (it then
 // renders as literal text).
-function parseLinkDestination(text) {
-  const m = String(text || '').match(LINK_DESTINATION_RE);
+// `allowEmpty`: an inline image/link may have an EMPTY destination
+// (`![alt]()`, `![alt](<>)`) — CommonMark still renders it (with an empty
+// src), so the caller gets '' to reject; a reference definition needs a
+// real destination, so it gets null.
+function parseLinkDestination(text, { allowEmpty = false } = {}) {
+  const str = String(text || '');
+  if (str.trim() === '' || /^\s*<>\s*$/.test(str)) return allowEmpty ? '' : null;
+  const m = str.match(LINK_DESTINATION_RE);
   if (!m) return null;
   const dest = (m[1] !== undefined ? m[1] : m[2]).trim();
-  return dest || null;
+  return dest || (allowEmpty ? '' : null);
 }
+const LINK_TITLE_ONLY_RE = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
+const DESTINATION_ONLY_RE = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
 function normalizeReferenceLabel(label) {
   return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
@@ -333,15 +341,29 @@ function blankReferenceDefinitions(str) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
     const rest = lines[i].slice(m[0].length);
+    let destLine = -1;
+    let destText = '';
     if (rest.trim() !== '') {
-      if (parseLinkDestination(rest)) lines[i] = blankSpan(lines[i]);
-      continue;
+      if (parseLinkDestination(rest)) { lines[i] = blankSpan(lines[i]); destLine = i; destText = rest; }
+    } else {
+      const next = lines[i + 1];
+      if (next !== undefined && next.trim() !== '' && parseLinkDestination(next)) {
+        lines[i] = blankSpan(lines[i]);
+        lines[i + 1] = blankSpan(next);
+        destLine = i + 1;
+        destText = next;
+      }
     }
-    const next = lines[i + 1];
-    if (next !== undefined && next.trim() !== '' && parseLinkDestination(next)) {
-      lines[i] = blankSpan(lines[i]);
-      lines[i + 1] = blankSpan(next);
-      i += 1;
+    if (destLine < 0) continue;
+    // A title may follow on the NEXT line after a destination-only line
+    // (`[pic]: /x.webp` then `"title"`): CommonMark consumes it with the
+    // definition, so it is not rendered text.
+    const title = lines[destLine + 1];
+    if (DESTINATION_ONLY_RE.test(destText) && title !== undefined && LINK_TITLE_ONLY_RE.test(title)) {
+      lines[destLine + 1] = blankSpan(title);
+      i = destLine + 1;
+    } else {
+      i = destLine;
     }
   }
   return lines.join('\n');

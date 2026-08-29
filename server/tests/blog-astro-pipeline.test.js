@@ -21,6 +21,9 @@ jest.mock('../services/content-astro/github-client', () => ({
   closePr: jest.fn(),
   deleteRef: jest.fn(),
   getBlob: jest.fn(),
+  compareFiles: jest.fn(),
+  getBranchSha: jest.fn(),
+  env: jest.fn(() => ({ defaultBranch: 'main' })),
 }));
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
@@ -3906,7 +3909,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
     });
     const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
-    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toEqual({ ok: true, reason: null });
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toMatchObject({ ok: true, reason: null });
     // The grandfather covers ONLY the exact hero ref the live body carries: a head that swaps it for
     // another post's hero (or an invented /hero.webp) is validated normally and withholds (GH r8).
     for (const swapped of ['/images/blog/other-post/hero.webp', '/images/blog/shrub-diseases-sarasota-fl/hero.webp']) {
@@ -4169,6 +4172,47 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(thrown?.code).toBeUndefined();
     expect(gh.commitFiles).not.toHaveBeenCalled();
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
+  });
+
+  test('bodyImageRefs: an empty destination renders (empty src) and is REJECTED; a picture inside a merely styled <div> is scanned, definitely-hidden containers still are not (GH r14)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0 }, { alt: 'b', src: '', line: 1 }]);
+    expect((await validateBodyImageRefs({ body: '![illustration]()\n\n![p](/images/blog/x/body-1.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/not committed.*empty src/);
+    const styled = '<div class="figure" style="max-width:600px">\n\n![styled](/images/blog/x/hero.webp)\n\n</div>\n<div hidden>\n\n![gone](/images/blog/x/body-9.webp)\n\n</div>\n<div aria-hidden="true">\n\n![gone2](/images/blog/x/body-8.webp)\n\n</div>';
+    expect(bodyImageRefs(styled).map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);
+    expect((await validateBodyImageRefs({ body: styled, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
+  });
+
+  test('assertBodyImagesAtHead: assets the PR did not change are validated from the DEFAULT branch (what the merge carries), PR-changed ones from the head; the base tip is returned for the merge-time recheck (GH r14)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = draft().frontmatter;
+    const md = fmModule.stringify({ ...fmData, hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } }, '## A\n\nProse.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\nMore.\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const hero = await webp(0); const b1 = await webp(1); const b2 = await webp(2);
+    // The PR changed the post + body-1 only. body-2 on the HEAD is distinct, but MAIN has since replaced body-2 with a hero duplicate.
+    gh.compareFiles.mockResolvedValue({ files: ['src/content/blog/pest-control/drywood-frass-venice.mdx', 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp'], mergeBaseSha: 'mb' });
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref ? { content: md, sha: 'm' } : null;
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: ref ? 'b2-head' : 'b2-main', raw: { content: ref ? b2 : hero } };
+      return null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/body-2\.webp.*near-duplicate of hero|near-duplicate/);
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-1.webp', 'content/autonomous-x');
+    // With main's body-2 distinct, the check passes and reports the base tip it validated against.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref ? { content: md, sha: 'm' } : null;
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
   });
 
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {

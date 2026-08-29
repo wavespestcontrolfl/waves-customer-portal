@@ -4687,6 +4687,11 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     // Only definitions the strict parser recognizes are blanked: an invalid continuation or trailing junk is paragraph text and stays (GH r13).
     expect(guardrails.blankLinkDefinitionsAndTitles('[ref]:\nProse ![bad](/missing.webp)')).toBe('[ref]:\nProse ![bad](/missing.webp)');
     expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n[y]: /ok.webp "t"')).toBe(`[x]: /dest.webp junk\n${' '.repeat('[y]: /ok.webp "t"'.length)}`);
+    // A title on the line AFTER a destination-only definition is consumed with it (GH r14); a non-title next line stays.
+    const t1 = '[pic]: /x.webp\n"title ![t](/y.webp)"\nprose';
+    expect(guardrails.blankLinkDefinitionsAndTitles(t1)).toBe(`${' '.repeat(14)}\n${' '.repeat(21)}\nprose`);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]: /x.webp\n"unterminated ![t](/y.webp)')).toBe(`${' '.repeat(14)}\n"unterminated ![t](/y.webp)`);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n/x.webp\n(paren title)\nprose')).toBe(`${' '.repeat(6)}\n${' '.repeat(7)}\n${' '.repeat(13)}\nprose`);
     // Full-grammar remainder: a quoted / parenthesized title is fine, trailing junk makes the line a paragraph (no definition).
     const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk', '[f]: </f g.webp>  (paren "quote")'].join('\n'));
     expect([...strict.keys()]).toEqual(['a', 'b', 'c', 'f']);
@@ -4705,6 +4710,9 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.parseLinkDestination("</a b.webp> 't'")).toBe('/a b.webp');
     expect(guardrails.parseLinkDestination('/a.webp (t)')).toBe('/a.webp');
     for (const bad of ['/a.webp trailing-junk', '/a.webp "t" junk', '', '   ', '<>']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // Inline images may carry an EMPTY destination — surfaced as '' for the caller to reject (GH r14).
+    for (const empty of ['', '   ', '<>']) expect(guardrails.parseLinkDestination(empty, { allowEmpty: true })).toBe('');
+    expect(guardrails.parseLinkDestination('junk here', { allowEmpty: true })).toBeNull();
   });
 
   test('eachMarkdownLink: nested and escaped brackets in labels, inline/reference/none/malformed kinds, escape parity on `!` and `[`', () => {

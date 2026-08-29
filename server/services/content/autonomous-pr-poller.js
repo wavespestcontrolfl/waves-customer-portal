@@ -982,6 +982,7 @@ async function maybeAutoMerge(run, pr) {
   //    eligibility withholds above). Off → no-op.
   //    (rewrite_title_meta PRs never reach this step: the metadata lane is
   //    withheld for a human merge above — `awaiting_human_merge_metadata_lane`.)
+  let bodyImagesBaseSha = null;
   if (['new_supporting_blog', 'refresh_existing_page'].includes(run.action_type) && typeof publisher.assertBodyImagesAtHead === 'function') {
     let bodyImages;
     try {
@@ -1006,6 +1007,7 @@ async function maybeAutoMerge(run, pr) {
       logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: body images — ${bodyImages.reason}`);
       return { pending: true, reason: `body_images_required: ${bodyImages.reason}` };
     }
+    bodyImagesBaseSha = bodyImages.baseSha || null;
   }
 
   // 3.6 Repeat the queue-state re-check: step 3.5 added async work (run +
@@ -1015,6 +1017,18 @@ async function maybeAutoMerge(run, pr) {
   if (!(await queueRowStillParked(run))) {
     logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during head-gate checks (operator action)`);
     return { pending: true, reason: 'queue_row_moved_during_gating' };
+  }
+
+  // 3.7 The body-image check validated unchanged assets as the DEFAULT
+  //    branch carried them at that moment; a base push since then could
+  //    swap one of those blobs under the merge. Re-read the tip and let the
+  //    next tick re-validate against it.
+  if (bodyImagesBaseSha && typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
+    const tip = await gh.getBranchSha(gh.env().defaultBranch);
+    if (tip && tip !== bodyImagesBaseSha) {
+      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} PR #${pr.number}: base moved during gating (${bodyImagesBaseSha.slice(0, 9)} → ${tip.slice(0, 9)})`);
+      return { pending: true, reason: 'base_moved_during_gating' };
+    }
   }
 
   // 4. The merge itself is pinned to the head commit the gates above were

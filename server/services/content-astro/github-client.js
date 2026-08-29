@@ -292,6 +292,19 @@ async function updatePr(number, { title, body } = {}) {
 // Blob by SHA (git data API): base64 content up to 100 MB — the fallback
 // for a committed asset whose contents-API response carries metadata but no
 // inline bytes (files over 1 MB).
+// Paths a head branch changes relative to the default branch (compare API:
+// `base...head`, three-dot = merge-base diff, i.e. exactly what the PR
+// carries into the merge). Files GitHub lists are capped at 300 — far above
+// any content PR.
+async function compareFiles(head, base) {
+  const { owner, repo, defaultBranch } = env();
+  const out = await ghFetch(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base || defaultBranch)}...${encodeURIComponent(head)}`);
+  return {
+    files: Array.isArray(out?.files) ? out.files.map((f) => f.filename) : [],
+    mergeBaseSha: out?.merge_base_commit?.sha || null,
+  };
+}
+
 async function getBlob(sha) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(sha)}`);
@@ -333,6 +346,7 @@ module.exports = {
   closePr,
   updatePr,
   getBlob,
+  compareFiles,
   deleteRef,
   verifyAccess,
 };
