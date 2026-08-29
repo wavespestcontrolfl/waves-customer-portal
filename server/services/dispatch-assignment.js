@@ -218,8 +218,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   if (emit) {
     const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })
       .catch((err) => logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`));
-    if (trx?.executionPromise) {
-      trx.executionPromise.then(emitUpdate).catch((err) => {
+    // Hooks wait for the OUTERMOST commit — a savepoint's own promise
+    // resolves at savepoint release (codex #3590 r14).
+    const { commitPromiseOf } = require('../utils/trx-commit-promise');
+    const commitPromise = commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise.then(emitUpdate).catch((err) => {
         logger.error(`[dispatch-assignment] transaction failed before broadcast for ${jobId}: ${err.message}`);
       });
     } else {
@@ -236,11 +240,13 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // through this writer on commit paths that matter.
   const runVisitSeam = () => require('./visit-groups').handleChildStopChanged(jobId)
     .catch((vgErr) => logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`));
-  if (trx?.executionPromise) {
+  const seamCommitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (seamCommitPromise) {
     // Transactional callers (admin-schedule assign) — run after THEIR
-    // commit, same pattern as the broadcast above (codex #3590 r4: the
-    // canonical schedule-assignment route always passes a trx).
-    trx.executionPromise.then(runVisitSeam).catch(() => {});
+    // outermost commit, same pattern as the broadcast above (codex #3590
+    // r4: the canonical schedule-assignment route always passes a trx;
+    // r14: savepoint callers hook the enclosing transaction).
+    seamCommitPromise.then(runVisitSeam).catch(() => {});
   } else {
     await runVisitSeam();
   }

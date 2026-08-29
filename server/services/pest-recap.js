@@ -332,7 +332,12 @@ async function submitRecap({
   // one-time customer SMS is gated on a recap_sms_sent_at claim taken under
   // that same lock (see below), so a duplicate/concurrent submit never
   // re-texts — while a genuine "completed earlier, text now" still sends.
-  await knex.transaction(async (trx) => {
+  // The stop lock's key revalidation throws VISIT_STOP_MOVED when a
+  // reschedule/linkage commits between its peek and lock (codex #3590
+  // r13/r14) — an expected race, retried ×3 like the main completion
+  // path. Nothing below mutates state before that lock, so a retry
+  // restarts cleanly.
+  const recapTransaction = async (trx) => {
     // 0a. Visit-group stop lock FIRST (codex #3590 r13): the in-transaction
     //     dissolve below needs the stop advisory lock, and every other
     //     visit writer takes stop → row. Taking it before the row lock keeps
@@ -893,7 +898,16 @@ async function submitRecap({
     if (existing) {
       await invalidateServiceReportPdfCache(recordId, trx);
     }
-  });
+  };
+  for (let stopAttempt = 0; stopAttempt < 3; stopAttempt += 1) {
+    try {
+      await knex.transaction(recapTransaction);
+      break;
+    } catch (trxErr) {
+      if (trxErr && trxErr.code === 'VISIT_STOP_MOVED' && stopAttempt < 2) continue;
+      throw trxErr;
+    }
+  }
 
   // Cancelled/skipped visit: nothing was written, skip all completion
   // side effects (track-complete, SMS) and report the rejection.

@@ -893,6 +893,13 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
         'ss.window_start', 'ss.window_end', 'ss.technician_id',
         'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
     if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
+    // Property identity is REQUIRED for automatic grouping (codex #3590
+    // r14): a null-property row (legacy / multi-home parent carrying only
+    // a stamped service address) would match any other null-property row
+    // for the customer that day, folding two addresses into one stop.
+    // Such rows group once property linkage stamps them (the linkage
+    // regroup pass) or by explicit office action.
+    if (!row.property_id) return null;
     if (JOIN_INELIGIBLE_STATUSES.includes(String(row.status || ''))) return null;
     const partnersQ = database('scheduled_services as ss')
       .leftJoin('services as svc', 'ss.service_id', 'svc.id')
