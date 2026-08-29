@@ -106,8 +106,18 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St N', 'Apt 4')).toBe('100 Main St N, Apt 4');
     expect(composeLeadAddress('100 Main St N', null)).toBe('100 Main St N');
     expect(composeLeadAddress('100 Main St N Apt 4', 'Apt 4')).toBe('100 Main St N, Apt 4');
-    expect(composeLeadAddress('100 Main St N Sarasota FL 34236', 'Apt 4')).toBe('100 Main St N, Apt 4, Sarasota FL 34236');
-    expect(composeLeadAddress('100 Main St NW Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St NW, Apt 4, Sarasota FL 34236');
+    // A directional followed by more words is ambiguous (post-directional vs
+    // "N Fort Myers" / "W Palm Beach") — the line is kept whole, never a
+    // wrong street or a wrong place.
+    expect(composeLeadAddress('100 Main St N Sarasota FL 34236', 'Apt 4')).toBe('100 Main St N Sarasota FL 34236, Apt 4');
+    expect(composeLeadAddress('100 Main St W Palm Beach FL 33401', 'Apt 4')).toBe('100 Main St W Palm Beach FL 33401, Apt 4');
+    expect(composeLeadAddress('100 Main St N Fort Myers FL 33903', null)).toBe('100 Main St N Fort Myers FL 33903');
+    // "FL <zip>" after a directional is the state tail, not a floor.
+    expect(composeLeadAddress('100 Main St N FL 34236', 'Apt 4')).toBe('100 Main St N, Apt 4, FL 34236');
+    expect(leadAddressTailPlace('100 Main St N, Apt 4, FL 34236')).toEqual({ zip: '34236', city: expect.any(String) });
+    // Route numbers after a suffix word are never dropped.
+    expect(composeLeadAddress('123 State Road 64 Bradenton FL 34208', 'Apt 4')).toBe('123 State Road 64 Bradenton FL 34208, Apt 4');
+    expect(composeLeadAddress('123 State Road 64', 'Apt 4')).toBe('123 State Road 64, Apt 4');
     expect(leadAddressTailPlace('100 Main St N')).toBeNull();
     expect(leadAddressCompareKey('100 Main St N')).not.toBe(leadAddressCompareKey('100 Main St'));
     const locked = { address: '100 Main St N, Apt 4', city: 'Sarasota', zip: '34236' };
