@@ -290,9 +290,17 @@ describe('buildStationNetwork — a RECONCILED station-map summary drives the co
     const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } });
     expect(out.stationSyncPartial).toBe(true);
     expect(out.metrics[0].value).toBe('12 of 12');
-    // no map at all is not a failed sync; neither is a zero-check visit
+    // no map at all is not a failed sync
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).stationSyncPartial).toBe(false);
-    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_checked: 0, stations_inaccessible: 12 }, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } }).stationSyncPartial).toBe(false);
+    // an all-INACCESSIBLE visit whose map persisted zero statuses is ALSO a
+    // failed sync (codex P2 #3600 r36): the hero says 12 inaccessible, the
+    // registry-only pins would say "not checked this visit"
+    const allInaccessible = buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_checked: 0, stations_inaccessible: 12 }, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } });
+    expect(allInaccessible.stationSyncPartial).toBe(true);
+    expect(allInaccessible.metrics[0].value).toBe('0 of 12');
+    // …but a visit that documents NO outcomes at all (nothing checked, nothing
+    // inaccessible) has nothing for the map to disagree with
+    expect(buildTermiteReportV2({ typedSnapshotValues: { ...CLEAN_VALUES, stations_checked: 0, stations_inaccessible: 0 }, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 0, activity: 0, serviced: 0, inaccessible: 0 } }).stationSyncPartial).toBe(false);
   });
 
   it('an explicitly recorded activity count survives statuses that read lower (affected stations saved as serviced)', () => {
@@ -583,6 +591,44 @@ describe('attachTermiteReportV2 — the one composer shared by the route and the
     expect(attachTermiteReportV2({ ...payload(), serviceLine: 'pest' }, service).termiteReportV2.status.label).toBe('No termite activity observed');
     expect(attachTermiteReportV2({ ...payload(), typedReport: { type: 'termite_liquid' } }, service).termiteReportV2).toBeUndefined();
     expect(attachTermiteReportV2(null, service)).toBeNull();
+  });
+
+  it('a PRIMARY termite dashboard evicts a name-derived Pest V2 dashboard but keeps the homeowner concern card (codex P1 r36)', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    // "Bait Annual" detects as serviceLine 'pest' → the route built Pest V2
+    // before the composer ran; the customer must never see two dashboards
+    const data = attachTermiteReportV2({
+      ...payload(),
+      serviceLine: 'pest',
+      pestReportV2: { status: { label: 'Perimeter protected' } },
+      customerConcern: { text: 'Saw swarmers by the lanai', reportedAt: '2026-08-01' },
+    }, service);
+    expect(data.termiteReportV2.source).toBe('primary');
+    expect(data).not.toHaveProperty('pestReportV2');
+    expect(data.customerConcernCard).toBeTruthy();
+    // an existing standalone card is left alone, and no concern → no card
+    const plain = attachTermiteReportV2({ ...payload(), pestReportV2: { status: {} } }, service);
+    expect(plain).not.toHaveProperty('pestReportV2');
+    expect(plain.customerConcernCard).toBeUndefined();
+    // gate off → the pest payload is untouched (no eviction without a dashboard)
+    process.env.TERMITE_REPORT_V2 = 'false';
+    expect(attachTermiteReportV2({ ...payload(), pestReportV2: { status: {} } }, service).pestReportV2).toBeTruthy();
+  });
+
+  it('a pest PRIMARY with a termite COMPANION keeps its own Pest V2 dashboard beside the companion dashboard', () => {
+    process.env.TERMITE_REPORT_V2 = 'true';
+    const combinedService = { service_data: JSON.stringify({
+      typedReportSnapshot: { type: 'pest_general', values: {} },
+      companionReportSnapshots: [{ type: 'termite_bait_station', delivery: 'auto_send', values: CLEAN_VALUES }],
+    }) };
+    const data = attachTermiteReportV2({
+      serviceLine: 'pest',
+      typedReport: { type: 'pest_general', visitSequence: 1 },
+      companionReports: [{ type: 'termite_bait_station', visitSequence: 2, internalOnly: false }],
+      pestReportV2: { status: { label: 'Perimeter protected' } },
+    }, combinedService);
+    expect(data.termiteReportV2.source).toBe('companion');
+    expect(data.pestReportV2).toBeTruthy();
   });
 });
 

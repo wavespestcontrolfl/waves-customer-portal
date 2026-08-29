@@ -478,11 +478,18 @@ function buildTermiteReportV2({
   // Also partial: a map that exists but carries ZERO persisted statuses
   // while the typed form documents checks — the sync failed or skipped every
   // entry, and the registry-only fallback rows would read "on file, not
-  // checked" beside a 12-inspected hero (codex P2 #3600 r35).
+  // checked" beside a 12-inspected hero (codex P2 #3600 r35). The same
+  // holds for an all-INACCESSIBLE visit: typed `stations_inaccessible` > 0
+  // with zero persisted statuses is a sync that dropped every inaccessible
+  // row, not a zero-outcome visit — the hero would report N inaccessible
+  // while the pins say "not checked this visit" (codex P2 #3600 r36).
   const typedChecked = toCount(values.stations_checked);
+  const typedInaccessible = toCount(values.stations_inaccessible);
+  const typedDocumentedOutcomes = (typedChecked != null && typedChecked > 0)
+    || (typedInaccessible != null && typedInaccessible > 0);
   const zeroCheckSync = Boolean(stationSummary && typeof stationSummary === 'object')
     && !visitBackedSummary(stationSummary)
-    && typedChecked != null && typedChecked > 0;
+    && typedDocumentedOutcomes;
   const stationSyncPartial = (Boolean(visitBackedSummary(stationSummary)) && !reconciledSummary(stationSummary, values))
     || zeroCheckSync;
   const checked = network?.counts?.checked ?? toCount(values.stations_checked);
@@ -727,7 +734,29 @@ function attachTermiteReportV2(data, service = {}) {
     });
     // `source` tells the client which typed section the dashboard replaces:
     // the primary cards, or the bait-station companion block.
-    if (termiteReportV2) data.termiteReportV2 = { ...termiteReportV2, source: resolved.source };
+    if (termiteReportV2) {
+      data.termiteReportV2 = { ...termiteReportV2, source: resolved.source };
+      // A PRIMARY termite dashboard owns the page. The Pest V2 dashboard is
+      // gated on the NAME-derived serviceLine, which a bait-station primary
+      // such as "Bait Annual" detects as 'pest' — with both gates on, the
+      // route would compose the perimeter dashboard ("no perimeter
+      // application was logged", duplicate visit-summary ids) beside the
+      // station dashboard (codex P1 #3600 r36). One enforcement point, in
+      // the composer both render paths share. The homeowner's reported
+      // concern keeps its standalone acknowledgment card — the same card
+      // the cockroach-family opt-out renders without the pest shell. A pest
+      // primary with a termite COMPANION keeps its own dashboard.
+      if (resolved.source === 'primary' && data.pestReportV2) {
+        delete data.pestReportV2;
+        if (data.customerConcern && !data.customerConcernCard) {
+          try {
+            const { buildCustomerConcernCard } = require('./pest-report-v2');
+            const card = buildCustomerConcernCard(data.customerConcern);
+            if (card) data.customerConcernCard = card;
+          } catch { /* best-effort */ }
+        }
+      }
+    }
   } catch { /* best-effort — never block the report */ }
   return data;
 }
