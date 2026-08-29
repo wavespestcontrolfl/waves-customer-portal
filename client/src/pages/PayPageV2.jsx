@@ -562,10 +562,16 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     return { fresh, freshOpts, freshAmount, unchanged };
   };
   const STALE_NOTICE = 'This invoice was just updated — the details above have been refreshed. Please try again.';
+  // Expand / visibility / interval can overlap; only the LATEST read may
+  // enable the controls (pre-push P1) — an older read finishing after a
+  // newer one started would re-enable stale details.
+  const readGenRef = useRef(0);
   const revalidate = async () => {
+    const gen = ++readGenRef.current;
     setValidated(false);
     try {
       const { fresh, unchanged } = await readFresh();
+      if (gen !== readGenRef.current) return;
       if (unchanged) {
         setStaleNotice('');
         setValidated(true);
@@ -579,6 +585,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
         setValidated(true);
       }
     } catch {
+      if (gen !== readGenRef.current) return;
       setStaleNotice('Could not confirm the invoice details — check your connection and try again.');
     }
   };

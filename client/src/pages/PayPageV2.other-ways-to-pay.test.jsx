@@ -332,6 +332,36 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     expect(screen.queryByText('$175.00')).not.toBeInTheDocument();
   });
 
+  it('an older overlapping read cannot re-enable controls after a newer one started', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(async () => undefined) } });
+    const first = payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+    let gets = 0;
+    const holds = [];
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') {
+        gets += 1;
+        if (gets === 1) return response(200, first);
+        // Every panel read is held until the test releases it.
+        await new Promise((r) => { holds.push(r); });
+        return response(200, first);
+      }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    await waitFor(() => expect(holds).toHaveLength(1)); // expand read (gen 1) in flight
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(holds).toHaveLength(2)); // re-focus read (gen 2) in flight
+    // The OLDER read finishes first — controls must stay disabled.
+    await act(async () => { holds[0](); });
+    expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeDisabled();
+    // Only the latest read enables them.
+    await act(async () => { holds[1](); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeEnabled());
+  });
+
   it('withholds the block while account credit is pending and Stripe setup has not answered (codex r3 P1)', async () => {
     stubFetch(payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, creditPending: true, version: 1 } }));
     renderPage();
