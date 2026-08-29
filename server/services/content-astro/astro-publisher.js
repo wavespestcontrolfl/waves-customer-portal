@@ -2017,7 +2017,11 @@ async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, ac
   if (typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
     baseSha = await gh.getBranchSha(gh.env().defaultBranch) || null;
   }
-  const getFile = (path) => (changed.size === 0 || changed.has(path) ? gh.getFile(path, branch) : gh.getFile(path));
+  // Unchanged assets are read AT the captured base tip, not the moving
+  // default-branch ref — a base push between the tip capture and this read
+  // could otherwise turn into a deterministic park (GH r29). baseSha null
+  // (client without getBranchSha) falls back to the default branch.
+  const getFile = (path) => (changed.size === 0 || changed.has(path) ? gh.getFile(path, branch) : gh.getFile(path, baseSha || undefined));
   let found = null;
   let label = '';
   let legacyHeroSrcs = [];
@@ -2261,7 +2265,7 @@ const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(
 // INDENT but keeps the marker, so opener detection runs on the line with a
 // leading marker removed.
 const LIST_MARKER_PREFIX_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/;
-function blankMarkdownHtmlBlocks(text) {
+function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
   const lines = String(text || '').split('\n');
   let closeRe = null; // type 1: ends on the line carrying the closing tag
   let inBlock = false; // types 6/7: end at a blank line
@@ -2272,8 +2276,16 @@ function blankMarkdownHtmlBlocks(text) {
   // paragraph. A closed HTML block is a boundary too.
   let atBoundary = true;
   const blankLine = (l) => ' '.repeat(l.length);
-  return lines.map((l) => {
+  return lines.map((l, i) => {
     const blank = l.trim() === '';
+    // Entering/leaving a blockquote or list item starts a new block even
+    // mid-paragraph — a quote can interrupt, so `Intro\n> <span>` opens a
+    // type-7 HTML block inside the quote (GH r29). The stripper removed the
+    // quote marker; `depths`/`inList` carry the container structure. A line
+    // carrying its own list marker opens a new item likewise.
+    if (i > 0 && ((depths && (depths[i] || 0) !== (depths[i - 1] || 0))
+      || (inList && !!inList[i] !== !!inList[i - 1])
+      || LIST_MARKER_PREFIX_RE.test(l))) atBoundary = true;
     if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
     if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
     const core = l.replace(LIST_MARKER_PREFIX_RE, '');
@@ -2313,7 +2325,7 @@ function blankMarkdownHtmlBlocks(text) {
 // (blankMarkdownHtmlBlocks); callers pass the TARGET file's extension.
 function renderedBodyView(body, { mdx = true } = {}) {
   const { text: stripped, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
-  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped);
+  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped, { depths, inList });
   // Children of a container a reader DEFINITELY never sees (<script>,
   // <template>, <div hidden>, aria-hidden, display:none, closed <details>,
   // …) are blanked by the guardrails' certainty-only walker. The

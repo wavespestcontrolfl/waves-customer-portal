@@ -33,6 +33,12 @@ describe('content-astro github-client pagination', () => {
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/compare/main...content%2Fblog-x'), expect.any(Object));
   });
 
+  test('getFile percent-encodes reserved filename characters — a literal `?` in a name is not a query string (GH r29)', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ sha: 'x', path: 'public/images/blog/x/what?name.webp', content: '' }));
+    await gh.getFile('public/images/blog/x/what?name.webp');
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/contents/public/images/blog/x/what%3Fname.webp?ref='), expect.any(Object));
+  });
+
   test('listIssueComments paginates past the first 100 rows', async () => {
     const firstPage = Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }));
     const secondPage = [{ id: 101 }];

@@ -4628,7 +4628,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/body-2\.webp.*near-duplicate of hero|near-duplicate/);
-    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+    // Unchanged assets are read AT the captured base tip (GH r29) — a base
+    // push between the tip capture and the read cannot change what merges.
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-2.webp', 'main-tip-1');
     expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-1.webp', 'content/autonomous-x');
     // With main's body-2 distinct, the check passes and reports the base tip it validated against.
     gh.getFile.mockImplementation(async (path, ref) => {
@@ -5447,6 +5449,13 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
     // A same-line close ends the block on its own line.
     expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
+  });
+
+  test('bodyImageRefs: entering a blockquote or list item is a block boundary in .md — `Intro` then `> <span>` opens a raw HTML block inside the quote (GH r29)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = 'Intro prose.\n> <span>\n> ![q](/images/blog/x/body-1.webp)\n> </span>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    expect(bodyImageRefs(body, { mdx: true }).map((r) => r.alt)).toEqual(['q', 'real']);
   });
 
   test('bodyImageRefs: a type-7 HTML block opens at any BLOCK BOUNDARY in .md — directly after a heading, not only after a blank line (hook P1)', () => {

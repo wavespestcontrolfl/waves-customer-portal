@@ -225,6 +225,18 @@ describe('scheduler-lane body-image revalidation (GH r19 P1)', () => {
     } finally { spy.mockRestore(); }
   });
 
+  test('a fix introducing ANOTHER post\'s managed body image parks at the pre-push check, not first at the merge gate (GH r29)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'blogBodyImages');
+    try {
+      const md = `---\ntitle: T\nslug: /pest-control/my-post/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n## A\n\n![Borrowed](/images/blog/other-post/body-1.webp)\n\n![Two](/images/blog/pest-control/my-post/body-2.webp)`;
+      const gh = { getFile: jest.fn(async () => ({ sha: 'x' })) };
+      const r = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/another post's generated image/);
+    } finally { spy.mockRestore(); }
+  });
+
   test('a flat .md fix is validated as .md renders: images inside a raw HTML block are literal text and do not count; the same body counts as .mdx (GH r25)', async () => {
     const gates = require('../config/feature-gates');
     const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'blogBodyImages');

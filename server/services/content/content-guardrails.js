@@ -404,6 +404,11 @@ function definitionMayStartAt(lines, i, lastDefinitionEnd, { depths = null, inLi
   if (i === 0 || lastDefinitionEnd === i - 1) return true;
   const prev = lines[i - 1];
   if (prev.trim() === '' || isInterruptingBlock(prev)) return true;
+  // A completed Setext heading ends its block: `Heading\n===\n[pic]: /x`
+  // starts a definition (GH r29). The `=` line is an underline only when a
+  // paragraph line precedes it — otherwise it is itself paragraph text and
+  // the next line merely continues it. (`---` already counts as a break.)
+  if (/^ {0,3}=+[ \t]*$/.test(prev) && i >= 2 && lines[i - 2].trim() !== '' && !isInterruptingBlock(lines[i - 2])) return true;
   if (depths && (depths[i] || 0) !== (depths[i - 1] || 0)) return true;
   if (marker) return !/^\d/.test(marker) || parseInt(marker, 10) === 1;
   if (inList && !!inList[i] !== !!inList[i - 1]) return true;

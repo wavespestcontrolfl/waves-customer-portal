@@ -4786,6 +4786,14 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
   });
 
+  test('markdownReferenceDefinitions: a definition directly after a completed Setext heading is at a block start (GH r29)', () => {
+    const defs = guardrails.markdownReferenceDefinitions('Heading\n===\n[pic]: /x.webp');
+    expect(defs.get('pic')).toBe('/x.webp');
+    // A `===` line with no paragraph before it is itself paragraph text —
+    // the next line continues that paragraph and defines nothing.
+    expect(guardrails.markdownReferenceDefinitions('\n===\n[pic]: /x.webp').has('pic')).toBe(false);
+  });
+
   test('blankDefinitelyHiddenContent restores only the FIRST summary that is a DIRECT child of the closed <details>; a summary nested in a wrapper stays hidden (GH r24)', () => {
     const { blankDefinitelyHiddenContent: keep } = guardrails;
     // Wrapped summary = collapsed body content, not the disclosure widget.

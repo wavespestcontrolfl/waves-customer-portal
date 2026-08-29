@@ -1080,7 +1080,11 @@ function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
 // `mdx`: the target file's flavour (false = flat `.md`, where a raw HTML
 // block hides the Markdown inside it) — the same rendering the publisher's
 // own checks and pages-poll's HEAD check use for that file (GH r25).
-async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null, mdx = true }, deps = {}) {
+// `slug`: the post's own managed-namespace key(s), same contract as the
+// publisher's validateBodyImageRefs — without it a fix introducing another
+// post's body-N would pass here and strand at the merge-time HEAD gate
+// (GH r29).
+async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null, mdx = true, slug = null }, deps = {}) {
   let bodyImagesOn = false;
   try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
   if (!bodyImagesOn) return { ok: true };
@@ -1088,7 +1092,7 @@ async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null
   const gh = deps.gh || ghDefault;
   if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
   const getFile = (path) => gh.getFile(path, prHeadRef);
-  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile, mdx });
+  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile, mdx, slug });
   if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
   if (valid.distinct < pub.BODY_IMAGE_MIN) {
     return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
@@ -1100,12 +1104,24 @@ async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null
 }
 // Scheduler-lane variant: the fixed MARKDOWN is all the lane has (no run /
 // draft payload) — hero src and body come from the fix itself.
-async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null, mdx = true } = {}, deps = {}) {
+async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null, mdx = true, slug = null } = {}, deps = {}) {
   let parsed;
   try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
   const data = (parsed && parsed.data) || {};
   const heroSrc = (data.hero_image && typeof data.hero_image === 'object' && data.hero_image.src) || '';
-  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef, mdx }, deps);
+  // Own namespace keys from the FIXED frontmatter (route + stamped category
+  // route), plus whatever key(s) the caller derives (file path) — any
+  // matches; only a clearly foreign namespace fails (GH r29).
+  const keys = [...(Array.isArray(slug) ? slug : slug ? [slug] : [])];
+  try {
+    const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+    const p0 = pub.slugPathFromFrontmatter(data);
+    keys.push(p0);
+    if (typeof pub.categoryRouteSlug === 'function' && typeof pub.normalizeAutonomousCategory === 'function') {
+      keys.push(pub.categoryRouteSlug(p0, pub.normalizeAutonomousCategory(data, {})));
+    }
+  } catch (_) { /* no safe frontmatter slug — caller keys only */ }
+  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef, mdx, slug: keys }, deps);
 }
 
 async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
@@ -1315,7 +1331,16 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     {
       const heroSrc = (fixedData.hero_image && typeof fixedData.hero_image === 'object' && fixedData.hero_image.src)
         || (draft.frontmatter && draft.frontmatter.hero_image && draft.frontmatter.hero_image.src) || '';
-      const bodyImages = await revalidateBodyImagesForFix({ body: draft.body, heroSrc, prHeadRef: deps.prHeadRef || null }, deps);
+      const slugKeys = [];
+      try {
+        const pubInt = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+        const p0 = pubInt.slugPathFromFrontmatter(fixedData.slug ? fixedData : (draft.frontmatter || {}));
+        slugKeys.push(p0);
+        if (typeof pubInt.categoryRouteSlug === 'function' && typeof pubInt.normalizeAutonomousCategory === 'function') {
+          slugKeys.push(pubInt.categoryRouteSlug(p0, pubInt.normalizeAutonomousCategory(fixedData.slug ? fixedData : (draft.frontmatter || {}), {})));
+        }
+      } catch (_) { /* no safe slug — namespace rule not applied */ }
+      const bodyImages = await revalidateBodyImagesForFix({ body: draft.body, heroSrc, prHeadRef: deps.prHeadRef || null, slug: slugKeys }, deps);
       if (!bodyImages.ok) return bodyImages;
     }
 
@@ -2147,10 +2172,15 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // Rendered as the scheduler's file renders: publishAstro writes a flat
     // `.md` (scheduledBlogFilePathForPost), whose raw HTML blocks hide the
     // Markdown inside them — same flavour pages-poll's HEAD check applies.
-    revalidateBodyImages: async (fixedMarkdown) => revalidateBodyImagesForMarkdown(fixedMarkdown, {
-      prHeadRef: row.astro_branch_name,
-      mdx: !/\.md$/i.test(String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '')),
-    }, deps),
+    revalidateBodyImages: async (fixedMarkdown) => {
+      const schedPath = String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '');
+      return revalidateBodyImagesForMarkdown(fixedMarkdown, {
+        prHeadRef: row.astro_branch_name,
+        mdx: !/\.md$/i.test(schedPath),
+        // File-path namespace key; ForMarkdown adds the frontmatter routes.
+        slug: [schedPath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')],
+      }, deps);
+    },
     prePushCheck: async () => {
       const fresh = await db('blog_posts').where({ id: row.id }).first();
       return !!fresh && fresh.publish_status === 'publishing'

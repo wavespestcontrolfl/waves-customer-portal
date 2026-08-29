@@ -69,17 +69,24 @@ async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries 
 
 // ── Contents API ──────────────────────────────────────────────────
 
+// Contents-API path: encodeURI leaves `?`/`#` bare, so a filename holding a
+// literal `?` would be read as a query string and a committed file reported
+// missing (GH r29). Encode per segment, keeping the `/` separators.
+function encodeContentsPath(path) {
+  return String(path || '').split('/').map(encodeURIComponent).join('/');
+}
+
 async function listDir(path, ref) {
   const { owner, repo, defaultBranch } = env();
   const refQ = ref ? `?ref=${encodeURIComponent(ref)}` : `?ref=${defaultBranch}`;
-  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}${refQ}`);
+  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}${refQ}`);
   return Array.isArray(out) ? out : [];
 }
 
 async function getFile(path, ref) {
   const { owner, repo, defaultBranch } = env();
   const refQ = ref ? `?ref=${encodeURIComponent(ref)}` : `?ref=${defaultBranch}`;
-  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}${refQ}`);
+  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}${refQ}`);
   if (!out || Array.isArray(out)) return null;
   const content = out.content ? Buffer.from(out.content, 'base64').toString('utf8') : '';
   return { sha: out.sha, path: out.path, content, raw: out };
@@ -93,7 +100,7 @@ async function putFile({ path, content, message, branch, sha }) {
     branch,
   };
   if (sha) body.sha = sha;
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, { method: 'PUT', body });
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, { method: 'PUT', body });
 }
 
 async function putBinary({ path, buffer, message, branch, sha }) {
@@ -104,13 +111,13 @@ async function putBinary({ path, buffer, message, branch, sha }) {
     branch,
   };
   if (sha) body.sha = sha;
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, { method: 'PUT', body });
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, { method: 'PUT', body });
 }
 
 async function deleteFile({ path, message, branch, sha }) {
   const { owner, repo } = env();
   if (!sha) throw new Error('deleteFile requires file sha');
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, {
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, {
     method: 'DELETE',
     body: { message, branch, sha },
   });
