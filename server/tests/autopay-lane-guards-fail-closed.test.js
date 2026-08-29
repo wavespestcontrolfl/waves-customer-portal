@@ -1,0 +1,132 @@
+/**
+ * Lane guards FAIL CLOSED (2026-08-29 incident).
+ *
+ * The autopay pre-charge reminder and the monthly billing cron both keyed
+ * their billing_mode lane guard on a `db.schema.hasColumn` probe wrapped in
+ * try/catch that fell back to the LEGACY unfiltered shape. A Railway deploy
+ * swap at 09:00:53 made the probe throw exactly as the 09:00 cron fired, the
+ * lane filter silently dropped, and 12 prepay / per-application customers
+ * were texted about a "monthly charge" that would never run. The cron had
+ * the identical shape for CHARGING.
+ *
+ * These tests pin the fix: neither job consults db.schema at all (the mock
+ * has no `schema` — a probe would throw), the reminder ALWAYS applies
+ * MONTHLY_LANE_SQL, and the cron ALWAYS selects billing_mode.
+ */
+
+let mockCustomers = [];
+const mockCalls = { whereRaw: [], select: [] };
+
+jest.mock('../models/db', () => {
+  function thenableFor(resultFn) {
+    const b = {};
+    for (const m of [
+      'where', 'andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNull',
+      'whereNotNull', 'distinct', 'orderBy', 'update', 'insert', 'returning',
+      'count', 'pluck', 'join', 'leftJoin',
+    ]) b[m] = () => b;
+    b.whereRaw = (sql) => { mockCalls.whereRaw.push(String(sql)); return b; };
+    b.select = (...cols) => { mockCalls.select.push(cols.flat()); return b; };
+    b.first = () => Promise.resolve(null);
+    b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
+    return b;
+  }
+  const db = jest.fn((table) => {
+    if (table === 'customers') return thenableFor(() => mockCustomers);
+    return thenableFor(() => []);
+  });
+  // Deliberately NO db.schema: any hasColumn/hasTable probe throws a
+  // TypeError. The fixed code must never reach for it.
+  db.fn = { now: () => new Date('2026-08-29T13:00:00Z') };
+  return db;
+});
+
+jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+jest.mock('../services/autopay-log', () => ({
+  logAutopay: jest.fn(() => Promise.resolve()),
+  eventExistsRecently: jest.fn(() => Promise.resolve(false)),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
+}));
+jest.mock('../services/sms-template-renderer', () => ({
+  renderSmsTemplate: jest.fn(() => Promise.resolve('Hello! Your auto-pay processes soon.')),
+  renderRequiredSmsTemplate: jest.fn(() => Promise.resolve('msg')),
+}));
+jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
+jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
+jest.mock('../services/account-membership-email', () => ({}));
+jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
+jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/twilio', () => ({ sendSms: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  activatePaidPendingTerms: jest.fn(() => Promise.resolve()),
+  getActivelyCoveredCustomerIds: jest.fn(() => Promise.resolve(new Set())),
+  getPaymentPendingCustomerIds: jest.fn(() => Promise.resolve(new Set())),
+}));
+
+const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { logAutopay } = require('../services/autopay-log');
+const PaymentRouter = require('../services/payment-router');
+
+beforeEach(() => {
+  mockCustomers = [];
+  mockCalls.whereRaw.length = 0;
+  mockCalls.select.length = 0;
+  jest.clearAllMocks();
+});
+
+describe('sendPreChargeReminders — lane filter is unconditional', () => {
+  test('applies MONTHLY_LANE_SQL without any schema probe (no db.schema in the mock)', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [];
+
+    await expect(sendPreChargeReminders()).resolves.toEqual(expect.objectContaining({ sent: 0 }));
+
+    expect(mockCalls.whereRaw).toContain(MONTHLY_LANE_SQL);
+  });
+
+  test('a customer the DB returns is texted only because the SQL lane filter admitted it — no JS-side fallback path exists', async () => {
+    const { sendPreChargeReminders } = require('../services/autopay-notifications');
+    mockCustomers = [{
+      id: 'cust-monthly', first_name: 'Member', phone: '+15550001111', monthly_rate: '33.33',
+      autopay_paused_until: null, waveguard_tier: 'Bronze',
+    }];
+
+    const r = await sendPreChargeReminders();
+
+    expect(mockCalls.whereRaw).toContain(MONTHLY_LANE_SQL);
+    expect(r.sent).toBe(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(logAutopay).toHaveBeenCalledWith('cust-monthly', 'pre_charge_reminder_sent', expect.any(Object));
+  });
+});
+
+describe('processMonthlyBilling — billing_mode is always selected', () => {
+  test('selects billing_mode unconditionally (no hasColumn probe) so GUARD 3b can never go inert', async () => {
+    const BillingCron = require('../services/billing-cron');
+    mockCustomers = [];
+
+    await BillingCron.processMonthlyBilling();
+
+    const customerSelect = mockCalls.select.find((cols) => cols.includes('monthly_rate') && cols.includes('billing_day'));
+    expect(customerSelect).toBeDefined();
+    expect(customerSelect).toContain('billing_mode');
+  });
+
+  test('explicit per_application customer is skipped by GUARD 3b, never charged', async () => {
+    const BillingCron = require('../services/billing-cron');
+    mockCustomers = [{
+      id: 'cust-PA', first_name: 'Applicant', last_name: 'X', phone: '+15550002222', monthly_rate: 55.3,
+      waveguard_tier: 'Bronze', autopay_enabled: true, autopay_paused_until: null,
+      autopay_payment_method_id: 'pm_1', billing_day: 1, billing_mode: 'per_application',
+    }];
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(logAutopay).toHaveBeenCalledWith('cust-PA', 'skipped_billing_mode', { details: { billing_mode: 'per_application' } });
+    expect(result.charged).toBe(0);
+  });
+});
