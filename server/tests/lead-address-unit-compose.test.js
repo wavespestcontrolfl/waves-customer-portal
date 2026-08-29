@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => ({
   logGateStatus: jest.fn(),
 }));
 
-const { composeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
+const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
 
 describe('composeLeadAddress', () => {
   test('appends the unit to the street', () => {
@@ -40,8 +40,14 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St Apt # 4', 'Unit 4')).toBe('100 Main St, Apt # 4');
   });
 
-  test('a different embedded unit is not treated as a duplicate', () => {
-    expect(composeLeadAddress('100 Main St Apt 4', 'Apt 5')).toBe('100 Main St Apt 4, Apt 5');
+  test('conflicting inline and dedicated units: keep the street line, drop the dedicated unit, flag it', () => {
+    expect(composeLeadAddress('100 Main St Apt 4', 'Apt 5')).toBe('100 Main St Apt 4');
+    expect(analyzeLeadAddress('100 Main St Apt 4', 'Apt 5')).toEqual({ address: '100 Main St Apt 4', unitConflict: true });
+    expect(analyzeLeadAddress('100 Main St Apt 4, Sarasota, FL 34236', 'Apt 5')).toEqual({ address: '100 Main St Apt 4, Sarasota, FL 34236', unitConflict: true });
+    // Same door in another notation is NOT a conflict.
+    expect(analyzeLeadAddress('100 Main St Apt 4', '#4')).toEqual({ address: '100 Main St, Apt 4', unitConflict: false });
+    expect(analyzeLeadAddress('100 Main St', 'Apt 4').unitConflict).toBe(false);
+    expect(analyzeLeadAddress('100 Main St Apt 4', null).unitConflict).toBe(false);
   });
 
   test('multipart and structural designators dedupe through the shared unit parser', () => {
@@ -49,8 +55,8 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('100 Main St Floor 2', 'Fl 2')).toBe('100 Main St, Floor 2');
     expect(composeLeadAddress('100 Main St Lot 7', 'Lot 7')).toBe('100 Main St, Lot 7');
     expect(composeLeadAddress('100 Main St Space 12', 'Spc 12')).toBe('100 Main St, Space 12');
-    // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed.
-    expect(composeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toBe('100 Main St Bldg 2 Apt 4, Apt 4');
+    // Bldg 2 Apt 4 is a different door than Apt 4 — never collapsed into one, never stored as two.
+    expect(analyzeLeadAddress('100 Main St Bldg 2 Apt 4', 'Apt 4')).toEqual({ address: '100 Main St Bldg 2 Apt 4', unitConflict: true });
     // Designator words inside a street name are not a unit.
     expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
   });
@@ -157,6 +163,14 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Lakewood Ranch', zip: '34211' }, { address: '100 Main St, Apt 4', city: 'Bradenton', zip: '34211' }).address).toBe('100 Main St, Apt 4');
     // A place-less lead is corroborated by anything.
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4', city: 'Sarasota', zip: '34236' }, { address: '100 Main St, Apt 4' }).address).toBe('100 Main St, Apt 4');
+  });
+
+  test('place evidence is read from the supplied composed address when city/zip fields are empty', () => {
+    const locked = { address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: null, zip: null }, locked).address).toBe(locked.address);
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Bradenton, FL 34205', city: null, zip: null }, locked).address).toBeUndefined();
+    // Explicit fields still win over the tail.
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
   });
 
   test('exact case-insensitive match still reaffirms', () => {

@@ -613,6 +613,7 @@ const CONFIRM_REASON_TEXT = {
   secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
+  address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2609,7 +2610,14 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
 // stays authoritative — conservative by design).
 function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
   const { placeCorroborates, snapshotTailPlace } = require('./customer-address-fanout');
-  const contact = { city: suppliedValues.city, zip: suppliedValues.zip };
+  // A full-address line1 with empty city/zip fields (the customer-create
+  // fallback shape) carries its place in the composed address tail — read
+  // it from there so a restated full address can still reaffirm (codex r7).
+  const suppliedTail = snapshotTailPlace(suppliedValues.address) || {};
+  const contact = {
+    city: String(suppliedValues.city || '').trim() || suppliedTail.city || null,
+    zip: String(suppliedValues.zip || '').trim() || suppliedTail.zip || null,
+  };
   if (!placeCorroborates(contact, { city: lockedLead.city, zip: lockedLead.zip })) return false;
   const tail = snapshotTailPlace(lockedLead.address);
   return !tail || placeCorroborates(contact, tail);
@@ -9252,7 +9260,11 @@ const CallRecordingProcessor = {
           // paired unit under primary mode, and reading V2 directly here
           // would glue a V2 unit onto an unrelated V1 street in shadow /
           // kill-switch mode.
-          const composedLeadAddress = composeLeadAddress(extracted.address_line1, extracted.address_line2);
+          const leadAddressShape = analyzeLeadAddress(extracted.address_line1, extracted.address_line2);
+          const composedLeadAddress = leadAddressShape.address;
+          if (leadAddressShape.unitConflict && !bridgeNeedsConfirmation.includes('address_unit_conflict')) {
+            bridgeNeedsConfirmation.push('address_unit_conflict');
+          }
 
           // The enrichment below runs as a PASS over `current` so the
           // claim-race recovery can re-run the SAME pass against a freshly
@@ -14547,8 +14559,20 @@ CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
  * address fan-out uses for leads.address). Pure.
  */
 function composeLeadAddress(line1, line2) {
+  return analyzeLeadAddress(line1, line2).address;
+}
+
+/**
+ * composeLeadAddress plus the shape verdict: `unitConflict` is true when the
+ * inline unit in line1 and the dedicated line2 name DIFFERENT doors ("…Apt 4"
+ * + "Apt 5"). A contradictory address is never stored as two doors — the
+ * caller's inline street wins and the dedicated unit is dropped, exactly as
+ * normalizeLeadAddress resolves the same input for the public intake — and
+ * the call is flagged address_unit_conflict for read-back (codex r7 P1).
+ */
+function analyzeLeadAddress(line1, line2) {
   const street = String(line1 || '').trim();
-  if (!street) return null;
+  if (!street) return { address: null, unitConflict: false };
   const { formatAddressBounded } = require('./customer-address-fanout');
   const {
     splitStreetLineUnitParts, normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS,
@@ -14559,7 +14583,7 @@ function composeLeadAddress(line1, line2) {
   // overlong unit would otherwise consume the whole 255 budget as the
   // protected tail and drop the street (codex r4 P2).
   let unit = clampUnit(line2);
-  if (!unit) return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
+  if (!unit) return { address: formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH), unitConflict: false };
   // A BARE unit ("4B", "102") gains its designator ("Unit 4B") before it is
   // stored: the shared parser and the ownership key only recognize a
   // comma-separated unit that leads with a designator or '#', so a bare
@@ -14578,12 +14602,21 @@ function composeLeadAddress(line1, line2) {
   const embedded = clampUnit(parts.unit);
   const key = (u) => unitLineValueKey(normalizeUnitLine(u));
   const duplicate = !!embedded && key(embedded) === key(unit);
-  const rebuiltStreet = embedded && !duplicate ? `${parts.street} ${embedded}` : parts.street;
-  return formatAddressBounded({
-    line1: rebuiltStreet,
-    line2: duplicate ? embedded : unit,
-    city: parts.tail || null,
-  }, LEAD_ADDRESS_MAX_LENGTH);
+  const unitConflict = !!embedded && !duplicate;
+  if (unitConflict) {
+    return {
+      address: formatAddressBounded({ line1: `${parts.street} ${embedded}`, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
+  return {
+    address: formatAddressBounded({
+      line1: parts.street,
+      line2: duplicate ? embedded : unit,
+      city: parts.tail || null,
+    }, LEAD_ADDRESS_MAX_LENGTH),
+    unitConflict,
+  };
 }
 // leads.address column width (migration 20260401000095: default string →
 // varchar(255)); a longer composed value makes Postgres reject the whole
@@ -14593,6 +14626,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 
 CallRecordingProcessor._test = {
   composeLeadAddress,
+  analyzeLeadAddress,
   leadAddressCompareKey,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
