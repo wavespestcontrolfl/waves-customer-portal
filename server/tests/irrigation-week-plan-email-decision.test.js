@@ -172,6 +172,8 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
     expect(sweep).toMatch(/const priorWeekEvents = weekPlanEnabled \? await loadPriorWeekPlanEvents\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
+    // A known move rides into the jurisdiction resolver (stale profile county rejected).
+    expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at \}\)/);
     expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {

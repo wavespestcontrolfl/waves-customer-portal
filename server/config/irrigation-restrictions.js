@@ -76,7 +76,7 @@ const ZIP_COUNTY = Object.freeze(Object.fromEntries([
   ...CHARLOTTE_ZIPS.map((z) => [z, 'Charlotte']),
 ]));
 
-function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null } = {}) {
+function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null, homeMoved = false } = {}) {
   // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
   // the 1:1 turf profile describes the home it was written for, so when its
   // own city context DIVERGES from the customer's current city (moved
@@ -94,6 +94,13 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // A profile with NO city context can still be stale: when the customer's
   // current ZIP/city maps to a different county, the current one wins.
   const countyConflicts = !!profileCounty && !!currentCounty && profileCounty !== currentCounty;
+  // After a KNOWN move (irrigation_home_changed_at) the profile county is
+  // evidence about the former home unless the profile's own city says it
+  // describes the current one — otherwise the current address alone decides,
+  // and null (no plan) when it cannot: never a plan under the old county,
+  // partially-covered Charlotte included (hook P1 on ad0b1ed31).
+  const profileDescribesCurrentHome = !!pCity && !!cCity && pCity === cCity;
+  if (homeMoved && !profileDescribesCurrentHome) return currentCounty;
   if (profileCounty && !profileDiverges && !countyConflicts) return profileCounty;
   return currentCounty;
 }

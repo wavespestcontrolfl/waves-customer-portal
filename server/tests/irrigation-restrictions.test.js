@@ -123,3 +123,17 @@ describe('resolveRestrictionCounty covers the whole service area (codex gh-r29)'
     expect(resolveRestrictionCounty({ zip: '34223', city: 'Venice' })).toBe('Sarasota'); // whole-county city map
   });
 });
+
+describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', () => {
+  const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+  test('the old profile county is rejected unless the profile describes the current home; ambiguous new address → null (fail closed)', () => {
+    // Old Sarasota profile (no municipality), new address Englewood 34223 (Sarasota/Charlotte shared) → null.
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Englewood', zip: '34223', homeMoved: true })).toBe(null);
+    // Same inputs without a move keep today's behavior (profile county stands).
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Englewood', zip: '34223' })).toBe('Sarasota');
+    // The current address establishing the county wins after a move.
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Bradenton', zip: '34205', homeMoved: true })).toBe('Manatee');
+    // A profile re-written for the current home (city matches) is trusted again.
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true })).toBe('Charlotte');
+  });
+});

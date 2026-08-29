@@ -1180,7 +1180,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip }),
+        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at }),
         home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
         // The restriction must cover the WHOLE plan week (through this Sunday).
         planWeekEnd,
