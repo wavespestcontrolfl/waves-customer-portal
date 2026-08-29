@@ -45,7 +45,7 @@ Everything already shipped is a **dependency**, not work to redo (§1).
 | Gap feeder | `competitor-gap-miner.js`, `competitor-discovery.js` → `seo_competitor_backlinks` | 7,553 unreviewed rows = the largest raw inventory; v2 ingests it (§4) |
 | Local opportunity feed | `local-opportunity-prospector/promoter.js` | Stays; writes through the guard |
 | Scorer + lane classifier | `prospect-scorer.js` (relevance, lead value, contactability gate, `CLAIMABLE_LINK_TYPES`), `signup-classifier.js` | Quality score. v2 adds path + persistence terms (§8) |
-| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Route shape and report semantics kept; AUTHENTICATION IS REPLACED in step 1 — `hermes-auth.js` bearer + `HERMES_SERVICE_TOKEN` retired, per-provider HMAC request signing (§12) — and v2 puts providers behind it (§7) |
+| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Route shape and report semantics kept; AUTHENTICATION IS REPLACED in step 1 — `hermes-auth.js` bearer + `HERMES_SERVICE_TOKEN` retired, per-provider HMAC request signing (§12) — and the repository-controlled Hermes callers are migrated IN THE SAME PR as the cutover: `docs/hermes/waves-outreach-drafter-skill.md` and the `waves-backlink-worker` signup skill drop the bearer-token file (`/data/workspace/.waves-portal-token`) for a shared signing helper (`docs/hermes/sign-request.py`: `LINK_WORKER_SECRET_HERMES` from a mounted secret file, canonical target + raw-body hash, timestamp + nonce) and their prerequisite lists name the new secret; the old bearer path is deleted, not dual-run, so no documented worker can still present `HERMES_SERVICE_TOKEN` after the cutover deploys — and v2 puts providers behind it (§7) |
 | Deterministic signup runner | `signup-runner.js`, `signup-evidence.js`, `GATE_SIGNUP_RUNNER`, `SIGNUP_RUNNER_ALLOWLIST`, `HERMES_SIGNUP_EMAIL` (chromium in the prod image) | First `BrowserAgentProvider` implementation (§7) |
 | Outreach drafter + sender | `backlink-outreach-drafter.js` (`GATE_OUTREACH_DRAFTER`), `link-prospect-outreach.js` (`GATE_LINK_OUTREACH`, `LINK_OUTREACH_DAILY_CAP`, Gmail `contact@`, idempotent send, `send_error` reconcile), `comms-lint.js` | The `OutreachProvider` (§7) under the bounded mandate (§6.4) |
 | Strategist | `backlink-strategy-agent*.js`, `create_link_prospects` / `list_prospects` | Stays on demand; becomes one more *source* into the registry |
@@ -343,7 +343,9 @@ later cleanup migration once step 5's provider work no longer needs to compare a
 ```js
 t.uuid('id').primary(); t.uuid('domain_id').notNullable();
 t.string('source').notNullable(); t.text('source_detail'); t.uuid('source_ref');
-t.text('touch_key').notNullable();   // `${source}:${source_ref || normalized source_detail || '-'}:${cycle_key}` — `cycle_key` = the domain's current acquisition-cycle id ('0' before any acquisition, the verified-loss event id after one) so a recurring feeder is idempotent WITHIN a cycle (Postgres UNIQUE treats NULLs as distinct, hence non-null) yet a rediscovery after a loss records a fresh touch inside the recovery window without erasing the original cycle's attribution
+t.uuid('placement_id');               // seo_link_prospects.id — set when the touch is bound to a specific placement's recovery cycle (below); NULL for a plain domain touch
+t.uuid('loss_event_id');              // seo_backlink_events.id of the verified loss that opened that placement's recovery cycle; NULL outside a recovery cycle
+t.text('touch_key').notNullable();   // `${source}:${source_ref || normalized source_detail || '-'}:${cycle_key}` — `cycle_key` is PER PLACEMENT CYCLE, never derived from "the domain's current cycle" (a domain with several placements — different pages / GBP locations — can have several open recovery cycles at once): '0' for a touch outside any recovery cycle, else `${placement_id}:${loss_event_id}`. Binding: a touch whose URL/page/location hint resolves via `findPlacementRow` to a placement with an open recovery cycle is bound to THAT placement's loss event; a touch with no placement hint on a domain with open recovery cycles is recorded once per open cycle (one row per placement in recovery, each with its own `placement_id`/`loss_event_id`) plus nothing else — never against a cycle chosen by recency. So a recurring feeder is idempotent WITHIN a cycle (Postgres UNIQUE treats NULLs as distinct, hence a non-null key) and §8 joins a reacquisition and its D30 result to the touches that carry ITS `loss_event_id`, so placement A's rediscovery can never be credited to placement B's loss
 t.timestamp('seen_at').notNullable().defaultTo(knex.fn.now());
 t.unique(['domain_id', 'touch_key']);
 ```
@@ -449,7 +451,7 @@ Policy panel, not by code.
 
 ## 4. Intake — one pipeline for every source
 
-`POST /api/admin/backlink-agent/opportunities/bulk`  (admin auth; also called internally)
+`POST /api/admin/backlink-agent/opportunities/bulk` is a thin admin-auth wrapper over the intake SERVICE `server/services/seo/link-registry-intake.js` (`ingestOpportunities({ items, source, sourceDetail, dryRun, actor })`, the module #3577 introduced). Scheduled server jobs — the weekly competitor-gap ingestion, the existing-profile baseline, `lost-link-recovery.js`, the X poller replacement, the recursive-discovery job — call the SERVICE directly with a job actor (`actor = { kind: 'job', name }`, recorded in `source_detail`); they never call the HTTP route, which keeps the router-wide admin auth on `admin-backlink-agent-v2.js` intact (a scheduler has no `waves_admin_token` bearer to present) and never needs a bypass. The route does nothing the service does not: parse the pasted text, pass `actor = { kind: 'admin', id }`, return the same idempotent result
 
 Accepts raw text: domains, URLs, an X post URL, a competitor backlink URL, a pasted list,
 CSV rows. Steps, all idempotent:
@@ -550,7 +552,13 @@ the CHECK), `confidence=0.1`, `last_investigated_at=null`
 - **Legacy signup queue** — the 12 pending `backlink_agent_queue` items (consumed today by
   `backlink-agent/signup-worker.js`) are imported ONCE in step 1 by an idempotent
   queue-to-registry intake (keyed by `legacy_queue_id`, ON CONFLICT DO NOTHING; `source` =
-  `x` or `owner_seed` per the row's origin, `source_detail=legacy_queue:<id>`, the row's
+  the row's `backlink_agent_queue.source` mapped EXHAUSTIVELY to the §3.5 enum — `x_feed`
+  (X poller) → `x`, `manual` (admin route) → `owner_seed`, `strategy_agent` → `strategy_agent`,
+  `competitor_gap` → `competitor_gap`, `web_discovery` and any other/NULL value →
+  `legacy_unknown` — so only the rows an admin typed in get the `owner_seed` prefilter bypass
+  and priority, automated discoveries keep their real source for §8 learning, and the verbatim
+  value is kept as `source_detail=legacy_queue:<id>:<source>` (`legacy:<value>` form as in the
+  prospect backfill), the row's
   status/provenance kept in `investigation.legacy_queue`), and the legacy worker is retired
   from the scheduler in the same PR so nothing is ever stranded in the old queue.
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
@@ -1656,7 +1664,7 @@ unset its gate; budget kill = the issuer program's limit.
 ## 14. Build order (PR boundaries)
 
 1. **Registry + paths + provenance + statuses** — migrations for §3.1–3.5, `awaiting_owner`/
-   `watching`/`ready_for_credentials`/`ready_for_payment` (status enum/constraint, `PROSPECT_STATUSES`, domain-guard sets, board filters + guard regression tests — all four), `domain_id/path_id/authority` + claim-binding columns (`leased_provider`/`lease_mode`/`lease_action`/`handoff_lease_token`) on prospects, per-provider HMAC worker auth (§12), intake endpoint skeleton
+   `watching`/`ready_for_credentials`/`ready_for_payment` (status enum/constraint, `PROSPECT_STATUSES`, domain-guard sets, board filters + guard regression tests — all four), `domain_id/path_id/authority` + claim-binding columns (`leased_provider`/`lease_mode`/`lease_action`/`handoff_lease_token`) on prospects, per-provider HMAC worker auth (§12) TOGETHER WITH the Hermes signing helper + both Hermes skill docs cut over from the bearer file (no worker keeps a documented `HERMES_SERVICE_TOKEN` path), intake SERVICE (`link-registry-intake.js`, called directly by jobs) + its thin admin endpoint
    (normalize/dedupe/upsert only); `seo_signup_attempts` backfill + atomic `recordAttempt`
    cutover to `seo_link_attempts` (§3.4). Docs-tested with contract tests on the guard.
 2. **Bulk intake** — paste box + CSV import + competitor-gap ingestion job + existing-profile
