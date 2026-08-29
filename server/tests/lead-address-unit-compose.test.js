@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => ({
   logGateStatus: jest.fn(),
 }));
 
-const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
+const { composeLeadAddress, analyzeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey, leadAddressTailPlace } = require('../services/call-recording-processor')._test;
 
 describe('composeLeadAddress', () => {
   test('appends the unit to the street', () => {
@@ -89,6 +89,23 @@ describe('composeLeadAddress', () => {
     expect(leadAddressCompareKey('100 Main St, Unit 4B')).toBe('100 main st|4b');
     const locked = { address: '100 Main St, Unit 4B', city: 'Sarasota', zip: '34236' };
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St', '4B'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Unit 4B');
+  });
+
+  test('comma-free full-address fallback: locality is split before the unit is deduped', () => {
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', '#4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St Sarasota FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota FL 34236');
+    expect(composeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Bldg 2 Apt 4')).toBe('100 Main St, Bldg 2 Apt 4, Sarasota FL 34236');
+    expect(analyzeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', 'Apt 5')).toEqual({ address: '100 Main St Apt 4, Sarasota FL 34236', unitConflict: true });
+    expect(composeLeadAddress('100 Main St Apt 4 Sarasota FL 34236', null)).toBe('100 Main St, Apt 4, Sarasota FL 34236');
+    // Street names that carry a suffix word mid-line are not split.
+    expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
+  });
+
+  test('a runaway place tail never crowds the street out of the bound', () => {
+    const out = composeLeadAddress(`100 Main St, ${'Somewhere '.repeat(40)}`, 'Apt 4');
+    expect(out.length).toBeLessThanOrEqual(255);
+    expect(out.startsWith('100 Main St, Apt 4, Somewhere')).toBe(true);
   });
 
   test('bounded to the leads.address varchar(255) — street trims, unit tail survives', () => {
@@ -180,6 +197,16 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Bradenton, FL 34205', city: null, zip: null }, locked).address).toBeUndefined();
     // Explicit fields still win over the tail.
     expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4, Sarasota, FL 34236', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
+  });
+
+  test('a floor unit (Fl 2) is a unit, not a city, for place corroboration', () => {
+    expect(leadAddressTailPlace('100 Main St, Fl 2')).toBeNull();
+    expect(leadAddressTailPlace('100 Main St, Fl 2, Sarasota, FL 34236')).toEqual({ zip: '34236', city: expect.stringMatching(/Sarasota/) });
+    expect(leadAddressTailPlace('100 Main St')).toBeNull();
+    const locked = { address: '100 Main St, Fl 2', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Fl 2', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Fl 2');
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Floor 2', city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Fl 2');
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Fl 2', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
   });
 
   test('exact case-insensitive match still reaffirms', () => {

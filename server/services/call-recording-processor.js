@@ -2613,14 +2613,28 @@ function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
   // A full-address line1 with empty city/zip fields (the customer-create
   // fallback shape) carries its place in the composed address tail — read
   // it from there so a restated full address can still reaffirm (codex r7).
-  const suppliedTail = snapshotTailPlace(suppliedValues.address) || {};
+  const suppliedTail = leadAddressTailPlace(suppliedValues.address) || {};
   const contact = {
     city: String(suppliedValues.city || '').trim() || suppliedTail.city || null,
     zip: String(suppliedValues.zip || '').trim() || suppliedTail.zip || null,
   };
   if (!placeCorroborates(contact, { city: lockedLead.city, zip: lockedLead.zip })) return false;
-  const tail = snapshotTailPlace(lockedLead.address);
+  const tail = leadAddressTailPlace(lockedLead.address);
   return !tail || placeCorroborates(contact, tail);
+}
+
+// Place evidence in a leads.address value, read through the UNIT-AWARE
+// parser: the unit segments ("Apt 4", and "Fl 2" — the fan-out's own tail
+// reader must skip 'fl' to tell a floor from Florida, so it would read a
+// floor unit as the city) are consumed first, and only the remaining place
+// tail is handed to snapshotTailPlace. null for a bare street (codex r9 P1).
+function leadAddressTailPlace(address) {
+  const raw = String(address == null ? '' : address).trim();
+  if (!raw) return null;
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  const { snapshotTailPlace } = require('./customer-address-fanout');
+  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
+  return tail ? snapshotTailPlace(`street, ${tail}`) : null;
 }
 
 // Canonical street|unit key for a leads.address value, tolerant of every
@@ -14563,6 +14577,50 @@ function composeLeadAddress(line1, line2) {
 }
 
 /**
+ * Street / inline unit / place tail of a lead street line, for EITHER shape
+ * the extractor produces: comma-separated ("100 Main St, Apt 4, Sarasota, FL
+ * 34236") through splitStreetLineUnitParts, and the comma-FREE full-address
+ * fallback ("100 Main St Apt 4 Sarasota FL 34236") through the shared
+ * splitStreetAndCity locality split first — otherwise the trailing-unit
+ * parser stops at the state/ZIP, reports no unit, and a repeated line2 is
+ * appended again / a conflicting one is stored without the read-back flag
+ * (codex r9 P1). splitStreetAndCity keeps ONE designator pair on the street
+ * side; any further unit pairs it pushed into the locality ("Bldg 2 Apt 4")
+ * are pulled back so the multipart unit peels whole. The place tail is
+ * clamped so a runaway locality can never crowd the street out of the 255
+ * bound — the tail is the protected part of formatAddressBounded (codex r9
+ * P2).
+ */
+function splitLeadStreetParts(street) {
+  const { splitStreetLineUnitParts, splitStreetAndCity, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const clampTail = (parts, locality = '') => ({
+    street: parts.street,
+    unit: parts.unit,
+    tail: [parts.tail, locality].filter(Boolean).join(', ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
+  });
+  // The unit-aware parser first: a comma-separated line, or a comma-free
+  // line whose unit is the trailing token pair, is fully understood here
+  // and needs no locality guess (which would misread "Apt # 4" as a city).
+  const direct = splitStreetLineUnitParts(street);
+  if (street.includes(',') || direct.unit) return clampTail(direct);
+  // Comma-free with no trailing unit: the locality (city / state / ZIP) is
+  // what stopped the unit peel — split it off, then peel again.
+  const split = splitStreetAndCity(street);
+  let line = split.line1;
+  const cityTokens = String(split.city || '').split(' ').filter(Boolean);
+  while (cityTokens.length >= 2) {
+    const first = cityTokens[0].replace(/\./g, '').toLowerCase();
+    if (!(first.startsWith('#') || UNIT_DESIGNATORS.has(first))) break;
+    line = `${line} ${cityTokens.shift()} ${cityTokens.shift()}`;
+  }
+  const locality = cityTokens.join(' ');
+  // A locality that does not start with a letter is a unit fragment or
+  // noise, not a place — keep the line whole.
+  if (!/^[A-Za-z]/.test(locality)) return clampTail(direct);
+  return clampTail(splitStreetLineUnitParts(line), locality);
+}
+
+/**
  * composeLeadAddress plus the shape verdict: `unitConflict` is true when the
  * inline unit in line1 and the dedicated line2 name DIFFERENT doors ("…Apt 4"
  * + "Apt 5"). A contradictory address is never stored as two doors — the
@@ -14574,9 +14632,7 @@ function analyzeLeadAddress(line1, line2) {
   const street = String(line1 || '').trim();
   if (!street) return { address: null, unitConflict: false };
   const { formatAddressBounded } = require('./customer-address-fanout');
-  const {
-    splitStreetLineUnitParts, normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS,
-  } = require('../utils/address-normalizer');
+  const { normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
   const clampUnit = (u) => String(u || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
   // Same 100-char unit clamp as the customer insert / booking linkage —
   // the extraction schema bounds street_line_2 by type only, and an
@@ -14590,7 +14646,7 @@ function analyzeLeadAddress(line1, line2) {
   // full-address line1 never loses its city/ZIP (codex r3 + r6 P2). The
   // no-line2 shape takes the same path: an inline-only unit is a supported
   // legacy shape and must survive the bound too (codex r8 P2).
-  const parts = splitStreetLineUnitParts(street);
+  const parts = splitLeadStreetParts(street);
   const embedded = clampUnit(parts.unit);
   if (!unit) {
     return {
@@ -14630,11 +14686,14 @@ function analyzeLeadAddress(line1, line2) {
 // enrichment update and fails the call-processing attempt.
 const LEAD_ADDRESS_MAX_LENGTH = 255;
 const LEAD_UNIT_MAX_LENGTH = 100;
+// Place tail budget: leaves ≥ 255 − 100 (unit) − 80 − separators ≈ 70 chars of street.
+const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
   composeLeadAddress,
   analyzeLeadAddress,
   leadAddressCompareKey,
+  leadAddressTailPlace,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,

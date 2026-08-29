@@ -613,6 +613,7 @@ module.exports = {
   unitLineValueKey,
   splitStreetLineUnit,
   splitStreetLineUnitParts,
+  splitStreetAndCity,
   titleCaseWords,
   normalizeState,
   parseRawAddress,
