@@ -68,9 +68,20 @@ const eyebrow = {
 // ── 1. Today's result: headline · body · three metrics ─────────────────────────
 // `narrative` = the tech-reviewed body (payload aiSummary.body), already
 // cleaned by the page the same way the typed Today's Result card cleans it.
-export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, visitSequence = 1 }) {
+// Cross-visit trend sentence from the activity gauge payload (same words
+// ActivityCard prints): baseline visits claim no trend.
+export function activityTrendLine(activity) {
+  if (!activity || activity.score == null) return null;
+  if (activity.isBaseline) return 'Baseline recorded today — trend starts next visit.';
+  if (activity.trend === 'stable') return 'Termite activity is holding steady since your last visit.';
+  if (activity.trendWord) return `Termite activity has ${activity.trendWord} since your last visit.`;
+  return null;
+}
+
+export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, visitSequence = 1 }) {
   if (!status) return null;
   const t = tone(status.tone);
+  const trendLine = activityTrendLine(activityTrend);
   return (
     <section data-glass="card" style={{ ...card, borderColor: t.border, background: `linear-gradient(180deg, ${t.wash}, ${CARD} 60%)` }}>
       <div style={eyebrow}>
@@ -83,6 +94,9 @@ export function TermiteStatusHero({ status, statusSummary, metrics, narrative = 
       ) : null}
       {narrative ? (
         <p className="ai-summary-body" style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}>{narrative}</p>
+      ) : null}
+      {trendLine ? (
+        <p style={{ margin: '10px 0 0', fontSize: 13, color: MUTED }}>{trendLine}</p>
       ) : null}
       {Array.isArray(metrics) && metrics.length ? (
         <div style={{ marginTop: 16, display: 'grid', gap: 6 }}>

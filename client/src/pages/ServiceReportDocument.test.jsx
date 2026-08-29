@@ -373,6 +373,36 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Keep mulch off the slab/);
   });
 
+  it('termite V2 is the sole result summary — the typed headline/body never print beside it', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      summary: 'Legacy recap that must not print.',
+      typedReport: {
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection',
+        todaysResult: { headline: 'Termite activity was high today.', body: 'We inspected 10 stations (typed).', nextStep: 'Recheck active stations sooner.' },
+        findings: [],
+      },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        aiSummary: { headline: null, body: 'Both cartridges were replaced.' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text).toMatch(/Termite activity observed at 2 stations/);
+    expect(text).toMatch(/2 of the 12 stations inspected/);
+    expect(text).toMatch(/Both cartridges were replaced/);
+    expect(text).not.toMatch(/Termite activity was high today/);
+    expect(text).not.toMatch(/10 stations \(typed\)/);
+    expect(text).not.toMatch(/Legacy recap/);
+    // the required next step still prints
+    expect(text).toMatch(/Recheck active stations sooner/);
+    // the summary body prints once (status row carries the label only)
+    expect(text.match(/2 of the 12 stations inspected/g)).toHaveLength(1);
+  });
+
   it('does not claim treated areas when the only application is a station check', () => {
     // treatment-map.js isRenderableApplication excludes method 'station_check'
     const data = {

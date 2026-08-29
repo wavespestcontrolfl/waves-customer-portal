@@ -489,8 +489,18 @@ export default function ServiceReportDocument({ data, token }) {
   const reportUrl = `${portalBase(data.publicOrigin)}/report/${encodeURIComponent(token)}`;
   const reportNumber = String(data.serviceRecordId || token || '').replace(/-/g, '').slice(0, 10).toUpperCase();
 
+  // Termite V2 is the PDF's SOLE result summary, as on the live report: the
+  // builder gives visit-backed station-map counts precedence over hand-
+  // edited typed counts, so printing the typed headline/body too could state
+  // two different inspected/activity totals (codex P2 #3600 r5).
+  const termiteV2Summary = data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   const summaryParagraphs = [];
-  if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
+  if (termiteV2Summary) {
+    summaryParagraphs.push(String(termiteV2Summary.status.label).replace(/\.$/, '') + '.');
+    if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
+    const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
+    if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
+  } else if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
@@ -499,8 +509,8 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = reconciledResult
-    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '';
+  const summaryBody = termiteV2Summary ? '' : (reconciledResult
+    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
@@ -518,7 +528,9 @@ export default function ServiceReportDocument({ data, token }) {
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
     if (mosquitoV2?.status?.label) return { label: 'Yard usability', value: mosquitoV2.status.label, detail: mosquitoV2.statusSummary };
-    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2.statusSummary };
+    // detail deliberately omitted — the summary paragraphs above already
+    // print statusSummary (sole-summary rule).
+    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: null };
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',

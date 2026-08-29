@@ -159,6 +159,13 @@ describe('buildStationNetwork — station-map summary wins over typed counts', (
     });
     expect(net.counts).toEqual({ total: 14, checked: 12, activity: 2, inaccessible: 2 });
     expect(net.items.map((i) => i.key)).toEqual(['inspected', 'activity', 'bait', 'access']);
+    // bait intact + activity pins (live termites / mud tubing) → never "bait engaged"
+    expect(net.items[1].detail).toBe('2 stations — activity observed');
+    const feeding = buildStationNetwork({
+      values: { ...CLEAN_VALUES, bait_consumption: 'Moderate feeding' },
+      stationSummary: { total: 14, checked: 12, activity: 2, serviced: 2, inaccessible: 2 },
+    });
+    expect(feeding.items[1].detail).toBe('2 stations — bait engaged');
     expect(net.summary).toBe('Your protective ring: 12 inspected · 2 with activity · 2 inaccessible.');
   });
 

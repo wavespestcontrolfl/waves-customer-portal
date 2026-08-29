@@ -229,11 +229,15 @@ function buildStationNetwork({ values = {}, stationSummary = null }) {
     detail: total && total > checked ? `${checked} of ${total} stations` : `${checked} station${plural(checked)}`,
   });
   if (activityCount != null && activityCount > 0) {
+    // "Bait engaged" only when feeding was actually recorded — station
+    // activity can be live termites or mud tubing with the bait intact
+    // (codex P2 #3600 r5).
+    const engaged = FEEDING_VALUES.has(values.bait_consumption);
     items.push({
       key: 'activity',
       label: 'Stations with termite activity',
       status: 'active',
-      detail: `${activityCount} station${plural(activityCount)} — bait engaged`,
+      detail: `${activityCount} station${plural(activityCount)} — ${engaged ? 'bait engaged' : 'activity observed'}`,
     });
   }
   const consumptionDetail = CONSUMPTION_DETAIL[values.bait_consumption];

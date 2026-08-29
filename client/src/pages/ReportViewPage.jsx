@@ -8899,6 +8899,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                  top-level nextAppointment may be ANY service line. */
               nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
               narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
+              /* Cross-visit trend from the activity gauge payload — the
+                 standalone ActivityCard is suppressed for termite V2. */
+              activityTrend={data.activity || null}
               bondLines={(data.termiteBonds || [])
                 .map((bond) => ({ serviceType: bond.serviceType || null, label: formatTermiteBondRenewalLabel(bond) }))
                 .filter((entry) => entry.label)}
@@ -9091,7 +9094,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             render the full ActivityCard (score history + knockdown progress chip)
             alongside the dashboard, and the server withholds `activity` from the
             hero on typed visits so the reading still shows exactly once. */}
-        {((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
+        {/* Termite V2 renders the current reading in its hero/metrics AND
+            carries the cross-visit trend line itself (activityTrend), so the
+            standalone gauge would print the reading twice (codex P2 #3600 r5). */}
+        {!data.termiteReportV2 && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : (
             <PestPressureCard

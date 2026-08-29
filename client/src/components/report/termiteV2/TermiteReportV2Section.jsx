@@ -32,6 +32,9 @@ export default function TermiteReportV2Section({
   // Tech-reviewed narrative, cleaned by the page (cleanVisitSummary) — the
   // dashboard is the report's one summary surface.
   narrative = null,
+  // Activity gauge payload (score / trend / isBaseline) — the hero prints
+  // its cross-visit trend sentence; the reading itself is the hero status.
+  activityTrend = null,
 }) {
   if (!data) return null;
   return (
@@ -41,6 +44,7 @@ export default function TermiteReportV2Section({
         statusSummary={data.statusSummary}
         metrics={data.metrics}
         narrative={narrative}
+        activityTrend={activityTrend}
         visitSequence={data.visitSequence}
       />
       {/* Live web only — pdf/static have no satellite basemap to pin against

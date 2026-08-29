@@ -207,6 +207,16 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(container.querySelector('#todays-result')).toBeNull();
   });
 
+  it('suppresses the standalone activity gauge and prints the cross-visit trend in the hero', async () => {
+    const trending = JSON.parse(JSON.stringify(termiteReportV2));
+    trending.activity = { score: 4, label: 'Termite Activity', levelWord: 'high', trend: 'up', trendWord: 'increased', isBaseline: false };
+    const { container } = renderReport(trending);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(container.querySelector('#activity')).toBeNull();
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).getByText('Termite activity has increased since your last visit.')).toBeInTheDocument();
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);
