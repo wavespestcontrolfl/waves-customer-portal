@@ -1923,7 +1923,7 @@ function bodyImagesEnabled() {
 // Both inline (`](<dest>`) and definition (`[label]: <dest>`, also with the
 // destination on the continuation line) forms are normalized — either
 // would otherwise read as an HTML closing tag to the tag masker.
-const ANGLE_DESTINATION_RE = /(\]\(|^[ \t]*\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:\n[ \t]*)?)<([^<>\n]*)>/gm;
+const ANGLE_DESTINATION_RE = /(\]\(|^[ \t]*\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:\n[ \t]*)?)<((?:[^<>\\\n]|\\.)*)>/gm;
 // Characters that are structural in a bare destination — spaces and
 // parentheses — are percent-encoded (`</a.webp)variant>` → `/a.webp%29variant`)
 // and decoded back when the destination is resolved, so the path the
@@ -1932,7 +1932,9 @@ function normalizeAngleDestinations(text) {
   // EVERY character between the brackets is part of the destination —
   // leading/trailing spaces included (CommonMark keeps them), so they are
   // encoded, never trimmed away.
-  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
+  // Escapes are honoured (`\>` is a literal `>` inside the brackets) and the
+  // escaped punctuation is interpreted before encoding, as CommonMark does.
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/[ ()<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
 }
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }
@@ -2010,9 +2012,9 @@ function renderedBodyView(body) {
   // Definitions are read from the JSX/MDX-MASKED text: a `[label]: dest`
   // inside a tag attribute or a `{…}` expression is data Astro never
   // renders, so it must not resolve an outside `![alt][label]`.
-  const defs = contentGuardrails.markdownReferenceDefinitions(blankJsxAndExpressions(visible));
+  const defs = contentGuardrails.markdownReferenceDefinitions(blankJsxAndExpressions(visible), { depths, inList });
   const rendered = blankJsxAndExpressions(
-    contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),
+    contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true, depths, inList }),
   );
   return { text: rendered, lines: rendered.split('\n'), depths, inList: inList || [], defs };
 }
@@ -2515,11 +2517,28 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
-  // Superseded = occupied names this run neither reused nor referenced.
+  // Superseded = every publisher-managed asset of this post — the whole
+  // directory listing, not just occupied names met below the first free
+  // one — that this run neither reused nor referenced.
   const kept = new Set([...draftSrcs, ...images.map((img) => img.src)].map((src) => `public${src}`));
-  const deletes = superseded.filter((d) => !kept.has(d.repoPath));
-  for (const d of deletes) pinned.push({ repoPath: d.repoPath, sha: d.sha });
-  return { body: nextBody, files, images, newAlts, pinned, deletes: deletes.map((d) => d.repoPath) };
+  const managed = new Map(superseded.map((d) => [d.repoPath, d]));
+  if (typeof gh.listDir === 'function') {
+    let entries = [];
+    try { entries = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`)) || []; } catch (listErr) {
+      // The sweep is best-effort; the pinned occupied names above still go.
+      logger.warn(`[astro-publisher] could not list body images for ${slug}: ${listErr.message}`);
+    }
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (!e || e.type !== 'file' || !/^body-\d+\.webp$/i.test(String(e.name || ''))) continue;
+      const repoPath = e.path || `${ASTRO_HERO_DIR}/${slug}/${e.name}`;
+      if (!managed.has(repoPath)) managed.set(repoPath, { repoPath, sha: e.sha || null });
+    }
+  }
+  const deletes = [...managed.values()].filter((d) => !kept.has(d.repoPath) && !files.some((f) => f.path === d.repoPath));
+  // Deletions carry their own pins (checked by bodyImageCommitConflicts: a
+  // path already gone on the branch is simply dropped from the deletion
+  // list; a path whose blob changed is a conflict).
+  return { body: nextBody, files, images, newAlts, pinned, deletes: deletes.map((d) => d.repoPath), deletePins: Object.fromEntries(deletes.map((d) => [d.repoPath, d.sha])) };
 }
 
 // Paths a body-image commit depends on, re-checked on the FRESH branch just
@@ -2540,6 +2559,20 @@ async function bodyImageCommitConflicts(bodyImages, branch) {
   for (const pin of bodyImages.pinned || []) {
     const onBranch = await gh.getFile(pin.repoPath, branch);
     if (!onBranch || (pin.sha && onBranch.sha !== pin.sha)) conflicts.push(`${pin.repoPath} (pinned picture changed: expected ${pin.sha}, found ${onBranch?.sha || 'missing'})`);
+  }
+  // Superseded assets: already gone on the branch → nothing to delete
+  // (pruned in place, the commit must not delete a missing path); changed
+  // since they were listed → conflict.
+  if (Array.isArray(bodyImages.deletes) && bodyImages.deletes.length) {
+    const remaining = [];
+    for (const repoPath of bodyImages.deletes) {
+      const onBranch = await gh.getFile(repoPath, branch);
+      if (!onBranch) continue;
+      const expected = bodyImages.deletePins?.[repoPath] || null;
+      if (expected && onBranch.sha !== expected) { conflicts.push(`${repoPath} (superseded picture changed: expected ${expected}, found ${onBranch.sha})`); continue; }
+      remaining.push(repoPath);
+    }
+    bodyImages.deletes.splice(0, bodyImages.deletes.length, ...remaining);
   }
   return conflicts;
 }
@@ -4292,13 +4325,16 @@ function stripManagedBodyImages(body, slug) {
   const lineStarts = [0];
   for (let k = 0; k < raw.length; k += 1) if (raw[k] === '\n') lineStarts.push(k + 1);
   const lineOf = (pos) => { let lo = 0; let hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
-  const defs = contentGuardrails.markdownReferenceDefinitions(unmasked.join('\n'));
+  const { depths: rawDepths, inList: rawInList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(raw);
+  const defs = contentGuardrails.markdownReferenceDefinitions(unmasked.join('\n'), { depths: rawDepths, inList: rawInList });
   const removals = [];
   for (const span of contentGuardrails.eachMarkdownLink(raw)) {
     if (!span.isImage) continue;
-    const spanText = raw.slice(span.start, span.end + 1);
-    if (spanText.includes('\n')) continue; // publisher-written images are single-line
-    if (!String(rendered[lineOf(span.start)] || '').includes(spanText)) continue; // not a rendered image
+    // Rendered-ness is decided STRUCTURALLY: the rendered view of the
+    // span's line(s) must itself carry an image with the same managed src
+    // (angle destinations normalized, wrapped alts spanning lines included).
+    const renderedSlice = rendered.slice(lineOf(span.start), lineOf(span.end) + 1).join('\n');
+    const renderedSrcs = new Set(imageRefsInText(renderedSlice, defs).map((r) => r.src));
     let src = null;
     if (span.kind === 'inline') src = decodeDestination(contentGuardrails.parseLinkDestination(raw.slice(span.destStart, span.destEnd + 1), { allowEmpty: true }) || '');
     else if (span.kind !== 'malformed') {
@@ -4306,7 +4342,7 @@ function stripManagedBodyImages(body, slug) {
       const label = contentGuardrails.normalizeReferenceLabel(tail || raw.slice(span.labelStart + 1, span.labelEnd));
       if (label && defs.has(label)) src = decodeDestination(defs.get(label));
     }
-    if (src && isManaged(src)) removals.push([span.start, span.end]);
+    if (src && isManaged(src) && renderedSrcs.has(src)) removals.push([span.start, span.end]);
   }
   // Splice the image syntax OUT (last first so offsets hold), then tidy the
   // touched lines: collapse the double space an inline removal leaves and

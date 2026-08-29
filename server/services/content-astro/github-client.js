@@ -299,10 +299,14 @@ async function updatePr(number, { title, body } = {}) {
 async function compareFiles(head, base) {
   const { owner, repo, defaultBranch } = env();
   const out = await ghFetch(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base || defaultBranch)}...${encodeURIComponent(head)}`);
-  return {
-    files: Array.isArray(out?.files) ? out.files.map((f) => f.filename) : [],
-    mergeBaseSha: out?.merge_base_commit?.sha || null,
-  };
+  // A renamed entry changes BOTH paths (the old one is deleted by the
+  // merge), so both are reported as PR-changed.
+  const files = [];
+  for (const f of Array.isArray(out?.files) ? out.files : []) {
+    if (f?.filename) files.push(f.filename);
+    if (f?.previous_filename) files.push(f.previous_filename);
+  }
+  return { files, mergeBaseSha: out?.merge_base_commit?.sha || null };
 }
 
 async function getBlob(sha) {

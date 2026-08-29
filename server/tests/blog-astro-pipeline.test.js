@@ -3431,6 +3431,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   }
 
   beforeEach(() => {
+    gh.listDir.mockReset();
+    gh.listDir.mockResolvedValue([]);
     jest.clearAllMocks();
     jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
     factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
@@ -4547,6 +4549,43 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     // Nullable slug → publishAstro's slugify(title) fallback.
     expect(AstroPublisher.stripManagedBodyImagesForPost('P.\n\n![g](/images/blog/ant-trails-in-bradenton/body-1.webp)', { slug: null, title: 'Ant Trails in Bradenton' })).toBe('P.');
     expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
+  });
+
+  test('bodyImageRefs: a definition opening a blockquote after prose defines; a closed <details> summary image renders; escaped `\\>` inside an angle destination is honoured (GH r23)', async () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![a][pic]\n\nIntro\n> [pic]: /images/blog/x/body-1.webp').map((r) => r.src)).toEqual(['/images/blog/x/body-1.webp']);
+    expect(bodyImageRefs('<details><summary>![preview](/images/blog/x/hero.webp)</summary>\n\n![gone](/images/blog/x/body-9.webp)\n\n</details>').map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);
+    expect(bodyImageRefs('![a](</images/blog/x/body-\\>.webp>)').map((r) => r.src)).toEqual(['/images/blog/x/body->.webp']);
+  });
+
+  test('stripManagedBodyImages resolves rendered spans structurally — angle-destination and wrapped-alt managed images are stripped too (GH r23)', () => {
+    const body = '## A\n\nProse.\n\n![gen](</images/blog/x/body-1.webp>)\n\n![wrapped\nalt](/images/blog/x/body-2.webp)\n\nMore.';
+    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\nMore.');
+  });
+
+  test('refresh lane: stale managed assets ABOVE the first free name are swept from the directory listing (GH r23)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === 'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp') return { content: '', sha: 'stale3' };
+      return null; // body-1/body-2 free by name probe…
+    });
+    // …but the directory still holds a stale body-3 nobody references.
+    gh.listDir.mockResolvedValue([{ type: 'file', name: 'body-3.webp', path: 'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', sha: 'stale3' }]);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', 'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp', 'src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-3.webp']);
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', expect.stringMatching(/^content\/refresh-/));
   });
 
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {

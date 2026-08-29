@@ -4724,6 +4724,10 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.parseLinkDestination('/images/body-\\(detail.webp')).toBe('/images/body-(detail.webp');
     expect(guardrails.parseLinkDestination('</images/a\\_b.webp>')).toBe('/images/a_b.webp');
     for (const bad of ['/images/body-(detail.webp', '/images/body-detail).webp', '/a)(b']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // A container transition (quote depth / list membership) is a block start too (GH r23).
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /q.webp', { depths: [0, 1], inList: [false, false] }).keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /l.webp', { depths: [0, 0], inList: [false, true] }).keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /n.webp', { depths: [0, 0], inList: [false, false] }).keys()]).toEqual([]);
     // A definition cannot interrupt a paragraph: only at a block start (first line / after blank / heading / break / another definition) (GH r20).
     expect([...guardrails.markdownReferenceDefinitions('Intro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /ok.webp\n[two]: /two.webp\n## H\n[after-heading]: /h.webp\n---\n[after-break]: /b.webp').keys()]).toEqual(['ok', 'two', 'after-heading', 'after-break']);
     expect(guardrails.blankLinkDefinitionsAndTitles('Intro prose\n[pic]: /images/blog/x/body-1.webp')).toBe('Intro prose\n[pic]: /images/blog/x/body-1.webp');
@@ -4755,6 +4759,14 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(spans).toEqual([['reference', 'body\\]shot'], ['none', null], ['none', null]]);
     const defs = guardrails.markdownReferenceDefinitions('[Body\\]Shot]: /images/blog/x/body-1.webp');
     expect([...defs.entries()]).toEqual([['body]shot', '/images/blog/x/body-1.webp']]);
+  });
+
+  test('blankDefinitelyHiddenContent keeps a closed <details> summary visible; the attribution walker stays conservative (GH r23)', () => {
+    const t = '<details><summary>Peek ![p](/x.webp)</summary>\n\nHidden body.\n\n</details>';
+    const kept = guardrails.blankDefinitelyHiddenContent(t);
+    expect(kept).toContain('Peek ![p](/x.webp)');
+    expect(kept).not.toContain('Hidden body');
+    expect(guardrails.blankHiddenContent(t)).not.toContain('Peek');
   });
 
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {

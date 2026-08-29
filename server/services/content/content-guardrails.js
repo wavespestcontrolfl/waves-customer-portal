@@ -176,9 +176,12 @@ function blankHiddenContent(str) {
 // as SEEN — a CTA anchor's visible wording — without discarding merely
 // styled copy.
 function blankDefinitelyHiddenContent(str) {
-  return blankContentWhere(str, opensDefinitelyHidden);
+  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true });
 }
-function blankContentWhere(str, opens) {
+// `keepSummary`: a closed <details> hides its body, but its <summary> is
+// what the reader sees — the certainty walker keeps the first summary's
+// content visible (the attribution walker stays conservative).
+function blankContentWhere(str, opens, { keepSummary = false } = {}) {
   const text = String(str || '');
   const out = text.split('');
   const tags = [...eachTag(text)];
@@ -187,16 +190,23 @@ function blankContentWhere(str, opens) {
     if (tag.isClose || tag.selfClosing || !opens(tag)) continue;
     let depth = 1;
     let endIdx = -1;
+    let endTagIdx = -1;
     for (let u = t + 1; u < tags.length; u += 1) {
       const other = tags[u];
       if (other.name !== tag.name || other.selfClosing) continue;
-      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; break; } }
+      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; endTagIdx = u; break; } }
       else depth += 1;
     }
     // Never closed → blank to end: unterminated hidden content cannot be
     // proven visible either.
     const stop = endIdx === -1 ? text.length - 1 : endIdx;
     for (let k = tag.start; k <= stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    if (keepSummary && tag.name === 'details') {
+      const last = endTagIdx === -1 ? tags.length : endTagIdx;
+      const open = tags.slice(t + 1, last).find((x) => x.name === 'summary' && !x.isClose && !x.selfClosing);
+      const close = open ? tags.slice(tags.indexOf(open) + 1, last).find((x) => x.name === 'summary' && x.isClose) : null;
+      if (open && close) for (let k = open.end + 1; k < close.start; k += 1) out[k] = text[k];
+    }
   }
   return out.join('');
 }
@@ -337,19 +347,25 @@ function normalizeReferenceLabel(label) {
 // 4.7): it is recognised only at a block start — the first line, after a
 // blank line, after an ATX heading / thematic break, or directly after
 // another accepted definition. `Intro\n[pic]: /x.webp` is paragraph text.
-function definitionMayStartAt(lines, i, lastDefinitionEnd) {
+// `depths` / `inList` (per line, from blankNonRenderedMarkdownWithDepths):
+// a container transition — entering/leaving a blockquote or a list item —
+// starts a new block too (`Intro\n> [pic]: /x.webp` defines `pic`).
+function definitionMayStartAt(lines, i, lastDefinitionEnd, { depths = null, inList = null } = {}) {
   if (i === 0 || lastDefinitionEnd === i - 1) return true;
   const prev = lines[i - 1];
-  return prev.trim() === '' || isInterruptingBlock(prev);
+  if (prev.trim() === '' || isInterruptingBlock(prev)) return true;
+  if (depths && (depths[i] || 0) !== (depths[i - 1] || 0)) return true;
+  if (inList && !!inList[i] !== !!inList[i - 1]) return true;
+  return false;
 }
-function markdownReferenceDefinitions(str) {
+function markdownReferenceDefinitions(str, { depths = null, inList = null } = {}) {
   const defs = new Map();
   const lines = String(str || '').split('\n');
   let lastDefinitionEnd = -2;
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
-    if (!definitionMayStartAt(lines, i, lastDefinitionEnd)) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList })) continue;
     let rest = lines[i].slice(m[0].length);
     if (rest.trim() === '') {
       // Continuation line: consumed ONLY when it is a valid destination —
@@ -380,13 +396,13 @@ function markdownReferenceDefinitions(str) {
 // remainder — or whose continuation line — is a valid destination. A
 // reference-looking prefix followed by anything else is paragraph text and
 // stays (an image on that line still renders and must still be seen).
-function blankReferenceDefinitions(str) {
+function blankReferenceDefinitions(str, { depths = null, inList = null } = {}) {
   const lines = String(str || '').split('\n');
   let lastDefinitionEnd = -2;
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
-    if (!definitionMayStartAt(lines, i, lastDefinitionEnd)) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList })) continue;
     const rest = lines[i].slice(m[0].length);
     let destLine = -1;
     let destText = '';
@@ -416,8 +432,8 @@ function blankReferenceDefinitions(str) {
   }
   return lines.join('\n');
 }
-function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false } = {}) {
-  const defsBlanked = blankReferenceDefinitions(str);
+function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false, depths = null, inList = null } = {}) {
+  const defsBlanked = blankReferenceDefinitions(str, { depths, inList });
   return (keepReferenceTails ? defsBlanked : defsBlanked.replace(/\]\s*\[[^\]\n]*\]/g, blankSpan))
     .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
 }
@@ -515,8 +531,8 @@ function* eachMarkdownLink(text) {
   }
 }
 
-function blankMarkdownLinkDestinations(str, { keepImages = false } = {}) {
-  const text = blankLinkDefinitionsAndTitles(str, { keepReferenceTails: keepImages });
+function blankMarkdownLinkDestinations(str, { keepImages = false, depths = null, inList = null } = {}) {
+  const text = blankLinkDefinitionsAndTitles(str, { keepReferenceTails: keepImages, depths, inList });
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
   for (const span of eachMarkdownLink(text)) {

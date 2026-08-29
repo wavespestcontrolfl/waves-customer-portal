@@ -26,6 +26,13 @@ describe('content-astro github-client pagination', () => {
     jest.clearAllMocks();
   });
 
+  test('compareFiles reports both sides of a renamed entry and the merge base (GH r23)', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(jsonResponse({ files: [{ filename: 'public/images/blog/x/body-2.webp', previous_filename: 'public/images/blog/x/body-1.webp', status: 'renamed' }, { filename: 'src/content/blog/x.mdx', status: 'modified' }], merge_base_commit: { sha: 'mb' } }));
+    const res = await gh.compareFiles('content/blog-x');
+    expect(res).toEqual({ files: ['public/images/blog/x/body-2.webp', 'public/images/blog/x/body-1.webp', 'src/content/blog/x.mdx'], mergeBaseSha: 'mb' });
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/compare/main...content%2Fblog-x'), expect.any(Object));
+  });
+
   test('listIssueComments paginates past the first 100 rows', async () => {
     const firstPage = Array.from({ length: 100 }, (_, i) => ({ id: i + 1 }));
     const secondPage = [{ id: 101 }];
