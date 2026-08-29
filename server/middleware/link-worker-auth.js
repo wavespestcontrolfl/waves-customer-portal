@@ -73,11 +73,19 @@ function rawBodyVerify(req, res, buf) {
   }
 }
 
-/** pathname + '?' + every query param sorted by key (then value), percent-encoded. */
+/**
+ * pathname + '?' + every query param sorted by key (then value),
+ * percent-encoded with FULL RFC 3986 escaping. encodeURIComponent leaves
+ * !'()* bare while the Python signer's quote(safe='') escapes them — without
+ * this alignment a validly signed request containing those characters fails.
+ */
+const rfc3986 = (s) =>
+  encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
 function canonicalTarget(originalUrl) {
   const u = new URL(originalUrl, 'http://localhost');
   const pairs = [...u.searchParams.entries()]
-    .map(([k, v]) => [encodeURIComponent(k), encodeURIComponent(v)])
+    .map(([k, v]) => [rfc3986(k), rfc3986(v)])
     .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1));
   const q = pairs.map((p) => `${p[0]}=${p[1]}`).join('&');
   return q ? `${u.pathname}?${q}` : u.pathname;

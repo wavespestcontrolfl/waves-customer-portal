@@ -229,6 +229,22 @@ describe('audit finalization', () => {
   });
 });
 
+describe('canonicalTarget encoding', () => {
+  test('escapes RFC 3986 reserved punctuation exactly like the Python signer', () => {
+    // python: quote("a b!'()*x", safe="") == 'a%20b%21%27%28%29%2Ax'
+    expect(canonicalTarget("/x?q=a b!'()*x")).toBe('/x?q=a%20b%21%27%28%29%2Ax');
+  });
+  test('sorts by encoded key then value and normalizes + as space', () => {
+    expect(canonicalTarget('/x?b=2&a=1&a=0')).toBe('/x?a=0&a=1&b=2');
+    expect(canonicalTarget('/x?q=a+b')).toBe('/x?q=a%20b');
+  });
+  test('a request signed over a reserved-punctuation query verifies', async () => {
+    const url = "/api/integrations/backlink-worker/claim?note=don't(stop)*now!";
+    const { next } = await drive(makeReq({ url, headers: signedHeaders({ url }) }));
+    expect(next).toHaveBeenCalledWith();
+  });
+});
+
 describe('rawBodyVerify scope', () => {
   test('captures bytes only for worker routes', () => {
     const buf = Buffer.from('{"a":1}');
