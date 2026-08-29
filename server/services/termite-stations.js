@@ -623,11 +623,11 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
 // the visit's ET service day (created before end-of-day, not retired before
 // start-of-day). Positions always render from the current row so drift
 // re-anchoring and physical re-pins keep pointing at the real ground.
-function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) {
+function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate, visitCompletedAt = null) {
   if (statusByStationId.size > 0) {
     return stationRows.filter((row) => statusByStationId.has(String(row.id)));
   }
-  return stationRowsOnVisitDay(stationRows, serviceDate);
+  return stationRowsOnVisitDay(stationRows, serviceDate, visitCompletedAt);
 }
 
 // The registry as it stood on the visit's ET service day — the NETWORK the
@@ -635,17 +635,23 @@ function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) 
 // wrote no checks, and as the summary's denominator when it did: 12
 // submitted checks on a 14-station property are "12 of 14", never "12 of 12"
 // (codex P2 #3600 r29).
-function stationRowsOnVisitDay(stationRows, serviceDate) {
+// `visitCompletedAt` (the record's completion timestamp) freezes the cutoff
+// at the visit itself: a station created later the same ET day must not
+// change an already-issued report's denominator (codex P2 #3600 r32). Falls
+// back to end-of-day when the record carries no timestamp.
+function stationRowsOnVisitDay(stationRows, serviceDate, visitCompletedAt = null) {
+  const completedAt = visitCompletedAt ? new Date(visitCompletedAt) : null;
+  const cutoffAt = completedAt && !Number.isNaN(completedAt.getTime()) ? completedAt : null;
   const dateStr = typeof serviceDate === 'string'
     ? serviceDate.slice(0, 10)
     : serviceDate instanceof Date && !Number.isNaN(serviceDate.getTime())
       ? serviceDate.toISOString().slice(0, 10)
       : null;
-  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+  if (!cutoffAt && (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr))) {
     // no visit anchor — active rows only (legacy behavior)
     return stationRows.filter((row) => row.is_active !== false);
   }
-  const dayEnd = parseETDateTime(`${dateStr}T23:59:59`);
+  const dayEnd = cutoffAt || parseETDateTime(`${dateStr}T23:59:59`);
   return stationRows.filter((row) => {
     const createdAt = row.created_at ? new Date(row.created_at) : null;
     if (createdAt && !Number.isNaN(createdAt.getTime()) && createdAt > dayEnd) return false;
@@ -687,6 +693,9 @@ function buildStationMapReportContext({
   imageContext = {},
   typedTypes = [],
   serviceDate = null,
+  // Completion timestamp — freezes the registry cutoff (see
+  // stationRowsOnVisitDay).
+  visitCompletedAt = null,
   // Declared trap SETUP: the pins went out on THIS visit, so every default
   // 'ok' pin means "set today", not "checked, nothing caught" — and the
   // summary counted them as inspected. Left unset, the map keeps its
@@ -724,7 +733,7 @@ function buildStationMapReportContext({
     }
   }
 
-  const visitRows = selectStationRowsForVisit(programRows, statusByStationId, serviceDate);
+  const visitRows = selectStationRowsForVisit(programRows, statusByStationId, serviceDate, visitCompletedAt);
   if (!visitRows.length) return { available: false, reason: 'no_stations' };
 
   // The visit's check evidence, counted from the persisted check rows —
@@ -735,7 +744,7 @@ function buildStationMapReportContext({
   const visitStatuses = visitRows.map((row) => statusByStationId.get(String(row.id)) || null);
   // Denominator = the network on the visit day (never smaller than the
   // rows the visit actually covered).
-  const networkTotal = Math.max(visitStatuses.length, stationRowsOnVisitDay(programRows, serviceDate).length);
+  const networkTotal = Math.max(visitStatuses.length, stationRowsOnVisitDay(programRows, serviceDate, visitCompletedAt).length);
   const summary = {
     total: networkTotal,
     checked: visitStatuses.filter((status) => status && status !== 'inaccessible').length,

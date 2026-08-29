@@ -766,6 +766,27 @@ test('the summary denominator is the visit-day network, not the submitted subset
   expect(context.summary).toEqual({ total: 14, checked: 12, activity: 0, serviced: 0, inaccessible: 0 });
 });
 
+test('the denominator is frozen at the visit completion time — a station added later the same day never changes it', () => {
+  const rows = [
+    stationRow('st-1', 1, pin(0.2, 0.3), { created_at: '2026-01-01T00:00:00Z' }),
+    stationRow('st-2', 2, pin(0.5, 0.5), { created_at: '2026-01-01T00:00:00Z' }),
+    // created that afternoon, AFTER the 10:56 ET completion
+    stationRow('st-3', 3, pin(0.8, 0.6), { created_at: '2026-08-27T19:30:00Z' }),
+  ];
+  const checks = [{ station_id: 'st-1', status: 'ok' }, { station_id: 'st-2', status: 'ok' }];
+  const frozen = buildStationMapReportContext({
+    stationRows: rows, checkRows: checks, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27', visitCompletedAt: '2026-08-27T14:56:00Z',
+  });
+  expect(frozen.summary).toEqual({ total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 });
+  // without a completion timestamp the legacy end-of-day cutoff still applies
+  const legacy = buildStationMapReportContext({
+    stationRows: rows, checkRows: checks, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'], serviceDate: '2026-08-27',
+  });
+  expect(legacy.summary.total).toBe(3);
+});
+
 test('a basemap outage keeps the visit-check evidence as checkSummary (status builders reconcile without a map)', () => {
   const context = buildStationMapReportContext({
     stationRows: [

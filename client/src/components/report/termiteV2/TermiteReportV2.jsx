@@ -352,7 +352,10 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
       </div>
       {/* TermiteBondCard is mounted by the portal's DocumentsTab
           (PortalPage.jsx) — the CTA lands where the bond actually renders
-          (codex P2 #3600 r31; r1's My Plan pointer was wrong). */}
+          (codex P2 #3600 r31; r1's My Plan pointer was wrong) — and only
+          when a bond EXISTS to view (the card returns null without one;
+          codex P2 r32). */}
+      {active ? (
       <a
         href="/?tab=documents"
         style={{
@@ -369,6 +372,7 @@ export function TermiteProtection({ nextVisitLabel = null, bondLines = [], progr
       >
         View termite protection plan →
       </a>
+      ) : null}
     </section>
   );
 }

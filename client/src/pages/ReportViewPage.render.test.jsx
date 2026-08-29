@@ -299,6 +299,16 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(companionFindings).queryByText('Stations checked')).toBeNull();
   });
 
+  it('a next monitoring visit without a bond shows the card but no protection-plan link (nothing to view)', async () => {
+    const noBond = JSON.parse(JSON.stringify(termiteReportV2));
+    noBond.termiteBonds = [];
+    renderReport(noBond);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const card = (await screen.findByText('Next monitoring visit')).closest('section');
+    expect(within(card).queryByText('ACTIVE')).toBeNull();
+    expect(within(card).queryByRole('link', { name: /View termite protection plan/ })).toBeNull();
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);
