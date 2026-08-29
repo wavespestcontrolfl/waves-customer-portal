@@ -445,12 +445,26 @@ function answerServiceReportQuestion({
   // watering question first — never re-entry or generic copy under the
   // plan shown on the same page (codex #3565 gh-r29). Without a plan the
   // existing routing (irrigation → re-entry) stands.
+  // Safety first: re-entry / pets / kids questions answer with the once-dry
+  // rule even when they mention minutes or water (codex gh-r30).
+  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside)\b/.test(q)) {
+    return answerReentry({ data });
+  }
+
   const weekPlan = data?.reportV2?.water?.weekPlan;
-  if (weekPlan?.title && /\b(water|watering|irrigat\w*|sprinklers?|run ?time|minutes|zones?)\b/.test(q)) {
+  const aftercare = data?.reportV2?.aftercare;
+  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q);
+  // Aftercare: "should I water after today's treatment?" answers with the
+  // label instruction, plus the reduced plan when a watering-in is credited.
+  if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {
+    const reduced = aftercare.waterInRequired === true && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
+    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : null].filter(Boolean).join(' ');
+  }
+  if (weekPlan?.title && wateringIntent) {
     return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');
   }
 
-  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside|irrigation)\b/.test(q)) {
+  if (/\b(irrigation)\b/.test(q)) {
     return answerReentry({ data });
   }
 

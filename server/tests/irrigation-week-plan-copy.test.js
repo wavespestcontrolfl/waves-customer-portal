@@ -133,6 +133,10 @@ describe('renderWeekPlanEmail', () => {
     const after = renderWeekPlanAfterTreatment(two, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
     expect(after.title).toBe('This week: 1 more run after today\'s watering-in');
     expect(after.detail).toContain('counts as one of your 2 runs. Run one more cycle of about 25 minutes per turf zone on one of your other permitted watering days (on your assigned day');
+    // gh-r30: the unconditional soaking-rain safeguard rides the reduced plan too; conditional plans keep their clause.
+    expect(after.detail).toContain('and if ½" or more of rain falls before a run, skip it.');
+    const condTwo = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(renderWeekPlanAfterTreatment(condTwo).detail).toContain('only if less than ½" has fallen since your previous run.');
     const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     expect(hold.action).toBe('hold');
     expect(renderWeekPlanAfterTreatment(hold)).toBe(null);

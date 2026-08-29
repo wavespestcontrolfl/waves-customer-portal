@@ -380,9 +380,15 @@ function renderWeekPlanAfterTreatment(plan, { restriction = null } = {}) {
     ? (minutes ? `one more cycle of ${minutes} per turf zone` : 'one more full cycle on each turf zone')
     : (minutes ? `${remaining} more cycles of ${minutes} per turf zone` : `${remaining} more full cycles on each turf zone`);
   const days = remaining === 1 ? 'one of your other permitted watering days' : 'your other permitted watering days';
+  // The remaining runs keep the plan's own rain rule: a conditional plan's
+  // "only if less than ½" has fallen" clause, or the unconditional
+  // one-soaking-skips-one-run safeguard (codex gh-r30).
+  const rainRule = plan.conditionalOnForecast
+    ? ', only if less than ½" has fallen since your previous run'
+    : ' — and if ½" or more of rain falls before a run, skip it';
   return {
     title: `This week: ${remaining} more run${remaining === 1 ? '' : 's'} after today\'s watering-in`,
-    detail: `Today\'s watering-in counts as one of your ${events} runs. Run ${cycles} on ${withHours(days, restriction)}${plan.conditionalOnForecast ? ', only if less than ½" has fallen since your previous run' : ''}.`,
+    detail: `Today\'s watering-in counts as one of your ${events} runs. Run ${cycles} on ${withHours(days, restriction)}${rainRule}.`,
   };
 }
 

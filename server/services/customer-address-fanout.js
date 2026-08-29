@@ -227,10 +227,14 @@ function homesDiffer(a, b) {
   const pb = premise(b);
   const za = zip5(a?.zip);
   const zb = zip5(b?.zip);
+  const ca = addressMatchKey(a?.city);
+  const cb = addressMatchKey(b?.city);
   // ZIP is authoritative when both sides have one (postal city names alias —
   // Bradenton / Lakewood Ranch share 34211, same rule as placeCorroborates);
-  // city decides only when a ZIP compare is unavailable (codex gh-r29).
-  const placeDiffers = (za && zb) ? za !== zb : addressMatchKey(a?.city) !== addressMatchKey(b?.city);
+  // city decides only when both sides have a city and no ZIP compare is
+  // possible. Missing place evidence on either side is never contradictory
+  // evidence — completing a blank city/ZIP is not a move (codex gh-r29/r30).
+  const placeDiffers = (za && zb) ? za !== zb : ((ca && cb) ? ca !== cb : false);
   return pa.street !== pb.street
     || pa.unit !== pb.unit
     || placeDiffers;
