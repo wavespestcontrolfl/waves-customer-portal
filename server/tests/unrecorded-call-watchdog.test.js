@@ -132,10 +132,31 @@ describe('alertUnrecordedCalls', () => {
     // 'alert' is silenced under GATE_ADMIN_BELL_POLICY; the explicit site
     // tag is what lets this lane's only output ring.
     expect(opts.bell).toBe(true);
-    expect(opts.metadata).toEqual(expect.objectContaining({
-      dedupeKey: 'unrecorded-call:CAfa987fe4d9655eafbd7d1e59701ff941',
-      call_sid: 'CAfa987fe4d9655eafbd7d1e59701ff941',
-    }));
+    // Top-level dedupeKey = notifyAdmin's advisory-lock insert (the sweep is
+    // unlocked; two overlapping pods must not both ring).
+    expect(opts.dedupeKey).toBe('unrecorded-call:CAfa987fe4d9655eafbd7d1e59701ff941');
+    expect(opts.link).toBe('/admin/communications');
+    expect(body).toMatch(/create the lead/);
+    expect(opts.metadata).toEqual(expect.objectContaining({ call_sid: 'CAfa987fe4d9655eafbd7d1e59701ff941' }));
+  });
+
+  test('a caller already matched to a customer is told to log the request, not create a lead', async () => {
+    mockGateOn = true;
+    installDb();
+    await alertUnrecordedCalls([row({ customer_id: 'cus-77' })], { now: NOW });
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toMatch(/log the customer/i);
+    expect(body).toMatch(/do not create a new lead/);
+    expect(body).not.toMatch(/create the lead from the call row/);
+    expect(opts.link).toBe('/admin/customers/cus-77');
+    expect(opts.metadata.customer_id).toBe('cus-77');
+  });
+
+  test('a write that notifyAdmin deduped (bell already existed) is settled — not alerted, not failed', async () => {
+    mockGateOn = true;
+    installDb();
+    NotificationService.notifyAdmin.mockImplementation(async () => ({ id: 'n-old', deduped: true }));
+    expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0 });
   });
 
   test('an already-alerted sid never re-rings', async () => {
@@ -155,7 +176,7 @@ describe('alertUnrecordedCalls', () => {
     expect(await alertUnrecordedCalls([row()], { now: NOW })).toEqual({ skipped: false, scanned: 1, missed: 1, alerted: 0, failed: 1 });
   });
 
-  test('more than AGGREGATE_THRESHOLD fresh misses → ONE outage bell, keyed per pass, carrying every sid', async () => {
+  test('more than AGGREGATE_THRESHOLD fresh misses → ONE outage bell keyed on the SID set, carrying every sid', async () => {
     mockGateOn = true;
     const rows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CA${i}` }));
     installDb();
@@ -165,16 +186,17 @@ describe('alertUnrecordedCalls', () => {
     const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toMatch(/DOWN/);
     expect(opts.bell).toBe(true);
-    expect(opts.metadata.dedupeKey).toBe(`unrecorded-call-outage:${NOW.toISOString()}`);
-    expect(opts.metadata.unrecorded_call_sids).toEqual(rows.map((r) => r.twilio_call_sid));
+    expect(opts.dedupeKey).toMatch(/^unrecorded-call-outage:[0-9a-f]{16}$/);
+    expect(opts.metadata.unrecorded_call_sids).toEqual(rows.map((r) => r.twilio_call_sid).sort());
 
-    // A later pass with its own >3 NEW misses gets a distinct key — it is
-    // never swallowed by the earlier aggregate, so its SIDs get settled.
-    const later = new Date(NOW.getTime() + 30 * 60 * 1000);
+    // Same fresh set on a concurrent pod (different `now`) → SAME key, so
+    // notifyAdmin's lock dedupes it; a later pass with NEW misses → a
+    // different key, never swallowed by the earlier aggregate.
+    await alertUnrecordedCalls([...rows].reverse(), { now: new Date(NOW.getTime() + 7000) });
+    expect(NotificationService.notifyAdmin.mock.calls[1][3].dedupeKey).toBe(opts.dedupeKey);
     const moreRows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CAlater${i}` }));
-    await alertUnrecordedCalls(moreRows, { now: later });
-    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(2);
-    expect(NotificationService.notifyAdmin.mock.calls[1][3].metadata.dedupeKey).toBe(`unrecorded-call-outage:${later.toISOString()}`);
+    await alertUnrecordedCalls(moreRows, { now: new Date(NOW.getTime() + 30 * 60 * 1000) });
+    expect(NotificationService.notifyAdmin.mock.calls[2][3].dedupeKey).not.toBe(opts.dedupeKey);
   });
 
   test('rows the sweep passes that are not misses (voicemail, inside grace) are classified out, not alerted', async () => {

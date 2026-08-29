@@ -30,14 +30,21 @@
  *
  * Alerting: one admin bell per call (explicit `bell: true` — the 'alert'
  * category is silenced under GATE_ADMIN_BELL_POLICY, and a bell is this
- * lane's only output), deduped forever via the notifications metadata
- * dedupeKey. More than AGGREGATE_THRESHOLD fresh misses in one pass =
- * recording is broadly broken → ONE aggregate bell keyed per pass that
- * carries every SID, so a later pass with new misses rings its own.
+ * lane's only output), deduped forever through notifyAdmin's top-level
+ * `dedupeKey` (its advisory-lock insert — the sweep is unlocked, so two
+ * overlapping pods must not both ring; the sidAlreadyAlerted pre-read is
+ * only a cheap filter). More than AGGREGATE_THRESHOLD fresh misses in one
+ * pass = recording is broadly broken → ONE aggregate bell keyed on the SET
+ * of fresh SIDs (same set on two pods → same key → one bell; a later pass
+ * with new misses → new set → its own bell) that carries every SID.
+ *
+ * A caller call_log already matched to a customer gets a different
+ * instruction — open the customer, don't mint a duplicate lead.
  *
  * Dark by default behind GATE_UNRECORDED_CALL_WATCHDOG. Reads notifications;
  * writes only admin notifications.
  */
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
@@ -117,47 +124,60 @@ async function alertUnrecordedCalls(rows, { now = new Date() } = {}) {
   const when = (c) => new Date(c.created_at).toLocaleString('en-US', { timeZone: 'America/New_York' });
   const describe = (c) => `${c.from_phone || 'unknown caller'} → ${c.to_phone || '?'} at ${when(c)} ET (${c.duration_seconds}s)`;
   const describeMasked = (c) => `${maskPhone(c.from_phone)} → ${maskPhone(c.to_phone)} at ${when(c)} ET (${c.duration_seconds}s)`;
+  const WHY = 'Twilio produced no recording (usually the number\'s voice fallback after a webhook timeout), so no transcript, extraction, or lead will follow.';
+  // Deduped (bell already existed) is settled, not a failure and not a new
+  // alert; a null/id-less return is a silenced or failed write — this
+  // lane's ONLY output, so it must not be reported as "alerted" (the
+  // pre-read would then never let it re-ring).
+  const outcome = (written) => (!written || written.id == null ? 'failed' : written.deduped ? 'deduped' : 'written');
 
   if (fresh.length > AGGREGATE_THRESHOLD) {
-    // Keyed per PASS (not per hour): every fresh SID in this pass rides in
-    // metadata, which is what settles it for sidAlreadyAlerted — a later
-    // pass with >3 NEW misses must ring its own aggregate, not be swallowed
-    // by an earlier key and leave its SIDs unalerted.
-    const dedupeKey = `unrecorded-call-outage:${now.toISOString()}`;
+    const sids = fresh.map((c) => c.twilio_call_sid).sort();
+    const dedupeKey = `unrecorded-call-outage:${crypto.createHash('sha1').update(sids.join(',')).digest('hex').slice(0, 16)}`;
     const written = await NotificationService.notifyAdmin(
       'alert',
       `Call recording may be DOWN — ${fresh.length} answered calls have no recording`,
       `${fresh.length} answered inbound calls have no Twilio recording, so no transcript, extraction, or lead will follow. ` +
       `Newest: ${describe(fresh[0])}. ` +
       'Check for webhook 502s in the Twilio debugger (the number\'s voice fallback bridges without the portal) and recent deploys.',
-      { link: '/admin/communications', bell: true, metadata: { dedupeKey, unrecorded_call_sids: fresh.map((c) => c.twilio_call_sid) } },
+      { link: '/admin/communications', bell: true, dedupeKey, metadata: { unrecorded_call_sids: sids } },
     );
-    if (!written || written.id == null) {
+    const result = outcome(written);
+    if (result === 'failed') {
       logger.error(`[unrecorded-call] ${fresh.length} unrecorded answered calls — aggregate alert NOT written (${written && written.reason ? written.reason : 'insert failed'})`);
       return { skipped: false, scanned: rows.length, missed: missed.length, alerted: 0, aggregate: true, failed: fresh.length };
     }
-    logger.error(`[unrecorded-call] ${fresh.length} unrecorded answered calls in one pass — aggregate alert fired`);
-    return { skipped: false, scanned: rows.length, missed: missed.length, alerted: 1, aggregate: true };
+    if (result === 'written') logger.error(`[unrecorded-call] ${fresh.length} unrecorded answered calls in one pass — aggregate alert fired`);
+    return { skipped: false, scanned: rows.length, missed: missed.length, alerted: result === 'written' ? 1 : 0, aggregate: true };
   }
 
   let alerted = 0;
   let failed = 0;
   for (const c of fresh) {
     const dedupeKey = `unrecorded-call:${c.twilio_call_sid}`;
+    const known = !!c.customer_id;
     const written = await NotificationService.notifyAdmin(
       'alert',
-      'Answered call has no recording — lead must be entered by hand',
-      `${describe(c)} was answered but Twilio produced no recording (usually the number's voice fallback after a ` +
-      'webhook timeout). No transcript, extraction, or lead will follow. Ask whoever took the call and create the lead from the call row.',
-      { link: '/admin/communications', bell: true, metadata: { dedupeKey, call_sid: c.twilio_call_sid, from_phone: c.from_phone } },
+      known
+        ? 'Answered call has no recording — log the customer\'s request by hand'
+        : 'Answered call has no recording — lead must be entered by hand',
+      known
+        ? `${describe(c)} matches an existing customer. ${WHY} Ask whoever took the call and log the request on the customer's record — do not create a new lead.`
+        : `${describe(c)} was answered but ${WHY} Ask whoever took the call and create the lead from the call row.`,
+      {
+        link: known ? `/admin/customers/${c.customer_id}` : '/admin/communications',
+        bell: true,
+        dedupeKey,
+        metadata: { call_sid: c.twilio_call_sid, from_phone: c.from_phone, ...(known ? { customer_id: c.customer_id } : {}) },
+      },
     );
-    // A bell is this lane's ONLY output: a silenced/failed write must not
-    // be reported as "alerted" (the dedupe would then never let it re-ring).
-    if (!written || written.id == null) {
+    const result = outcome(written);
+    if (result === 'failed') {
       failed += 1;
       logger.error(`[unrecorded-call] Unrecorded call ${c.twilio_call_sid} (${describeMasked(c)}) — alert NOT written (${written && written.reason ? written.reason : 'insert failed'})`);
       continue;
     }
+    if (result === 'deduped') continue;
     alerted += 1;
     logger.warn(`[unrecorded-call] Unrecorded call ${c.twilio_call_sid} (${describeMasked(c)}) — alert fired`);
   }

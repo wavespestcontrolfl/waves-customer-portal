@@ -14361,10 +14361,16 @@ const CallRecordingProcessor = {
 
   async recoverMissingRecentRecordings() {
     // The extra columns feed the unrecorded-call alert below (the row's
-    // identity + timing; nothing the recovery itself needs).
+    // identity + timing; nothing the recovery itself needs). Rows whose
+    // unrecorded-call bell has already rung (per-call dedupeKey, or
+    // membership in an aggregate bell's unrecorded_call_sids) sort LAST so
+    // the 25-row cap is spent on rows that still need a Twilio look + a
+    // bell — under an outage with >25 permanent misses the newest settled
+    // rows would otherwise pin the window and older misses never ring.
+    // Settled rows still get recovery retries whenever capacity allows.
     const rows = await db('call_log')
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
-        'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'created_at')
+        'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
       .where(function () {
         this.whereNull('recording_url').orWhere('recording_url', '');
@@ -14373,6 +14379,12 @@ const CallRecordingProcessor = {
       .where('created_at', '>=', db.raw("NOW() - INTERVAL '7 days'"))
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
       .where('duration_seconds', '>', 10)
+      .orderByRaw(`EXISTS (
+        SELECT 1 FROM notifications n
+        WHERE n.recipient_type = 'admin'
+          AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
+               OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
+      ) ASC`)
       .orderBy('created_at', 'desc')
       .limit(25);
 
