@@ -346,16 +346,30 @@ async function findConcurrentSeriesMoveWinner(conn, serviceId, opKey, observedPr
 // the result's rewoundIds, not only the anchor's old status: a pass that
 // died between the commit and its post-commit loop left those techs pinned
 // and trackers stale too (codex r10 P1). Also run by the reconciler.
+// Stamps series_moves.cleanup_done_at once every rewound row's tech pointer
+// is released (best-effort marker write; the reconciler keys on it).
+async function markSeriesCleanupDone(seriesMoveId, ok) {
+  if (!seriesMoveId || !ok) return;
+  try {
+    await db('series_moves').where({ id: seriesMoveId }).whereNull('cleanup_done_at').update({ cleanup_done_at: db.fn.now() });
+  } catch (err) {
+    logger.warn(`[rebooker] series_moves cleanup_done_at stamp failed for ${seriesMoveId}: ${err.message}`);
+  }
+}
+// Returns true when every cleanup landed (and stamps cleanup_done_at);
+// false leaves the operation reconcilable.
 async function replaySeriesMoveCleanup(prior) {
   const rows = Array.isArray(prior.rows) ? prior.rows : [];
   const rewound = new Set((prior.result?.rewoundIds || []).map(String));
   const anchor = rows.find((r) => r.anchor);
+  let ok = true;
   if (anchor && (LIVE_OVERRIDE_STATUSES.has(String(anchor.before?.status)) || rewound.has(String(anchor.id)))) {
     const techId = anchor.before?.technician_id || null;
     if (techId) {
       try {
         await clearTechCurrentJob({ tech_id: techId, current_job_id: anchor.id, status: 'idle' });
       } catch (err) {
+        ok = false;
         logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
       }
     }
@@ -365,14 +379,18 @@ async function replaySeriesMoveCleanup(prior) {
     if (row.anchor || !rewound.has(String(row.id))) continue;
     const status = String(row.after?.status ?? row.before?.status ?? 'confirmed');
     try {
-      await applyLiveMovePostCommitEffects(
+      const out = await applyLiveMovePostCommitEffects(
         { id: row.id, customer_id: prior.customer_id, technician_id: row.before?.technician_id || null, status },
         { toStatus: status },
       );
+      if (out && out.techCleared === false) ok = false;
     } catch (err) {
+      ok = false;
       logger.error(`[rebooker] track-rewind cleanup on series replay failed for sibling ${row.id}: ${err.message}`);
     }
   }
+  if (rewound.size || (anchor && LIVE_OVERRIDE_STATUSES.has(String(anchor.before?.status)))) await markSeriesCleanupDone(prior.id, ok);
+  return ok;
 }
 
 // What an operation_key replay hands back for a committed move: the result
@@ -2319,6 +2337,11 @@ class SmartRebooker {
     // decision (anchorRewound — fresh read, date-change gated), so a
     // same-day edit that preserved the lifecycle never clears an active
     // tech, and a concurrent tap after the outer read is still covered.
+    // Cleanup completion is a durable effect of its own: series_moves.
+    // cleanup_done_at stamps only when every rewound row's tech pointer was
+    // released; until then the reconciler re-runs replaySeriesMoveCleanup
+    // for the operation (codex r14 P1).
+    let cleanupOk = true;
     if (wasLive || anchorRewound) {
       // The trx-fresh anchor row wins over the outer snapshot: a concurrent
       // reassignment between the two reads would otherwise clear the OLD
@@ -2335,6 +2358,7 @@ class SmartRebooker {
             status: 'idle',
           });
         } catch (err) {
+          cleanupOk = false;
           logger.error(`[rebooker] tech_status clear after live series reschedule failed for ${serviceId}: ${err.message}`);
         }
       }
@@ -2345,11 +2369,16 @@ class SmartRebooker {
     // status in the sweep, so the refresh carries it. Best-effort per row.
     for (const rewoundSib of rewoundSiblings) {
       try {
-        await applyLiveMovePostCommitEffects(rewoundSib, { toStatus: String(rewoundSib.status) });
+        const out = await applyLiveMovePostCommitEffects(rewoundSib, { toStatus: String(rewoundSib.status) });
+        if (out && out.techCleared === false) cleanupOk = false;
       } catch (err) {
+        cleanupOk = false;
         logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
       }
     }
+    // Only an operation that rewound something owes the marker (the
+    // reconciler selects on rewoundIds); a plain move writes nothing here.
+    if (wasLive || anchorRewound || rewoundSiblings.length) await markSeriesCleanupDone(seriesMoveId, cleanupOk);
 
     // Same escalation check the single-visit path runs — a series re-anchor
     // is still a reschedule of this visit, and the manual-review threshold
@@ -2499,7 +2528,11 @@ async function applyLiveMoveHistory(conn, svc, { actor = null } = {}) {
 // 'confirmed'), the row's unchanged status for a tracker-evidence-only
 // rewind (track_state was live but status never synced, so the move did
 // not flip it).
+// Returns { techCleared } so a durable caller (the series post-commit loop,
+// replaySeriesMoveCleanup) can keep the operation reconcilable until every
+// pinned technician is actually released (codex r14 P1).
 async function applyLiveMovePostCommitEffects(svc, { toStatus = 'confirmed' } = {}) {
+  let techCleared = true;
   if (svc.technician_id) {
     try {
       await clearTechCurrentJob({
@@ -2508,10 +2541,12 @@ async function applyLiveMovePostCommitEffects(svc, { toStatus = 'confirmed' } = 
         status: 'idle',
       });
     } catch (err) {
+      techCleared = false;
       logger.error(`[rebooker] tech_status clear after live move failed for ${svc.id}: ${err.message}`);
     }
   }
   emitCustomerJobRefresh(svc, toStatus);
+  return { techCleared };
 }
 
 // Convenience composition for NON-transactional callers (the IB movers run

@@ -923,6 +923,21 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000031_series_moves_effects_attempted_at.js'))).toBe(true);
   });
 
+  test('a daily weekend-avoiding series whose rows are the seeder\'s collision-adjusted dates (Fri, Mon, Tue, Wed) is NOT ambiguous and plans no exceptions', () => {
+    const { planCadenceExceptions } = require('../models/migrations/20260828000030_series_moves_and_date_exception');
+    let F = dayOffset(10);
+    while (etParts(parseETDateTime(`${F}T12:00`)).dayOfWeek !== 5) F = etDateString(addETDays(parseETDateTime(`${F}T12:00`), 1));
+    const day = (n) => etDateString(addETDays(parseETDateTime(`${F}T12:00`), n));
+    const parent = { recurring_pattern: 'custom', recurring_interval_days: 1, skip_weekends: true, weekend_shift: null };
+    const rows = [
+      { id: 'a', scheduled_date: F, date_exception: false },
+      { id: 'b', scheduled_date: day(3), date_exception: false }, // Sat → Mon
+      { id: 'c', scheduled_date: day(4), date_exception: false }, // Sun → Mon → Tue
+      { id: 'd', scheduled_date: day(5), date_exception: false }, // Mon → Tue → Wed
+    ];
+    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [], ambiguous: false });
+  });
+
   test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {
     expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: dayOffset(19) }])).toEqual({ planned: [], ambiguous: true });
     expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: SIB1 }])).toEqual({ planned: [], ambiguous: false });
@@ -1005,7 +1020,14 @@ describe('caller wiring (source)', () => {
     expect(fx).toContain("const cardOnly = markers.status === 'superseded';");
     // A customer SMS-reply series move keeps the quiet-hours window; staff surfaces are exempt — decided by the row's recorded source on every pass.
     expect(fx).toContain("operatorInitiated: STAFF_SERIES_SURFACES.has(markers.source_surface),");
-    expect(disp).toContain("const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal']);");
+    expect(disp).toContain("const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);");
+    // r14: re-arm failures keep the row retryable; an accepted recipient before a fan-out throw counts as sent; a stale Quick Move claim is recovered; cleanup completion is a reconciled effect.
+    expect(fx).toContain("if (definitiveNonSend && rearm?.ok !== false) await stampMarker('notified_at', { customer_notified: false });");
+    expect(fx).toContain('if (sendOutcome.providerAccepted === true) {');
+    expect(fx).toContain("const staleQuickMoveClaim = markers.source_surface === 'quick_move'");
+    expect(disp).toContain("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0");
+    expect(read('../services/rebooker.js')).toContain('await markSeriesCleanupDone(seriesMoveId, cleanupOk);');
+    expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000032_series_moves_cleanup_done_at.js'))).toBe(true);
     expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
@@ -1029,6 +1051,8 @@ describe('caller wiring (source)', () => {
     // …and both customer surfaces run their series effects through the shared durable pass (reconciled surfaces), Quick Move with notify off.
     expect(rainOut).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(rainOut).toContain('notify: false,');
+    expect(rainOut).toContain('notifyRequested: notifyCustomer === true,');
+    expect(rainOut).toContain('result: { ...seriesResultForEffects, notifyRequested: false },');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
     expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");
     expect(rainOut).toContain('const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;');

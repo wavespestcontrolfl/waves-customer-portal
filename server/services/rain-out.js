@@ -1765,8 +1765,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             allowLive: true,
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
-            // Quick Move sends its own moved-SMS; the series pass never texts.
-            notifyRequested: false,
+            // The intent is recorded WITH the operation (durable): the live
+            // pass sends Quick Move's own moved-SMS (claimed on the row
+            // below), and a pass that dies before claiming or sending is
+            // recovered by the reconciler with the series confirmation
+            // (codex r14 P1).
+            notifyRequested: notifyCustomer === true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
@@ -1899,7 +1903,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       try {
         const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
         await applySeriesMoveEffects({
-          result: seriesResultForEffects,
+          // The LIVE pass never texts through the shared pass — Quick Move's
+          // own moved-SMS below is the customer notice; the recorded intent
+          // stays on the row for recovery.
+          result: { ...seriesResultForEffects, notifyRequested: false },
           serviceId: job.id,
           newDate: target.date,
           newWindow,

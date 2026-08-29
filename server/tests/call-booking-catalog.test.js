@@ -1274,7 +1274,11 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     const { conn, log } = fakeConn({ kids, updatedCount: 1 });
     occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const report = {};
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
     const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report });
+    // The durable card rings for every caller — a report only adds the response warning.
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(occupancy.findConflictingVisits).toHaveBeenCalledTimes(1);
     expect(occupancy.findConflictingVisits.mock.calls[0][0]).toMatchObject({ date: '2026-07-19', windowStart: '09:00', windowEnd: '10:30', excludeServiceIds: ['kid-1'] });
     expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19' }]);

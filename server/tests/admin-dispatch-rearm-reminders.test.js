@@ -192,7 +192,7 @@ test('a newer reschedule that moved the row on underneath is not stomped (zero-r
   const q = chain({ update: jest.fn().mockResolvedValue(0) });
   db.mockImplementation(() => q);
 
-  await expect(rearmRescheduleReminderWindows(guard('svc-1'))).resolves.toBeUndefined();
+  await expect(rearmRescheduleReminderWindows(guard('svc-1'))).resolves.toEqual({ ok: expect.any(Boolean) });
   expect(q.where).toHaveBeenCalledWith('appointment_time', FUTURE_APPT);
   expect(q.where).toHaveBeenCalledWith('updated_at', UPD);
   expect(logger.error).not.toHaveBeenCalled();
@@ -210,7 +210,7 @@ test('empty/falsy input is a no-op (nothing without a guard is queried)', async 
 
 test('a re-arm failure is logged per guard, never thrown (best-effort compensation)', async () => {
   db.mockImplementation(() => chain({ update: jest.fn().mockRejectedValue(new Error('db down')) }));
-  await expect(rearmRescheduleReminderWindows(guard('svc-1'))).resolves.toBeUndefined();
+  await expect(rearmRescheduleReminderWindows(guard('svc-1'))).resolves.toEqual({ ok: expect.any(Boolean) });
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-arm after failed notice failed'));
 });
 
@@ -340,7 +340,7 @@ describe('snapshot-read-failure fallback (unguarded re-arm)', () => {
 
   test('a fallback re-arm failure is logged per entry, never thrown (best-effort compensation)', async () => {
     db.mockImplementation(() => chain({ update: jest.fn().mockRejectedValue(new Error('db down')) }));
-    await expect(rearmRescheduleReminderWindows(FAILED, [entry('svc-1')])).resolves.toBeUndefined();
+    await expect(rearmRescheduleReminderWindows(FAILED, [entry('svc-1')])).resolves.toEqual({ ok: false });
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('re-arm after failed notice failed'));
   });
 });

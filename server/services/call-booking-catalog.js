@@ -721,11 +721,13 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
         });
     }
     if (skipped.length) {
-      if (report && typeof report === 'object') {
-        report.skipped = (report.skipped || []).concat(skipped);
-      } else {
-        // No caller to surface it: durable operator card (best-effort, own
-        // connection — a rolled-back caller trx leaves at worst a stale card).
+      if (report && typeof report === 'object') report.skipped = (report.skipped || []).concat(skipped);
+      // The durable operator card rings for EVERY caller — a report only
+      // adds the response warning. A caller that dies after its transaction
+      // commits but before returning would otherwise be the only record of
+      // the follow-up that kept its date (codex r14 P2). Best-effort, own
+      // connection — a rolled-back caller trx leaves at worst a stale card.
+      {
         try {
           const NotificationService = require('./notification-service');
           await NotificationService.notifyAdmin(

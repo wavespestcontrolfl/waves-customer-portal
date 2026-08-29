@@ -86,11 +86,29 @@ function planCadenceExceptions(parent, rows) {
     const d = nextRecurringDate(origin, parent.recurring_pattern, k, optsFor(origin));
     return d ? shiftWeekend(d) : null;
   };
+  // The runtime projector never writes two occurrences on one day: when the
+  // weekend shift collapses consecutive occurrences onto one weekday it
+  // advances the later ones day by day (weekend-aware). The same
+  // collision-adjusted sequence is what existing rows must be judged
+  // against, or a valid daily/short-cadence series reads as ambiguous or
+  // as exceptions (codex r14 P2).
+  const dedupeForward = (dates) => {
+    const used = new Set();
+    return dates.map((d) => {
+      if (!d) return d;
+      let out = d;
+      for (let guard = 0; guard < 31 && used.has(out); guard++) {
+        out = shiftWeekend(etDateString(addETDays(parseETDateTime(`${out}T12:00`), 1)));
+      }
+      used.add(out);
+      return out;
+    });
+  };
   // Try every row as the cadence origin (index = its position); the origin
   // explaining the most rows wins, and it must explain more than half.
   let best = null;
   for (let j = 0; j < rows.length; j++) {
-    const expected = rows.map((_, i) => (i === j ? positions[j] : project(positions[j], i - j)));
+    const expected = dedupeForward(rows.map((_, i) => (i === j ? positions[j] : project(positions[j], i - j))));
     const matches = expected.filter((e, i) => e && e === positions[i]).length;
     if (!best || matches > best.matches) best = { matches, expected };
   }

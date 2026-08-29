@@ -13679,6 +13679,10 @@ async function captureReminderGuards(serviceIds) {
 // reschedule re-stamped the row mid-send; skipping the re-arm instead risks
 // the customer never hearing about the new time at all. Prefer the re-arm,
 // accept the narrow double-text window, and log loudly.
+// Returns { ok } — false when any applicable re-arm write failed (or a
+// failed snapshot had no fallback scope), so a durable caller can keep its
+// operation retryable instead of concluding over covered windows (codex
+// r14 P1). Single-visit callers ignore it.
 async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
   const snapshotFailed = Boolean(guards) && !Array.isArray(guards) && guards.failed === true;
   const list = (snapshotFailed
@@ -13688,9 +13692,13 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
   if (!list.length) {
     // Failure marker but no caller-supplied scope: never fall back to an
     // unscoped update — surface the stuck-suppressed risk instead.
-    if (snapshotFailed) logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
-    return;
+    if (snapshotFailed) {
+      logger.error('[dispatch] reminder re-arm skipped after snapshot-read failure: no fallback scope supplied');
+      return { ok: false };
+    }
+    return { ok: true };
   }
+  let failed = 0;
   // Shared boundary predicates — never a local copy of the cron's cutoffs.
   const { reminder72hStillReachable, reminder24hStillReachable } = require('../services/appointment-reminders');
   // Same update-builder shape as reschedule-sms.js's rearmUpdateFor: each
@@ -13746,9 +13754,11 @@ async function rearmRescheduleReminderWindows(guards, unguardedFallback) {
       }
       await query.update(rearmUpdate);
     } catch (err) {
+      failed += 1;
       logger.error(`[dispatch] reminder re-arm after failed notice failed (${g.scheduledServiceId}): ${err.message}`);
     }
   }
+  return { ok: failed === 0 };
 }
 
 // GET /api/admin/dispatch/:serviceId/reschedule-options
@@ -14294,7 +14304,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       await stampMarker('notified_at', { customer_notified: true });
       return true;
     };
-    if (notify && markers.notified_at) {
+    // Quick Move sends its own moved-SMS live and CLAIMS it on the row
+    // (notified_at with customer_notified=false, see rain-out); a claim
+    // older than the lease horizon is a pass that died before sending —
+    // not a concluded non-send — and the recovery text is this pass's
+    // series confirmation (codex r14 P1). Other surfaces' notified_at with
+    // customer_notified=false is a definitive non-send and stays concluded.
+    const staleQuickMoveClaim = markers.source_surface === 'quick_move'
+      && markers.customer_notified === false
+      && !!markers.notified_at
+      && new Date(markers.notified_at).getTime() < Date.now() - SERIES_EFFECTS_LEASE_MS;
+    if (notify && markers.notified_at && !staleQuickMoveClaim) {
       notificationSent = markers.customer_notified === true;
       if (!notificationSent) notificationError = 'notification concluded earlier without a send';
     } else if (notify && markers.customer_notified === true) {
@@ -14336,13 +14356,16 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
+        // sendOutcome: the sender reports a DEFERRED send (send window,
+        // provider hold) separately from a definitive non-send, and
+        // providerAccepted once ANY recipient's handoff succeeded — read in
+        // the catch too, because a fan-out can accept one contact and then
+        // throw on a later one.
+        const sendOutcome = {};
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
           const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
-          // sendOutcome: the sender reports a DEFERRED send (send window,
-          // provider hold) separately from a definitive non-send.
-          const sendOutcome = {};
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate('appointment_series_rescheduled', {
@@ -14395,6 +14418,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         } catch (err) {
           notificationError = err.message;
           logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
+          if (sendOutcome.providerAccepted === true) {
+            // A recipient already accepted the text before the throw: the
+            // delivery stands — record it and close, or a retry would send
+            // that recipient a duplicate (codex r14 P1).
+            notificationSent = true;
+            notificationError = null;
+            await recordCustomerNotified();
+            await closeSeriesReminders();
+          }
         }
       }
       if (!notificationSent) {
@@ -14414,15 +14446,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
           guardsForRearm = Array.isArray(retryGuards) ? retryGuards : { failed: true, guards: [] };
         }
-        await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({
+        const rearm = await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({
           scheduledServiceId: occurrence.id,
           appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
         })));
-        // The terminal marker lands only AFTER the compensation: a pass that
-        // dies between the two leaves the row selectable for the reconciler
-        // (re-arm is idempotent), never a customer with neither notice nor
-        // reminders.
-        if (definitiveNonSend) await stampMarker('notified_at', { customer_notified: false });
+        // The terminal marker lands only AFTER the compensation, and only
+        // when it actually landed: a pass that dies between the two, or a
+        // failed re-arm write, leaves the row selectable for the reconciler
+        // (re-arm is idempotent) — never covered windows under a concluded
+        // non-send (codex r14 P1).
+        if (definitiveNonSend && rearm?.ok !== false) await stampMarker('notified_at', { customer_notified: false });
+        else if (definitiveNonSend) logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder re-arm incomplete — notified_at left unstamped for retry`);
       }
     }
     return { notificationSent, notificationError, conflicts, seriesMoveId };
@@ -14441,7 +14475,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];
 // Surfaces whose series text is an authenticated staff action (quiet-hours
 // exempt); every customer-driven surface stays inside the send window.
-const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal']);
+const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);
 async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
   // Committed rows with any unfinished effect, plus SUPERSEDED rows that
   // still owe their conflict card (applySeriesMoveEffects runs card-only
@@ -14456,7 +14490,12 @@ async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit 
       .where((c) => c.where({ status: 'committed' }).where((u) => u
         .whereNull('reminders_synced_at')
         .orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at'))
-        .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at'))))
+        .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at'))
+        // Rewound rows whose tech pointer release never completed.
+        .orWhere((q4) => q4.whereNull('cleanup_done_at').whereRaw("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0"))
+        // A Quick Move text claimed by a pass that died before sending.
+        .orWhere((q5) => q5.where({ source_surface: 'quick_move', notify_requested: true, customer_notified: false })
+          .where('notified_at', '<', new Date(Date.now() - SERIES_EFFECTS_LEASE_MS)))))
       .orWhere((s) => s.where({ status: 'superseded' }).where('conflict_count', '>', 0).whereNull('conflict_card_at')))
     .orderByRaw('COALESCE(effects_attempted_at, created_at) asc')
     .limit(limit)
