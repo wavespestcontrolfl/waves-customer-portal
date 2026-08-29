@@ -268,12 +268,36 @@ completed child → admin bell with *Close & send* / *Separate*. Never composes 
 
 ## 5. Customer visit-summary page — ships with the message
 
-`/visit/:token` + `GET /api/public/visit/:token`, token = `service_visits.summary_token`, same
-header posture as `/report/:token` (noindex, no-referrer, no-store), same rate-limit shape as
-`reports-public.js`. **Activation is a conjunction (rev 3):** grouped completion comms run only
+`/visit/:token` + `GET /api/public/visit/:token`, token = `service_visits.summary_token`.
+
+**Bearer-token contract (rev 4 — security-critical, mirrors `pay-statement.js`).** The route
+family exposes reports, today's charges, a receipt and a payment write with no auth, so the
+token *is* the credential:
+- `summary_token` = 32 bytes from `crypto.randomBytes` encoded as **64 hex chars**, generated
+  at group creation, `UNIQUE NOT NULL`, never derived from ids or dates, never logged.
+- Format gate `^[0-9a-f]{64}$` runs **before any DB access**; malformed and unknown tokens both
+  return a generic **404** (no distinguishing body/status), exactly like
+  `loadStatementByToken`. A dissolved or cancelled visit is also a 404.
+- Gate check first (both gates off ⇒ 404 before the limiter, so a dark surface can't be probed
+  via 429), then a router-wide per-IP limiter (60/min, same shape as
+  `statementPayLimiter`), plus a tighter limiter on the payment POSTs.
+- Privacy headers on every GET/POST outcome including errors: `X-Robots-Tag: noindex`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store` (same posture as `/report/:token`).
+- The page shows no customer name, email, phone, or full address (R6 → ruled no name; street
+  only, as on the report page) — the link is forwardable by design.
+- Build blocker: the family `/api/public/visit/:token` (+ `/pay`, `/pay/quote`, `/pay/finalize`,
+  `/receipt`) is **added to the public-by-token allowlist in `AGENTS.md`** in the same PR that
+  introduces the route (new public routes outside that list are P0).
+
+**Activation is a conjunction (rev 3, tightened rev 4):** grouped completion comms run only
 when `GATE_VISIT_GROUPS` **and** `GATE_VISIT_SUMMARY_PAGE` are both on (a conjunction accessor
-in `feature-gates.js`, like `isPrepayCardAndChargeEnabled`); with the page gate off, grouped
-visits still close but fall back to per-row completion texts — never a multi-link SMS.
+in `feature-gates.js`, like `isPrepayCardAndChargeEnabled`). **Fail closed:** if the page gate
+is off, no `service_visits` row is ever *closed* through the grouped path — the packet endpoint
+returns 404 and the tech app shows the per-row closeout, so each row runs the legacy
+`/complete` (its own text, its own review ask) exactly as today. A group is never closed and
+then followed by multiple child messages; the "one visit message owns delivery" rule in §4 holds
+whenever a visit closes at all. Turning the page gate off after launch dissolves nothing — open
+groups simply complete per row until it is back on.
 
 **Portal billing history (rev 3, new surface).** The customer portal Billing tab
 (`client/src/pages/PortalPage.jsx` `BillingTab` :5105, Payment History card) groups invoices
@@ -311,6 +335,18 @@ primary button: *Pay $173* can never silently become $301. An older balance rend
 separate block with its own *Pay full balance* action (that path may use the existing combined
 sibling selection). Mint, ledger, void-on-cancel, dunning, and Sandy's account-level language
 are untouched. Copy says "today's charges / today's total", never "invoice".
+
+**Surcharge seam (rev 4 — money-critical).** The visit token cannot reach the invoice-token
+`/update-amount`, `/quote`, `/finalize` routes, so the visit surface ships its **own** equivalent
+seams, modelled on `pay-statement.js:148-166`: `POST /api/public/visit/:token/pay` (create the
+combined PI with the locked allocation), `POST …/pay/quote` (surcharge quote for the chosen
+payment method), `POST …/pay/finalize` (re-verify the allocation with `verifyAllocationLocked`,
+then apply the surcharge and confirm). The displayed total, the PI amount, the PI metadata and
+the payment-row surcharge are all derived from **one** `computeChargeAmount(..., { funding })`
+result per finalize; nothing recomputes independently. Card funding is never charged base-only,
+and the PI amount always equals what the ledger records (AGENTS.md surcharge / PI-agreement
+rules). ACH/bank funding takes the no-surcharge branch of the same call. The kill-switch sweep
+in `pay-combined.js:703` applies to visit PIs unchanged.
 
 **Receipts.** One visit receipt per successful visit payment; the per-invoice receipts the
 combined settle enqueues today (`:883`) are suppressed when the PI carries a `visit_id`.
@@ -387,7 +423,7 @@ hold Phase 2 until future multi-row days reach ~10 per 120d or the owner GOes on
 | R3 | Rescheduling one grouped row | group moves as a unit; "just this service" splits — **open** |
 | R4 | Section outcomes | table in §3 — **ruled**; the per-outcome billing column (does `partially_completed` bill in full?) is **open** |
 | R5 | SMS shape | one link, short copy per §4 — **ruled** |
-| R6 | Summary page greets by name? | no name on page; first name in SMS only — **open** |
+| R6 | Summary page greets by name? | no name on page; first name in SMS only — **recommended (rev 4), owner to confirm** |
 | R7 | Autopay rollout | self-pay only until grouped autopay ships — **ruled** |
 | R8 | Retire combined routes + combo rows | only after summary + self-pay + grouped autopay reach parity (after Phase 3) — **ruled (rev 3)** |
 | R9 | Build blockers | one packet endpoint · page + message same gate · visit-scoped payment — **ruled** |
