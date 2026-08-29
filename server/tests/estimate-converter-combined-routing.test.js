@@ -56,6 +56,17 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(standalone.some((u) => u.fromSupplement && u.catalogServiceKey === 'rodent_bait_quarterly')).toBe(true);
   });
 
+  test('a pinned legacy rodent-ONLY plan is the monthly dues product; mixed / new-model plans are not (codex #3591 r21 P0)', () => {
+    const { isPinnedLegacyRodentOnlyPlan } = require('../services/estimate-converter');
+    const pinned = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, legacyPinnedReplay: true };
+    const fresh = { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true };
+    const pest = { service: 'pest_control', name: 'Pest Control', mo: 100 };
+    expect(isPinnedLegacyRodentOnlyPlan([pinned])).toBe(true);
+    expect(isPinnedLegacyRodentOnlyPlan([pinned, pest])).toBe(false);
+    expect(isPinnedLegacyRodentOnlyPlan([fresh])).toBe(false);
+    expect(isPinnedLegacyRodentOnlyPlan([])).toBe(false);
+  });
+
   test('a rodent bait line with no cadence gets the quarterly program default standalone', () => {
     const { standalone } = combineRecurringServicesForScheduling([
       { name: 'Rodent Bait Stations', service: 'rodent_bait' },

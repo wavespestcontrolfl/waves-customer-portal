@@ -495,6 +495,18 @@ describe('buildReportCrossSell', () => {
         .toEqual({ incomplete: false, unexpected: false });
     });
 
+    test('with the live rodent flag OFF, rodent bait leaves the baseline (no false mismatch) — codex #3591 r21 P1', () => {
+      const constants = require('../services/pricing-engine/constants');
+      const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+      constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+      try {
+        expect(qualifyingBaselineMismatch(['pest_control', 'rodent_bait'], ['pest_control']))
+          .toEqual({ incomplete: false, unexpected: false });
+      } finally {
+        constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+      }
+    });
+
     test('non-qualifying families are ignored on both sides', () => {
       // Ownership is broader than qualification: rodent monitoring never
       // moves the tier, so it cannot make the baselines disagree.

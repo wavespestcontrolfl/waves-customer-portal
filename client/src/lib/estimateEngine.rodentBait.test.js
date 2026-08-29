@@ -150,3 +150,20 @@ describe("rodent bait — manual-discount base never subtracts an already-exclud
     expect(excluded.manualDiscount.amount).toBeGreaterThan(0);
   });
 });
+
+describe("rodent bait — the matched account's qualifying families count toward the fallback tier (codex #3591 r21 P1)", () => {
+  it("a pest customer adding rodent bait prices at Silver, not Bronze; families already on the estimate are not double-counted", () => {
+    const bronze = calculateEstimate(rodentInput());
+    expect(bronze.recurring.waveGuardTier).toBe("Bronze");
+    const silver = calculateEstimate(rodentInput({ existingQualifyingServices: ["pest_control"] }));
+    expect(silver.recurring.waveGuardTier).toBe("Silver");
+    expect(setupRow(silver)).toBeUndefined();
+    const onEstimate = calculateEstimate(rodentInput({ svcPest: true, pestFrequency: "quarterly", existingQualifyingServices: ["pest_control"] }));
+    expect(onEstimate.recurring.waveGuardTier).toBe("Silver");
+  });
+  it("a prior rodent family follows the live flag", () => {
+    applyServerRodentWaveguardPricingConfig({ tier_qualifier: false, exclude_from_pct_discount: false });
+    const E = calculateEstimate(rodentInput({ svcRodentBait: false, svcPest: true, pestFrequency: "quarterly", existingQualifyingServices: ["rodent_bait"] }));
+    expect(E.recurring.waveGuardTier).toBe("Bronze");
+  });
+});

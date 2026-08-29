@@ -510,6 +510,18 @@ function explicitServiceCadence(svc = {}) {
 // a $147 per-completion charge under billing_mode per_application).
 const { isPinnedLegacyRodentRow } = require('./billing-cadence');
 
+// The whole recurring plan is a pinned pre-realignment rodent bait plan —
+// the legacy MONTHLY DUES product (billed monthly, visits covered by dues).
+// Such an accept must land on the monthly_membership lane, not the
+// estimate-flow per_application stamp: with per_application the monthly
+// cron skips the customer and completion collects the monthly figure only
+// four times a year (codex #3591 r21 P0). Mixed plans (pest + pinned rodent)
+// keep the per-application stamp — the pest half always billed per visit.
+function isPinnedLegacyRodentOnlyPlan(recurringServices = []) {
+  const rows = (Array.isArray(recurringServices) ? recurringServices : []).filter((r) => r && typeof r === 'object');
+  return rows.length > 0 && rows.every(isPinnedLegacyRodentRow);
+}
+
 function supplementalCompanionLines(estimateData = {}) {
   const result = estimateData.result || {};
   const recurring = estimateData.recurring || result.recurring || {};
@@ -3636,6 +3648,7 @@ const EstimateConverter = {
     const recurringServicesForConversion = suppressRecurringConversion
       ? []
       : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isPinnedLegacyRodentRow(svc));
+    const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices);
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -4027,7 +4040,13 @@ const EstimateConverter = {
     // established per-application customer's add-on accept the two
     // deliberately differ — the stamp preserves the original series' fee,
     // the email prices what was just accepted.
-    const stampedPerApplicationFee = preservesExistingMembership
+    // A pinned pre-realignment rodent-only plan lands on the monthly dues
+    // lane (billing_mode monthly_membership below — codex #3591 r21 P0):
+    // no per-application fee exists for it. The customers-row stamp stays
+    // the ONE fallback authority, so the legacy branch lives here.
+    const stampedPerApplicationFee = (pinnedLegacyRodentOnlyPlan && !preservesExistingMembership)
+      ? null
+      : preservesExistingMembership
       ? (customer.per_application_fee ?? null)
       : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
         ? Number(customer.per_application_fee)
@@ -4092,9 +4111,13 @@ const EstimateConverter = {
           // model (see preservesExistingMembership above). Column-guarded —
           // pre-migration accepts keep the legacy update shape.
           ...(billingModeColumnsExist ? {
+            // A pinned pre-realignment rodent-only plan is the legacy monthly
+            // dues product: explicit monthly_membership so the monthly cron
+            // charges the disclosed $/mo and completions are dues-covered
+            // (codex #3591 r21 P0).
             billing_mode: preservesExistingMembership
               ? (customer.billing_mode || null)
-              : 'per_application',
+              : (pinnedLegacyRodentOnlyPlan ? 'monthly_membership' : 'per_application'),
             // Fee semantics documented on stampedPerApplicationFee above —
             // shared with the membership.started email payload.
             per_application_fee: stampedPerApplicationFee,
@@ -6452,6 +6475,7 @@ module.exports.combinedRewriteUpdate = combinedRewriteUpdate;
 module.exports.explicitServiceCadence = explicitServiceCadence;
 module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.isPinnedLegacyRodentRow = isPinnedLegacyRodentRow;
+module.exports.isPinnedLegacyRodentOnlyPlan = isPinnedLegacyRodentOnlyPlan;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;

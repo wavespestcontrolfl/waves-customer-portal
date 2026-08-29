@@ -2400,6 +2400,9 @@ function EstimateToolView() {
       existingOtherQualifyingService: Array.isArray(resolvedQualifyingKeys)
         ? resolvedQualifyingKeys.some((k) => k !== "rodent_bait")
         : false,
+      // The full trusted family set — the fallback tier counts these like
+      // generateEstimate's priorQualifyingServices (codex #3591 r21 P1).
+      existingQualifyingServices: Array.isArray(resolvedQualifyingKeys) ? resolvedQualifyingKeys : [],
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
@@ -2442,6 +2445,10 @@ function EstimateToolView() {
         headers: authHeaders,
         body: JSON.stringify({
           address: form.address,
+          // The matched account — persistence reloads its canonical
+          // qualifying families from this id for the server recompute
+          // (codex #3591 r21 P1).
+          customerId: existingCustomerMatch?.id || null,
           customerName: customerSearch || form.customerName || "",
           customerPhone: form.customerPhone || "",
           customerEmail: form.customerEmail || "",

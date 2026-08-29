@@ -3528,7 +3528,9 @@ export function calculateEstimate(inputs) {
     // generateEstimate reads as priorQualifyingServices minus rodent_bait;
     // codex #3591 r13 P1), never the account-level tier/rate: a rodent-only
     // Bronze account owes the setup on a second rodent quote.
-    const existingOtherQualifierWaives = inputs.existingOtherQualifyingService === true;
+    const existingOtherQualifierWaives = inputs.existingOtherQualifyingService === true
+      || (Array.isArray(inputs.existingQualifyingServices)
+        && inputs.existingQualifyingServices.some((k) => k && k !== 'rodent_bait'));
     // "Sole qualifier" = no OTHER qualifying service on the estimate (rodent
     // never self-waives, whether or not it counts toward the tier).
     const otherQualifiersOnEstimate = ac - (rbCountsTowardTier ? 1 : 0);
@@ -3540,7 +3542,7 @@ export function calculateEstimate(inputs) {
         price: rbSetupFee,
         discountable: false,
         excludeFromPctDiscount: true,
-        detail: `One-time $${rbSetupFee} setup — waived for WaveGuard members`,
+        detail: `One-time $${rbSetupFee} setup — waived with any other WaveGuard recurring service`,
       });
     }
   }
@@ -3552,6 +3554,22 @@ export function calculateEstimate(inputs) {
   // This file is deprecated (Session 11 retirement); kept in sync as a
   // hardcoded literal until then since the server constants can't be
   // imported into the browser bundle.
+  // Existing qualifying families on the MATCHED account (canonical keys the
+  // estimator loaded — codex #3591 r21 P1) count toward the tier exactly as
+  // generateEstimate's priorQualifyingServices do: a pest customer adding
+  // rodent bait prices at Silver, not Bronze. Families already on this
+  // estimate are not double-counted; rodent follows its live flag.
+  const priorQualifyingFamilies = Array.isArray(inputs.existingQualifyingServices) ? inputs.existingQualifyingServices : [];
+  if (priorQualifyingFamilies.length) {
+    const onEstimate = new Set(lineItems.map((li) => li.service));
+    const rbQualifiesLive = rodentBaitWaveguardFlags().tierQualifier !== false;
+    for (const key of new Set(priorQualifyingFamilies)) {
+      if (!['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait'].includes(key)) continue;
+      if (key === 'rodent_bait' && !rbQualifiesLive) continue;
+      if (onEstimate.has(key)) continue;
+      ac++;
+    }
+  }
   let wt = 'Bronze', wd = 0;
   if (ac >= 4) { wt = 'Platinum'; wd = 0.20; }
   else if (ac === 3) { wt = 'Gold'; wd = 0.15; }

@@ -5288,9 +5288,13 @@ function priceBaitSetup(options = {}) {
     discountable: false,
     discountEligible: false,
     excludeFromPctDiscount: true,
+    // Copy names the actual rule (codex #3591 r21 P2): the rodent line alone
+    // makes a Bronze member, yet the setup still applies — only ANOTHER
+    // qualifying recurring service (on the estimate or already active)
+    // waives it.
     detail: waived
-      ? 'Waived for WaveGuard members'
-      : `One-time $${RODENT.baitSetupFee} setup — waived for WaveGuard members`,
+      ? 'Waived — another WaveGuard recurring service is on the plan'
+      : `One-time $${RODENT.baitSetupFee} setup — waived with any other WaveGuard recurring service`,
   };
 }
 

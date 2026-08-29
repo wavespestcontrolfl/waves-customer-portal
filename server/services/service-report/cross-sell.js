@@ -136,11 +136,24 @@ function startFamilyForIdentity(row = {}) {
 // directive) — a rodent plan now moves the tier, so a disagreement about it
 // between the strict ownership read and the pricer's own reload prices the
 // offer at the wrong tier in either direction (codex #3591 r11 P1).
-const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite', 'rodent_bait']);
+// rodent_bait's membership follows the LIVE pricing_config.rodent_waveguard
+// flag (codex #3591 r21 P1): with tier_qualifier off the canonical model
+// loader excludes it while the broad ownership read still carries it — an
+// unconditional baseline would then flag every rodent customer's report
+// offer as incomplete and demote it to the unpriced CTA.
+const QUALIFYING_BASELINE_CORE = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite'];
+function qualifyingBaseline() {
+  let rodentQualifies = true;
+  try {
+    rodentQualifies = require('../pricing-engine/discount-engine').serviceCountsTowardWaveGuardTier('rodent_bait');
+  } catch { rodentQualifies = true; }
+  return new Set([...QUALIFYING_BASELINE_CORE, ...(rodentQualifies ? ['rodent_bait'] : [])]);
+}
 
 function qualifyingBaselineMismatch(evidencedOwnedKeys = [], modeledKeys = []) {
-  const evidenced = [...offerVocabulary(evidencedOwnedKeys)].filter((key) => QUALIFYING_BASELINE.has(key));
-  const modeled = [...new Set(modeledKeys || [])].filter((key) => QUALIFYING_BASELINE.has(key));
+  const baseline = qualifyingBaseline();
+  const evidenced = [...offerVocabulary(evidencedOwnedKeys)].filter((key) => baseline.has(key));
+  const modeled = [...new Set(modeledKeys || [])].filter((key) => baseline.has(key));
   return {
     incomplete: evidenced.some((key) => !modeled.includes(key)),
     unexpected: modeled.some((key) => !evidenced.includes(key)),
