@@ -20,6 +20,11 @@ jest.mock('../services/content-astro/github-client', () => ({
   deleteFile: jest.fn(),
   closePr: jest.fn(),
   deleteRef: jest.fn(),
+  getBlob: jest.fn(),
+  listDir: jest.fn(),
+  compareFiles: jest.fn(),
+  getBranchSha: jest.fn(),
+  env: jest.fn(() => ({ defaultBranch: 'main' })),
   retireBranch: jest.fn().mockResolvedValue(true),
 }));
 // publishAstro's topic-targeting gate (owner rulings 2026-08-27) loads the
@@ -3166,6 +3171,32 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
       .rejects.toThrow(/no longer matches the verified build commit/);
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
+
+  test('expectBaseSha: the default-branch tip is re-read inside the merge lock right before the merge call — a moved base refuses (BLOG_BASE_MOVED), a still base merges (GH r25)', async () => {
+    const setup = () => {
+      const read = chain({ first: jest.fn().mockResolvedValue(hubOnlyPost()) });
+      const queries = [read];
+      db.mockImplementation(() => queries.shift() || chain());
+      gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA } });
+      mockHubOnlyBranchFile();
+      gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
+      gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
+      gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+    };
+    setup();
+    gh.getBranchSha.mockResolvedValue('main-tip-2');
+    let thrown;
+    try { await AstroPublisher.mergeAstro('post-pin-1', { expectBaseSha: 'main-tip-1' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BASE_MOVED');
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    setup();
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    const result = await AstroPublisher.mergeAstro('post-pin-1', { expectBaseSha: 'main-tip-1' });
+    expect(result.merged).toBe(true);
+    expect(gh.mergePr).toHaveBeenCalledWith(42, expect.objectContaining({ sha: HEAD_SHA }));
+  });
 });
 
 describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter (PR #3549 codex r4)', () => {
@@ -3732,4 +3763,1872 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     const without = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c' });
     expect(without).not.toContain('Backfilled schema-required fields');
   });
+});
+
+
+describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)', () => {
+  const fmModule = require('../services/content-astro/frontmatter');
+  const featureGates = require('../config/feature-gates');
+  const { bodyImageSlots, insertBodyImages, countBodyImages, BODY_IMAGE_MIN } = AstroPublisher._internals;
+  const article = [
+    'Intro paragraph about frass on a Venice window sill.',
+    '',
+    '## Reading the pellets',
+    '',
+    'Drywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.',
+    '',
+    '- bullet one',
+    '- bullet two',
+    '',
+    '## Where the colony sits',
+    '',
+    '<ComparisonTable rows={[["a","b"]]} />',
+    '',
+    'Follow the pile straight up to the window frame.',
+    '',
+    '```js',
+    '## not a heading inside a fence',
+    '```',
+    '',
+    '### Fascia boards',
+    '',
+    'Fascia galleries are the usual suspects in older homes.',
+    '',
+    '## What a quote covers',
+    '',
+    'A drywood treatment quote is per structure.',
+    '',
+    '## Frequently asked questions',
+    '',
+    '**Is frass dangerous?** No.',
+  ].join('\n');
+
+  // Real, visually DISTINCT pictures (the 1×1 HERO_PNG hashes identically to
+  // any other flat image): 32×32 RGB patterns whose gradients differ per seed.
+  const PATTERNS = [];
+  async function patternPng(seed) {
+    const sharp = require('sharp');
+    const w = 32; const h = 32; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3;
+      const v = seed % 2 === 0 ? ((x * 8 * seed) + (y * 3)) % 256 : ((y * 8 * seed) + ((x * 7 * seed) % 5) * 40) % 256;
+      raw[i] = v; raw[i + 1] = (v * 3 + seed * 40) % 256; raw[i + 2] = (255 - v + seed * 17) % 256;
+    }
+    const png = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    return `data:image/png;base64,${png.toString('base64')}`;
+  }
+  beforeAll(async () => { for (const seed of [1, 2, 3, 4, 5]) PATTERNS.push(await patternPng(seed)); });
+  // Committed-file stub with REAL distinct bytes (the picture-level check
+  // reads them): pattern index by path order.
+  const committedStub = (paths) => {
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    return async (path) => {
+      const idx = paths.indexOf(path);
+      return idx >= 0 ? { content: '', sha: `s${idx}`, raw: { content: b64(PATTERNS[(idx + 2) % PATTERNS.length]) } } : null;
+    };
+  };
+
+  // Default generator: a different picture on every call, prompt-derived alt
+  // for body images. Tests that need specific pictures override it.
+  function mockRotatingGeneration() {
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({
+      dataUrl: PATTERNS[call++ % PATTERNS.length],
+      model: 'test-model',
+      alt: mode === 'blog-body' ? `Prompt alt for ${keyword}` : 'hero alt',
+      attempts: [],
+    }));
+    gh.putBinary.mockResolvedValue({});
+  }
+
+  beforeEach(() => {
+    gh.listDir.mockReset();
+    gh.listDir.mockResolvedValue([]);
+    // publishAstro's topic-targeting gate loads the live corpus — reset any
+    // one-shot rejection a prior test left unconsumed and restore the benign
+    // corpus the file-level mock provides.
+    const planner = require('../services/content/internal-link-planner');
+    planner.loadAstroCorpusFromGitHub.mockReset();
+    planner.loadAstroCorpusFromGitHub.mockResolvedValue([{
+      file: 'src/content/blog/quokka-habitat-notes.md',
+      url: '/quokka-habitat-notes/',
+      body: '---\ntitle: Quokka Habitat Notes\nslug: /quokka-habitat-notes/\nprimary_keyword: quokka habitat\n---\n\n## Quokka basics\n',
+    }]);
+    jest.clearAllMocks();
+    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    heroAltVision.describeHeroForAlt.mockResolvedValue(null);
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 201, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/201' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockRotatingGeneration();
+  });
+  afterEach(() => featureGates.isEnabled.mockRestore());
+
+  function draft(body = article, fmOverrides = {}) {
+    return {
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        slug: '/drywood-frass-venice/',
+        title: 'Drywood Termite Frass in Venice',
+        canonical: 'https://www.wavespestcontrol.com/drywood-frass-venice/',
+        hero_image: { src: '/images/blog/drywood-frass-venice/hero.png', alt: 'Frass on a sill' },
+        og_image: '/images/blog/drywood-frass-venice/hero.png',
+        ...fmOverrides,
+      }),
+      body,
+    };
+  }
+
+  test('bodyImageSlots: spreads slots across H2 sections, skips FAQ, lists, MDX blocks and fences, inserts after prose', () => {
+    const slots = bodyImageSlots(article, 2, { title: 'T' });
+    expect(slots).toHaveLength(2);
+    const lines = article.split('\n');
+    // 1st slot: "Reading the pellets" — right after its prose paragraph, before the list.
+    expect(slots[0].heading).toBe('Reading the pellets');
+    expect(lines[slots[0].insertAt - 1]).toMatch(/^Drywood frass/);
+    expect(slots[0].lead).toBe('Drywood frass is hexagonal in cross-section. See our guide for more.');
+    // 2nd slot: spread to the 3rd eligible H2 (FAQ excluded) — after its prose.
+    expect(slots[1].heading).toBe('What a quote covers');
+    expect(lines[slots[1].insertAt - 1]).toMatch(/^A drywood treatment quote/);
+    // A heading inside a fence is never a section.
+    expect(slots.map((sl) => sl.heading)).not.toContain('not a heading inside a fence');
+  });
+
+  test('bodyImageSlots: headings inside comments, <pre> and fences (incl. shorter backtick runs inside a longer fence) are never sections; code is never prose (hook r6)', () => {
+    const body = [
+      '## Real section', '', 'Real prose.', '',
+      '<!-- ## Commented heading', '', 'hidden prose -->', '',
+      '<pre>', '## Pre heading', 'pre text', '</pre>', '',
+      '````md', '## Fenced heading', '```', 'still inside the 4-backtick fence', '```', '````', '',
+      '## Second real', '', 'More prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections
+      ? AstroPublisher._internals.scanBodySections(body, { title: 'T' })
+      : { sections: [] };
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['Real section', 'Second real']);
+    const lines = body.split('\n');
+    expect(lines[slots[0].insertAt - 1]).toBe('Real prose.');
+    expect(lines[slots[1].insertAt - 1]).toBe('More prose.');
+    expect(sections.map((sec) => sec.heading)).not.toContain('Fenced heading');
+  });
+
+  test('bodyImageSlots: H3 prose rolls up into its H2 (slot after the last sub-section paragraph); an image under an H3 marks the H2 illustrated', () => {
+    const body = [
+      'Intro.', '',
+      '## Colony locations', '',
+      '### Window frames', '', 'Frames first.', '',
+      '### Fascia boards', '', 'Fascia second.', '',
+      '## Illustrated section', '',
+      '### Sub', '', 'Text.', '', '![already](/images/x.webp)', '',
+      '## Third', '', 'Third prose.',
+    ].join('\n');
+    const slots = bodyImageSlots(body, 2, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['Colony locations', 'Third']);
+    expect(body.split('\n')[slots[0].insertAt - 1]).toBe('Fascia second.');
+    expect(slots[0].lead).toBe('Frames first.');
+  });
+
+  test('bodyImageSlots: sections that already carry an image are skipped; the intro backfills when sections run out', () => {
+    const body = 'Intro prose here.\n\n## Only section\n\nProse.\n\n![existing](/images/x.webp)\n';
+    const slots = bodyImageSlots(body, 2, { title: 'Title' });
+    expect(slots).toHaveLength(1);
+    expect(slots[0].heading).toBe('Title');
+    expect(body.split('\n')[slots[0].insertAt - 1]).toBe('Intro prose here.');
+  });
+
+  test('insertBodyImages: each image lands on its own paragraph, brackets stripped from alt, no triple blank lines', () => {
+    const body = 'One.\n\n## A\n\nTwo.\n\n## B\n\nThree.';
+    const out = insertBodyImages(body, [
+      { insertAt: 5, src: '/images/blog/s/body-1.webp', alt: 'Alt [one]' },
+      { insertAt: 9, src: '/images/blog/s/body-2.webp', alt: 'Alt two' },
+    ]);
+    expect(out).toBe('One.\n\n## A\n\nTwo.\n\n![Alt one](/images/blog/s/body-1.webp)\n\n## B\n\nThree.\n\n![Alt two](/images/blog/s/body-2.webp)');
+    expect(countBodyImages(out)).toBe(2);
+  });
+
+  test('insertBodyImages: blank lines inside fenced code are preserved; blanks added only where neighbours lack them (hook r4)', () => {
+    const body = 'Prose.\n\n```js\nline1\n\n\n\nline2\n```\n\n## B\nThree.';
+    const out = insertBodyImages(body, [{ insertAt: 2, src: '/i.webp', alt: 'A' }, { insertAt: 12, src: '/j.webp', alt: 'B' }]);
+    expect(out).toBe('Prose.\n\n![A](/i.webp)\n\n```js\nline1\n\n\n\nline2\n```\n\n## B\nThree.\n\n![B](/j.webp)');
+  });
+
+  test('gate ON, new post: generates BODY_IMAGE_MIN blog-body images from section context, commits them beside the hero in ONE commit, inserts refs with vetted alts', async () => {
+    gh.getFile.mockResolvedValue(null);
+    heroAltVision.describeHeroForAlt.mockImplementation(async ({ keyword }) => (keyword === 'Reading the pellets' ? 'Hexagonal drywood termite pellets on a white window sill' : null));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog', city: 'Venice' });
+
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls).toHaveLength(BODY_IMAGE_MIN);
+    expect(bodyCalls[0][0]).toEqual(expect.objectContaining({ keyword: 'Reading the pellets', city: 'Venice', title: 'Drywood Termite Frass in Venice' }));
+    expect(bodyCalls[0][0].topic).toMatch(/^Drywood frass is hexagonal/);
+    expect(bodyCalls[1][0].keyword).toBe('What a quote covers');
+    // Framing rotates per slot and every body prompt names the hero subject to differ from.
+    expect(bodyCalls[0][0].shot).toBe('close-up');
+    expect(bodyCalls[1][0].shot).toBe('action');
+    expect(bodyCalls[0][0].avoid).toBe(draft().frontmatter.primary_keyword || 'Drywood Termite Frass in Venice');
+
+    expect(gh.commitFiles).toHaveBeenCalledTimes(1);
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    expect(files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/hero.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-1.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+    for (const f of files.slice(1, 3)) {
+      expect(f.buffer.slice(0, 4).toString('ascii')).toBe('RIFF');
+      expect(f.buffer.slice(8, 12).toString('ascii')).toBe('WEBP');
+    }
+    const parsed = fmModule.parse(files[3].content);
+    // Vision alt where available, prompt-derived alt otherwise; refs sit at the end of each section's prose.
+    expect(parsed.content).toContain('See [our guide](/termite-control/) for more.\n\n![Hexagonal drywood termite pellets on a white window sill](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n- bullet one');
+    expect(parsed.content).toContain('A drywood treatment quote is per structure.\n\n![Prompt alt for What a quote covers](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n## Frequently asked questions');
+    expect(countBodyImages(parsed.content)).toBe(BODY_IMAGE_MIN);
+    // The hero is never embedded in the body (layout renders it).
+    expect(parsed.content).not.toContain('hero.webp');
+  });
+
+  test('gate OFF: body untouched, no blog-body generation', async () => {
+    featureGates.isEnabled.mockImplementation(() => false);
+    gh.getFile.mockResolvedValue(null);
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/hero.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+  });
+
+  test('update run: a body-N.webp already on main whose alt the live body carries is REUSED (no regeneration); the missing one is generated', async () => {
+    // Live file carries the category route slug (what a prior publish wrote).
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+      return null;
+    });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls).toHaveLength(1);
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    expect(files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+    const parsed = fmModule.parse(files[1].content);
+    expect(parsed.content).toContain('![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)');
+    expect(parsed.content).toContain('![Generated alt two](/images/blog/pest-control/drywood-frass-venice/body-2.webp)');
+  });
+
+  test('update run: a REUSED alt goes through the compliance second pass alongside generated alts (GH r2)', async () => {
+    const complianceGate = require('../services/content/compliance-gate');
+    const spy = jest.spyOn(complianceGate, 'evaluate');
+    try {
+      const liveMd = fmModule.stringify(
+        { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+        'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+      );
+      const b64 = (dataUrl) => dataUrl.split(',')[1];
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+        if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+        if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+        return null;
+      });
+      heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+      await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+      // The alts are folded into `body` after META_SECTION_MARKER (field-value marker).
+      const altPass = spy.mock.calls.find(([arg]) => String(arg?.body || '').includes(complianceGate.META_SECTION_MARKER) && String(arg.body).includes('Live alt for pellets'));
+      expect(altPass).toBeTruthy();
+      expect(altPass[0].body).toContain('Generated alt two');
+    } finally { spy.mockRestore(); }
+  });
+
+  test('update run: intro-slot reuse compares against the LIVE title — a retitled article does not inherit its old intro illustration (GH r2)', async () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const live = { file: { content: fmModule.stringify({ title: 'Old Title' }, 'Intro prose.\n\n![Old intro pic](/images/blog/x/body-1.webp)\n\n## A\n\nProse.\n') } };
+    // New slot heading = NEW title (intro pseudo-section) → live side is judged by the OLD title → no match.
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'New Title', { title: 'New Title', lead: 'Intro prose.' })).toBeNull();
+    // Same title + same opening prose → reusable.
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'Old Title', { title: 'Old Title', lead: 'Intro prose.' })).toBe('Old intro pic');
+  });
+
+  test('update run: a REUSED committed body image is hashed too — one that duplicates the reused hero is regenerated instead of reused (hook r8)', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      // Committed hero and body-1 are the SAME picture.
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[0]) } };
+      return null;
+    });
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: [PATTERNS[2], PATTERNS[3]][call++], model: 'm', alt: 'Regenerated' }));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    // The duplicate committed body-1 is never overwritten — the replacement lands on the next free names (hook P0).
+    expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    expect(files).toEqual(expect.arrayContaining(['public/images/blog/pest-control/drywood-frass-venice/body-2.webp', 'public/images/blog/pest-control/drywood-frass-venice/body-3.webp']));
+    expect(fmModule.parse(gh.commitFiles.mock.calls[0][0].files.at(-1).content).content).not.toContain('Live alt for pellets');
+  });
+
+  test('update run: a committed body image that now sits under a DIFFERENT heading is regenerated, not reused (hook r2)', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Some other topic\n\nOld prose.\n\n![Live alt](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const committed = committedStub(['public/images/blog/pest-control/drywood-frass-venice/hero.webp', 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp']);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx' ? { content: liveMd, sha: 'live-sha' } : committed(path)));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    // body-1 stays committed under its old heading; the new pictures take the next free names (hook P0: never overwrite).
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-3.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+    expect(fmModule.parse(gh.commitFiles.mock.calls[0][0].files[2].content).content).not.toContain('Live alt');
+  });
+
+  test('draft-authored image refs count only when COMMITTED in the repo; fenced `![..]` is not an image', async () => {
+    gh.getFile.mockImplementation(committedStub(['public/images/2026/08/a.webp', 'public/images/2026/08/b.webp']));
+    const body = `${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n\n\`\`\`md\n![not an image](/images/2026/08/c.webp)\n\`\`\`\n`;
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/a.webp', '/images/2026/08/b.webp']);
+    await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+  });
+
+  test('distinct sources count, not references; new body-N names skip ones the draft already references (hook r3)', async () => {
+    gh.getFile.mockImplementation(committedStub(['public/images/blog/pest-control/drywood-frass-venice/body-2.webp']));
+    // Two references to ONE committed file → one image → one more needed, and it must not be body-2.
+    const body = `${article}\n\n![same](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n![same again](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`;
+    await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(1);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+  });
+
+  test('bodyImageRefs: image syntax inside JSX/HTML attributes or MDX expressions is data, not an image (hook r7)', () => {
+    const body = [
+      '<Card note="![x](/images/2026/08/a.webp)" />',
+      '<ComparisonTable',
+      '  rows={[["![y](/images/2026/08/b.webp)", "z"]]}',
+      '/>',
+      '{"![z](/images/2026/08/c.webp)"}',
+      '<span title="![w](/images/2026/08/d.webp)">t</span>',
+      '<Card note="x > ![hidden](/images/2026/08/f.webp)" />',
+      '{"a}" + "![g](/images/2026/08/g.webp)"}',
+      '',
+      '![real](/images/2026/08/e.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/e.webp']);
+    expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(9);
+  });
+
+  test('bodyImageRefs: reference definitions, "[ref]" tails and link titles are never rendered — image syntax inside them does not count (GH r5)', () => {
+    const body = [
+      '[ref]: /contact/ "![hidden](/images/blog/x/body-1.webp)"',
+      '[Get a quote](/contact/ "![t](/images/blog/x/body-2.webp)")',
+      '[label][![r](/images/blog/x/body-3.webp)]',
+      '',
+      '![real](/images/blog/x/body-4.webp)',
+    ].join('\n');
+    // `[label][![r](…)]` is NOT a full reference (a label may not contain an unescaped `[`, CommonMark 6.3): it renders as
+    // literal `[label]` + bracketed text whose image DOES render — so body-3 counts (escape-aware tail, GH r15).
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-3.webp', '/images/blog/x/body-4.webp']);
+  });
+
+  test('imageDHash: an RGBA picture hashes like its opaque twin (alpha flattened, channel-aware indexing); undecodable bytes are a deterministic BLOG_BODY_IMAGES_FAILED (GH r5)', async () => {
+    const { imageDHash, hammingDistance } = AstroPublisher._internals;
+    const sharp = require('sharp');
+    const w = 40; const h = 30;
+    const rgb = Buffer.alloc(w * h * 3); const rgba = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const v = ((x * 255) / w) | 0; const u = ((y * 255) / h) | 0; const i = y * w + x;
+      rgb[i * 3] = v; rgb[i * 3 + 1] = u; rgb[i * 3 + 2] = 128;
+      rgba[i * 4] = v; rgba[i * 4 + 1] = u; rgba[i * 4 + 2] = 128; rgba[i * 4 + 3] = 255;
+    }
+    const opaque = await sharp(rgb, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    const alpha = await sharp(rgba, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
+    expect(hammingDistance(await imageDHash(opaque), await imageDHash(alpha))).toBe(0);
+    let thrown;
+    try { await imageDHash(Buffer.from('definitely not an image')); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+  });
+
+  test('fail-closed: a committed draft image Sharp cannot decode parks deterministically instead of retry-looping (GH r5)', async () => {
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/bad.webp' ? { content: '', sha: 'b', raw: { content: Buffer.from('corrupt bytes').toString('base64') } } : null));
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![bad](/images/2026/08/bad.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/could not be decoded/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('fail-closed: a raw <img> in the body parks — it cannot be counted or verified by the Markdown scan (hook r13)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n<img src="/images/2026/08/raw.webp" alt="x">\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/raw <img> tag/);
+    // Inside a code fence it is text, not a tag.
+    const ok = await AstroPublisher._internals.validateBodyImageRefs({ body: '```html\n<img src="/x.webp">\n```\n', getFile: async () => null });
+    expect(ok.ok).toBe(true);
+  });
+
+  test('bodyImageRefs: image syntax nested in a LINK destination is not an image; an image in a link LABEL renders and is (GH r6)', () => {
+    const body = '[contact](/go/![hidden](/images/blog/x/body-1.webp)) and [![linked](/images/blog/x/body-2.webp)](/contact/)';
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-2.webp']);
+  });
+
+  test('bodyImageSlots: headings and prose inside blockquotes or list items are not top-level — never sections or slots (GH r6)', () => {
+    const body = [
+      '## Real section', '', 'Real prose.', '',
+      '> ## Quoted heading', '>', '> Quoted testimonial prose.', '',
+      '- item', '  ## Nested heading', '', '  Nested prose under the item.', '',
+      '## Second real', '', 'Second prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Real section', 'Second real']);
+    const slots = bodyImageSlots(body, 2, { title: 'T' });
+    const lines = body.split('\n');
+    expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['Real prose.', 'Second prose.']);
+  });
+
+  test('bodyImageRefs: images inside hidden containers (<script>, <template>, <div hidden>, closed <details>) are not rendered (GH r7)', () => {
+    const body = [
+      '<script>const x = "![s](/images/blog/x/body-1.webp)";</script>',
+      '<template>![t](/images/blog/x/body-2.webp)</template>',
+      '<div hidden>', '', '![h](/images/blog/x/body-3.webp)', '', '</div>',
+      '<details>', '', '![d](/images/blog/x/body-4.webp)', '', '</details>',
+      '',
+      '![real](/images/blog/x/body-5.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-5.webp']);
+  });
+
+  test('imageDHash: an orientation-tagged JPEG hashes like its auto-oriented twin (GH r7)', async () => {
+    const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
+    const sharp = require('sharp');
+    const w = 96; const h = 64; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 3; raw[i] = (x * 255) / w; raw[i + 1] = (y * 255) / h; raw[i + 2] = 90; }
+    const upright = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
+    // Store the raster rotated 90° CCW with EXIF orientation 6 → displays upright.
+    const tagged = await sharp(upright).rotate(270).withMetadata({ orientation: 6 }).jpeg({ quality: 95 }).toBuffer();
+    expect(hammingDistance(await imageDHash(upright), await imageDHash(tagged))).toBeLessThanOrEqual(NEAR_DUPLICATE_MAX_DISTANCE);
+  });
+
+  test('update run: reuse requires the same section CONTEXT — a kept heading over rewritten prose regenerates (GH r7)', () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const live = { file: { content: fmModule.stringify({ title: 'T' }, '## What to expect\n\nThe technician sweeps eaves first.\n\n![old](/images/blog/x/body-1.webp)\n') } };
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'What to expect', { title: 'T', lead: 'The technician sweeps eaves first.' })).toBe('old');
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'What to expect', { title: 'T', lead: 'Bait stations go in along the foundation.' })).toBeNull();
+  });
+
+  test('assertBodyImagesAtHead: validates the post file on the PR branch — hero-only withholds, compliant passes, gate off is a no-op (GH r7)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } };
+    const heroOnly = fmModule.stringify(fmData, 'Body with no pictures.\n');
+    const withImages = fmModule.stringify(fmData, 'Body.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    const files = { content: heroOnly };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (ref !== 'content/autonomous-x') return null;
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: files.content, sha: 'f' };
+      const m = path.match(/drywood-frass-venice\/(hero|body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\) on content\/autonomous-x, minimum 2/);
+    files.content = withImages;
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).ok).toBe(true);
+    // Unknown branch / missing file fail closed.
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: null })).ok).toBe(false);
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/other' })).reason).toMatch(/not found on content\/other/);
+    // Gate off → no-op.
+    featureGates.isEnabled.mockImplementation(() => false);
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: null })).toEqual({ ok: true, reason: 'gate_off' });
+  });
+
+  test('refresh lane: a blog refresh under the gate gains its body images in ONE commit; a live legacy post that repeats its hero in the body is grandfathered (hook r14)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    // Legacy convention: hero repeated as the first body image.
+    const liveBody = `![shrub diseases](${heroSrc})\n\n## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    // Hero bytes distinct from the rotating generator's first pictures (else the near-duplicate guard regenerates — correct, but not what this test measures).
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed with new guidance.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    // Hero-in-body grandfathered (no park), two images generated and committed with the post.
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    expect(gh.putFile).not.toHaveBeenCalled();
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[2].content).content;
+    expect(written).toContain(`![shrub diseases](${heroSrc})`);
+    expect(AstroPublisher._internals.countBodyImages(written)).toBe(3);
+    // Only that exact legacy reference is grandfathered: a refresh that swaps it for another post's
+    // hero (or a nonexistent /hero.webp) parks instead of shipping under the grandfather (GH r8).
+    gh.commitFiles.mockClear();
+    for (const swapped of ['/images/blog/other-post/hero.webp', '/images/blog/shrub-diseases-sarasota-fl/hero.webp']) {
+      let thrown;
+      try {
+        await AstroPublisher.publishRefresh({ ...draft, body: draft.body.replace(`![shrub diseases](${heroSrc})`, `![shrub diseases](${swapped})`) }, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+      } catch (err) { thrown = err; }
+      expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+      expect(thrown.message).toContain('embeds the hero image');
+      expect(thrown.message).toContain(swapped);
+    }
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+  });
+
+  test('assertBodyImagesAtHead: refresh targets resolve like publishRefresh; non-blog targets are exempt; a route-matched flat legacy file is what gets checked (hook r14)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const mainMd = fmModule.stringify(liveFm, `![h](${heroSrc})\n\n## A\n\nProse.\n`);
+    const headMd = fmModule.stringify(liveFm, `![h](${heroSrc})\n\n## A\n\nProse.\n\n![a](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## B\n\n![b](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n`);
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? headMd : mainMd, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toMatchObject({ ok: true, reason: null });
+    // The grandfather covers ONLY the exact hero ref the live body carries: a head that swaps it for
+    // another post's hero (or an invented /hero.webp) is validated normally and withholds (GH r8).
+    for (const swapped of ['/images/blog/other-post/hero.webp', '/images/blog/shrub-diseases-sarasota-fl/hero.webp']) {
+      const swappedMd = headMd.replace(`![h](${heroSrc})`, `![h](${swapped})`);
+      gh.getFile.mockImplementation(async (path, ref) => {
+        if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? swappedMd : mainMd, sha: 'f' };
+        if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+        const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+        return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+      });
+      const res = await assertBodyImagesAtHead({ frontmatter: {}, ...refresh });
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/embeds the hero image/);
+      expect(res.reason).toContain(swapped);
+    }
+    expect(AstroPublisher._internals.legacyHeroRefs(`![h](${heroSrc})\n\n![x](/images/blog/a/hero.webp)\n\n![y](/images/blog/a/body-1.webp)\n\n![h2](${heroSrc})`, heroSrc)).toEqual([heroSrc, '/images/blog/a/hero.webp', heroSrc]); // occurrences, not unique (GH r13)
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? headMd : mainMd, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    // A non-blog target is exempt only once RESOLVED on the branch; unresolved fails closed (hook r15).
+    gh.getFile.mockImplementationOnce(async (path, ref) => (ref === 'content/refresh-x' && path === 'src/content/services/pest-control-venice-fl.md' ? { content: '---\ntitle: S\n---\nService.', sha: 's' } : null));
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).toEqual({ ok: true, reason: 'non_blog_target' });
+    expect((await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).reason).toMatch(/not found on content\/refresh-x/);
+    // New-post lane: a FLAT legacy .md that renders the same route is the file publication updated → it is what gets checked.
+    const flatFm = validFrontmatter({ slug: '/pest-control/drywood-frass-venice/', title: 'Drywood', canonical: 'https://www.wavespestcontrol.com/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/drywood-frass-venice/hero.webp', alt: 'h' }, og_image: '/images/blog/drywood-frass-venice/hero.webp' });
+    const flatMd = fmModule.stringify(flatFm, 'Body without pictures.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/autonomous-y' && path === 'src/content/blog/drywood-frass-venice.md' ? { content: flatMd, sha: 'flat' } : null));
+    const res = await assertBodyImagesAtHead({ frontmatter: draft().frontmatter, branch: 'content/autonomous-y' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\)/);
+  });
+
+  test('bodyImageRefs: reference-style images (full, collapsed, shortcut) resolve through the body\'s definitions; undefined labels and definitions inside code are not images; reference LINKS still blank (GH r9)', () => {
+    const body = [
+      '![technician][body]',
+      '![Collapsed Alt][]',
+      '![shortcut]',
+      '![nope][undefined]',
+      '![in-fence][fenced]',
+      '![multiline][multi]',
+      '[a reference link][body] and [text](/x/) stay prose',
+      '',
+      '[body]: /images/blog/x/body-1.webp "Title"',
+      '[ collapsed   alt ]: </images/blog/x/body-2.webp>',
+      '[SHORTCUT]: /images/blog/x/body-3.webp',
+      '[body]: /images/blog/x/ignored-second-definition.webp',
+      '[multi]:',
+      '  /images/blog/x/body-5.webp',
+      '```',
+      '[fenced]: /images/blog/x/body-4.webp',
+      '```',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([
+      ['technician', '/images/blog/x/body-1.webp'],
+      ['Collapsed Alt', '/images/blog/x/body-2.webp'],
+      ['shortcut', '/images/blog/x/body-3.webp'],
+      ['multiline', '/images/blog/x/body-5.webp'],
+    ]);
+    // The section scanner sees the same pictures: a reference-style image marks its section illustrated.
+    const { sections } = AstroPublisher._internals.scanBodySections(`## A\n\nProse.\n\n![pic][body]\n\n## B\n\nMore.\n\n[body]: /images/blog/x/body-1.webp\n`, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.hasImage === true])).toEqual([['A', true], ['B', false]]);
+  });
+
+  test('refresh lane: the multi-file commit keeps the optimistic lock — a target whose SHA moved on the fresh branch throws a transient error and nothing is committed (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      // main read → sha 'live'; the fresh branch already carries a newer edit → sha 'moved'.
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: ref ? 'moved' : 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/changed since it was read/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    // The just-cut branch is deleted (GH r11) — no orphan per retry.
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/shrub-diseases-sarasota-fl.md', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('refresh lane: the lock also covers generated asset paths — a body-N.webp that appeared on the fresh branch throws transient + deletes the branch (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // body-1 is free on main at allocation time but has appeared on the fresh branch by commit time.
+      if (ref && path === 'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp') return { content: '', sha: 'raced' };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/body-1\.webp \(appeared since it was allocated\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('resolveBodyImages: a committed body-N the run cannot reuse is never overwritten — the next free name is allocated (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // An orphan body-1.webp sits on main; the live body does not reference it → not reusable, never overwritten.
+      if (path === 'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp') return { content: '', sha: 'orphan', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
+  });
+
+  test('committedImageBuffer: a 404 (null) is a missing asset; an operational read error propagates so the runner retries instead of parking (hook P1)', async () => {
+    const { committedImageBuffer, assertDistinctPictures } = AstroPublisher._internals;
+    expect(await committedImageBuffer('public/images/blog/x/gone.webp', async () => null)).toBeNull();
+    await expect(committedImageBuffer('public/images/blog/x/a.webp', async () => { throw new Error('GitHub 503'); })).rejects.toThrow('GitHub 503');
+    await expect(assertDistinctPictures({ srcs: ['/images/blog/x/a.webp'], heroSrc: '/images/blog/x/hero.webp', getFile: async () => { throw new Error('GitHub 503'); } })).rejects.toThrow('GitHub 503');
+    // Through the publisher: a draft-authored image whose bytes fail to READ (not a 404) is not BLOG_BODY_IMAGES_FAILED.
+    gh.getFile.mockImplementation(async (path) => {
+      if (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/body-')) throw new Error('GitHub 502');
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('bodyImageRefs: image labels with nested or escaped brackets are parsed whole (balanced scanner), so the picture is validated (GH r11)', async () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![Technician [close-up]](/images/blog/x/hero.webp)\n![a \\] b](/images/blog/x/body-1.webp "t")\n![nested [ref]][r]\n\n[r]: /images/blog/x/body-2.webp');
+    expect(refs.map((r) => [r.alt, r.src])).toEqual([['Technician [close-up]', '/images/blog/x/hero.webp'], ['a \\] b', '/images/blog/x/body-1.webp'], ['nested [ref]', '/images/blog/x/body-2.webp']]);
+    const res = await AstroPublisher._internals.validateBodyImageRefs({ body: '![Technician [close-up]](/images/blog/x/hero.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) });
+    expect(res.reason).toMatch(/embeds the hero image/);
+  });
+
+  test('committedImageBuffer: a contents-API response without inline bytes (file over 1 MB) falls back to the blob by SHA (GH r11)', async () => {
+    const { committedImageBuffer } = AstroPublisher._internals;
+    const bytes = Buffer.from('big-picture');
+    gh.getBlob.mockResolvedValueOnce({ content: bytes.toString('base64'), encoding: 'base64' });
+    const buf = await committedImageBuffer('public/images/2024/big-hero.jpg', async () => ({ content: '', sha: 'blobsha', raw: { sha: 'blobsha', content: '', encoding: 'none', size: 2_000_000 } }));
+    expect(buf.equals(bytes)).toBe(true);
+    expect(gh.getBlob).toHaveBeenCalledWith('blobsha');
+    // Still null when the blob has nothing either.
+    gh.getBlob.mockResolvedValueOnce({ content: '', encoding: 'base64' });
+    expect(await committedImageBuffer('public/images/2024/empty.jpg', async () => ({ content: '', sha: 'e', raw: { sha: 'e', content: '' } }))).toBeNull();
+  });
+
+  test('bodyImageRefs: an inline destination with trailing junk is literal text, not an image; a wrapped (multi-line) label is still one image on its first line (GH r12)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![alt](/images/blog/x/body-1.webp trailing-junk)\n![ok](/images/blog/x/body-2.webp "title")')).toEqual([{ alt: 'ok', src: '/images/blog/x/body-2.webp', line: 1 }]);
+    const wrapped = '## A\n\nProse.\n\n![Technician\nworking](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(wrapped)).toEqual([{ alt: 'Technician working', src: '/images/blog/x/hero.webp', line: 4 }, { alt: 'b', src: '/images/blog/x/body-2.webp', line: 7 }]);
+    expect((await validateBodyImageRefs({ body: wrapped, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
+    // The section scanner sees the wrapped image under its heading.
+    const { sections } = AstroPublisher._internals.scanBodySections(wrapped, { title: 'T' });
+    expect(sections.find((sec) => sec.heading === 'A').images).toEqual(['/images/blog/x/hero.webp', '/images/blog/x/body-2.webp']);
+  });
+
+  test('bodyImageSlots: a `---` nested in a quote or list under a paragraph is not a setext underline — no fabricated section (GH r12)', () => {
+    const body = ['Intro one.', '> ---', '', 'Intro two.', '- ---', '', 'Intro three.', '', '## Real', '', 'Real prose.'].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Real']);
+    expect(bodyImageSlots(body, 1, { title: 'T' }).map((sl) => sl.heading)).toEqual(['Real']);
+  });
+
+  test('refresh lane: a REUSED body picture is pinned to its blob — a replacement on main by commit time throws transient and deletes the branch (GH r12)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const bodySrc = '/images/blog/shrub-diseases-sarasota-fl/body-1.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Live hibiscus alt](${bodySrc})\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    const bodyWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // body-1 on main is reusable (same heading + lead); the fresh branch already carries a REPLACED blob.
+      if (path === `public${bodySrc}`) return { content: '', sha: ref ? 'b1-replaced' : 'b1', raw: { content: bodyWebp.toString('base64') } };
+      return null;
+    });
+    // Draft keeps the Hibiscus section verbatim but drops the picture → the publisher REUSES body-1.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace(`![Live hibiscus alt](${bodySrc})\n\n`, '').replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/body-1\.webp \(reused picture changed: expected b1, found b1-replaced\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('bodyImageRefs: an image on the line after a reference-looking prefix is still rendered and validated; hero grandfather is per OCCURRENCE (GH r13)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs, legacyHeroRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('[ref]:\nProse ![bad](/images/blog/x/missing.webp)').map((r) => r.src)).toEqual(['/images/blog/x/missing.webp']);
+    expect((await validateBodyImageRefs({ body: '[ref]:\nProse ![bad](/images/blog/x/missing.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => null })).reason).toMatch(/not committed/);
+    const hero = '/images/2025/12/shrub.webp';
+    expect(legacyHeroRefs(`![a](${hero})\n\n![b](${hero})`, hero)).toEqual([hero, hero]);
+    const getFile = async () => ({ content: 'x' });
+    // Live body carried the hero ONCE → one occurrence is exempt; a refresh that repeats it fails.
+    expect(await validateBodyImageRefs({ body: `![a](${hero})\n\n![p](/images/blog/x/body-1.webp)\n\n![q](/images/blog/x/body-2.webp)`, heroSrc: hero, getFile, legacyHeroSrcs: [hero] })).toMatchObject({ ok: true, distinct: 2 });
+    expect((await validateBodyImageRefs({ body: `![a](${hero})\n\n![again](${hero})\n\n![p](/images/blog/x/body-1.webp)`, heroSrc: hero, getFile, legacyHeroSrcs: [hero] })).reason).toMatch(/embeds the hero image/);
+  });
+
+  test('bodyImageSlots: a quote or list directly under prose (no blank line) closes the paragraph — the lead and slot exclude the nested block; a heading-embedded image marks its section illustrated (GH r13)', () => {
+    const body = ['## A', '', 'Prose line.', '> quoted testimonial', '', '## B', '', 'B prose.', '- item', '', '## ![inspection](/images/blog/x/body-1.webp) What to inspect', '', 'C prose.', '', '## D', '', 'D prose.'].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    const byHeading = Object.fromEntries(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, { last: lines[sec.lastProse - 1], lead: sec.lead, img: !!sec.hasImage }]));
+    expect(byHeading).toEqual({
+      A: { last: 'Prose line.', lead: 'Prose line.', img: false },
+      B: { last: 'B prose.', lead: 'B prose.', img: false },
+      'What to inspect': { last: 'C prose.', lead: 'C prose.', img: true },
+      D: { last: 'D prose.', lead: 'D prose.', img: false },
+    });
+    expect(bodyImageSlots(body, 3, { title: 'T' }).map((sl) => sl.heading)).toEqual(['A', 'B', 'D']);
+  });
+
+  test('update lane: draft-authored pictures are pinned to their blobs even when the draft already meets the minimum — a replacement on main by commit time throws transient and drops the branch (GH r13)', async () => {
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      const m = path.match(/drywood-frass-venice\/(body-1|body-2)\.webp$/);
+      if (m) return { content: '', sha: ref ? `${m[1]}-replaced` : `${m[1]}-orig`, raw: { content: bytes[m[1]] } };
+      return null;
+    });
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    expect(thrown?.message).toMatch(/body-1\.webp \(pinned picture changed: expected body-1-orig, found body-1-replaced\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
+  });
+
+  test('bodyImageRefs: an empty destination renders (empty src) and is REJECTED; a picture inside a merely styled <div> is scanned, definitely-hidden containers still are not (GH r14)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![illustration]()\n![b](<>)')).toEqual([{ alt: 'illustration', src: '', line: 0 }, { alt: 'b', src: '', line: 1 }]);
+    expect((await validateBodyImageRefs({ body: '![illustration]()\n\n![p](/images/blog/x/body-1.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/not committed.*empty src/);
+    const styled = '<div class="figure" style="max-width:600px">\n\n![styled](/images/blog/x/hero.webp)\n\n</div>\n<div hidden>\n\n![gone](/images/blog/x/body-9.webp)\n\n</div>\n<div aria-hidden="true">\n\n![gone2](/images/blog/x/body-8.webp)\n\n</div>';
+    expect(bodyImageRefs(styled).map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);
+    expect((await validateBodyImageRefs({ body: styled, heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) })).reason).toMatch(/embeds the hero image/);
+  });
+
+  test('assertBodyImagesAtHead: assets the PR did not change are validated from the DEFAULT branch (what the merge carries), PR-changed ones from the head; the base tip is returned for the merge-time recheck (GH r14)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = draft().frontmatter;
+    const md = fmModule.stringify({ ...fmData, hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } }, '## A\n\nProse.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\nMore.\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const hero = await webp(0); const b1 = await webp(1); const b2 = await webp(2);
+    // The PR changed the post + body-1 only. body-2 on the HEAD is distinct, but MAIN has since replaced body-2 with a hero duplicate.
+    gh.compareFiles.mockResolvedValue({ files: ['src/content/blog/pest-control/drywood-frass-venice.mdx', 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp'], mergeBaseSha: 'mb' });
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref === 'content/autonomous-x' ? { content: md, sha: 'm' } : null;
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: ref === 'content/autonomous-x' ? 'b2-head' : 'b2-main', raw: { content: ref === 'content/autonomous-x' ? b2 : hero } };
+      return null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/body-2\.webp.*near-duplicate of hero|near-duplicate/);
+    // Unchanged assets are read AT the captured base tip (GH r29) — a base
+    // push between the tip capture and the read cannot change what merges.
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-2.webp', 'main-tip-1');
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/pest-control/drywood-frass-venice/body-1.webp', 'content/autonomous-x');
+    // With main's body-2 distinct, the check passes and reports the base tip it validated against.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return ref === 'content/autonomous-x' ? { content: md, sha: 'm' } : null;
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
+  });
+
+  test('bodyImageRefs: a reference definition inside a JSX attribute or a (multi-line) MDX expression defines nothing — the outside reference stays text (hook P1)', () => {
+    const body = [
+      '![a][jsx]',
+      '![b][expr]',
+      '![c][real]',
+      '',
+      '<Callout note="',
+      '[jsx]: /images/blog/x/body-1.webp',
+      '" />',
+      '{',
+      '  `[expr]: /images/blog/x/body-2.webp`',
+      '}',
+      '[real]: /images/blog/x/body-3.webp',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-3.webp']);
+  });
+
+  test('bodyImageSlots: an image in a setext H2 heading belongs to the section it opens, not the intro (GH r16)', () => {
+    const body = ['Intro prose.', '', '![inspection](/images/blog/x/body-1.webp) Inspection', '---', '', 'Inspection prose.', '', '## B', '', 'B prose.'].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.map((sec) => [sec.heading, !!sec.hasImage, sec.images])).toEqual([['T', false, []], ['Inspection', true, ['/images/blog/x/body-1.webp']], ['B', false, []]]);
+    expect(bodyImageSlots(body, 1, { title: 'T' }).map((sl) => sl.heading)).toEqual(['B']);
+  });
+
+  test('update lane: the pre-commit lock covers the existing post SHA and the destination path of a legacy migration (GH r16)', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n',
+    );
+    const committed = committedStub(['public/images/blog/pest-control/drywood-frass-venice/hero.webp']);
+    // Existing legacy .md read on main with sha 'live-sha'; on the fresh branch it already moved.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.md') return { content: liveMd, sha: ref ? 'moved' : 'live-sha' };
+      return committed(path);
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/drywood-frass-venice\.md \(post changed: expected live-sha, found moved\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\//));
+    // Migration destination (.mdx) that appeared on the branch is a conflict too.
+    gh.deleteRef.mockClear();
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.md') return { content: liveMd, sha: 'live-sha' };
+      if (ref && path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: 'x', sha: 'new' };
+      return committed(path);
+    });
+    thrown = undefined;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/drywood-frass-venice\.mdx \(appeared since the route was resolved\)/);
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+  });
+
+  test('bodyImageRefs: a reference definition with an angle-bracket (spaced) destination is decoded like an inline one; escaped label punctuation matches its unescaped spelling (GH r17)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![a][pic]\n![detail][shot!]\n\n[pic]: </images/blog/x/body 1.webp>\n[shot\\!]: /images/blog/x/body-2.webp');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/body 1.webp', '/images/blog/x/body-2.webp']);
+  });
+
+  test('publishAstro (calendar/scheduler lane): under the gate a hero-only post gets its two body images in the same commit; the PR body carries the illustrated body (GH r18 P1)', async () => {
+    const post = {
+      id: 'post-bi', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => { const q = read; return q; });
+    gh.getFile.mockResolvedValue(null);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/x/pull/77', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-bi');
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual([
+      'public/images/blog/ant-trails-bradenton/hero.webp',
+      'public/images/blog/ant-trails-bradenton/body-1.webp',
+      'public/images/blog/ant-trails-bradenton/body-2.webp',
+      'src/content/blog/ant-trails-bradenton.md',
+    ]);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[3].content).content;
+    expect(AstroPublisher._internals.countBodyImages(written)).toBe(2);
+  });
+
+  test('publishAstro republish: the live post\'s body pictures are REUSED (no generation, no body-3/4) (GH r19)', async () => {
+    const post = {
+      id: 'post-re', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const liveBody = '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n![Live alt one](/images/blog/ant-trails-bradenton/body-1.webp)\n\n## What to do first\n\nWipe the trail and seal the entry point.\n\n![Live alt two](/images/blog/ant-trails-bradenton/body-2.webp)\n';
+    const liveMd = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: post.title, hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), liveBody);
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { 'body-1': await webp(1), 'body-2': await webp(2) };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md') return { content: liveMd, sha: 'live' };
+      const m = path.match(/ant-trails-bradenton\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 78, html_url: 'https://github.com/x/pull/78', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-re');
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual(['public/images/blog/ant-trails-bradenton/hero.webp', 'src/content/blog/ant-trails-bradenton.md']);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[1].content).content;
+    expect(written).toContain('![Live alt one](/images/blog/ant-trails-bradenton/body-1.webp)');
+    expect(written).toContain('![Live alt two](/images/blog/ant-trails-bradenton/body-2.webp)');
+  });
+
+  test('publishAstro republish: a live post that moved on main by commit time throws transient and drops the branch — never overwritten (hook P0)', async () => {
+    const post = {
+      id: 'post-lock', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const liveMd = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: post.title, hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## What you are seeing\n\nOld.\n');
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path, ref) => (path === 'src/content/blog/ant-trails-bradenton.md' ? { content: liveMd, sha: ref ? 'moved' : 'live' } : null));
+    let thrown;
+    try { await AstroPublisher.publishAstro('post-lock'); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/ant-trails-bradenton\.md \(post changed: expected live, found moved\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    void update;
+  });
+
+  test('unpublishAstro removes the generated body-N.webp assets with the hero (GH r19)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/ant-trails-bradenton.md') return { content: '---\ntitle: x\n---\nbody', sha: 'md' };
+      if (path === 'public/images/blog/ant-trails-bradenton/hero.webp') return { content: '', sha: 'h' };
+      return null;
+    });
+    gh.listDir.mockResolvedValue([
+      { type: 'file', name: 'hero.webp', path: 'public/images/blog/ant-trails-bradenton/hero.webp', sha: 'h' },
+      { type: 'file', name: 'body-1.webp', path: 'public/images/blog/ant-trails-bradenton/body-1.webp', sha: 'b1' },
+      { type: 'file', name: 'body-2.webp', path: 'public/images/blog/ant-trails-bradenton/body-2.webp', sha: 'b2' },
+      { type: 'file', name: 'notes.txt', path: 'public/images/blog/ant-trails-bradenton/notes.txt', sha: 'n' },
+    ]);
+    gh.deleteFile.mockResolvedValue({});
+    gh.createPr.mockResolvedValue({ number: 79, html_url: 'https://github.com/x/pull/79', head: { sha: 'u' } });
+
+    await AstroPublisher.unpublishAstro('post-un');
+
+    const deleted = gh.deleteFile.mock.calls.map(([a]) => a.path);
+    expect(deleted).toEqual(expect.arrayContaining(['src/content/blog/ant-trails-bradenton.md', 'public/images/blog/ant-trails-bradenton/hero.webp', 'public/images/blog/ant-trails-bradenton/body-1.webp', 'public/images/blog/ant-trails-bradenton/body-2.webp']));
+    expect(deleted).not.toContain('public/images/blog/ant-trails-bradenton/notes.txt');
+    expect(gh.createPr.mock.calls[0][0].body).toContain('2 generated body image(s)');
+  });
+
+  test('refresh lane: a REUSED committed hero sibling is pinned — a hero replaced on main by commit time throws transient (GH r19)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: ref ? 'hero-replaced' : 'hero-orig', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/shrub-diseases\.webp \(pinned picture changed: expected hero-orig, found hero-replaced\)/);
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('assertBodyImagesAtHead: an operational read error is reported transient; a contract miss is not (hook P1)', async () => {
+    const { assertBodyImagesAtHead } = AstroPublisher._internals;
+    gh.getFile.mockImplementation(async () => { throw new Error('GitHub 503'); });
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: 'src/content/blog/ant-trails-bradenton.md' });
+    expect(res).toMatchObject({ ok: false, transient: true });
+    expect(res.reason).toContain('GitHub 503');
+    const md = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: 'T', hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## A\n\nProse only.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/blog-x' && path === 'src/content/blog/ant-trails-bradenton.md' ? { content: md, sha: 'm' } : null));
+    const miss = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: 'src/content/blog/ant-trails-bradenton.md' });
+    expect(miss.ok).toBe(false);
+    expect(miss.transient).toBeFalsy();
+  });
+
+  test('assertBodyImagesAtHead: an explicit filePath (scheduler lane) is validated on the PR branch (GH r19)', async () => {
+    const { assertBodyImagesAtHead } = AstroPublisher._internals;
+    const md = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: 'T', hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## A\n\nProse only.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/blog-x' && path === 'src/content/blog/ant-trails-bradenton.md' ? { content: md, sha: 'm' } : null));
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-x', filePath: AstroPublisher.scheduledBlogFilePath('ant-trails-bradenton') });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image/);
+    // EXACTLY the scheduler's .md is read — a stale .mdx sibling on the branch is never consulted (hook P1).
+    expect(gh.getFile).not.toHaveBeenCalledWith('src/content/blog/ant-trails-bradenton.mdx', 'content/blog-x');
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/ant-trails-bradenton.md', 'content/blog-x');
+    expect((await assertBodyImagesAtHead({ frontmatter: {}, branch: 'content/blog-y', filePath: 'src/content/blog/ant-trails-bradenton.md' })).reason).toMatch(/not found on content\/blog-y/);
+  });
+
+  test('bodyImageRefs: a reference-looking line glued to prose defines nothing — the reference stays text (GH r20)', () => {
+    expect(AstroPublisher._internals.bodyImageRefs('![a][pic]\n\nIntro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /images/blog/x/body-2.webp\n\n![b][ok]').map((r) => r.src)).toEqual(['/images/blog/x/body-2.webp']);
+  });
+
+  test('isTransientImageError: a Gemini 429/5xx recorded as fatal is still transient; a 400 is not (GH r20 P1)', () => {
+    const { isTransientImageError } = AstroPublisher._internals;
+    const err = (attempts) => Object.assign(new Error('image-generator: all providers failed'), { attempts });
+    expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { fatal: true, status: 400 } }, { provider: 'gemini', result: { fatal: true, status: 429 } }]))).toBe(true);
+    expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 503 } }]))).toBe(true);
+    expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 400 } }, { provider: 'gpt-image-2', result: { fatal: true, status: 'no_b64_in_response' } }]))).toBe(false);
+  });
+
+  test('publishAstro republish with a COMMITTED hero (absolute hub URL): the hero enters the duplicate check from its relative src (hook P1)', async () => {
+    const post = {
+      id: 'post-hub', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: 'https://www.wavespestcontrol.com/images/blog/ant-trails-bradenton/hero.webp', hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const heroWebp = (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/blog/ant-trails-bradenton/hero.webp' ? { content: '', sha: 'h', raw: { content: heroWebp } } : null));
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 80, html_url: 'https://github.com/x/pull/80', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-hub');
+
+    // The committed hero's bytes were read for the dHash sibling set (no fresh hero bytes on a committed-hero republish).
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/ant-trails-bradenton/hero.webp');
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual(['public/images/blog/ant-trails-bradenton/body-1.webp', 'public/images/blog/ant-trails-bradenton/body-2.webp', 'src/content/blog/ant-trails-bradenton.md']);
+  });
+
+  test('unpublishAstro aborts (branch dropped, no PR) when the body-asset listing fails (GH r20)', async () => {
+    const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un2', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/ant-trails-bradenton.md' ? { content: '---\ntitle: x\n---\nbody', sha: 'md' } : null));
+    gh.listDir.mockRejectedValue(new Error('GitHub 502'));
+    let thrown;
+    try { await AstroPublisher.unpublishAstro('post-un2'); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(gh.createPr).not.toHaveBeenCalled();
+    // The listing happens BEFORE the branch is cut — no orphan ref per retry (hook P1).
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('assertBodyImagesAtHead: a post that changed on the default branch since the branch was cut is withheld (the merged body is not the PR-head copy) (GH r20)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = draft().frontmatter;
+    const md = fmModule.stringify({ ...fmData, hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } }, '## A\n\nProse.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\nMore.\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const hero = await webp(0); const b1 = await webp(1); const b2 = await webp(2);
+    gh.compareFiles.mockResolvedValue({ files: ['src/content/blog/pest-control/drywood-frass-venice.mdx'], mergeBaseSha: 'mb' });
+    gh.getBranchSha.mockResolvedValue('main-tip-1');
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') {
+        if (ref === 'content/autonomous-x') return { content: md, sha: 'head' };
+        if (ref === 'mb') return { content: md, sha: 'fork' };
+        return { content: md, sha: 'main-moved' }; // default branch edited the post after the fork
+      }
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.transient).toBeFalsy();
+    expect(res.reason).toMatch(/changed on the default branch since content\/autonomous-x was cut/);
+    // Same blob at the fork and now → validated normally.
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: md, sha: ref === 'content/autonomous-x' ? 'head' : 'fork' };
+      if (path.endsWith('/hero.webp')) return { content: '', sha: 'h', raw: { content: hero } };
+      if (path.endsWith('/body-1.webp')) return { content: '', sha: 'b1', raw: { content: b1 } };
+      if (path.endsWith('/body-2.webp')) return { content: '', sha: 'b2', raw: { content: b2 } };
+      return null;
+    });
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    // The divergence read of the post itself is pinned to the captured base
+    // tip (GH r30) — a push after the capture is the tip comparison's
+    // transient retry, never a deterministic withhold.
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/drywood-frass-venice.mdx', 'main-tip-1');
+  });
+
+  test('bodyImageRefs: an image used as a link label is scanned; an angle destination keeps its edge whitespace (GH r21)', async () => {
+    const { bodyImageRefs, validateBodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('[![linked alt](/images/blog/x/missing.webp)](/contact/)\n![p](</images/blog/x/body-1.webp >)').map((r) => [r.alt, r.src])).toEqual([['linked alt', '/images/blog/x/missing.webp'], ['p', '/images/blog/x/body-1.webp ']]);
+    const getFile = async (path) => (path === 'public/images/blog/x/body-1.webp' ? { content: 'x' } : null);
+    expect((await validateBodyImageRefs({ body: '[![linked alt](/images/blog/x/missing.webp)](/contact/)', heroSrc: '/images/blog/x/hero.webp', getFile })).reason).toMatch(/not committed.*missing\.webp/);
+    expect((await validateBodyImageRefs({ body: '![p](</images/blog/x/body-1.webp >)', heroSrc: '/images/blog/x/hero.webp', getFile })).reason).toMatch(/not committed/);
+  });
+
+  test('refresh lane: a superseded body-N (section rewritten) is DELETED in the same commit, pinned to its blob; reused ones stay (GH r22)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const b1 = '/images/blog/shrub-diseases-sarasota-fl/body-1.webp';
+    const b2 = '/images/blog/shrub-diseases-sarasota-fl/body-2.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Live one](${b1})\n\n## Oleander\n\nOleander prose.\n\n![Live two](${b2})\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const webp = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(4), 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: `${m[1]}-sha`, raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    // Hibiscus section REWRITTEN (different lead → body-1 not reusable); Oleander unchanged (body-2 reused). Draft drops both refs.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: '## Hibiscus\n\nCompletely new hibiscus guidance.\n\n## Oleander\n\nOleander prose.\n' };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', 'src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp']);
+    const written = fmModule.parse(call.files[1].content).content;
+    expect(written).toContain(`![Live two](${b2})`);
+    expect(written).not.toContain(b1);
+    // The lock also covers the deleted path (pinned to the blob it was judged on).
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('stripManagedBodyImages removes publisher-managed body-N references (and only those) from a body mirrored into blog_posts (GH r22)', () => {
+    const body = '## A\n\nProse.\n\n![gen](/images/blog/x/body-1.webp)\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore ![inline](/images/blog/x/body-2.webp) text.\n\n![gen2](/images/blog/x/body-2.webp)';
+    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\n## B\n\n![authored](/images/2025/12/photo.webp)\n\nMore text.');
+    // Reference-style managed images and their definitions go too; a definition for a NON-managed path stays (hook P1).
+    const ref = '## A\n\nProse.\n\n![gen][pic]\n\n![keep][photo]\n\n[pic]: </images/blog/x/body-1.webp>\n[photo]: /images/2025/12/photo.webp';
+    expect(AstroPublisher.stripManagedBodyImages(ref, 'x')).toBe('## A\n\nProse.\n\n![keep][photo]\n\n[photo]: /images/2025/12/photo.webp');
+    // Multi-line managed definitions (destination on the continuation line, title after) are removed whole (hook P1).
+    const multi = '## A\n\nProse.\n\n![gen][pic]\n\n[pic]:\n  </images/blog/x/body-1.webp>\n  "title"\n[photo]: /images/2025/12/photo.webp';
+    expect(AstroPublisher.stripManagedBodyImages(multi, 'x')).toBe('## A\n\nProse.\n\n[photo]: /images/2025/12/photo.webp');
+    // Only RENDERED, publisher-OWNED occurrences: code/comments/expressions and authored `body-background.webp` stay (hook P1).
+    const guarded = ['## A', '', 'Prose.', '', '![gen](/images/blog/x/body-1.webp)', '', '```', '![gen](/images/blog/x/body-1.webp)', '```', '', 'Inline `![gen](/images/blog/x/body-2.webp)` code.', '', '<!-- ![gen](/images/blog/x/body-2.webp) -->', '', '![bg](/images/blog/x/body-background.webp)', '', '![other post](/images/blog/y/body-1.webp)'].join('\n');
+    expect(AstroPublisher.stripManagedBodyImages(guarded, 'x')).toBe(['## A', '', 'Prose.', '', '```', '![gen](/images/blog/x/body-1.webp)', '```', '', 'Inline `![gen](/images/blog/x/body-2.webp)` code.', '', '<!-- ![gen](/images/blog/x/body-2.webp) -->', '', '![bg](/images/blog/x/body-background.webp)', '', '![other post](/images/blog/y/body-1.webp)'].join('\n'));
+    // Nullable slug → publishAstro's slugify(title) fallback.
+    expect(AstroPublisher.stripManagedBodyImagesForPost('P.\n\n![g](/images/blog/ant-trails-in-bradenton/body-1.webp)', { slug: null, title: 'Ant Trails in Bradenton' })).toBe('P.');
+    expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
+  });
+
+  test('bodyImageRefs: a definition opening a blockquote after prose defines; a closed <details> summary image renders; escaped `\\>` inside an angle destination is honoured (GH r23)', async () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    expect(bodyImageRefs('![a][pic]\n\nIntro\n> [pic]: /images/blog/x/body-1.webp').map((r) => r.src)).toEqual(['/images/blog/x/body-1.webp']);
+    expect(bodyImageRefs('<details><summary>![preview](/images/blog/x/hero.webp)</summary>\n\n![gone](/images/blog/x/body-9.webp)\n\n</details>').map((r) => r.src)).toEqual(['/images/blog/x/hero.webp']);
+    expect(bodyImageRefs('![a](</images/blog/x/body-\\>.webp>)').map((r) => r.src)).toEqual(['/images/blog/x/body->.webp']);
+  });
+
+  test('stripManagedBodyImages resolves rendered spans structurally — angle-destination and wrapped-alt managed images are stripped too (GH r23)', () => {
+    const body = '## A\n\nProse.\n\n![gen](</images/blog/x/body-1.webp>)\n\n![wrapped\nalt](/images/blog/x/body-2.webp)\n\nMore.';
+    expect(AstroPublisher.stripManagedBodyImages(body, 'x')).toBe('## A\n\nProse.\n\nMore.');
+    // A code-span copy of the SAME managed image on the same line as a real one stays; only the rendered one goes (hook P1).
+    expect(AstroPublisher.stripManagedBodyImages('See `![gen](/images/blog/x/body-1.webp)` then ![gen](/images/blog/x/body-1.webp) here.', 'x')).toBe('See `![gen](/images/blog/x/body-1.webp)` then here.');
+    expect(AstroPublisher.stripManagedBodyImages('> ![gen](/images/blog/x/body-1.webp)\n> Quoted prose.', 'x')).toBe('>\n> Quoted prose.');
+    // A definition inside a JSX attribute / MDX expression defines nothing — the outside reference and the tag stay (hook P1).
+    const jsx = '![a][pic]\n\n<Callout note="\n[pic]: /images/blog/x/body-1.webp\n" />';
+    expect(AstroPublisher.stripManagedBodyImages(jsx, 'x')).toBe(jsx);
+    // A wrapped-alt removal must not shift later lines: a managed definition after it still goes, unrelated prose stays (hook P0).
+    const shifted = '![wrapped\nalt][pic]\n\nKeep this prose.\n\n[pic]: /images/blog/x/body-1.webp\nAnd this line too.';
+    expect(AstroPublisher.stripManagedBodyImages(shifted, 'x')).toBe('Keep this prose.\n\nAnd this line too.');
+  });
+
+  test('refresh lane: the managed-image directory is keyed by the PUBLISHED frontmatter route, not the source file path — a flat file rendering a nested route sweeps the route directory (GH r27)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/pest-control/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const a1 = '/images/2026/01/hibiscus-detail.webp';
+    const a2 = '/images/2026/01/oleander-detail.webp';
+    const liveBody = `## Hibiscus\n\nHibiscus prose.\n\n![Hibiscus detail](${a1})\n\n## Oleander\n\nOleander prose.\n\n![Oleander detail](${a2})\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    const w = async (i) => (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const a1Webp = await w(1); const a2Webp = await w(2);
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === `public${a1}`) return { content: '', sha: 'a1', raw: { content: a1Webp } };
+      if (path === `public${a2}`) return { content: '', sha: 'a2', raw: { content: a2Webp } };
+      return null;
+    });
+    gh.listDir.mockResolvedValue([]);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    // The sweep looked in the ROUTE directory the creating lane files under.
+    expect(gh.listDir).toHaveBeenCalledWith('public/images/blog/pest-control/shrub-diseases-sarasota-fl');
+  });
+
+  test('refresh lane: a managed-image listing failure propagates as a transient error — no PR on a partial deletion set (GH r25)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.listDir.mockRejectedValue(new Error('GitHub 502'));
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('could not list managed images');
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(thrown?.code).toBeUndefined(); // transient, not BLOG_BODY_IMAGES_FAILED
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
+  test('refresh lane: stale managed assets ABOVE the first free name are swept from the directory listing (GH r23)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === 'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp') return { content: '', sha: 'stale3' };
+      return null; // body-1/body-2 free by name probe…
+    });
+    // …but the directory still holds a stale body-3 nobody references.
+    gh.listDir.mockResolvedValue([{ type: 'file', name: 'body-3.webp', path: 'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', sha: 'stale3' }]);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', 'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp', 'src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-3.webp']);
+    expect(gh.getFile).toHaveBeenCalledWith('public/images/blog/shrub-diseases-sarasota-fl/body-3.webp', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);
+  });
+
+  test('refresh lane: an unchanged draft is NOT a no-op while the live blog body is short of its images — the refresh backfills them; a non-blog unchanged draft stays no_changes (GH r15)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = `![shrub diseases](${heroSrc})\n\n## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (path === 'src/content/services/pest-control-venice-fl.md') return { content: '---\ntitle: S\nmeta_description: d\n---\nService body.', sha: 's' };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    // Identical body + meta: previously no_changes; under the gate the image-poor post gets its two pictures.
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
+    // A live post whose two body paths hold the SAME picture (or a missing asset) is short of the contract too (hook P1):
+    // the unchanged refresh runs — and parks, because the draft body carries the invalid pictures.
+    const dupBody = `## Hibiscus\n\nHibiscus prose.\n\n![p](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## Oleander\n\nOleander prose.\n\n![q](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n`;
+    const dupMd = fmModule.stringify(liveFm, dupBody);
+    const same = (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: dupMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (/shrub-diseases-sarasota-fl\/body-[12]\.webp$/.test(path)) return { content: '', sha: 'same', raw: { content: same } };
+      if (path === 'src/content/services/pest-control-venice-fl.md') return { content: '---\ntitle: S\nmeta_description: d\n---\nService body.', sha: 's' };
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishRefresh({ ...draft, body: dupBody }, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate/);
+    // Non-blog target, identical → still a no-op.
+    const svc = await AstroPublisher.publishRefresh({ type: 'draft', page_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', frontmatter: {}, body: 'Service body.' }, { action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/' });
+    expect(svc.status).toBe('no_changes');
+  });
+
+  test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![detail](</images/blog/foo/body-1.webp>)\n![spaced](</images/blog/foo/body 2.webp> "t")\n![plain](/images/blog/foo/body-3.webp)');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-1.webp', '/images/blog/foo/body 2.webp', '/images/blog/foo/body-3.webp']);
+    const getFile = async (path) => (path === 'public/images/blog/foo/body-1.webp' || path === 'public/images/blog/foo/body-3.webp' ? { content: 'x' } : null);
+    expect(await AstroPublisher._internals.validateBodyImageRefs({ body: '![a](</images/blog/foo/body-1.webp>)\n\n![b](/images/blog/foo/body-3.webp)', heroSrc: '/images/blog/foo/hero.webp', getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
+  test('validateBodyImageRefs: an authored image with empty alt text fails closed — it never counts toward the minimum (GH r10)', async () => {
+    const getFile = async () => ({ content: 'x' });
+    for (const body of ['![](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', '![   ](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', '![][r]\n\n![b](/images/blog/foo/body-2.webp)\n\n[r]: /images/blog/foo/body-1.webp']) {
+      const res = await AstroPublisher._internals.validateBodyImageRefs({ body, heroSrc: '/images/blog/foo/hero.webp', getFile });
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/has no alt text/);
+      expect(res.reason).toContain('/images/blog/foo/body-1.webp');
+    }
+    expect(await AstroPublisher._internals.validateBodyImageRefs({ body: '![a](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', heroSrc: '/images/blog/foo/hero.webp', getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
+  test('validateBodyImageRefs: a reference-style image is validated like an inline one — hero via reference fails, uncommitted via reference fails, committed counts (GH r9)', async () => {
+    const { validateBodyImageRefs } = AstroPublisher._internals;
+    const heroSrc = '/images/blog/x/hero.webp';
+    const getFile = async (path) => (path === 'public/images/blog/x/body-1.webp' || path === 'public/images/blog/x/body-2.webp' ? { content: 'x' } : null);
+    const viaRef = (label, dest) => `## A\n\n![p][${label}]\n\n![q](/images/blog/x/body-2.webp)\n\n[${label}]: ${dest}\n`;
+    expect((await validateBodyImageRefs({ body: viaRef('h', heroSrc), heroSrc, getFile })).reason).toMatch(/embeds the hero image/);
+    expect((await validateBodyImageRefs({ body: viaRef('r', 'https://example.com/pic.jpg'), heroSrc, getFile })).reason).toMatch(/not committed/);
+    expect((await validateBodyImageRefs({ body: viaRef('m', '/images/blog/x/missing.webp'), heroSrc, getFile })).reason).toMatch(/not committed/);
+    expect(await validateBodyImageRefs({ body: viaRef('ok', '/images/blog/x/body-1.webp'), heroSrc, getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
+  test('bodyImageSlots: top-level H2s and paragraphs with 1–3 leading spaces are still top-level; real list children are not (GH r9)', () => {
+    const body = [
+      '  ## Indented heading', '', '   Indented prose, still a paragraph.', '',
+      '## Plain', '', 'Plain prose.', '',
+      '- item', '  ## Nested heading', '', '  Nested prose under the item.', '',
+      ' ## After list', '', ' After prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Indented heading', 'Plain', 'After list']);
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    const lines = body.split('\n');
+    expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['   Indented prose, still a paragraph.', 'Plain prose.', ' After prose.']);
+  });
+
+  test('bodyImageSlots: setext headings are sections — a `---` underline opens an H2 with its own slot, `===` is an H1 that closes the range; an underline under list/quoted text is not a setext heading (hook P1)', () => {
+    const body = [
+      'Intro prose.', '',
+      'Setext Two', '---', '', 'Two prose.', '',
+      'Setext One', '===', '', 'After-H1 prose.', '',
+      '## ATX', '', 'ATX prose.', '',
+      '- item', '  ---', '', 'Tail prose.',
+    ].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.map((sec) => [sec.heading, !!sec.sub, sec.lastProse == null ? null : lines[sec.lastProse - 1]])).toEqual([
+      ['T', false, 'Intro prose.'],
+      ['Setext Two', false, 'Two prose.'],
+      ['Setext Two', true, 'After-H1 prose.'],
+      ['ATX', false, 'Tail prose.'],
+    ]);
+    expect(bodyImageSlots(body, 2, { title: 'T' }).map((sl) => sl.heading)).toEqual(['Setext Two', 'ATX']);
+  });
+
+  test('bodyImageSlots: thematic breaks are dividers, never prose — the slot stays above the break, a divider-only section is ineligible, "- - -" is not a list; a setext underline makes heading text, not prose (GH r9)', () => {
+    const body = [
+      '## A', '', 'A prose.', '', '---', '',
+      '## Only divider', '', '***', '',
+      '## B', '', 'B prose.', '- - -', '',
+      '## C', '', 'Setext-looking text', '---', '',
+      '## D', '', 'D prose.', '', '___',
+    ].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    const byHeading = Object.fromEntries(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.lastProse == null ? null : lines[sec.lastProse - 1]]));
+    expect(byHeading).toEqual({ A: 'A prose.', 'Only divider': null, B: 'B prose.', C: null, 'Setext-looking text': null, D: 'D prose.' });
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['A', 'B', 'D']);
+    // Insertion lands ABOVE the divider, inside the section.
+    const out = insertBodyImages(body, slots.map((sl, i) => ({ ...sl, src: `/images/blog/x/body-${i + 1}.webp`, alt: sl.heading })));
+    expect(out).toContain('A prose.\n\n![A](/images/blog/x/body-1.webp)\n\n---');
+    expect(out).toContain('B prose.\n\n![B](/images/blog/x/body-2.webp)\n\n- - -');
+  });
+
+  test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);
+  });
+
+  test('bodyImageRefs: comments, JSX comments, code spans and escaped syntax are not images; an escaped backslash before ! still renders (GH r1)', () => {
+    const body = [
+      '![real](/images/2026/08/a.webp)',
+      '<!-- ![hidden](/images/2026/08/b.webp) -->',
+      '{/* ![jsx](/images/2026/08/c.webp) */}',
+      '`![span](/images/2026/08/d.webp)`',
+      '\\![escaped](/images/2026/08/e.webp)',
+      '\\\\![double-escaped renders](/images/2026/08/f.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/a.webp', '/images/2026/08/f.webp']);
+    // The section scanner sees the same thing: a commented-out image does not mark a section illustrated.
+    const slots = bodyImageSlots('## A\n\nProse.\n\n<!-- ![x](/i.webp) -->\n', 1);
+    expect(slots.map((sl) => sl.heading)).toEqual(['A']);
+  });
+
+  test('fail-closed: a draft that embeds the HERO in its body parks — the hero never counts as a body image (GH r1)', async () => {
+    gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/') ? { content: 'x', sha: 'h' } : null));
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![hero again](/images/blog/pest-control/drywood-frass-venice/hero.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toContain('embeds the hero image');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('fail-closed: a draft image ref that is NOT committed (invented path / remote URL) parks instead of shipping a broken image (hook r2)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    for (const ref of ['/images/2026/08/made-up.webp', 'https://example.com/pic.jpg']) {
+      let thrown;
+      try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![x](${ref})\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+      expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+      expect(thrown.message).toContain(ref);
+    }
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('fail-closed: body image generation failure throws with the provider chain before any branch is cut — a retryable provider failure stays TRANSIENT (no code), a non-retryable one is BLOG_BODY_IMAGES_FAILED (hook P1)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
+      if (mode === 'blog-hero') return { dataUrl: PATTERNS[0], model: 'm' };
+      const err = new Error('image-generator: all providers failed');
+      err.attempts = [{ provider: 'gpt-image-2', result: { retryable: true, status: 503 } }];
+      throw err;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBeUndefined();
+    expect(thrown.message).toContain('"Reading the pellets"');
+    expect(thrown.message).toContain('gpt-image-2');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
+      if (mode === 'blog-hero') return { dataUrl: PATTERNS[0], model: 'm' };
+      const err = new Error('image-generator: all providers failed');
+      err.attempts = [{ provider: 'gpt-image-2', result: { retryable: false, status: 400 } }];
+      throw err;
+    });
+    thrown = undefined;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('variation: a generated body image must also differ from a DRAFT-authored committed image (hook r9)', async () => {
+    // The committed file is what a publish commits: the WebP-compressed bytes.
+    const committedWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a', raw: { content: committedWebp.toString('base64') } } : null));
+    // hero = P0; body first try = P1 (same picture as the draft's a.webp) → regenerate → P2.
+    const sequence = [PATTERNS[0], PATTERNS[1], PATTERNS[2]];
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => ({ dataUrl: sequence[call++], model: 'm', alt: mode === 'blog-body' ? 'b' : 'h', attempts: [] }));
+    await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n`), { action_type: 'new_supporting_blog' });
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls.map(([a]) => a.shot)).toEqual(['close-up', 'action']);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+  });
+
+  test('variation: two draft-authored refs holding the SAME picture, or a draft image repeating the hero, park even when the count is met (hook r11)', async () => {
+    const committedWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/2026/08/') ? { content: '', sha: 'x', raw: { content: committedWebp.toString('base64') } } : null));
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/b\.webp, a near-duplicate of \/images\/2026\/08\/a\.webp/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+
+    // Draft image = the freshly generated hero's picture → parks too.
+    jest.clearAllMocks();
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[0].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/h.webp' ? { content: '', sha: 'x', raw: { content: heroWebp.toString('base64') } } : null));
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => ({ dataUrl: PATTERNS[0], model: 'm', alt: mode === 'blog-body' ? 'b' : 'h', attempts: [] }));
+    thrown = null;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![h](/images/2026/08/h.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate of hero/);
+  });
+
+  test('fail-closed: unreadable bytes for a reused hero or a draft image park — an unverifiable picture never passes the distinctness check (hook r12)', async () => {
+    // Reused hero (committed, but the contents API returned no bytes).
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n',
+    );
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h' };
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/hero bytes unavailable/);
+
+    // Draft image committed (path exists) but bytes unreadable.
+    jest.clearAllMocks();
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a' } : null));
+    thrown = null;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/bytes cannot be read/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('imageDHash: identical pictures hash identically, different patterns are far apart, recompression is tolerated', async () => {
+    const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
+    const toBuf = (dataUrl) => Buffer.from(dataUrl.split(',')[1], 'base64');
+    const a = await imageDHash(toBuf(PATTERNS[0]));
+    const b = await imageDHash(toBuf(PATTERNS[1]));
+    expect(hammingDistance(a, await imageDHash(toBuf(PATTERNS[0])))).toBe(0);
+    expect(hammingDistance(a, b)).toBeGreaterThan(NEAR_DUPLICATE_MAX_DISTANCE);
+    // Recompression/resizing of a photo-like (smooth) image keeps it a duplicate.
+    const sharp = require('sharp');
+    const w = 96; const h = 64; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 3; raw[i] = (x * 255) / w; raw[i + 1] = (y * 255) / h; raw[i + 2] = ((x + y) * 128) / (w + h); }
+    const photo = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    const recompressed = await AstroPublisher._internals.compressToWebp(photo, { width: 48 });
+    expect(hammingDistance(await imageDHash(photo), await imageDHash(recompressed))).toBeLessThanOrEqual(NEAR_DUPLICATE_MAX_DISTANCE);
+  });
+
+  test('variation: a body image that is a near-duplicate of the hero is regenerated once with the next framing; a still-duplicate sibling parks', async () => {
+    gh.getFile.mockResolvedValue(null);
+    // hero = P0; body-1 first try = P0 (dup of hero) → regenerate → P1; body-2 = P2.
+    const sequence = [PATTERNS[0], PATTERNS[0], PATTERNS[1], PATTERNS[2]];
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({ dataUrl: sequence[call++], model: 'm', alt: mode === 'blog-body' ? `Alt ${keyword}` : 'hero', attempts: [] }));
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls.map(([a]) => a.shot)).toEqual(['close-up', 'action', 'action']);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+
+    // Same picture every time → after one regeneration the run parks.
+    jest.clearAllMocks();
+    gh.getFile.mockResolvedValue(null);
+    gh.createPr.mockResolvedValue({ number: 202, html_url: 'x' });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[3], model: 'm', alt: 'same', attempts: [] }));
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate of hero even after regenerating/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('fail-closed: too few prose sections to place the images parks instead of publishing short', async () => {
+    gh.getFile.mockResolvedValue(null);
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft('![only](/images/x.webp)\n\n- a list\n- only'), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('bodyImageRefs: a reference definition that OPENS a list item (`- [pic]: …`) defines its label — the reference image renders and is validated (GH r24)', () => {
+    const body = '- Intro\n- [pic]: /images/blog/x/body-1.webp\n\n![Pellets][pic]\n\n1. [one]: /images/blog/x/body-2.webp\n\n![Sill][one]';
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([['Pellets', '/images/blog/x/body-1.webp'], ['Sill', '/images/blog/x/body-2.webp']]);
+    // A continuation line inside the item is paragraph text — no definition, no image.
+    expect(AstroPublisher._internals.bodyImageRefs('- item\n  [pic]: /images/blog/x/body-1.webp\n\n![a][pic]')).toEqual([]);
+  });
+
+  test('bodyImageRefs: HTML character references in a destination are decoded before percent-decoding — inline and reference forms probe the path the browser requests (GH r24)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '![Detail](/images/blog/x/body&amp;detail.webp)\n\n[ref]: /images/blog/x/sill&#x2F;close%20up.webp\n\n![Sill][ref]\n\n![Literal](/images/blog/x/no&bogus;entity&amp.webp)';
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([
+      '/images/blog/x/body&detail.webp',
+      '/images/blog/x/sill/close up.webp',
+      // An unknown or unterminated reference is literal text (CommonMark: `;` mandatory).
+      '/images/blog/x/no&bogus;entity&amp.webp',
+    ]);
+  });
+
+  test('bodyImageRefs: a legacy .md renders CommonMark HTML blocks as raw text — Markdown images inside them do not count; .mdx parses JSX children as Markdown and they do (GH r24)', () => {
+    const { bodyImageRefs, blankMarkdownHtmlBlocks } = AstroPublisher._internals;
+    const body = [
+      '<div>![a](/images/blog/x/body-1.webp)</div>', '',            // type 6, one line
+      '<figure>', '![b](/images/blog/x/body-2.webp)', '',           // type 6, runs to the blank line
+      '![c](/images/blog/x/body-3.webp)', '',                        // after the blank → rendered
+      '<span>', '![d](/images/blog/x/body-4.webp)', '</span>', '',  // type 7 (complete tag alone, after a blank)
+      'Prose <span>![e](/images/blog/x/body-5.webp)</span>', '',    // inline HTML inside a paragraph → rendered
+      'Prose', '<span>', '![f](/images/blog/x/body-6.webp)', '',    // type 7 cannot interrupt a paragraph → rendered
+      '<script>', 'const s = "![g](/images/blog/x/body-7.webp)";', '</script>', '', // type 1 runs to its closing tag
+      '<div>', '', '![h](/images/blog/x/body-8.webp)',              // block ends at the blank line → rendered
+    ].join('\n');
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([1, 2, 3, 4, 5, 6, 8].map((n) => `/images/blog/x/body-${n}.webp`));
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.src)).toEqual([3, 5, 6, 8].map((n) => `/images/blog/x/body-${n}.webp`));
+    // Newline-preserving so line indices still address the original text.
+    expect(blankMarkdownHtmlBlocks(body).split('\n')).toHaveLength(body.split('\n').length);
+    // A reference definition inside an HTML block defines nothing in .md.
+    expect(bodyImageRefs('<div>\n[pic]: /images/blog/x/body-1.webp\n\n![a][pic]', { mdx: false })).toEqual([]);
+  });
+
+  test('bodyImageRefs: .md raw HTML block types 3/4/5 (processing instruction, declaration, CDATA) hide the Markdown inside them; .mdx does not use HTML blocks (GH r26)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '<?x\n![pi](/images/blog/x/body-1.webp)\n?>\n\n<![CDATA[\n![cd](/images/blog/x/body-2.webp)\n]]>\n\n<!DECL\n![decl](/images/blog/x/body-3.webp)\nattr>\n\n![real](/images/blog/x/body-4.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // A same-line close ends the block on its own line.
+    expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
+  });
+
+  test('bodyImageRefs: ENTERING a would-be list inside an active raw HTML block is raw text — only the OPENING container ending terminates it (#3593 r2)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    // No blank line: the list-looking line is raw text inside the div block.
+    const body = '<div>\n- ![literal](/images/blog/x/body-1.webp)\n</div>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // Leaving the opening quote still terminates (regression from GH r30).
+    const quote = '> <div>\n> ![in](/images/blog/x/body-1.webp)\n![out](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(quote, { mdx: false }).map((r) => r.alt)).toEqual(['out']);
+  });
+
+  test('bodyImageRefs: an INDENTED marker at content depth stays inside an active raw HTML block; only a sibling/outer marker terminates it (#3593 r1)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '- <div>\n  - nested ![in](/images/blog/x/body-1.webp)\n  ![in2](/images/blog/x/body-2.webp)\n- ![next](/images/blog/x/body-3.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['next']);
+  });
+
+  test('bodyImageRefs: leaving a container (or a sibling list item) TERMINATES an active raw HTML block in .md — the image outside renders (GH r30)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    // The div opens inside the quote; the unquoted line leaves the quote —
+    // the block ends there and the image renders.
+    const quote = '> <div>\n> ![in](/images/blog/x/body-1.webp)\n![out](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(quote, { mdx: false }).map((r) => r.alt)).toEqual(['out']);
+    // A sibling list item ends the block opened by the previous item.
+    const list = '- <div>\n  ![in](/images/blog/x/body-1.webp)\n- ![next](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(list, { mdx: false }).map((r) => r.alt)).toEqual(['next']);
+  });
+
+  test('bodyImageRefs: entering a blockquote or list item is a block boundary in .md — `Intro` then `> <span>` opens a raw HTML block inside the quote (GH r29)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = 'Intro prose.\n> <span>\n> ![q](/images/blog/x/body-1.webp)\n> </span>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    expect(bodyImageRefs(body, { mdx: true }).map((r) => r.alt)).toEqual(['q', 'real']);
+  });
+
+  test('bodyImageRefs: a type-7 HTML block opens at any BLOCK BOUNDARY in .md — directly after a heading, not only after a blank line (hook P1)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '## H\n<span>\n![h7](/images/blog/x/body-1.webp)\n</span>\n\n![real](/images/blog/x/body-2.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // …but a type-7 opener cannot interrupt a PARAGRAPH: the span line is
+    // paragraph text and the image renders.
+    const para = 'Prose line.\n<span>\n![kept](/images/blog/x/body-3.webp)';
+    expect(bodyImageRefs(para, { mdx: false }).map((r) => r.alt)).toEqual(['kept']);
+  });
+
+  test('bodyImageRefs: a LIST ITEM may open a raw HTML block in .md (`- <div>`) — images inside it are literal text (GH r28)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '- <div>\n  ![li](/images/blog/x/body-9.webp)\n</div>\n\n![real](/images/blog/x/body-1.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    expect(bodyImageRefs(body, { mdx: true }).map((r) => r.alt)).toEqual(['li', 'real']);
+  });
+
+  test('validateBodyImageRefs: a reference into ANOTHER post\'s managed namespace fails; the post\'s own namespace passes (GH r28)', async () => {
+    const { validateBodyImageRefs } = AstroPublisher._internals;
+    const getFile = async () => ({ sha: 'x' });
+    const body = '![Borrowed](/images/blog/other-post/body-1.webp)\n\n![Fine](/images/2026/01/authored.webp)';
+    const cross = await validateBodyImageRefs({ body, getFile, slug: 'pest-control/my-post' });
+    expect(cross.ok).toBe(false);
+    expect(cross.reason).toMatch(/another post's generated image/);
+    const own = await validateBodyImageRefs({ body, getFile, slug: 'other-post' });
+    expect(own.ok).toBe(true);
+    // No slug provided → the namespace rule is not applied (callers without one).
+    expect((await validateBodyImageRefs({ body, getFile })).ok).toBe(true);
+  });
+
+  test('resolveBodyImages: a RETAINED managed reference whose draft section no longer matches the live context is stripped and swept — it never ships under rewritten prose (GH r28)', async () => {
+    // The suite's beforeEach already enables blogBodyImages.
+    {
+      const { resolveBodyImages, compressToWebp } = AstroPublisher._internals;
+      const managedSrc = '/images/blog/pest-control/my-post/body-1.webp';
+      const a1 = '/images/2026/01/detail-one.webp'; const a2 = '/images/2026/01/detail-two.webp';
+      const liveBody = `## Alpha\n\nOld lead prose.\n\n![Old alt](${managedSrc})\n\n## Beta\n\nBeta prose.\n`;
+      const draftBody = `## Alpha\n\nCompletely new lead.\n\n![Old alt](${managedSrc})\n\n## Beta\n\nBeta prose.\n\n![One](${a1})\n\n![Two](${a2})\n`;
+      const w = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+      const w1 = await w(1); const w2 = await w(2);
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === `public${a1}`) return { content: '', sha: 'a1', raw: { content: w1 } };
+        if (path === `public${a2}`) return { content: '', sha: 'a2', raw: { content: w2 } };
+        if (path === `public${managedSrc}`) return { content: '', sha: 'b1', raw: { content: w1 } };
+        return null;
+      });
+      gh.listDir.mockResolvedValue([{ type: 'file', name: 'body-1.webp', path: `public${managedSrc}`.replace('public/', 'public/').replace('public', 'public'), sha: 'b1' }].map((e) => ({ ...e, path: `public${managedSrc}` })));
+      const res = await resolveBodyImages({
+        frontmatter: { title: 'My Post' },
+        slug: 'pest-control/my-post',
+        body: draftBody,
+        existingFile: { path: 'src/content/blog/pest-control/my-post.mdx', file: { content: `---\ntitle: My Post\n---\n${liveBody}` } },
+      });
+      expect(res.body).not.toContain(managedSrc);
+      expect(res.body).toContain(a1);
+      expect(res.deletes).toEqual([`public${managedSrc}`]);
+    }
+  });
+
+  test('bodyImageRefs: a query or fragment on a local destination is resolved to its pathname — the committed file, not the suffixed URL, is what validates (GH r27)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '![v](/images/blog/x/detail.webp?v=2)\n\n![f](/images/blog/x/other.webp#figure)\n\n![enc](/images/blog/x/what%3Fname.webp)';
+    expect(bodyImageRefs(body).map((r) => r.src)).toEqual([
+      '/images/blog/x/detail.webp',
+      '/images/blog/x/other.webp',
+      // A percent-encoded `?` is part of the FILENAME, not a query.
+      '/images/blog/x/what?name.webp',
+    ]);
+  });
+
+  test('reusableLiveBodyImage judges the live section in the live file\'s own flavour: a raw HTML block before the prose does not change the .md lead (GH r27)', () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const src = '/images/blog/x/body-1.webp';
+    const liveBody = `## Section\n\n<div>Noise text</div>\n\nActual lead prose here.\n\n![Live alt](${src})\n`;
+    const existingFile = { path: 'src/content/blog/x.md', file: { content: `---\ntitle: T\n---\n${liveBody}` } };
+    // .md: the div is a raw HTML block — lead = the real prose → context matches.
+    expect(reusableLiveBodyImage(existingFile, src, 'Section', { title: 'T', lead: 'Actual lead prose here.', mdx: false })).toBe('Live alt');
+    // .mdx: the div's inner text renders — the lead differs → no reuse.
+    expect(reusableLiveBodyImage(existingFile, src, 'Section', { title: 'T', lead: 'Actual lead prose here.', mdx: true })).toBeNull();
+  });
+
+  test('bodyImageRefs: a reference label over 999 characters neither defines nor renders — the reference stays literal text (GH r26)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const long = 'x'.repeat(1000);
+    const ok = 'y'.repeat(999);
+    const body = `[${long}]: /images/blog/x/body-1.webp\n\n![alt][${long}]\n\n[${ok}]: /images/blog/x/body-2.webp\n\n![kept][${ok}]`;
+    expect(bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([['kept', '/images/blog/x/body-2.webp']]);
+  });
+
+  test('assertBodyImagesAtHead: a .md head whose two images sit inside raw HTML blocks withholds; the same body in .mdx passes (GH r24)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const wrapped = fmModule.stringify(liveFm, '## A\n\nProse.\n\n<div>![a](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)</div>\n\n## B\n\n<figure>\n![b](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n</figure>\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    const rig = (ext) => gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === `src/content/blog/shrub-diseases-sarasota-fl.${ext}`) return { content: wrapped, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
+    rig('md');
+    const res = await assertBodyImagesAtHead({ frontmatter: {}, ...refresh });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\) on content\/refresh-x, minimum 2/);
+    rig('mdx');
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toMatchObject({ ok: true, reason: null });
+  });
+
+  test('refresh lane: a draft that replaces every managed picture with authored ones needs no generation — the dropped body-N assets are still swept (GH r24)', async () => {
+    const { compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n![Managed one](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## Oleander\n\nOleander prose.\n\n![Managed two](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'authored-a': await webp(1), 'authored-b': await webp(2), 'body-1': await webp(3), 'body-2': await webp(4) };
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(authored-a|authored-b|body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    gh.listDir.mockResolvedValue(['body-1', 'body-2'].map((n) => ({ type: 'file', name: `${n}.webp`, path: `public/images/blog/shrub-diseases-sarasota-fl/${n}.webp`, sha: n })));
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draftBody = liveBody
+      .replace('![Managed one](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)', '![Authored one](/images/blog/shrub-diseases-sarasota-fl/authored-a.webp)')
+      .replace('![Managed two](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)', '![Authored two](/images/blog/shrub-diseases-sarasota-fl/authored-b.webp)');
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: draftBody };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    const call = gh.commitFiles.mock.calls[0][0];
+    expect(call.files.map((f) => f.path)).toEqual(['src/content/blog/shrub-diseases-sarasota-fl.md']);
+    expect(call.deletes).toEqual(['public/images/blog/shrub-diseases-sarasota-fl/body-1.webp', 'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp']);
+    // The swept blobs are pinned: each was re-read on the fresh branch before the commit.
+    for (const n of ['body-1', 'body-2']) expect(gh.getFile).toHaveBeenCalledWith(`public/images/blog/shrub-diseases-sarasota-fl/${n}.webp`, expect.stringMatching(/^content\/refresh-/));
+  });
+
 });

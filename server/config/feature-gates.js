@@ -18,6 +18,7 @@
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
+ *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
@@ -249,6 +250,14 @@ const gates = {
   // environment. Gate off: the pay page and all pay flows are byte-
   // identical to today. Kill switch: unset or any non-'true' value.
   payIncludeBalance: process.env.GATE_PAY_INCLUDE_BALANCE === 'true',
+
+  // Visit groups (docs/design/visit-group-scope.md rev 5): parent
+  // service_visits rows grouping same-stop scheduled_services. CREATION
+  // gate only — off means no new groups are stamped; existing visits keep
+  // the behaviour they were created under (behavior_version frozen at
+  // creation) and issued /visit/:token links keep resolving. Fail-closed
+  // ==='true' in EVERY environment; kill switch: unset.
+  visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
   // Service-report cross-sell (owner-approved 2026-08-11): the LIVE web
   // report offers the next service family the customer lacks (pest ↔ lawn,
@@ -1205,6 +1214,17 @@ const gates = {
   // GATE_NAMED_COMPETITOR_COMPARISON=true. Category comparisons are unaffected.
   namedCompetitorComparison: isProd ? process.env.GATE_NAMED_COMPETITOR_COMPARISON === 'true' : true,
 
+  // Autonomous blog body images (owner rule 2026-08-27: every autopublished
+  // post ships ≥3 images — hero + ≥2 in-article illustrations). When ON,
+  // publishOrUpdatePage, publishRefresh and the calendar/scheduler lane's
+  // publishAstro generate the missing body images, commit them
+  // beside the hero (/images/blog/<slug>/body-N.webp) and inserts them at the
+  // end of two section's prose; generation failure parks the run (same
+  // fail-closed posture as the hero). OFF in EVERY environment unless set to
+  // exactly 'true' — it adds two image-generation calls per publish. Kill =
+  // unset.
+  blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
+
   // Named-competitor drafts that PASS every comparison/quality gate publish
   // autonomously instead of parking at named_competitor_review (owner
   // directive 2026-08-26: the intercept lane runs with no human review queue,
@@ -1369,6 +1389,27 @@ const gates = {
   // rendering). Off in prod until verified on a live proposal.
   // Kill switch: unset GATE_ESTIMATE_COMMERCIAL_GLASS.
   estimateCommercialGlass: isProd ? process.env.GATE_ESTIMATE_COMMERCIAL_GLASS === 'true' : true,
+
+  // Commercial scoped one-time auto-pricing — one-time services whose price is
+  // already unit-scoped (slab sqft, linear ft, drill points, rooms, entry
+  // points, palm counts) price identically on commercial properties instead of
+  // collapsing to the generic manual-quote line, carrying commercial line
+  // marking (FL nonresidential pest tax flag, no residential discounts) from
+  // markCommercialOneTimeLine. Extends owner directive 2026-06-29 ("ALL
+  // commercial pricing is auto") to the scoped one-time family; the recurring
+  // foam bypass (owner 2026-06-25) is the precedent. Home-size-bracket
+  // one-times (one-time pest/lawn, roach programs, rodent trapping, flea)
+  // stay manual — they need commercial bases and owner-approved numbers first.
+  // WDO also stays manual (footprint-BRACKETED, and public quote can supply a
+  // synthetic 2,000 sqft for unmeasured commercial buildings), as does palm
+  // injection (recurring program whose legacy-mapper round trip drops the
+  // commercial identity) — both codex #3594 P1s.
+  // Off everywhere until the owner verifies a priced commercial estimate —
+  // pricing gates are env-only in every environment (GATE_UNIT_BAND_PRICING /
+  // GATE_BERMUDA_SUPPRESSION convention); the engine re-reads the env at call
+  // time via gateEnvValue so tests and gate flips take effect immediately.
+  // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
+  commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
 
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
   // proposal.pdf download, and the proposal email attachment render the React
@@ -1566,6 +1607,12 @@ const gates = {
   // creds + cronJobs on must NOT email real customers. Until the gate is on,
   // the Monday sweep only shadow-logs candidate counts and never sends.
   irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
+  // Monday irrigation email + lawn report: replace the static "ease up / add
+  // a few minutes" callouts with a concrete legal-first watering plan
+  // (minutes per turf zone, hold, conditional-on-rain) from
+  // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
+  // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
+  irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
 
   // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
   // the daily upsell generator write message_drafts status='pending' rows

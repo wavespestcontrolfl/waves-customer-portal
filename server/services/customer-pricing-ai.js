@@ -321,6 +321,15 @@ async function loadCurrentServiceKeys(db, customer) {
 // transaction already holds is a no-op).
 async function withTurfProfileFence(dbOrTrx, customerId, write) {
   return dbOrTrx.transaction(async (trx) => {
+    // Property-preferences advisory lock BEFORE the customer row lock: the
+    // turf-profile save confirms the turf county in the sprinkler-settings
+    // ledger under this fence, and taking row-then-advisory formed a
+    // deadlock cycle with executeMerge's advisory-then-row order (codex
+    // #3565 gh-r38). One global order: prefs advisory → customers row.
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['property-preferences', String(customerId)],
+    );
     await trx('customers').where({ id: customerId }).forUpdate().first('id');
     return write(trx);
   });

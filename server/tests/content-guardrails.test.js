@@ -4670,6 +4670,211 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   });
 });
 
+describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on PR #3567)', () => {
+  test('isThematicBreak: CommonMark breaks incl. spaced variants; not list markers, headings, setext-only text', () => {
+    for (const l of ['---', '***', '___', '- - -', ' * * *', '   _ _ _', '-----', '*\t*\t*']) expect(guardrails.isThematicBreak(l)).toBe(true);
+    for (const l of ['- item', '--', '## h', '    ---', '-- -x', '', 'text']) expect(guardrails.isThematicBreak(l)).toBe(false);
+  });
+
+  test('markdownReferenceDefinitions: normalized labels, <dest> form, first definition wins', () => {
+    const defs = guardrails.markdownReferenceDefinitions('[Body]: /a.webp "t"\n[ two   words ]: </b c.webp>\n[body]: /dup.webp\ntext [x]: not-at-line-start');
+    expect([...defs.entries()]).toEqual([['body', '/a.webp'], ['two words', '/b c.webp']]);
+    expect(guardrails.normalizeReferenceLabel('  Two\n  Words ')).toBe('two words');
+    // Escaped ASCII punctuation is interpreted before matching: `[shot\!]` ≡ `[shot!]`; a non-punctuation backslash stays (GH r17).
+    expect(guardrails.normalizeReferenceLabel('shot\\!')).toBe('shot!');
+    expect(guardrails.normalizeReferenceLabel('body\\]shot')).toBe('body]shot');
+    expect(guardrails.normalizeReferenceLabel('a\\b')).toBe('a\\b');
+    // Destination on the continuation line (CommonMark allows one line ending after `[label]:`); a bare `[label]:` with nothing after is not a definition.
+    const multi = guardrails.markdownReferenceDefinitions('[pic]:\n  /images/blog/x/body-1.webp "t"\n[angle]:\n</a b.webp>\n[none]:\n\ntext');
+    expect([...multi.entries()]).toEqual([['pic', '/images/blog/x/body-1.webp'], ['angle', '/a b.webp']]);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n  /dest.webp\nprose')).toBe('      \n            \nprose');
+    // Only definitions the strict parser recognizes are blanked: an invalid continuation or trailing junk is paragraph text and stays (GH r13).
+    expect(guardrails.blankLinkDefinitionsAndTitles('[ref]:\nProse ![bad](/missing.webp)')).toBe('[ref]:\nProse ![bad](/missing.webp)');
+    // `[x]: /dest.webp junk` is paragraph text, so the glued `[y]` line cannot interrupt it — neither is a definition (GH r20).
+    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n[y]: /ok.webp "t"')).toBe('[x]: /dest.webp junk\n[y]: /ok.webp "t"');
+    expect(guardrails.blankLinkDefinitionsAndTitles('[x]: /dest.webp junk\n\n[y]: /ok.webp "t"')).toBe(`[x]: /dest.webp junk\n\n${' '.repeat('[y]: /ok.webp "t"'.length)}`);
+    // A title on the line AFTER a destination-only definition is consumed with it (GH r14); a non-title next line stays.
+    const t1 = '[pic]: /x.webp\n"title ![t](/y.webp)"\nprose';
+    expect(guardrails.blankLinkDefinitionsAndTitles(t1)).toBe(`${' '.repeat(14)}\n${' '.repeat(21)}\nprose`);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]: /x.webp\n"unterminated ![t](/y.webp)')).toBe(`${' '.repeat(14)}\n"unterminated ![t](/y.webp)`);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n/x.webp\n(paren title)\nprose')).toBe(`${' '.repeat(6)}\n${' '.repeat(7)}\n${' '.repeat(13)}\nprose`);
+    // Full-grammar remainder: a quoted / parenthesized title is fine, trailing junk makes the line a paragraph (no definition).
+    const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[f]: </f g.webp>  (paren "quote")', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk'].join('\n'));
+    expect([...strict.keys()]).toEqual(['a', 'b', 'c', 'f']);
+  });
+
+  test('blankMarkdownLinkDestinations keepImages: reference-style IMAGE tails are kept, reference-style LINK tails are blanked; default path unchanged', () => {
+    const src = '![pic][ref] and [link][ref] and [text](/x/)';
+    expect(guardrails.blankMarkdownLinkDestinations(src, { keepImages: true })).toBe('![pic][ref] and  link       and  text      ');
+    // Default path (no keepImages) is byte-for-byte what it was before reference tails were image-aware.
+    expect(guardrails.blankMarkdownLinkDestinations(src)).toBe('![pic       and [link       and  text      ');
+  });
+
+  test('parseLinkDestination: one grammar for definitions and inline destinations — optional quoted/parenthesized title, nothing else', () => {
+    expect(guardrails.parseLinkDestination('/a.webp')).toBe('/a.webp');
+    expect(guardrails.parseLinkDestination('  /a.webp "t"  ')).toBe('/a.webp');
+    expect(guardrails.parseLinkDestination("</a b.webp> 't'")).toBe('/a b.webp');
+    expect(guardrails.parseLinkDestination('/a.webp (t)')).toBe('/a.webp');
+    for (const bad of ['/a.webp trailing-junk', '/a.webp "t" junk', '', '   ', '<>']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // Inline images may carry an EMPTY destination — surfaced as '' for the caller to reject (GH r14).
+    for (const empty of ['', '   ', '<>']) expect(guardrails.parseLinkDestination(empty, { allowEmpty: true })).toBe('');
+    // Bare destinations: balanced parentheses required (escapes honoured), punctuation escapes interpreted (GH r18).
+    expect(guardrails.parseLinkDestination('/images/body-(detail).webp')).toBe('/images/body-(detail).webp');
+    expect(guardrails.parseLinkDestination('/images/body-\\(detail\\).webp')).toBe('/images/body-(detail).webp');
+    expect(guardrails.parseLinkDestination('/images/body-\\(detail.webp')).toBe('/images/body-(detail.webp');
+    expect(guardrails.parseLinkDestination('</images/a\\_b.webp>')).toBe('/images/a_b.webp');
+    for (const bad of ['/images/body-(detail.webp', '/images/body-detail).webp', '/a)(b']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // A container transition (quote depth / list membership) is a block start too (GH r23).
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /q.webp', { depths: [0, 1], inList: [false, false] }).keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /l.webp', { depths: [0, 0], inList: [false, true] }).keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n[pic]: /n.webp', { depths: [0, 0], inList: [false, false] }).keys()]).toEqual([]);
+    // A definition may OPEN a list item — the marker makes a new block even between two adjacent items that share
+    // depth and list membership; a bullet or `1.` item interrupts the paragraph before it, `2.` cannot; a continuation
+    // line inside the same item is paragraph text; five spaces after the marker make the rest indented code (GH r24).
+    expect([...guardrails.markdownReferenceDefinitions('- Intro\n- [pic]: /x.webp', { depths: [0, 0], inList: [true, true] }).entries()]).toEqual([['pic', '/x.webp']]);
+    expect([...guardrails.markdownReferenceDefinitions('- Intro\n  - [nested]: /n.webp').keys()]).toEqual(['nested']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n- [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n1. [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n1) [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('Intro\n2. [pic]: /x.webp').keys()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('\n2. [pic]: /x.webp').keys()]).toEqual(['pic']);
+    expect([...guardrails.markdownReferenceDefinitions('- item\n  [pic]: /x.webp').keys()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('-     [code]: /x.webp').keys()]).toEqual([]);
+    expect(guardrails.blankLinkDefinitionsAndTitles('- Intro\n- [pic]: /x.webp\n\n![a][pic]', { keepReferenceTails: true })).toBe('- Intro\n                \n\n![a][pic]');
+    // A definition cannot interrupt a paragraph: only at a block start (first line / after blank / heading / break / another definition) (GH r20).
+    expect([...guardrails.markdownReferenceDefinitions('Intro prose\n[pic]: /images/blog/x/body-1.webp\n\n[ok]: /ok.webp\n[two]: /two.webp\n## H\n[after-heading]: /h.webp\n---\n[after-break]: /b.webp').keys()]).toEqual(['ok', 'two', 'after-heading', 'after-break']);
+    expect(guardrails.blankLinkDefinitionsAndTitles('Intro prose\n[pic]: /images/blog/x/body-1.webp')).toBe('Intro prose\n[pic]: /images/blog/x/body-1.webp');
+    // An empty `[bad]:` followed by a VALID definition does not swallow it (GH r18).
+    // `[bad]:` alone is paragraph text; a glued `[good]` line cannot interrupt that paragraph (CommonMark 4.7) — after a blank line it defines (GH r18/r20).
+    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n[good]: /images/good.webp').entries()]).toEqual([]);
+    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n\n[good]: /images/good.webp').entries()]).toEqual([['good', '/images/good.webp']]);
+    expect(guardrails.parseLinkDestination('junk here', { allowEmpty: true })).toBeNull();
+  });
+
+  test('eachMarkdownLink: nested and escaped brackets in labels, inline/reference/none/malformed kinds, escape parity on `!` and `[`', () => {
+    const spans = (t) => [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.isImage, sp.kind, t.slice(sp.labelStart + 1, sp.labelEnd), sp.kind === 'inline' ? t.slice(sp.destStart, sp.destEnd + 1) : sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
+    expect(spans('![Technician [close-up]](/x.webp) and ![a \\] b](/y.webp)')).toEqual([[true, 'inline', 'Technician [close-up]', '/x.webp'], [true, 'inline', 'a \\] b', '/y.webp']]);
+    expect(spans('[t][ref] ![i][] [s] ![m](oops')).toEqual([[false, 'reference', 't', 'ref'], [true, 'reference', 'i', ''], [false, 'none', 's', null], [true, 'malformed', 'm', null]]);
+    // `\\![x](y)` is a literal "!" followed by a LINK (not an image); an escaped `\\[z](/w)` is still scanned as a link (citation rules rely on it).
+    expect(spans('\\![x](/y) \\[z](/w) \\\\![img](/v)')).toEqual([[false, 'inline', 'x', '/y'], [false, 'inline', 'z', '/w'], [true, 'inline', 'img', '/v']]);
+    // An image used as a LINK label is still yielded (the link's tail is skipped, its label is scanned); an image's alt is not scanned (GH r21).
+    expect(spans('[![linked alt](/x.webp)](/contact/) ![a ![b](/y.webp)](/z.webp)')).toEqual([[false, 'inline', '![linked alt](/x.webp)', '/contact/'], [true, 'inline', 'linked alt', '/x.webp'], [true, 'inline', 'a ![b](/y.webp)', '/z.webp']]);
+    expect(guardrails.blankMarkdownLinkDestinations('[![linked alt](/x.webp)](/contact/)', { keepImages: true })).toBe(` ![linked alt](/x.webp)${' '.repeat('](/contact/)'.length)}`);
+    // A link nested inside bare brackets is still found.
+    expect(spans('[outer [in](/i)]')).toEqual([[false, 'none', 'outer [in](/i)', null], [false, 'inline', 'in', '/i']]);
+    expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)', { keepImages: true })).toBe('![Technician [close-up]](/x.webp)');
+    expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)')).toBe('                                 ');
+  });
+
+  test('reference labels honour backslash escapes in tails and definitions (GH r15)', () => {
+    const t = '![detail][body\\]shot] [x][a[b]';
+    const spans = [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.kind, sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
+    expect(spans).toEqual([['reference', 'body\\]shot'], ['none', null], ['none', null]]);
+    const defs = guardrails.markdownReferenceDefinitions('[Body\\]Shot]: /images/blog/x/body-1.webp');
+    expect([...defs.entries()]).toEqual([['body]shot', '/images/blog/x/body-1.webp']]);
+  });
+
+  test('blankDefinitelyHiddenContent keeps a closed <details> summary visible; the attribution walker stays conservative (GH r23)', () => {
+    const t = '<details><summary>Peek ![p](/x.webp)</summary>\n\nHidden body.\n\n</details>';
+    const kept = guardrails.blankDefinitelyHiddenContent(t);
+    expect(kept).toContain('Peek ![p](/x.webp)');
+    expect(kept).not.toContain('Hidden body');
+    expect(guardrails.blankHiddenContent(t)).not.toContain('Peek');
+    // A <details> inside another hidden container stays hidden — no summary restore (hook P1).
+    expect(guardrails.blankDefinitelyHiddenContent('<div hidden><details><summary>Peek ![p](/x.webp)</summary>body</details></div>')).not.toContain('Peek');
+    expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).toContain('Outer');
+    expect(guardrails.blankDefinitelyHiddenContent('<details><summary>Outer</summary><details><summary>Inner</summary>x</details></details>')).not.toContain('Inner');
+  });
+
+  test('opensDefinitelyHidden: only a TOP-LEVEL attribute spread overrides; bare unquoted values keep interior slashes (#3595 r1)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // A spread nested inside another attribute's expression sets nothing — still hidden.
+    expect(keep(`<div style={{ display: 'none' }} data-config={JSON.stringify({...defaults})}>![h](/x.webp)</div>`)).not.toContain('![h]');
+    // …a real attribute spread still makes it unprovable.
+    expect(keep("<div style={{ display: 'none' }} {...props}>![v](/x.webp)</div>")).toContain('![v]');
+    // Unquoted value with interior slashes — the later display:none still hides.
+    expect(keep('<div style=background:url(/x);display:none>![h2](/x.webp)</div>')).not.toContain('![h2]');
+    // A multiline spread (many whitespace chars before the dots) still overrides (#3595 late r2).
+    expect(keep("<div style={{ display: 'none' }} {\n          ...props}>![v2](/x.webp)</div>")).toContain('![v2]');
+  });
+
+  test('opensDefinitelyHidden: attribute scans are quote-aware; falsy literals are case-sensitive; a spread after a hidden style makes it unprovable (#3593 r2)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // `open` inside ANOTHER attribute's quoted value is not an attribute — the element stays closed.
+    expect(keep('<details open={false} title="Click to open details"><summary>S</summary>![h](/x.webp)</details>')).not.toContain('![h]');
+    // `style=` inside a quoted title is not a style attribute — visible.
+    expect(keep(`<div title="literal style='display:none' example">![v](/x.webp)</div>`)).toContain('![v]');
+    // Identifiers are case-sensitive: {FALSE} may be truthy — unprovable, open.
+    expect(keep('<details open={FALSE}><summary>S</summary>![v2](/x.webp)</details>')).toContain('![v2]');
+    // A spread after a literal hidden style may override it — unprovable, visible.
+    expect(keep("<div style={{ display: 'none' }} {...props}>![v3](/x.webp)</div>")).toContain('![v3]');
+    // …spread BEFORE the literal is overridden by it — still hidden.
+    expect(keep("<div {...props} style={{ display: 'none' }}>![h2](/x.webp)</div>")).not.toContain('![h2]');
+  });
+
+  test('opensDefinitelyHidden: style matching is bounded to the style VALUE with token boundaries; spreads make `open` unprovable (#3593 r1)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // Keyword in a DIFFERENT attribute, or as a substring — visible.
+    expect(keep('<div style={{ color: \'red\' }} title="display:none example">![v](/x.webp)</div>')).toContain('![v]');
+    expect(keep("<div style={{ display: 'nonetheless' }}>![v2](/x.webp)</div>")).toContain('![v2]');
+    // …the real thing still hides.
+    expect(keep("<div style={{ display: 'none' }}>![h](/x.webp)</div>")).not.toContain('![h]');
+    // A spread after open={false} (or with no open at all) may reopen — the
+    // certainty walker treats the element as open.
+    expect(keep('<details open={false} {...props}><summary>S</summary>![v3](/x.webp)</details>')).toContain('![v3]');
+    expect(keep('<details {...props}><summary>S</summary>![v4](/x.webp)</details>')).toContain('![v4]');
+    // A spread BEFORE the literal is overridden by it — still closed.
+    expect(keep('<details {...props} open={false}><summary>S</summary>![h2](/x.webp)</details>')).not.toContain('![h2]');
+  });
+
+  test('opensDefinitelyHidden: `open={false}` renders a CLOSED details; a literal style expression hides; `open="false"` stays a truthy boolean attribute (GH r30)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    const closed = keep('<details open={false}><summary>Peek</summary>![h](/x.webp)</details>');
+    expect(closed).toContain('Peek'); // first direct summary of a closed details stays visible
+    expect(closed).not.toContain('![h]');
+    // HTML semantics: a STRING value is a truthy boolean attribute — open.
+    expect(keep('<details open="false"><summary>S</summary>![v](/x.webp)</details>')).toContain('![v]');
+    // An unprovable expression counts as open (certainty walker never blanks possibly-visible text).
+    expect(keep('<details open={isOpen}><summary>S</summary>![v](/x.webp)</details>')).toContain('![v]');
+    // Literal MDX style expression with a quoted keyword.
+    expect(keep("<div style={{ display: 'none' }}>![h2](/x.webp)</div>")).not.toContain('![h2]');
+    expect(keep('<div style={{ visibility: "hidden" }}>![h3](/x.webp)</div>')).not.toContain('![h3]');
+  });
+
+  test('markdownReferenceDefinitions: a definition directly after a completed Setext heading is at a block start (GH r29)', () => {
+    const defs = guardrails.markdownReferenceDefinitions('Heading\n===\n[pic]: /x.webp');
+    expect(defs.get('pic')).toBe('/x.webp');
+    // A `===` line with no paragraph before it is itself paragraph text —
+    // the next line continues that paragraph and defines nothing.
+    expect(guardrails.markdownReferenceDefinitions('\n===\n[pic]: /x.webp').has('pic')).toBe(false);
+  });
+
+  test('blankDefinitelyHiddenContent restores only the FIRST summary that is a DIRECT child of the closed <details>; a summary nested in a wrapper stays hidden (GH r24)', () => {
+    const { blankDefinitelyHiddenContent: keep } = guardrails;
+    // Wrapped summary = collapsed body content, not the disclosure widget.
+    expect(keep('<details><div><summary>Peek ![p](/x.webp)</summary></div></details>')).not.toContain('Peek');
+    // A wrapper BEFORE the direct summary does not hide it; the second direct summary is body content.
+    const t = '<details><p>lead</p><summary>Widget ![w](/w.webp)</summary><summary>Second ![s](/s.webp)</summary>body</details>';
+    expect(keep(t)).toContain('Widget ![w](/w.webp)');
+    expect(keep(t)).not.toContain('Second');
+    expect(keep(t)).not.toContain('lead');
+    // Void / self-closing elements before the summary never open a child.
+    expect(keep('<details><br><img src="/a.webp"/><summary>Peek</summary>body</details>')).toContain('Peek');
+    // A hidden container NESTED in the summary stays blanked — restoring the summary never resurrects it (hook P1).
+    const nested = keep('<details><summary>Peek ![p](/p.webp) <span hidden>![ghost](/g.webp)</span> tail</summary>body</details>');
+    expect(nested).toContain('Peek ![p](/p.webp)');
+    expect(nested).toContain('tail');
+    expect(nested).not.toContain('ghost');
+    expect(nested).not.toContain('body');
+  });
+
+  test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {
+    const body = ['  ## Indented', '', '- item', '  continued', 'lazy continuation', '', '  still item', '', 'after list', '', ' - - -', 'x'].join('\n');
+    const { inList } = guardrails.blankNonRenderedMarkdownWithDepths(body);
+    expect(inList).toEqual([false, false, true, true, true, true, true, true, false, false, false, false]);
+  });
+});
+
 describe('offFootprintCityFinding — metro-named compounds (PR #3549 hook)', () => {
   const guardrails = require('../services/content/content-guardrails');
   test('pest / material compounds are not footprint claims; a served-city claim about the metro still is', () => {

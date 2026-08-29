@@ -181,7 +181,14 @@ function mapWater(waterContext, waterSnapshot = null) {
   // no property rainfall but the area does (and its inputs are actually known —
   // status can read low/high from irrigation-only totals while rain is unsynced).
   const clientRainKnown = waterContext && num(waterContext.rainfallInches7d) != null;
-  if (!clientRainKnown && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Sprinkler settings follow the home: after a move the STORED snapshot's
+  // irrigation, total AND status all describe the former property — its
+  // status was computed from the very figures the card would withhold, so
+  // surplus/deficit insights and root-cause claims would still leak the old
+  // schedule (codex gh-r39). Fall through to the live context (rain-only /
+  // unknown) instead of using the snapshot at all.
+  const snapshotUnconfirmed = !!(waterContext && waterContext.scheduleUnconfirmed);
+  if (!clientRainKnown && !snapshotUnconfirmed && waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown') {
     const rain = waterSnapshot.adjusted_rain_7day_inches != null ? waterSnapshot.adjusted_rain_7day_inches : waterSnapshot.rain_7day_inches;
     return {
@@ -199,6 +206,9 @@ function mapWater(waterContext, waterSnapshot = null) {
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
       scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      scheduleUnconfirmed: false,
+      // The sent plan is independent of which rainfall source the card uses.
+      weekPlan: (waterContext && waterContext.weekPlan) || null,
     };
   }
   if (!waterContext) return null;
@@ -211,7 +221,11 @@ function mapWater(waterContext, waterSnapshot = null) {
     targetInches: target,
     status: clientWaterStatus(advice),
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
-    explanation: waterExplanation(advice, target, grassLabel),
+    // A moved home's live context withholds the schedule — prose that says
+    // "your irrigation schedule on file" would contradict that (gh-r39).
+    explanation: waterContext.scheduleUnconfirmed
+      ? `Your sprinkler settings need a quick re-entry after your address change, so this week reads from rainfall alone. The seasonal target for your ${grassLabel} is ${target != null ? `about ${target}"/wk` : 'the seasonal target'}.`
+      : waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
     // True provider of rainfallInches7d (open_meteo | fawn) — the Source row
     // credits the real one (codex P2 r6).
@@ -222,6 +236,11 @@ function mapWater(waterContext, waterSnapshot = null) {
     // `irrigationInchesPerWeek != null` would wrongly count 0 and hide the CTA
     // while the card still shows the "no schedule on file" copy.
     scheduleOnFile: advice.profileMissing === false,
+    // The card says WHY the irrigation figure is not on file after a move.
+    scheduleUnconfirmed: !!waterContext.scheduleUnconfirmed,
+    // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
+    // { title, detail } or null — rendered as its own callout on the card.
+    weekPlan: waterContext.weekPlan || null,
   };
 }
 
@@ -361,17 +380,30 @@ function statusHeadline(overallStatus, topIssue) {
 
 // Cross-signal root cause — a small deterministic decision table that connects the
 // separate signals into ONE driver, so the report reads like an expert wrote it.
-function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis }) {
+function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null }) {
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
+  // With a weekly plan on the card, the plan IS the watering fix — the root
+  // cause names it instead of prescribing more/less water (codex gh-r27).
+  const hasPlan = !!(weekPlan && weekPlan.title);
+  // The plan card's own action — the sentence must agree with the card
+  // rendered right below it: a run plan is never described as "easing back"
+  // and a hold plan never as "setting the runs" (codex gh-r37). Legacy
+  // snapshots without an action get the action-neutral defer copy.
+  const planHolds = hasPlan && weekPlan.action === 'hold';
+  const planRuns = hasPlan && weekPlan.action === 'run' && weekPlan.conditionalOnForecast !== true;
   // A vision-only overwatering flag must not override an active coverage
   // (dry-spots) story — the two are contradictory on the same page; only a
   // measured surplus may carry the "too much water" claim alongside it.
   if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
+    if (planHolds) return 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    if (hasPlan) return 'The main driver looks like too much water — this week’s watering plan below already accounts for it, so follow it as written; that should do more for fungus, mushrooms, and weed pressure than any single treatment.';
     return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
+    if (planRuns) return 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.';
+    if (hasPlan) return 'The lawn is simply running a little dry — this week’s watering plan below weighs that against the week’s rain, so follow it as written.';
     return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
   }
   if (coverageWatch && mowShort) {
@@ -420,15 +452,21 @@ function buildAftercare(applications) {
   // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
   // we never publish a do-not-water instruction the label doesn't back.
   let watering;
+  let neutral = false;
   if (waterInRequired === true) {
     watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
   } else if (productNote) {
     watering = productNote;
   } else {
-    watering = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+    // Non-label fallback — the report rewrites it to defer to the weekly
+    // plan when one is on the card (see buildLawnReportV2).
+    watering = NEUTRAL_AFTERCARE;
+    neutral = true;
   }
-  return { watering, reentry, waterInRequired };
+  return { watering, reentry, waterInRequired, neutral };
 }
+const NEUTRAL_AFTERCARE = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
+const NEUTRAL_AFTERCARE_WITH_PLAN = 'No special watering is needed because of today’s treatment — follow this week’s watering plan.';
 
 // Short topic phrase for the headline, from the top issue card's category.
 const ISSUE_TOPIC = {
@@ -465,7 +503,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // overwatering signal must ignore it too. (A rain-unknown snapshot — irrigation-only
   // — is also excluded, same as mapWater.)
   const clientRainKnown = num(lawnAssessment.waterContext?.rainfallInches7d) != null;
-  const usingSnapshot = !clientRainKnown && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
+  // Same move guard as mapWater (gh-r39/r47): a moved home's snapshot was
+  // computed from the withheld schedule — its status must not drive
+  // effectiveWaterStatus / overwatering insights either.
+  const movedSnapshot = !!lawnAssessment.waterContext?.scheduleUnconfirmed;
+  const usingSnapshot = !clientRainKnown && !movedSnapshot && !!(waterSnapshot && waterSnapshot.status && waterSnapshot.status !== 'unknown'
     && waterSnapshot.interpretation !== 'rain_unknown');
   const SNAP_TO_ADVICE = { high: 'surplus', low: 'deficit', balanced: 'balanced' };
   const effectiveWaterStatus = usingSnapshot ? SNAP_TO_ADVICE[waterSnapshot.status] : (advice.status || null);
@@ -606,7 +648,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
-  const rootCause = buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis });
+  const rootCause = buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
   const seasonalNote = buildSeasonalNote(lawnAssessment, grassLabel);
 
   const snapshot = {
@@ -653,11 +695,22 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // above target the report tells the customer to EASE BACK on irrigation, and a
   // bare "give the lawn a normal watering" instruction two cards later reads like a
   // contradiction. Name the exception explicitly so both instructions survive.
+  // Neutral (non-label) aftercare never tells a customer to "keep your normal
+  // schedule" under a plan — a hold plan may be lower than, or the order may
+  // forbid, that schedule (codex #3565 gh-r28). Label instructions stay.
+  if (aftercare.neutral && water && water.weekPlan && water.weekPlan.title) {
+    aftercare.watering = NEUTRAL_AFTERCARE_WITH_PLAN;
+  }
   // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
   if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
-    aftercare.watering += ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
+    // Beside a plan the wording stays action-neutral — a hot week's RUN plan
+    // can follow a historical surplus, and "exception to easing back" would
+    // contradict the card (codex gh-r47).
+    aftercare.watering += (water && water.weekPlan && water.weekPlan.title)
+      ? ' This one watering-in is required by today’s application — after it, follow this week’s watering plan.'
+      : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
   }
 
   const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
@@ -677,4 +730,4 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, grassLabelFor };
+module.exports = { buildLawnReportV2, grassLabelFor, mapWater, buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN };

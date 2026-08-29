@@ -1,13 +1,14 @@
 /**
- * Hermes worker auth — machine-to-machine, NOT admin bearer.
+ * Legacy Hermes worker-auth helpers.
  *
- * The Hermes (Docker) acquisition agent authenticates with a shared service
- * token (HERMES_SERVICE_TOKEN), sent as `Authorization: Bearer <token>` or
- * `X-Hermes-Token`. Fails closed: 403 if the gate is off, 503 if no token is
- * configured, 401 on mismatch (constant-time compare).
+ * The hermesAuth middleware itself was replaced by
+ * middleware/link-worker-auth.js (per-provider HMAC request signing with a
+ * bounded bearer transition — docs/design/backlink-manager-plan.md §12/§1);
+ * the bearer semantics live on inside that module until the §14 step-1b
+ * retirement. This file keeps only the constant-time comparator, which other
+ * machine-auth routes (mcp.js) still use.
  */
 const crypto = require('crypto');
-const { isEnabled } = require('../config/feature-gates');
 
 function safeEqual(a, b) {
   if (!a || !b) return false;
@@ -17,22 +18,4 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
-function hermesAuth(req, res, next) {
-  if (!isEnabled('hermesWorker')) {
-    return res.status(403).json({ error: 'hermes worker integration disabled' });
-  }
-  const expected = process.env.HERMES_SERVICE_TOKEN;
-  if (!expected) {
-    return res.status(503).json({ error: 'hermes worker not configured' });
-  }
-  const header = req.headers.authorization || '';
-  const provided = header.startsWith('Bearer ')
-    ? header.slice(7)
-    : (req.headers['x-hermes-token'] || '');
-  if (!safeEqual(provided, expected)) {
-    return res.status(401).json({ error: 'invalid worker token' });
-  }
-  next();
-}
-
-module.exports = { hermesAuth, safeEqual };
+module.exports = { safeEqual };

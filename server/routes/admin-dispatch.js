@@ -4267,6 +4267,39 @@ router.get('/:serviceId/completion-status', async (req, res) => {
     if (ownershipError) {
       return res.status(ownershipError.status).json(ownershipError.payload);
     }
+
+    {
+      // One atomic re-read (not the svc snapshot above; runs AFTER ownership so an unowned tech never learns visit ids — codex r10 P2) so a group
+      // attachment that landed after the load is still seen, and lookup
+      // errors propagate (fail closed) instead of silently allowing a
+      // duplicate completion. An orphaned visit pointer also blocks —
+      // dissolution NULLs child visit_id in the same transaction, so an
+      // orphan means something is mid-flight or broken, never "go ahead".
+      const membership = await db('scheduled_services as ss')
+        .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+        .where('ss.id', req.params.serviceId)
+        .first('ss.visit_id', 'sv.status as visit_status');
+      if (membership && membership.visit_id
+          && String(membership.visit_status || '') !== 'dissolved') {
+        // READ-ONLY here (codex #3590 r2 P1: nothing may mutate the visit
+        // before ownership/validation): hard-409 only when a completion
+        // packet exists — that is the double-completion race the guard
+        // exists for. An OPEN packet-less visit falls through; the
+        // POST-claim re-check (after ownership + validators + the durable
+        // claim) applies the Phase-1 dissolve fallback atomically.
+        const packet = await db('visit_completion_packets')
+          .where({ visit_id: membership.visit_id }).first('id');
+        if (packet || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
+          return res.status(409).json({
+            error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+            code: 'visit_grouped',
+            visitId: membership.visit_id,
+          });
+        }
+      }
+    }
+
+
     const status = await CompletionAttempts.completionStatusForService({
       serviceId: req.params.serviceId,
       idempotencyKey: String(req.query.idempotencyKey || ''),
@@ -4292,6 +4325,7 @@ const {
 
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
+  let legacyVisitToDissolve = null;
   let markedSucceeded = false;
   let durableCompletionCommitted = false;
   try {
@@ -4524,6 +4558,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Visit-group guard (visit-group-scope.md §5 Gates, rev 5c): a row
+    // attached to a non-dissolved visit must complete through the visit
+    // sheet — legacy per-row completion alongside the packet worker would
+    // double records and side effects. Inert until GATE_VISIT_GROUPS
+    // stamping ships (no row carries a visit_id today). The check reads
+    // the CURRENT visit status, so an admin "Separate these services"
+    // (dissolve) restores per-row completion immediately.
     // This endpoint can mint reports, invoices, inventory deductions, and
     // customer messages. Technicians may only perform that write for their
     // own assigned visit; admins retain office-wide dispatch authority.
@@ -5236,15 +5277,129 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const rawIdempotencyKey = req.get('Idempotency-Key') || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
     const idempotencyKey = String(rawIdempotencyKey).trim().slice(0, 120);
-    const claim = await CompletionAttempts.claimCompletionAttempt({
-      serviceId: svc.id,
-      idempotencyKey,
-      requestHash: CompletionAttempts.hashCompletionRequest(req.body),
-    });
-    if (claim.action === 'replay') return res.json(claim.payload);
+    // The claim commits while THIS request holds the row's stop advisory
+    // lock (codex #3590 r12 P1): stamping (visit-groups.createOrJoinVisit)
+    // checks for live claims and stamps under the same lock, so the claim
+    // can no longer land between stamping's READ COMMITTED snapshot and its
+    // commit. The claim runs ON the lock transaction's connection (r13: a
+    // nested root-pool checkout under a burst could exhaust the pool) —
+    // its INSERT is savepoint-wrapped inside claimCompletionAttempt so the
+    // unique-violation recovery path survives. lockStopForRow revalidates
+    // the stop key under the lock and throws VISIT_STOP_MOVED on a
+    // concurrent reschedule (r13) — retried like the recheck below.
+    let claim = null;
+    for (let lockAttempt = 0; lockAttempt < 3; lockAttempt += 1) {
+      try {
+        claim = await db.transaction(async (lockTrx) => {
+          await require('../services/visit-groups').lockStopForRow(lockTrx, svc.id);
+          return CompletionAttempts.claimCompletionAttempt({
+            serviceId: svc.id,
+            idempotencyKey,
+            requestHash: CompletionAttempts.hashCompletionRequest(req.body),
+          }, lockTrx);
+        });
+        break;
+      } catch (lockErr) {
+        if (lockErr && lockErr.code === 'VISIT_STOP_MOVED' && lockAttempt < 2) continue;
+        throw lockErr;
+      }
+    }
+    if (claim.action === 'replay') {
+      // A prior success whose fire-and-forget dissolve failed transiently
+      // would otherwise never be repaired (codex r10): re-run the fresh-
+      // read dissolve on every replay — no-op unless the row still sits
+      // on an open packet-less visit.
+      void db('scheduled_services').where({ id: svc.id }).first('visit_id')
+        .then((nowRow) => (nowRow && nowRow.visit_id
+          ? require('../services/visit-groups').dissolveForLegacyCompletion(nowRow.visit_id, { expectChildId: svc.id })
+          : null))
+        .catch(() => {});
+      return res.json(claim.payload);
+    }
     if (claim.action === 'conflict') return res.status(claim.status).json(claim.payload);
     completionAttempt = claim.attempt;
     const resumingCommittedCompletion = claim.action === 'resume';
+
+    // Visit-group membership re-check, now that the durable claim is
+    // committed (codex r2 P0). Stamping (visit-groups.js) locks the row
+    // FOR UPDATE and then refuses rows with a live claim, so taking the
+    // same row lock here and re-reading membership closes every
+    // interleaving: either stamping saw our claim and refused, or we see
+    // its committed stamp here and stop before any side effect.
+    if (claim.action === 'proceed') {
+      const visitRecheck = async (trx) => {
+        // Lock ORDER matches stamping (codex #3590 r2 P1): stop advisory
+        // lock FIRST, then the row lock — with the peek → lock → verify →
+        // retry pattern from createOrJoinVisit (r3 P1: the svc snapshot is
+        // thousands of lines stale; a concurrent reschedule can have moved
+        // the row under another stop key).
+        const { stopBaseKey } = require('../services/visit-groups');
+        const peek = await trx('scheduled_services').where({ id: svc.id })
+          .first('property_id', 'customer_id', 'scheduled_date');
+        if (!peek) return null;
+        const baseKey = stopBaseKey({
+          propertyId: peek.property_id,
+          customerId: peek.customer_id,
+          scheduledDate: peek.scheduled_date,
+        });
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
+        const lockedRow = await trx('scheduled_services')
+          .where({ id: svc.id }).forUpdate()
+          .first('visit_id', 'property_id', 'customer_id', 'scheduled_date');
+        if (!lockedRow) return null;
+        const lockedKey = stopBaseKey({
+          propertyId: lockedRow.property_id,
+          customerId: lockedRow.customer_id,
+          scheduledDate: lockedRow.scheduled_date,
+        });
+        if (lockedKey !== baseKey) {
+          const moved = new Error('visit stop moved concurrently');
+          moved.code = 'VISIT_STOP_MOVED';
+          throw moved;
+        }
+        if (!lockedRow.visit_id) return null;
+        const parent = await trx('service_visits')
+          .where({ id: lockedRow.visit_id }).first();
+        if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
+        if (String(parent.status) === 'dissolved') return null;
+        // READ-ONLY (codex #3590 r4: later validators can still 422, and a
+        // rejected completion must not have dissolved anything): an open
+        // packet-less visit is allowed through and remembered — the
+        // dissolve runs only after the completion durably commits
+        // (dissolveForLegacyCompletion at the durable-commit sites). The
+        // committed claim keeps stamping/packets away in the meantime.
+        if (String(parent.status) === 'open') {
+          const packet = await trx('visit_completion_packets')
+            .where({ visit_id: parent.id }).first('id');
+          if (!packet) return { legacyVisitId: parent.id };
+        }
+        return { blockedBy: parent.id };
+      };
+      let recheckOutcome = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          recheckOutcome = await db.transaction(visitRecheck);  
+          break;
+        } catch (recheckErr) {
+          if (recheckErr && recheckErr.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+          throw recheckErr;
+        }
+      }
+      if (recheckOutcome && recheckOutcome.blockedBy) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error('visit_grouped'),
+        ).catch(() => {});
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: recheckOutcome.blockedBy,
+        });
+      }
+      if (recheckOutcome && recheckOutcome.legacyVisitId) {
+        legacyVisitToDissolve = recheckOutcome.legacyVisitId;
+      }
+    }
 
     // Deferred photo-caption banned-copy gate (captions were sanitized above).
     // Run only after replay/conflict handling so idempotent retries of an
@@ -6115,6 +6270,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
+      // Phase-1 legacy fallback, deferred to durable commit (codex #3590
+      // r4; r6 resume path): the open packet-less visit this completion
+      // was allowed through dissolves only now that the completion
+      // actually exists. On a RESUMED completion (first process died after
+      // its commit but before this cleanup) the recheck never ran, so
+      // reconstruct the visit id from the row itself — the dissolve
+      // helper no-ops on anything but an open packet-less visit.
+      {
+        let dissolveVisitId = legacyVisitToDissolve;
+        legacyVisitToDissolve = null;
+        if (!dissolveVisitId) {
+          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          dissolveVisitId = nowRow && nowRow.visit_id;
+        }
+        if (dissolveVisitId) {
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId, { expectChildId: svc.id });
+        }
+      }
     } else {
       try {
         conditionsAtApplication = shouldCaptureApplicationConditions({
@@ -7767,6 +7940,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         );
       });
         durableCompletionCommitted = true;
+      // Phase-1 legacy fallback, deferred to durable commit (codex #3590
+      // r4; r6 resume path): the open packet-less visit this completion
+      // was allowed through dissolves only now that the completion
+      // actually exists. On a RESUMED completion (first process died after
+      // its commit but before this cleanup) the recheck never ran, so
+      // reconstruct the visit id from the row itself — the dissolve
+      // helper no-ops on anything but an open packet-less visit.
+      {
+        let dissolveVisitId = legacyVisitToDissolve;
+        legacyVisitToDissolve = null;
+        if (!dissolveVisitId) {
+          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          dissolveVisitId = nowRow && nowRow.visit_id;
+        }
+        if (dissolveVisitId) {
+          void require('../services/visit-groups').dissolveForLegacyCompletion(dissolveVisitId, { expectChildId: svc.id });
+        }
+      }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
@@ -13009,6 +13200,23 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
 router.post('/:serviceId/pest-recap', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
+    // Visit-group guard (codex #3590 r4; AFTER ownership per r10 P2 so an
+    // unowned tech never learns visit ids): a grouped row completes
+    // per-row only when its visit is dissolvable — same contract as
+    // /:serviceId/complete. An open packet-less visit is dissolved INSIDE
+    // submitRecap's transaction (codex r13: the recap has no durable
+    // attempt whose replay could retry a post-commit cleanup); packet or
+    // closing/closed hard-blocks; not_found falls through to the 404.
+    {
+      const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
+      if (!gate.ok && gate.reason !== 'not_found') {
+        return res.status(409).json({
+          error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
+          code: 'visit_grouped',
+          visitId: gate.visitId || null,
+        });
+      }
+    }
     const { actorType, actorId } = recapActor(req);
     const {
       technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,

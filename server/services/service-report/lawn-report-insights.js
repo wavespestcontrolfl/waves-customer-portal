@@ -35,6 +35,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
+  // A weekly watering plan on the card is the SOLE watering instruction: the
+  // balance cards may still explain last week, but their actions defer to
+  // the plan (which already accounts for the balance) instead of prescribing
+  // more or less water against it (codex #3565 gh-r27).
+  const hasPlan = !!(water && water.weekPlan && water.weekPlan.title);
   if (water && water.status === 'surplus') {
     cards.push({
       // Same provenance rule as the damp card below: overwatering is an
@@ -48,10 +53,16 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: has('fungicide')
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: waterInRequired
-        ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-        : 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
-      nextVisitPlan: 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
+      customerAction: hasPlan
+        ? (waterInRequired
+          ? 'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.'
+          : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
+        : (waterInRequired
+          ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
+          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
+      nextVisitPlan: hasPlan
+        ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
+        : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });
   } else if (water && water.status === 'deficit') {
@@ -60,9 +71,20 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: 'The lawn is running a little dry',
       whatWeSaw: 'The weekly water total is below the seasonal target for your lawn.',
       whyItMatters: 'Under-watered turf shows heat and drought stress faster and thins out.',
-      wavesAction: 'Noted the shortfall and set the watering target on the report.',
-      customerAction: `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
-      nextVisitPlan: 'Recheck moisture and color next visit to confirm the added water is landing.',
+      wavesAction: hasPlan
+        ? 'Noted the shortfall and set this week’s watering plan on the report.'
+        : 'Noted the shortfall and set the watering target on the report.',
+      // The sentence must agree with the plan card below it — a hold /
+      // conditional plan is never described as "setting runs" (gh-r44,
+      // same rule as buildRootCause).
+      customerAction: hasPlan
+        ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
+          ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
+          : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
+        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
+      nextVisitPlan: hasPlan
+        ? 'Recheck moisture and color next visit.'
+        : 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
   } else if (water.localizedDry) {
     // Localized dry evidence (dry-signal observations or a coverage-issue
@@ -99,15 +121,24 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       // "Keep your current watering schedule" requires a schedule ON FILE —
       // for profiles without one it invented guidance and contradicted the
       // add-your-schedule CTA (codex P2 r23).
-      customerAction: damp
-        // A label-required watering-in must not collide with ease-back
-        // advice — name the exception instead (codex P1 r32).
-        ? (waterInRequired
-          ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-          : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-        : (water && water.scheduleOnFile
-          ? 'Keep your current watering schedule unless we flag a change.'
-          : 'We’ll keep watching moisture balance at upcoming visits.'),
+      // With a weekly plan on the card the plan is the sole watering
+      // instruction — never "keep your current schedule" / "ease back a
+      // cycle" beside a hold or run plan (codex #3565 gh-r29).
+      customerAction: hasPlan
+        ? (damp
+          ? (waterInRequired
+            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings — this week’s watering plan below already accounts for it.'
+            : 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.')
+          : 'Follow this week’s watering plan below; we’ll keep watching moisture balance at upcoming visits.')
+        : damp
+          // A label-required watering-in must not collide with ease-back
+          // advice — name the exception instead (codex P1 r32).
+          ? (waterInRequired
+            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
+            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
+          : (water && water.scheduleOnFile
+            ? 'Keep your current watering schedule unless we flag a change.'
+            : 'We’ll keep watching moisture balance at upcoming visits.'),
       nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }

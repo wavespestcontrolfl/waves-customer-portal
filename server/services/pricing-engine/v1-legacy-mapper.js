@@ -1020,6 +1020,12 @@ function mapV1ToLegacyShape(v1Result) {
         detail: mappedDetail,
         ...measurementMetadataFields(li),
         ...termiticideMetadataFields(li),
+        // Commercial identity (isCommercial / commercialPricingMode / tax
+        // family) for a PRICED scoped one-time on a commercial property —
+        // trenching enters here via ONE_TIME_SERVICES and lost it, so the
+        // admin save's mapped result hid the line from the one-time commercial
+        // stamp + copy flag (codex #3594 r4 P1). Empty for residential rows.
+        ...commercialManualQuoteFields(li),
       };
       // Treatment-visit count (pest_initial_roach display config) — the
       // public estimate view reads it off the persisted item to render

@@ -91,7 +91,23 @@ describe('property preferences — irrigation on by default', () => {
     // unchecking the rain sensor on a legacy false row is still the
     // customer's first edit under Irrigation (pre-push codex P1).
     expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true \}/);
-    expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, updated_at/);
+    expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, \.\.\.confirmFields, updated_at: trx\.fn\.now\(\)/);
+    // gh-r20/r21: confirmation after a move accrues PER sizing field (the portal
+    // autosaves one field per PUT) — never a shared stamp, never a non-sizing edit.
+    // gh-r25: the sizing list + confirmation parser live in the shared module (sweep + report use the same).
+    expect(src).toMatch(/const \{ IRRIGATION_SIZING_FIELDS \} = require\('\.\.\/services\/irrigation-schedule-confirmation'\);/);
+    expect(src).toMatch(/const confirmedNow = \[\.\.\.IRRIGATION_SIZING_FIELDS, 'rain_sensor'\]\.filter\(\(f\) => f in updates\);/);
+    // gh-r43: confirmations require the request's rendered-against stamp to match the CURRENT move stamp —
+    // a queued pre-move autosave (old/absent token) saves its fields but never re-confirms them.
+    expect(src).toMatch(/const requestFresh = stampMs\(current\?\.irrigation_home_changed_at\) == null\s*\|\| \(hasRenderStamp && renderedAgainstMs === stampMs\(current\.irrigation_home_changed_at\)\);/);
+    expect(src).toMatch(/const confirmFields = \(confirmedNow\.length && requestFresh\)/);
+    const portal = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'PortalPage.jsx'), 'utf8');
+    expect(portal).toMatch(/toSave\.confirmed_as_of = lastSavedRef\.current\?\.irrigationHomeChangedAt \?\? null;/);
+    // gh-r26: the union is ONE atomic statement over the row's CURRENT value (no read-modify-write race with the move reset).
+    expect(src).toMatch(/jsonb_array_elements_text\(COALESCE\(irrigation_confirmed_fields, '\[\]'::jsonb\) \|\| \?::jsonb\)/);
+    expect(src).toMatch(/irrigation_confirmed_fields: trx\.raw\(/);
+    expect(src).toMatch(/\[JSON\.stringify\(confirmedNow\)\],/);
+    expect(src).toMatch(/\.\.\.stampIrrigationOn,\n\s+\.\.\.\(confirmedNow\.length \? \{ irrigation_confirmed_fields: JSON\.stringify\(confirmedNow\) \} : \{\}\),\n/);
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)
     expect(src).toMatch(/camelFields\.irrigationSystem = true/); // GET presentation of legacy false rows

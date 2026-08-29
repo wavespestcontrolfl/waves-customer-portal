@@ -218,13 +218,37 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   if (emit) {
     const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })
       .catch((err) => logger.error(`[dispatch-assignment] broadcast failed for ${jobId}: ${err.message}`));
-    if (trx?.executionPromise) {
-      trx.executionPromise.then(emitUpdate).catch((err) => {
+    // Hooks wait for the OUTERMOST commit — a savepoint's own promise
+    // resolves at savepoint release (codex #3590 r14).
+    const { commitPromiseOf } = require('../utils/trx-commit-promise');
+    const commitPromise = commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise.then(emitUpdate).catch((err) => {
         logger.error(`[dispatch-assignment] transaction failed before broadcast for ${jobId}: ${err.message}`);
       });
     } else {
       await emitUpdate();
     }
+  }
+
+  // Visit-group seam (visit-group-scope.md §2, rev-5 item 6): the visit
+  // owns the technician — a routine single-row reassignment that now
+  // conflicts with its visit's tech detaches the row (full visit-level
+  // assignment lands with the grouped route card PR). Best-effort,
+  // post-commit; skipped inside a caller trx (uncommitted row invisible
+  // to the helper's own transaction) — those callers re-run assignment
+  // through this writer on commit paths that matter.
+  const runVisitSeam = () => require('./visit-groups').handleChildStopChanged(jobId)
+    .catch((vgErr) => logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`));
+  const seamCommitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (seamCommitPromise) {
+    // Transactional callers (admin-schedule assign) — run after THEIR
+    // outermost commit, same pattern as the broadcast above (codex #3590
+    // r4: the canonical schedule-assignment route always passes a trx;
+    // r14: savepoint callers hook the enclosing transaction).
+    seamCommitPromise.then(runVisitSeam).catch(() => {});
+  } else {
+    await runVisitSeam();
   }
 
   return {

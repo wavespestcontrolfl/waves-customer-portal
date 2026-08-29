@@ -61,11 +61,28 @@ describe('sizeFor', () => {
     expect(sizeFor('blog-hero', 'openai')).toBe('1536x1024');
     expect(sizeFor('blog-hero', 'gemini')).toBe('1536x1024');
   });
+  test('blog-body shares the hero frame (3:2)', () => {
+    expect(sizeFor('blog-body', 'openai')).toBe('1536x1024');
+    expect(sizeFor('blog-body', 'gemini')).toBe('1536x1024');
+    expect(_internals.MODE_ASPECTS['blog-body']).toBe('3:2');
+  });
   test('social-square', () => {
     expect(sizeFor('social-square', 'openai')).toBe('1024x1024');
   });
   test('unknown mode falls back to blog-hero', () => {
     expect(sizeFor('made-up', 'openai')).toBe('1536x1024');
+  });
+});
+
+describe('buildAltText', () => {
+  const { buildAltText } = _internals;
+  test('blog-body fallback alt carries heading + section lead, clipped; hero alt unchanged (GH r3)', () => {
+    const alt = buildAltText({ keyword: 'What to expect', topic: 'The technician sweeps eaves and treats entry points first.', mode: 'blog-body' });
+    expect(alt).toMatch(/illustrating What to expect — The technician sweeps eaves and treats entry points first\.$/);
+    const long = buildAltText({ keyword: 'H', topic: 'word '.repeat(60).trim(), mode: 'blog-body' });
+    expect(long.length).toBeLessThan(260);
+    expect(long).toMatch(/…\.$/);
+    expect(buildAltText({ keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/illustrating k\.$/);
   });
 });
 
@@ -75,6 +92,29 @@ describe('buildPrompt', () => {
     expect(p).toMatch(/Pest Control Bradenton/);
     expect(p).toMatch(/Bradenton/);
     expect(p).toMatch(/no text/i);
+  });
+  test('blog-body asks for an in-article illustration, subject = section heading', () => {
+    const p = buildPrompt({ title: 'Post', keyword: 'Reading the pellets', mode: 'blog-body' });
+    expect(p).toMatch(/in-article illustration/);
+    expect(p).not.toMatch(/hero/);
+    expect(p).toMatch(/Subject: Reading the pellets\./);
+    // Section prose rides along as context (GH r1) — a generic heading alone illustrates nothing.
+    const withLead = buildPrompt({ title: 'Post', keyword: 'What to expect', topic: 'The technician sweeps eaves and treats entry points first.', mode: 'blog-body' });
+    expect(withLead).toMatch(/Subject: What to expect\. Context from the article: The technician sweeps eaves/);
+    // Hero prompts are unchanged.
+    expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
+    expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
+  });
+  test('blog-body framing rotates by shot and names the hero subject it must differ from (variation, not three of the same picture)', () => {
+    const closeUp = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'close-up', avoid: 'drywood termite frass' });
+    const action = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'action', avoid: 'drywood termite frass' });
+    expect(closeUp).toMatch(/Framing: a close-up/);
+    expect(action).toMatch(/Framing: a person .* actively doing/);
+    expect(closeUp).not.toBe(action);
+    expect(closeUp).toMatch(/must look clearly different from the article's hero image \(a wide establishing shot of: drywood termite frass\)/);
+    // Unknown shot falls back to close-up; no avoid → no distinct clause.
+    expect(buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'nope' })).toMatch(/Framing: a close-up/);
+    expect(buildPrompt({ keyword: 'k', mode: 'blog-body' })).not.toMatch(/must look clearly different/);
   });
   test('social-square wording differs', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);

@@ -1,0 +1,249 @@
+'use strict';
+
+/**
+ * CURRENT lawn-watering restriction policy — the legal ceiling the weekly
+ * watering plan sits under (owner ruling 2026-08-28: restrictions are a hard
+ * constraint ABOVE the irrigation model, never a clamp applied after it).
+ *
+ * Source of truth: IRRIGATION_RESTRICTION_POLICY (JSON) in the environment;
+ * the checked-in DEFAULT is the SWFWMD Modified Phase III water-shortage
+ * order as extended 2026-08-27 — one day per week through 2026-10-01 across
+ * Manatee, Sarasota and covered portions of Charlotte.
+ *
+ * FAIL CLOSED: past `expiresOn` with no newer policy configured there is NO
+ * policy — never a silent fallback to "2 days/week". Callers get null and
+ * the plan reports itself unavailable (the email keeps its pre-plan copy).
+ *
+ * Shape: { maxDaysPerWeek, effectiveFrom (YYYY-MM-DD), expiresOn (YYYY-MM-DD,
+ * inclusive), label, source, hoursNote, coverage } — coverage REQUIRED:
+ * { counties: ['Manatee', …], partial: ['Charlotte'] } or the explicit
+ * marker 'all'.
+ */
+const logger = require('../services/logger');
+const { etDateString, validCalendarDate } = require('../utils/datetime-et');
+
+const DEFAULT_POLICY = Object.freeze({
+  maxDaysPerWeek: 1,
+  effectiveFrom: '2026-08-27',
+  expiresOn: '2026-10-01',
+  label: 'SWFWMD Modified Phase III water shortage order',
+  source: 'https://www.swfwmd.state.fl.us/the-newsroom/2026/district-extends-modified-phase-iii-water-shortage',
+  hoursNote: 'on your assigned day, during your area\'s allowed hours',
+  // Jurisdiction. A policy applies only where its coverage can be
+  // ESTABLISHED for the customer: counties listed here in full; a county in
+  // `partial` (the order covers only portions of Charlotte) can't be
+  // resolved from county alone and yields no policy (fail closed) until an
+  // address-level lane exists.
+  coverage: Object.freeze({ counties: ['Manatee', 'Sarasota'], partial: ['Charlotte'] }),
+});
+
+// Service-area cities → county, for customers whose turf profile carries no
+// county. Only cities that sit wholly in one county; a city that straddles
+// counties (Lakewood Ranch, Longboat Key, Englewood — and the Sarasota
+// POSTAL city, which reaches Manatee County through shared ZIP 34243) is
+// deliberately absent → unknown → no plan (fail closed) until an
+// address-level lane exists (codex gh-r38).
+const CITY_COUNTY = Object.freeze({
+  bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
+  'anna maria': 'Manatee', 'holmes beach': 'Manatee',
+  'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
+  venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
+  osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
+  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
+});
+
+/**
+ * The county a customer's watering restriction is judged in: the turf
+ * profile's county (same source the WaveGuard plan engine uses for
+ * fertilizer ordinances), else a whole-county service city, else null
+ * (coverage cannot be established).
+ */
+const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, SERVICE_AREA_COUNTY_ZIPS } = require('./county-zips');
+// Watering jurisdiction by ZIP. A ZIP the service-area map lists under MORE
+// THAN ONE county straddles a line (34228 Longboat Key, 34243 University
+// Park / SRQ, 34223–34224 Englewood): NOTHING address-level may decide it —
+// not the tax map (a filing convention, not a jurisdiction: 34228 files as
+// Sarasota while its north end is Manatee's) and not the city map either,
+// because the USPS city spans the same line ("Sarasota" 34243 reaches into
+// Manatee). Such a ZIP fails closed to the technician-confirmed profile
+// county, else no plan (codex gh-r29, gh-r33). Elsewhere the tax map speaks
+// first and the FULLER service-area map covers the ZIPs it omits (Cortez
+// 34215, Anna Maria, Ellenton…).
+const { SERVICE_AREA_ZIP_COUNTY, SHARED_SERVICE_AREA_ZIPS } = (() => {
+  const seen = {};
+  for (const [county, zips] of Object.entries(SERVICE_AREA_COUNTY_ZIPS)) {
+    for (const z of zips) seen[z] = seen[z] ? 'shared' : county;
+  }
+  return {
+    SERVICE_AREA_ZIP_COUNTY: Object.freeze(Object.fromEntries(Object.entries(seen).filter(([, c]) => c !== 'shared'))),
+    SHARED_SERVICE_AREA_ZIPS: Object.freeze(new Set(Object.entries(seen).filter(([, c]) => c === 'shared').map(([z]) => z))),
+  };
+})();
+const ZIP_COUNTY = Object.freeze(Object.fromEntries([
+  ...MANATEE_ZIPS.map((z) => [z, 'Manatee']),
+  ...SARASOTA_ZIPS.map((z) => [z, 'Sarasota']),
+  ...CHARLOTTE_ZIPS.map((z) => [z, 'Charlotte']),
+].filter(([z]) => !SHARED_SERVICE_AREA_ZIPS.has(z))));
+
+function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null, homeMoved = false, movedAt = null, countyConfirmed = false } = {}) {
+  // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
+  // the 1:1 turf profile describes the home it was written for, so when its
+  // own city context DIVERGES from the customer's current city (moved
+  // customer, stale profile) its county is dropped and the current city
+  // decides — never the old property's order.
+  const pCity = String(profileCity || '').trim().toLowerCase();
+  const cCity = String(city || '').trim().toLowerCase();
+  // The customer's CURRENT county: ZIP first (the tax/compliance county map —
+  // a USPS city of "Sarasota" at 34243 is Manatee), then a whole-county city.
+  const zip5 = String(zip || '').trim().slice(0, 5);
+  // A straddling ZIP is decided by no address-level source (see above).
+  const currentCounty = SHARED_SERVICE_AREA_ZIPS.has(zip5)
+    ? null
+    : (ZIP_COUNTY[zip5] || SERVICE_AREA_ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null);
+  const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
+  const profileCounty = norm(county);
+  // A profile with NO city context can still be stale: when the customer's
+  // current ZIP/city maps to a different county, the current one wins.
+  const countyConflicts = !!profileCounty && !!currentCounty && profileCounty !== currentCounty;
+  // After a KNOWN move (irrigation_home_changed_at) the profile county is
+  // evidence about the former home unless its COUNTY was re-saved after the
+  // move (irrigation_confirmed_fields carries 'turf_county', written only by
+  // the turf-profile save that carries a county). A matching city name
+  // proves nothing (Englewood straddles the Sarasota/Charlotte line) and
+  // neither does the profile's row-wide updated_at — unrelated turf writers
+  // (the assessment's grass-type auto-capture) bump it without touching the
+  // premise (codex gh-r32). Otherwise the current address alone decides, and
+  // null (no plan) when it cannot: never a plan under the old county,
+  // partially-covered Charlotte included (hook P1 on ad0b1ed31, gh-r31).
+  if (homeMoved || movedAt) {
+    if (countyConfirmed !== true) return currentCounty;
+    // An explicitly re-confirmed county is the technician's statement about
+    // the CURRENT home: it stands unless the current address unambiguously
+    // contradicts it — a stale profile municipality (never re-typed) is not
+    // a contradiction (codex gh-r34).
+    return profileCounty && !countyConflicts ? profileCounty : currentCounty;
+  }
+  // No stamped move: the technician's profile county stands unless the
+  // CURRENT address establishes a conflicting county. A differing postal
+  // city alone (Sarasota → University Park at the same street + shared ZIP
+  // 34243) is a same-home alias — real moves stamp irrigation_home_changed_at
+  // via the address fan-out, and a city that resolves to a different county
+  // still wins through countyConflicts (codex gh-r44).
+  if (profileCounty && !countyConflicts) return profileCounty;
+  return currentCounty;
+}
+
+// Jurisdiction is REQUIRED on every policy (env overrides included): either
+// { counties: [...], partial: [...] } or the explicit marker 'all'. A policy
+// without it is invalid → null (fail closed) — an operator can never bypass
+// the partial-Charlotte / unknown-county handling by omission.
+function validCoverage(coverage) {
+  if (coverage === 'all') return true;
+  if (!coverage || typeof coverage !== 'object') return false;
+  const countyList = (list) => Array.isArray(list) && list.every((c) => typeof c === 'string' && c.trim() !== '');
+  if (!countyList(coverage.counties) || coverage.counties.length === 0) return false;
+  // `partial` is the fail-closed list: when present it MUST be an array of
+  // county names. A malformed value ("Charlotte" as a string) would read as
+  // an empty list in coversCounty and apply the whole-county policy to a
+  // partially covered county (codex gh-r35).
+  if (coverage.partial != null && !countyList(coverage.partial)) return false;
+  return true;
+}
+
+function coversCounty(policy, county) {
+  const coverage = policy.coverage;
+  if (coverage === 'all') return !!county; // explicit all-jurisdictions marker still needs a known county
+  if (!county) return false;
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const inList = (list) => (Array.isArray(list) ? list : []).some((x) => norm(x) === norm(county));
+  if (inList(coverage.partial)) return false;
+  return inList(coverage.counties);
+}
+
+// { configured: false } when the variable is unset (default applies);
+// { configured: true, policy: null } when it is set but unusable (FAIL
+// CLOSED — an operator meant to override, so the default must not apply).
+// Diagnostics for a persistent configuration state (expired / malformed
+// policy) are emitted once per hour per message — the sweep calls this per
+// customer and every gated report load calls it again.
+const LOG_ONCE_MS = 60 * 60 * 1000;
+const _lastLogged = new Map();
+function logOnce(message) {
+  const at = _lastLogged.get(message);
+  if (at && Date.now() - at < LOG_ONCE_MS) return;
+  _lastLogged.set(message, Date.now());
+  logger.error(message);
+}
+
+function parseEnvPolicy(raw) {
+  if (!raw || !String(raw).trim()) return { configured: false, policy: null };
+  try {
+    const parsed = JSON.parse(raw);
+    return { configured: true, policy: parsed && typeof parsed === 'object' ? parsed : null };
+  } catch (err) {
+    logOnce(`[irrigation-restrictions] IRRIGATION_RESTRICTION_POLICY is not valid JSON: ${err.message}`);
+    return { configured: true, policy: null };
+  }
+}
+
+function validPolicy(p) {
+  if (!p) return false;
+  const days = Number(p.maxDaysPerWeek);
+  if (!Number.isInteger(days) || days < 0 || days > 7) return false;
+  // Real calendar dates, not just the shape — a mistyped 2026-02-31 must not
+  // keep legal guidance alive past its real expiry.
+  if (!validCoverage(p.coverage)) return false;
+  if (!validCalendarDate(p.expiresOn)) return false;
+  if (p.effectiveFrom != null && p.effectiveFrom !== '') {
+    if (!validCalendarDate(p.effectiveFrom)) return false;
+    if (String(p.effectiveFrom) > String(p.expiresOn)) return false;
+  }
+  // Legal-first: an order that restricts days usually restricts hours too.
+  // A policy must STATE its hours (hoursNote rides every instruction) or
+  // explicitly assert there is no hour restriction — silence would render
+  // day-specific instructions with no allowed-hours constraint (codex
+  // #3565 gh-r24).
+  const hours = typeof p.hoursNote === 'string' ? p.hoursNote.trim() : '';
+  if (!hours && p.noHourRestriction !== true) return false;
+  return true;
+}
+
+/**
+ * The policy in force on `now` (ET calendar date) FOR `county` — and, when
+ * `horizonEnd` (YYYY-MM-DD) is given, in force through that date — or null
+ * when none is configured, its coverage of the county cannot be established,
+ * or it expires inside the horizon.
+ */
+function currentRestrictionPolicy(now = new Date(), { env = process.env, county = null, horizonEnd = null } = {}) {
+  const today = etDateString(now);
+  const envPolicy = parseEnvPolicy(env.IRRIGATION_RESTRICTION_POLICY);
+  const candidate = envPolicy.configured ? envPolicy.policy : DEFAULT_POLICY;
+  if (!validPolicy(candidate)) {
+    logOnce('[irrigation-restrictions] restriction policy is malformed — weekly watering plan unavailable');
+    return null;
+  }
+  if (!coversCounty(candidate, county)) return null;
+  if (candidate.effectiveFrom && today < candidate.effectiveFrom) return null;
+  // A plan speaks for a whole week: a policy that expires inside the plan
+  // horizon (before the plan week's Sunday) does not cover the instruction —
+  // no plan until a successor policy is configured (fail closed, logged).
+  if (horizonEnd && /^\d{4}-\d{2}-\d{2}$/.test(String(horizonEnd)) && String(horizonEnd) > candidate.expiresOn) {
+    logOnce(`[irrigation-restrictions] restriction policy "${candidate.label}" expires ${candidate.expiresOn}, inside the plan week ending ${horizonEnd} — set IRRIGATION_RESTRICTION_POLICY for the successor rule; weekly watering plan unavailable until then`);
+    return null;
+  }
+  if (today > candidate.expiresOn) {
+    logOnce(`[irrigation-restrictions] restriction policy "${candidate.label}" expired ${candidate.expiresOn} — set IRRIGATION_RESTRICTION_POLICY; weekly watering plan unavailable until then`);
+    return null;
+  }
+  return {
+    maxDaysPerWeek: Number(candidate.maxDaysPerWeek),
+    effectiveFrom: candidate.effectiveFrom || null,
+    expiresOn: candidate.expiresOn,
+    label: String(candidate.label || 'local watering restrictions'),
+    source: candidate.source || null,
+    hoursNote: candidate.hoursNote || null,
+    county,
+  };
+}
+
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, ZIP_COUNTY, _lastLogged } };

@@ -1,6 +1,7 @@
 const {
   mapAvailability,
   parsePriceText,
+  parsePriceTextCents,
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,
@@ -16,6 +17,20 @@ const {
 } = require('../services/price-scan/extract');
 
 describe('price-scan extract', () => {
+  describe('parsePriceTextCents', () => {
+    test('whole-dollar quote defaults the fraction', () => expect(parsePriceTextCents('USD 95')).toBe(9500));
+    test('string-token conversion never mis-rounds', () => expect(parsePriceTextCents('$10.07')).toBe(1007));
+    test('thousands separators', () => expect(parsePriceTextCents('$1,234.50')).toBe(123450));
+    test('single fractional digit pads', () => expect(parsePriceTextCents('$10.5')).toBe(1050));
+    test('more than two fractional digits parses to null', () => expect(parsePriceTextCents('10.075')).toBeNull());
+    test('shares the strict rejections', () => {
+      expect(parsePriceTextCents('$89 - $95')).toBeNull();
+      expect(parsePriceTextCents('Save 20%')).toBeNull();
+      expect(parsePriceTextCents('')).toBeNull();
+      expect(parsePriceTextCents('$0.00')).toBeNull();
+    });
+  });
+
   describe('parsePriceText', () => {
     test('parses a plain price', () => expect(parsePriceText('$95.00')).toBe(95));
     test('parses thousands separators', () => expect(parsePriceText('$1,234.50')).toBe(1234.5));

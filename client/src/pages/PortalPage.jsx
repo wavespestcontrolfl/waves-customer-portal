@@ -7184,6 +7184,13 @@ function PropertyTab({ customer }) {
         const toSave = { ...pendingRef.current };
         if (!Object.keys(toSave).length) return;
         pendingRef.current = {};
+        // Freshness token (codex #3565 gh-r43): the server confirms a
+        // sprinkler field for the weekly watering plan only when this save
+        // was rendered against the CURRENT home — a queued pre-move autosave
+        // draining after an address change must not re-confirm the former
+        // home's settings. lastSavedRef tracks the server's latest view
+        // (load + every save response).
+        toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;

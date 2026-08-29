@@ -257,6 +257,20 @@ async function completionStatusForService({ serviceId, idempotencyKey }, knex = 
   return { state: 'running' };
 }
 
+/**
+ * INSERT the pending attempt. On a transaction the insert runs inside a
+ * SAVEPOINT (codex #3590 r13): the unique-violation recovery below issues
+ * follow-up queries, which a failed statement would otherwise poison
+ * (25P02). On the root connection (autocommit) it is a plain insert.
+ */
+async function insertPendingAttempt(knex, values) {
+  const doInsert = (k) => k('service_completion_attempts').insert(values).returning('*');
+  if (knex && knex.isTransaction && typeof knex.transaction === 'function') {
+    return knex.transaction((sp) => doInsert(sp));
+  }
+  return doInsert(knex);
+}
+
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
   // Per-service terminal-state guard. The unique index on
   // (service_id, idempotency_key) plus the partial pending-only
@@ -363,12 +377,12 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
   }
 
   try {
-    const [row] = await knex('service_completion_attempts').insert({
+    const [row] = await insertPendingAttempt(knex, {
       service_id: serviceId,
       idempotency_key: idempotencyKey,
       status: 'pending',
       request_hash: requestHash,
-    }).returning('*');
+    });
     return { action: 'proceed', attempt: row };
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
@@ -432,12 +446,12 @@ async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }
           );
           // Pending row is now failed — partial unique index is clear.
           // Retry the original insert under this caller's key.
-          const [row] = await knex('service_completion_attempts').insert({
+          const [row] = await insertPendingAttempt(knex, {
             service_id: serviceId,
             idempotency_key: idempotencyKey,
             status: 'pending',
             request_hash: requestHash,
-          }).returning('*');
+          });
           return { action: 'proceed', attempt: row };
         }
         // Lost the reclaim race to another retry — fall through.

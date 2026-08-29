@@ -7,11 +7,14 @@
  */
 const express = require('express');
 const router = express.Router();
-const { hermesAuth } = require('../middleware/hermes-auth');
+const { linkWorkerAuth, finalizeWorkerRequest } = require('../middleware/link-worker-auth');
 const { isEnabled } = require('../config/feature-gates');
 const worker = require('../services/seo/link-prospect-worker');
 
-router.use(hermesAuth);
+// Per-provider HMAC request signing with a bounded bearer transition for the
+// external Hermes skills (plan §12/§1); every accepted request writes a
+// seo_link_worker_requests audit row the handlers finalize below.
+router.use(linkWorkerAuth((req) => (req.method === 'GET' ? 'claim' : 'report')));
 
 // GET /claim?n=10&type=signup|outreach — lease unworked prospects
 router.get('/claim', async (req, res, next) => {
@@ -20,9 +23,11 @@ router.get('/claim', async (req, res, next) => {
     // Outreach stays approval-gated: don't hand outreach prospects to the worker
     // until linkProspectOutreach is enabled (M3b).
     if (type === 'outreach' && !isEnabled('linkProspectOutreach')) {
+      await finalizeWorkerRequest(req, 'empty_claim');
       return res.json({ prospects: [], note: 'outreach is approval-gated (linkProspectOutreach off)' });
     }
     const prospects = await worker.claim({ n: req.query.n, type });
+    await finalizeWorkerRequest(req, prospects.length ? 'leased' : 'empty_claim');
     res.json({ prospects, business_profile: worker.businessProfile() });
   } catch (err) { next(err); }
 });
@@ -51,18 +56,24 @@ function sanitizeReportBody(body = {}) {
 router.post('/report', async (req, res, next) => {
   try {
     const { prospect_id, outcome } = req.body || {};
-    if (!prospect_id) return res.status(400).json({ error: 'prospect_id required' });
+    if (!prospect_id) {
+      await finalizeWorkerRequest(req, 'report_rejected');
+      return res.status(400).json({ error: 'prospect_id required' });
+    }
     // 'drafted' = outreach lane: the worker researched + drafted a one-to-one email
     // (outreach_to_email/subject/body); it's parked for human approval, never auto-sent.
     if (!['placed', 'failed', 'skipped', 'drafted'].includes(outcome)) {
+      await finalizeWorkerRequest(req, 'report_rejected');
       return res.status(400).json({ error: "outcome must be 'placed', 'failed', 'skipped', or 'drafted'" });
     }
     // Sanitize: pass ONLY the allowlisted external fields, never the runner-internal flags.
     const result = await worker.report(sanitizeReportBody(req.body));
     if (!result.ok) {
       const status = { not_found: 404, stale_lease: 409 }[result.code] || 400;
+      await finalizeWorkerRequest(req, 'report_rejected', { prospect_id });
       return res.status(status).json(result);
     }
+    await finalizeWorkerRequest(req, 'report_accepted', { prospect_id });
     res.json(result);
   } catch (err) { next(err); }
 });

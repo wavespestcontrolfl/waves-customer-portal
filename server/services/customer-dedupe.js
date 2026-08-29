@@ -645,6 +645,95 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
   return `moved ${moved}, dropped ${dropped} duplicate row(s) (winner already has them)`;
 }
 
+// irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
+// matters is the DELIVERED one (sent_at) — it is the decision the customer
+// received and the report renders, and the Monday sweep's first dedupe key
+// (hasSentWeekPlan). Keeping the winner's row blindly could delete the
+// loser's sent snapshot in favour of an unsent one: the report then hides
+// the plan the customer got and the sweep resends a possibly different
+// plan (codex #3565 gh-r15). Rule: a sent row beats an unsent row; both
+// sent or both unsent → the winner's stays.
+// "Delivered" for a week-plan row: stamped sent_at, OR a durable customer-week
+// delivery record (email_messages at trigger_event_id
+// `irrigation.weekly:<customer>:<week>`, provider-accepted status) whose
+// `plan:<hash>` category names THIS row's decision — SendGrid can accept the
+// email while markWeekPlanSent fails, leaving sent_at null on the plan the
+// customer actually received (codex #3565 gh-r17). Read at collision time,
+// before the merge rewrites the loser's trigger identity.
+async function weekPlanDelivered(trx, row, customerId) {
+  if (!row) return false;
+  if (row.sent_at) return true;
+  if (!row.decision_hash) return false;
+  const weekEnding = row.week_ending instanceof Date
+    ? row.week_ending.toISOString().slice(0, 10)
+    : String(row.week_ending || '').slice(0, 10);
+  const msgs = await trx('email_messages')
+    .where({ trigger_event_id: `irrigation.weekly:${customerId}:${weekEnding}` })
+    .whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])
+    .select('categories');
+  const wanted = `plan:${row.decision_hash}`;
+  return msgs.some((m) => {
+    let list = m.categories;
+    if (typeof list === 'string') { try { list = JSON.parse(list); } catch { list = []; } }
+    return Array.isArray(list) && list.includes(wanted);
+  });
+}
+
+async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'decision_hash');
+  let moved = 0;
+  let replaced = 0;
+  let dropped = 0;
+  let stamped = 0;
+  // Rank: stamped (sent_at) > provider-accepted but unstamped > undelivered.
+  // The higher rank survives; ties keep the winner's row. A retained row that
+  // is accepted-but-unstamped is stamped here — once the two customers'
+  // delivery records share one identity, weekPlanDeliveryState may name the
+  // deleted row's hash, so the survivor could otherwise never be stamped
+  // and the report plan would stay absent (codex gh-r18).
+  const rank = async (row, customerId) => (row ? (row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+      // A moved row the provider accepted but markWeekPlanSent never stamped
+      // is reconciled here too — the report reads only stamped rows, and the
+      // rewritten delivery identity later proves acceptance (codex gh-r21).
+      if (!row.sent_at && await weekPlanDelivered(trx, row, loserId)) {
+        await trx(table).where({ id: row.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
+        stamped += 1;
+      }
+      continue;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+    }
+    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'week_ending', 'decision_hash');
+    const loserRank = await rank(row, loserId);
+    const winnerRank = await rank(winnerRow, winnerId);
+    let kept;
+    let keptRank;
+    if (winnerRow && loserRank > winnerRank) {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id: winnerRow.id }).del();
+        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+      });
+      replaced += 1;
+      kept = row; keptRank = loserRank;
+    } else {
+      await trx(table).where({ id: row.id }).del();
+      dropped += 1;
+      kept = winnerRow; keptRank = winnerRank;
+    }
+    if (kept && keptRank === 1) {
+      await trx(table).where({ id: kept.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
+      stamped += 1;
+    }
+  }
+  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's better-delivered snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
+}
+
 // collections_flags: at most one ACTIVE row per (customer, flag) — both
 // duplicate profiles carrying the same active hold is the same instruction,
 // not divergent data. The winner's copy stays live; the loser's colliding
@@ -694,6 +783,12 @@ const UNIQUE_COLLISION_HANDLERS = {
   // same property) — keep the winner's ledger row, drop the loser's copy
   // (codex #3390: absent here, a shared alert aborted the whole merge).
   customer_alerts: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id, week_ending): both duplicate profiles holding a
+  // Monday watering-plan snapshot for the same week — the DELIVERED
+  // snapshot survives (sent_at, or a provider-accepted delivery record
+  // naming its decision; ties keep the winner's); never abort the merge
+  // (codex #3565 gh-r14/r15/r17).
+  irrigation_week_plans: repointWeekPlansKeepSent,
   collections_flags: repointFlagsReleaseCollisions,
 };
 
@@ -794,6 +889,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['collections_case', custId],
+      );
+    }
+    // The property-preferences advisory lock for BOTH parties, before the FK
+    // sweep or the singleton pref merge touches either customer's
+    // property_preferences row (codex #3565 gh-r37): a portal irrigation
+    // autosave takes this advisory lock first and then updates the row —
+    // if the merge updated the row first and only took the lock later (the
+    // sprinkler-settings move stamp), the two waited on each other in a
+    // deadlock. Same sorted-id order as the case locks.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', custId],
       );
     }
     // Combined-session locks BEFORE any customer row locks, UNCONDITIONALLY
@@ -981,6 +1089,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // endpoint refuses any merge where one did.
     const repointedIds = {};
     const collisionHandlers = [];
+    // email_messages ids whose irrigation weekly trigger identity was
+    // rewritten loser→winner (row ids, or { count } over the cap — the undo
+    // refuses count-only, like any other non-restorable record).
+    let irrigationTriggerIds = [];
 
     // BEFORE the sweep: an unstamped visit renders its address via
     // COALESCE(scheduled_services.service_address_line1, customers.
@@ -1214,6 +1326,51 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         });
       } catch (e) {
         throw new Error(`executeMerge: repoint failed on ${table}.${idColumn}: ${e.message}`);
+      }
+    }
+    // The weekly watering-plan delivery record is keyed by a customer/week
+    // trigger id (`irrigation.weekly:<customerId>:<weekEnding>`) that the
+    // recipient repoint above does not touch. Left on the loser id, the
+    // winner's next sweep sees neither a sent snapshot (a delivered-but-
+    // unstamped plan has sent_at null) nor the delivery record, replaces the
+    // moved decision and sends a second plan — rewrite the identity to the
+    // winner (codex #3565 gh-r16). Fail-closed like the pointer sweeps.
+    try {
+      await trx.transaction(async (sp) => {
+        const loserPrefix = `irrigation.weekly:${loserId}:`;
+        const rows = await sp('email_messages')
+          .where('trigger_event_id', 'like', `${loserPrefix}%`)
+          .select('id', 'trigger_event_id');
+        for (const r of rows) {
+          await sp('email_messages').where({ id: r.id })
+            .update({ trigger_event_id: `irrigation.weekly:${winnerId}:${String(r.trigger_event_id).slice(loserPrefix.length)}` });
+        }
+        if (rows.length) repointed['email_messages.trigger_event_id'] = rows.length;
+        irrigationTriggerIds = rows.length > REPOINT_ID_CAP ? { count: rows.length } : rows.map((r) => r.id);
+      });
+    } catch (e) {
+      throw new Error(`executeMerge: irrigation delivery identity rewrite failed: ${e.message}`);
+    }
+    // Duplicate profiles can be the customer's OLD and NEW homes: the
+    // surviving property_preferences row (merged, filled, or repointed by
+    // mergeSingletonPrefRow) may carry sprinkler settings saved for the
+    // other address. When the two homes differ, mark the survivor moved —
+    // the weekly plan withholds the sizing fields until each is re-saved for
+    // the kept address (codex #3565 gh-r22). Same premise test as the
+    // address fan-out's move guard. Left in place by an undo (conservative:
+    // it only ever withholds).
+    const fanout = require('./customer-address-fanout');
+    // Only two REAL addresses are evidence of different homes: an addressless
+    // shell inherits the loser's address in the backfill below, so those
+    // settings belong to the surviving home (codex gh-r25).
+    if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1) && fanout.homesDiffer(winner, loser)) {
+      try {
+        await trx.transaction(async (sp) => {
+          const n = await fanout.markSprinklerSettingsMoved(winnerId, sp);
+          if (n) repointed['property_preferences.irrigation_home_changed_at'] = n;
+        });
+      } catch (e) {
+        throw new Error(`executeMerge: sprinkler-settings move stamp failed: ${e.message}`);
       }
     }
     // Referral surfaces load ONE promoter per customer (`.first()` in
@@ -1638,6 +1795,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // folded/merged/dropped, not plainly repointed, so the merge is not
         // auto-revertible (the revert endpoint 409s when any are listed).
         collision_handlers: collisionHandlers,
+        // email_messages rows whose irrigation weekly delivery identity
+        // (trigger_event_id) the merge rewrote to the winner — the undo
+        // rewrites exactly these back so the restored loser's customer-week
+        // record follows the returned rows (hook P1 on 47b0a3146).
+        irrigation_trigger_ids: irrigationTriggerIds,
         // The winner's ORIGINAL customer-level autopay fields for the exact
         // columns the most-restrictive block overwrote ({ before, applied }),
         // or null when the merge left the winner's autopay alone.
@@ -2280,6 +2442,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // only part of the loser's data. Not auto-revertible.
     if (Array.isArray(recorded.collision_handlers) && recorded.collision_handlers.length) {
       refuse(`This merge folded colliding rows (${recorded.collision_handlers.join(', ')}) that cannot be split back apart automatically — restore by hand from the journal snapshot`);
+    }
+    // Irrigation weekly delivery identities rewritten without row-level
+    // records cannot be restored exactly — refuse, never leave the winner's
+    // customer-week record on rows the undo returns to the loser.
+    const irrigationTriggerIds = recorded.irrigation_trigger_ids;
+    if (irrigationTriggerIds && !Array.isArray(irrigationTriggerIds)) {
+      refuse('irrigation weekly delivery identities were rewritten without row-level records — restore by hand from the journal');
     }
     // Link-as-property merges create the winner-owned property row AFTER the
     // merge transaction commits; if the journal never learned its id, an
@@ -3268,6 +3437,27 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       }
     }
 
+    // Restore the irrigation weekly delivery identities the merge rewrote
+    // (email_messages.trigger_event_id winner→loser) for exactly the
+    // journaled rows — the plain recipient repoint above returned the rows,
+    // this returns their customer-week key; a row no longer carrying the
+    // winner identity has moved on since the merge and is reported.
+    if (Array.isArray(irrigationTriggerIds) && irrigationTriggerIds.length) {
+      const winnerPrefix = `irrigation.weekly:${winnerId}:`;
+      const rows = await trx('email_messages')
+        .whereIn('id', irrigationTriggerIds)
+        .where('trigger_event_id', 'like', `${winnerPrefix}%`)
+        .select('id', 'trigger_event_id');
+      for (const r of rows) {
+        await trx('email_messages').where({ id: r.id })
+          .update({ trigger_event_id: `irrigation.weekly:${loserId}:${String(r.trigger_event_id).slice(winnerPrefix.length)}` });
+      }
+      if (rows.length !== irrigationTriggerIds.length) {
+        skipped.push({ key: 'email_messages.trigger_event_id', reason: 'rows_changed_since_merge', count: irrigationTriggerIds.length - rows.length });
+      }
+      if (rows.length) repointedBack['email_messages.trigger_event_id'] = rows.length;
+    }
+
     // The property row link-as-property created from the loser's address
     // belongs to the restored loser again — take it off the winner. HOW
     // matters: scheduled_services.property_id references customer_properties
@@ -4054,6 +4244,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
+    repointWeekPlansKeepSent,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

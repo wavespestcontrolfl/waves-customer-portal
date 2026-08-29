@@ -9247,6 +9247,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     });
 
+    // Visit-group seam (visit-group-scope.md §2; codex #3590 r4/r8): a
+    // direct Edit-Appointment change must repair grouped membership like
+    // every other writer — for the edited anchor AND every recurring
+    // child this edit rewrote (cadence moves collect their ids in
+    // recurringUpdatedJobIds). Post-commit, best-effort, no-op for
+    // ungrouped rows.
+    try {
+      const { handleChildStopChanged } = require('../services/visit-groups');
+      const seamIds = [...new Set([req.params.id, ...recurringUpdatedJobIds])].filter(Boolean);
+      for (const seamId of seamIds) {
+        await handleChildStopChanged(seamId);
+      }
+    } catch (vgErr) {
+      logger.warn(`[schedule/update-details] visit-group seam failed for ${req.params.id}: ${vgErr.message}`);
+    }
+
     // Rebooker-parity post-commit half of the live-move rewind above:
     // tech_status release + customer tracker refresh. Best-effort — the
     // move is committed; a side-effect failure must not fail the edit.

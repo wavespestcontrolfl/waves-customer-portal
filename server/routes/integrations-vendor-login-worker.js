@@ -8,9 +8,9 @@ const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { hermesAuth } = require('../middleware/hermes-auth');
+const { linkWorkerAuth } = require('../middleware/link-worker-auth');
 
-router.use(hermesAuth);
+router.use(linkWorkerAuth('vendor_login'));
 
 const TERMINAL_OUTCOMES = ['found', 'needs_manual_signup', 'not_found', 'failed', 'skipped'];
 const CLAIM_LEASE_MINUTES = 15;

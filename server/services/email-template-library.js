@@ -848,6 +848,11 @@ function isUniqueViolation(err) {
 // automation executor's stale-running cutoff.
 const QUEUED_IN_FLIGHT_MS = 2 * 60 * 1000;
 
+// error_message of a queued attempt the caller aborted at the queue
+// transition (onQueued → false): a pre-provider failure that is IMMEDIATELY
+// retryable — never a delivery, never ambiguous.
+const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
+
 function queuedRowInFlight(message, now = Date.now()) {
   if (String(message?.status || '').toLowerCase() !== 'queued') return false;
   const queuedAt = message.queued_at ? new Date(message.queued_at).getTime() : null;
@@ -911,6 +916,14 @@ async function sendTemplate({
   // caller is responsible for logging a sanitized reason itself; the thrown
   // error (status/body) still propagates for classification.
   suppressProviderErrorLog = false,
+  // Called with the durable email row the moment it is QUEUED (the point the
+  // library's own in-flight lease starts) — lets a caller holding a sibling
+  // lease (the weekly watering-plan snapshot claim) renew it on the same
+  // transition instead of a lease that began before template resolution
+  // and suppression checks (codex #3565 gh-r19). Resolving `false` ABORTS
+  // the send before dispatch (the row is marked failed, pre-provider); a
+  // throw is logged and the send proceeds.
+  onQueued = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1172,6 +1185,35 @@ async function sendTemplate({
       return await resolveIdempotencyCollision(err, idempotencyKey);
     }
   }
+  if (typeof onQueued === 'function') {
+    let keep = true;
+    try {
+      keep = (await onQueued(message)) !== false;
+    } catch (err) {
+      logger.warn(`[email-template-library] onQueued hook failed for ${templateKey}: ${err.message}`);
+    }
+    if (!keep) {
+      // The caller's sibling lease is LOST (an overlapping worker owns the
+      // decision now): never dispatch this attempt. The queued row becomes
+      // a pre-provider failure — no provider id — so the customer-week
+      // reconciliation reads it as retryable, not as a delivery
+      // (codex #3565 gh-r20).
+      const reason = ABORTED_BEFORE_DISPATCH;
+      let aborted;
+      try {
+        // Scoped to THIS queued attempt (id + queued + send_attempt_token),
+        // exactly like the provider-error path: a newer worker that has
+        // reclaimed the row owns a new token and must never be marked
+        // failed by this one (0 rows → leave it alone; still no dispatch).
+        [aborted] = await db('email_messages')
+          .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+          .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+      } catch (err) {
+        logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);
+      }
+      return { sent: false, aborted: true, reason, message: aborted || { ...message, status: 'failed', error_message: reason }, rendered };
+    }
+  }
 
   try {
     const result = await sendgrid.sendOne({
@@ -1282,6 +1324,9 @@ module.exports = {
   loadVersion,
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
+  queuedRowInFlight,
+  ABORTED_BEFORE_DISPATCH,
+  QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
   publishVersion,
   sendTemplate,

@@ -14,10 +14,11 @@
 //     opinion); routes/satisfaction.js + the review maps encode a DIFFERENT
 //     office-routing opinion (e.g. osprey→venice, palmetto→bradenton) under a
 //     different office-id namespace.
-//   - services/property-lookup/ai-property-lookup.js — county ZIP sets for
-//     property-record matching; a FULLER set than these (e.g. Manatee adds
-//     34215–34218, 34220, 34228, 34264, 34270). Using these tax sets there, or
-//     vice-versa, would change tax inference.
+//   - SERVICE_AREA_COUNTY_ZIPS (below) — the FULLER property-record /
+//     watering-jurisdiction sets (e.g. Manatee adds 34215–34218, 34220,
+//     34228, 34264, 34270), consumed by ai-property-lookup and
+//     irrigation-restrictions. Using these tax sets there, or vice-versa,
+//     would change tax inference.
 //
 // So: tax & compliance share THESE; everyone else stays separate on purpose.
 // Consumers keep their own return-value format (tax → 'Manatee'; compliance →
@@ -31,6 +32,35 @@ const SARASOTA_ZIPS = ['34228', '34229', '34230', '34231', '34232', '34233', '34
 
 const CHARLOTTE_ZIPS = ['33947', '33948', '33949', '33950', '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983'];
 
+// SERVICE-AREA county ZIP sets — the FULLER coverage (Cortez 34215, Anna
+// Maria 34216–34218, Ellenton 34222…) used for property-record matching
+// (services/property-lookup/ai-property-lookup.js builds its Sets from
+// these) and for WATERING-RESTRICTION jurisdiction
+// (config/irrigation-restrictions.js). Deliberately separate from the tax
+// sets above: tax inference must not change. ZIPs appearing in more than
+// one county here straddle a line; jurisdiction consumers must not pick one
+// blindly (the restriction resolver falls back to the city map / fails
+// closed for those).
+const SERVICE_AREA_COUNTY_ZIPS = Object.freeze({
+  Manatee: Object.freeze([
+    '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
+    '34210', '34211', '34212', '34215', '34216', '34217', '34218', '34219', '34220',
+    '34221', '34222', '34228', '34243', '34250', '34251', '34264', '34270', '34280',
+    '34281', '34282',
+  ]),
+  Sarasota: Object.freeze([
+    '34223', '34224', '34228', '34229', '34230', '34231', '34232', '34233', '34234',
+    '34235', '34236', '34237', '34238', '34239', '34240', '34241', '34242', '34243',
+    '34249', '34260', '34272', '34274', '34275', '34276', '34277', '34284', '34285',
+    '34286', '34287', '34288', '34289', '34290', '34291', '34292', '34293', '34295',
+  ]),
+  Charlotte: Object.freeze([
+    '33921', '33927', '33938', '33946', '33947', '33948', '33949', '33950', '33951',
+    '33952', '33953', '33954', '33955', '33980', '33981', '33982', '33983', '34223',
+    '34224',
+  ]),
+});
+
 const LEE_ZIPS = ['33901', '33903', '33904', '33905', '33907', '33908', '33909', '33912', '33913', '33914',
   '33916', '33917', '33919', '33920', '33921', '33922', '33924', '33928', '33931', '33936',
   '33956', '33957', '33965', '33966', '33967', '33971', '33972', '33973', '33974', '33976',
@@ -39,4 +69,4 @@ const LEE_ZIPS = ['33901', '33903', '33904', '33905', '33907', '33908', '33909',
 const COLLIER_ZIPS = ['34102', '34103', '34104', '34105', '34108', '34109', '34110', '34112', '34113', '34114',
   '34116', '34117', '34119', '34120', '34140', '34141', '34142', '34145'];
 
-module.exports = { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS };
+module.exports = { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, SERVICE_AREA_COUNTY_ZIPS };

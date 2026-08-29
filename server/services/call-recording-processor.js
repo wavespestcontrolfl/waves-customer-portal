@@ -11590,6 +11590,17 @@ const CallRecordingProcessor = {
                       .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
                       .returning('*');
                     primaryRow = updatedExisting || existing;
+                    // Visit-group seam (visit-group-scope.md §2; codex #3590
+                    // r12): this direct assignment bypasses assignDispatchJob,
+                    // so a manually grouped row would go assigned while its
+                    // parent/siblings stayed unassigned. Same after-commit
+                    // pattern as dispatch-assignment's own seam; best-effort.
+                    if (trx?.executionPromise) {
+                      const seamRowId = existing.id;
+                      trx.executionPromise
+                        .then(() => require('./visit-groups').handleChildStopChanged(seamRowId))
+                        .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
+                    }
                   }
                   // A reused appointment still closed the deal: reprocessing a
                   // call (or recovering from an earlier savepoint-contained
