@@ -2638,21 +2638,14 @@ function leadAddressTailPlace(address) {
   // still surrender its trailing state/ZIP as evidence (#3608 codex r5).
   const parts = splitStreetLineUnitParts(raw);
   const tail = String(parts.tail || '').trim();
-  if (tail) return snapshotTailPlace(`street, ${tail}`);
   // A comma-free WHOLE line ("100 Main St Apt 4 Bradenton FL 34205") has no
-  // parsed tail, but its inline unit run is a lexically safe delimiter, so
-  // everything after the last unit run is the place. Without that evidence
-  // a locked lead with empty city/zip columns would corroborate ANY place
-  // (#3608 pre-push audit P1). No inline unit → no delimiter → no evidence,
-  // never a locality guess.
-  // From the RAW line, not through normalizeStreetLine: a terminal locality
-  // word that doubles as a street suffix ("Palm Harbor" → "Palm Hbr") must
-  // reach placeCorroborates as the city the caller will restate (codex r7).
-  const streetKey = String(parts.street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
-  const { streetKey: canon, unitKeys } = canonicalizeInlineUnits(streetKey);
-  if (!unitKeys.length) return null;
-  const afterUnit = canon.slice(canon.lastIndexOf('}') + 1).trim();
-  return afterUnit ? snapshotTailPlace(`street, ${afterUnit}`) : null;
+  // parsed tail and offers NO place evidence — deliberately. Inferring the
+  // locality from the text after the inline unit was tried and misread
+  // every trailing subpremise qualifier ("Apt 4 Rear" → city "Rear"),
+  // which blocked an exact restatement with the real city from recording
+  // ownership. Ownership on that legacy shape rests on the exact string,
+  // which already carries whatever place the caller gave.
+  return tail ? snapshotTailPlace(`street, ${tail}`) : null;
 }
 
 // Canonical street|unit key for a leads.address value, tolerant of every

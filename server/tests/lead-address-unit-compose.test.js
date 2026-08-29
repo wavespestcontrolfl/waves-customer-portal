@@ -325,20 +325,18 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(leadAddressCompareKey('100 Main St #A Sarasota FL 34236')).toBe(leadAddressCompareKey('100 Main St Unit A Sarasota FL 34236'));
     expect(leadAddressCompareKey('100 Main St Apt 4 Sarasota FL 34236')).not.toBe(leadAddressCompareKey('100 Main St Apt 5 Sarasota FL 34236'));
     expect(composeLeadAddress('100 Main St #A Sarasota FL 34236', '#A')).toBe('100 Main St #A Sarasota FL 34236');
-    // A comma-free WHOLE line with EMPTY city/zip columns still carries its place after the
-    // inline unit — a restatement from another city must not take ownership.
-    expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton FL 34205')).toEqual({ zip: '34205', city: expect.stringMatching(/bradenton/i) });
-    expect(leadAddressTailPlace('100 Main St Apt 4 Bradenton')).toEqual({ zip: null, city: expect.stringMatching(/bradenton/i) });
-    expect(leadAddressTailPlace('100 Main St Apt 4')).toBeNull();
-    expect(leadAddressTailPlace('100 Main St North Port FL 34287')).toBeNull();
-    // The locality is read from the RAW line — a terminal city word that is also a street suffix is not abbreviated (r7).
-    expect(leadAddressTailPlace('100 Main St Apt 4 Palm Harbor')).toEqual({ zip: null, city: expect.stringMatching(/palm harbor/i) });
-    const lockedWholeNoCols = { address: '100 Main St Apt 4 Bradenton FL 34205', city: null, zip: null };
-    expect(reaffirmedFilledLeadFields({ address: lockedWholeNoCols.address, city: 'Sarasota', zip: '34236' }, lockedWholeNoCols).address).toBeUndefined();
-    expect(reaffirmedFilledLeadFields({ address: lockedWholeNoCols.address, city: 'Bradenton', zip: '34205' }, lockedWholeNoCols).address).toBe(lockedWholeNoCols.address);
-    const lockedPalm = { address: '100 Main St Apt 4 Palm Harbor', city: null, zip: null };
-    expect(reaffirmedFilledLeadFields({ address: lockedPalm.address, city: 'Sarasota', zip: null }, lockedPalm).address).toBeUndefined();
-    expect(reaffirmedFilledLeadFields({ address: lockedPalm.address, city: 'Palm Harbor', zip: null }, lockedPalm).address).toBe(lockedPalm.address);
+    // A comma-free WHOLE line offers NO place evidence — the locality is never inferred from the
+    // text after the inline unit (a trailing qualifier like "Rear" is not a city). Ownership on that
+    // legacy shape rests on the exact string, so an exact restatement with the real city reaffirms.
+    for (const wholeLine of ['100 Main St Apt 4 Bradenton FL 34205', '100 Main St Apt 4 Bradenton', '100 Main St Apt 4', '100 Main St Apt 4 Palm Harbor', '100 Main St North Port FL 34287']) {
+      expect(leadAddressTailPlace(wholeLine)).toBeNull();
+    }
+    for (const qualifier of ['Rear', 'Front', 'Upper']) {
+      const withQualifier = `100 Main St Apt 4 ${qualifier}`;
+      const locked = { address: withQualifier, city: 'Sarasota', zip: '34236' };
+      expect(reaffirmedFilledLeadFields({ address: withQualifier, city: 'Sarasota', zip: '34236' }, locked).address).toBe(withQualifier);
+      expect(reaffirmedFilledLeadFields({ address: withQualifier, city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
+    }
   });
 
   test('an overlong whole line that already names the door is bounded with the unit and place protected', () => {
