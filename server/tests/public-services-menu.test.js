@@ -100,8 +100,22 @@ describe('instant-quote set stays in step with the public quote engine', () => {
     expect(PUBLIC_QUOTE_REQUESTS.pest_general_bimonthly.pest.frequency).toBe('bimonthly');
   });
   test('products with no complete public engine request are never advertised as instant', () => {
-    for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid']) {
+    for (const k of ['mosquito_one_time', 'wdo_inspection', 'pest_general_semiannual', 'lawn_care_quarterly', 'termite_liquid',
+      'palm_injection', 'bed_bug_treatment', 'dethatching', 'termite_trenching', 'termite_slab_pretreat']) {
       expect({ k, instant: PUBLIC_INSTANT_QUOTE_KEYS.has(k) }).toEqual({ k, instant: false });
     }
+  });
+  test('CONTRACT: every advertised instant key prices to a positive, non-manual line on a plain property', () => {
+    for (const key of PUBLIC_INSTANT_QUOTE_KEYS) {
+      const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey(key) });
+      const priced = (estimate.lineItems || []).filter((l) => !l.quoteRequired && !l.requiresCustomQuote
+        && Number(l.price ?? l.total ?? l.monthly ?? l.annual ?? 0) > 0);
+      expect({ key, priced: priced.length > 0 }).toEqual({ key, priced: true });
+    }
+  });
+  test('flea_tick prices the SINGLE-visit knockdown, not the two-visit package', () => {
+    const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey('flea_tick') });
+    expect(estimate.lineItems.map((l) => l.service)).toContain('flea_knockdown_single');
+    expect(estimate.lineItems.map((l) => l.service)).not.toContain('flea_package');
   });
 });

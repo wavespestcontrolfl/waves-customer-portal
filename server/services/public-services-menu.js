@@ -59,7 +59,6 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   lawn_care_6week: { lawn: { tier: 'enhanced' } },
   lawn_care_monthly: { lawn: { tier: 'premium' } },
   lawn_care_one_time: { oneTimeLawn: {} },
-  dethatching: { dethatching: {} },
   plugging: { plugging: {} },
   top_dressing: { topDressing: {} },
   mosquito_seasonal: { mosquito: { tier: 'seasonal9' } },
@@ -67,21 +66,27 @@ const PUBLIC_QUOTE_REQUESTS = Object.freeze({
   tree_shrub_quarterly: { treeShrub: { tier: 'light' } },
   tree_shrub_program: { treeShrub: { tier: 'standard' } },
   tree_shrub_6week: { treeShrub: { tier: 'enhanced' } },
-  palm_injection: { palm: {} },
   rodent_bait_quarterly: { rodentBait: {} },
   rodent_trapping: { rodentTrapping: {} },
   rodent_exclusion_only: { exclusion: {} },
   rodent_sanitation_light: { sanitation: { tier: 'light' } },
   rodent_sanitation_standard: { sanitation: { tier: 'standard' } },
   rodent_sanitation_heavy: { sanitation: { tier: 'heavy' } },
-  flea_tick: { flea: {} },
-  bed_bug_treatment: { bedBug: {} },
+  // Catalog flea_tick is the SINGLE-visit treatment (engine key
+  // flea_knockdown_single); the engine's default flea offer is the two-visit
+  // package, so the offer is pinned here (pre-push codex P0).
+  flea_tick: { flea: { offerKey: 'flea_knockdown_single' } },
   bee_wasp_removal: { stinging: {} },
   termite_bait: { termite: {} },
-  termite_trenching: { trenching: {} },
-  termite_slab_pretreat: { preSlab: {} },
   rodent_inspection: { rodentInspection: {} },
 });
+// Selectable but NOT instant (quote-on-request), because the public engine
+// needs inputs the website does not collect or returns a manual line:
+//   palm_injection (palm count) · bed_bug_treatment (method) ·
+//   dethatching / termite_trenching / termite_slab_pretreat (quote-required
+//   lines) · pest_general_semiannual · lawn_care_quarterly · mosquito_one_time.
+// The contract test runs every instant key through the engine and requires
+// a positive, non-manual line.
 const PUBLIC_INSTANT_QUOTE_KEYS = new Set(Object.keys(PUBLIC_QUOTE_REQUESTS));
 
 // Deep copy so a caller can never mutate the canonical request.

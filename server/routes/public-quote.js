@@ -1030,7 +1030,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.flea) {
-      engineInput.services.flea = {};
+      // Offer key is a whitelisted engine identity (single-visit knockdown vs
+      // the two-visit package); anything else falls to the engine default.
+      const FLEA_OFFERS = ['flea_knockdown_single', 'flea_elimination_two_visit'];
+      const fleaOffer = FLEA_OFFERS.includes(String(services.flea.offerKey || '').toLowerCase()) ? String(services.flea.offerKey).toLowerCase() : null;
+      engineInput.services.flea = fleaOffer ? { offerKey: fleaOffer } : {};
     }
     if (services.stinging) {
       engineInput.services.stinging = {
