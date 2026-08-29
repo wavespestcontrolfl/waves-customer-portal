@@ -1744,7 +1744,13 @@ function generateEstimate(input) {
     const result = calculateStingingPrice(services.stingingV2);
     lineItems.push(result);
   }
-  if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control', { scopedOneTime: true })) {
+  // services.exclusionV2 is NOT a scoped one-time (codex #3594 r2 P1):
+  // calculateExclusionPrice is sqft-tiered (entry points inferred from sqft,
+  // residential size-tier minimums, property.footprint fallback), so an
+  // unmeasured commercial building would get a firm footprint-derived price.
+  // Only the live per-point/per-LF services.exclusion{pricingVersion:'v2'}
+  // shape (priceRodentExclusionV2, above) bypasses the manual quote.
+  if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control')) {
     const result = calculateExclusionPrice({
       sqft: services.exclusionV2.sqft || property.footprint,
       stories: services.exclusionV2.stories || property.stories,

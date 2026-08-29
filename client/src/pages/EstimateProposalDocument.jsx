@@ -134,6 +134,9 @@ export default function EstimateProposalDocument({ data, token }) {
   const totals = proposal?.totals || {};
   const isCommercial = cta.commercialProposal === true
     || cta.commercialAutoPriced === true
+    // Scoped one-time commercial rows: commercial document identity (title,
+    // terms-neutral line) — never pestRecurringOnly (codex #3594 r2 P1).
+    || cta.commercialOneTimePriced === true
     || String(estimate.category || '').toUpperCase() === 'COMMERCIAL';
   const authoredProposal = proposal?.enabled === true;
   const buildings = Array.isArray(proposal?.buildings) ? proposal.buildings : [];

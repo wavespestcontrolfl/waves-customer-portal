@@ -263,10 +263,10 @@ const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
   'stinging_insect',
   'stinging_insect_v2',
   // The live V2 exclusion shape (services.exclusion + pricingVersion:'v2')
-  // emits per-section rows keyed 'rodent_exclusion'; 'exclusion_v2' covers the
-  // alternate services.exclusionV2 spelling's pricer.
+  // emits per-section rows keyed 'rodent_exclusion'. The alternate
+  // services.exclusionV2 spelling ('exclusion_v2') is deliberately ABSENT —
+  // its pricer is sqft-tiered off property.footprint (codex #3594 r2 P1).
   'rodent_exclusion',
-  'exclusion_v2',
   'rodent_wire_mesh',
   'rodent_bird_box',
   'rodent_sanitation',
@@ -274,11 +274,14 @@ const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
   'rodent_inspection',
 ]);
 
-// rodent_inspection follows the existing service_taxability rows (inspection
-// rows carry is_taxable=false) — commercial-inspection taxability is an open
-// owner/CPA ruling; until it lands the table is the authority. Everything else
-// here is nonresidential pest control, which FL taxes.
-const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['rodent_inspection']);
+// Every scoped one-time here is nonresidential pest control, which FL taxes —
+// INCLUDING rodent_inspection: the canonical service_taxability seed exempts
+// only wdo_inspection / termite_inspection (§212.08(6)), and both
+// TaxCalculator's unmatched-commercial default and estimate-proposal-generate's
+// EXEMPT_INSPECTION_KEYS treat rodent_inspection as taxable. Marking it exempt
+// here made the accepted estimate disagree with the completion invoice
+// (codex #3594 r2 P1). The commercial-inspection ruling (owner/CPA) changes
+// the canonical table first, never this file.
 
 // Re-marks a residential-pricer line for a commercial property: commercial
 // identity fields, FL tax family, and the flat-commercial discount rules the
@@ -288,7 +291,6 @@ const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['rodent_inspection']);
 // the pricer's own detail/disclaimer.
 function markCommercialOneTimeLine(result, property = {}, options = {}) {
   if (!result || typeof result !== 'object') return result;
-  const isExemptInspection = COMMERCIAL_EXEMPT_INSPECTION_ONETIME.has(result.service);
   return {
     ...result,
     propertyType: 'commercial',
@@ -297,8 +299,8 @@ function markCommercialOneTimeLine(result, property = {}, options = {}) {
     commercialPricingMode: 'auto_estimate',
     discountable: false,
     excludeFromPctDiscount: true,
-    taxable: !isExemptInspection,
-    taxCategory: isExemptInspection ? (result.taxCategory || null) : 'nonresidential_pest_control',
+    taxable: true,
+    taxCategory: 'nonresidential_pest_control',
   };
 }
 
