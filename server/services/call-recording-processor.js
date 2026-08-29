@@ -2632,9 +2632,11 @@ function leadAddressTailPlace(address) {
   const raw = String(address == null ? '' : address).trim();
   if (!raw) return null;
   const { snapshotTailPlace } = require('./customer-address-fanout');
-  // Lead-shape splitter so a legacy comma-free stored value still yields
-  // its locality as place evidence (codex r10 P1).
-  const tail = String(splitLeadStreetParts(raw).tail || '').trim();
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  // The UNBOUNDED tail: LEAD_PLACE_TAIL_MAX_LENGTH is a write-time clamp for
+  // values being composed; a stored legacy value with a long tail must
+  // still surrender its trailing state/ZIP as evidence (#3608 codex r5).
+  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
   return tail ? snapshotTailPlace(`street, ${tail}`) : null;
 }
 
@@ -2665,13 +2667,29 @@ function leadAddressCompareKey(v) {
 }
 
 // True when a (lower-cased, punctuation-free) street key carries an inline
-// "<designator> <value>" pair anywhere whose unit key equals unitK.
+// unit anywhere whose unit key equals unitK — every spelling the shared
+// parser supports: "apt 4", "#4", "# 4", "apt #4", and multipart units
+// ("bldg 2 apt 4") compared as ONE span, not pair-by-pair (#3608 codex r5).
 function streetEmbedsUnitKey(streetKey, unitK) {
-  const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const re = /\b(apt|apartment|unit|ste|suite|bldg|building|floor|lot|spc|space|#)\s*#?\s*([a-z0-9-]+)\b/g;
-  let m;
-  while ((m = re.exec(streetKey)) !== null) {
-    if (unitLineValueKey(normalizeUnitLine(`${m[1]} ${m[2]}`)) === unitK) return true;
+  const { normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const tokens = String(streetKey || '').split(' ').filter(Boolean);
+  const isDesignator = (t) => t === '#' || UNIT_DESIGNATORS.has(t);
+  let i = 0;
+  while (i < tokens.length) {
+    if (!(tokens[i].startsWith('#') || isDesignator(tokens[i]))) { i += 1; continue; }
+    // One MAXIMAL inline-unit run: consecutive "<designator> <value>" pairs
+    // ("bldg 2 apt 4") or a lone "#4" — compared whole, so "Apt 4" never
+    // matches inside "Bldg 2 Apt 4" (a different door, same rule as the
+    // composer's dedupe).
+    const run = [];
+    let j = i;
+    while (j < tokens.length) {
+      if (tokens[j].length > 1 && tokens[j].startsWith('#') && !isDesignator(tokens[j])) { run.push(tokens[j]); j += 1; continue; }
+      if (isDesignator(tokens[j]) && j + 1 < tokens.length) { run.push(tokens[j], tokens[j + 1]); j += 2; continue; }
+      break;
+    }
+    if (run.length && unitLineValueKey(normalizeUnitLine(run.join(' '))) === unitK) return true;
+    i = Math.max(j, i + 1);
   }
   return false;
 }

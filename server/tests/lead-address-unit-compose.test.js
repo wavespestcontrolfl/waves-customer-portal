@@ -253,6 +253,26 @@ describe('reaffirmedFilledLeadFields — address', () => {
     expect(reaffirmedFilledLeadFields({ address: restated, city: 'Sarasota', zip: '34236' }, lockedCF).address).toBe(commaFree);
     expect(reaffirmedFilledLeadFields({ address: composeLeadAddress(commaFree, 'Apt 5'), city: 'Sarasota', zip: '34236' }, lockedCF).address).toBeUndefined();
     expect(reaffirmedFilledLeadFields({ address: restated, city: 'Bradenton', zip: '34205' }, lockedCF).address).toBeUndefined();
+    // Every inline spelling the shared parser supports, incl. multipart.
+    for (const [line, unit] of [
+      ['100 Main St #4 Sarasota FL 34236', '#4'],
+      ['100 Main St # 4 Sarasota FL 34236', 'Apt 4'],
+      ['100 Main St Apt #4 Sarasota FL 34236', 'Unit 4'],
+      ['100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Bldg 2 Apt 4'],
+      ['100 Main St Suite 200-A Sarasota FL 34236', 'Ste 200-A'],
+    ]) {
+      expect(leadAddressCompareKey(composeLeadAddress(line, unit))).toBe(leadAddressCompareKey(line));
+    }
+    expect(leadAddressCompareKey(composeLeadAddress('100 Main St Bldg 2 Apt 4 Sarasota FL 34236', 'Apt 4'))).not.toBe(leadAddressCompareKey('100 Main St Bldg 2 Apt 4 Sarasota FL 34236'));
+  });
+
+  test('stored place evidence is read from the UNBOUNDED tail (the clamp is write-time only)', () => {
+    const longTail = `${'Somewhereville '.repeat(8)}Sarasota, FL 34236`;
+    const legacy = `100 Main St, Apt 4, ${longTail}`;
+    expect(leadAddressTailPlace(legacy)).toEqual({ zip: '34236', city: expect.any(String) });
+    const locked = { address: legacy, city: null, zip: null };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Sarasota', zip: '34236' }, locked).address).toBe(legacy);
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 4', city: 'Bradenton', zip: '34205' }, locked).address).toBeUndefined();
   });
 
   test('conflict branch keeps the retained inline unit through the bound', () => {
