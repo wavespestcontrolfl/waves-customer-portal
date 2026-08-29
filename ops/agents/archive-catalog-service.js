@@ -33,8 +33,12 @@ if (!process.env.DATABASE_PUBLIC_URL && !process.env.DATABASE_URL) {
 // The app's knex reads DATABASE_URL; railway run injects the internal host,
 // which is unreachable from a local machine — use the public proxy, with TLS
 // (the public proxy needs it; the dev knexfile block passes only a string).
-if (process.env.DATABASE_PUBLIC_URL) process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
-if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
+// TLS only on the Railway public-proxy path: a directly supplied
+// DATABASE_URL (local dev copy, non-TLS Postgres) must stay plain.
+if (process.env.DATABASE_PUBLIC_URL) {
+  process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
+  if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
+}
 
 const EXECUTE = process.argv.includes('--execute');
 const keyArg = process.argv.find((a) => a.startsWith('--key='));
