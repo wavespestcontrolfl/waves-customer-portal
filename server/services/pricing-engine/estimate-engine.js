@@ -1391,8 +1391,18 @@ function generateEstimate(input) {
       : pricePreSlabTermiticide(property, preSlabOptions);
     lineItems.push(result);
   }
-  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: true })) {
-    const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
+  // Commercial bed bug bypasses the manual lane only with EXPLICIT commercial
+  // scope (codex #3594 r4 P1): a positive room count, a non-single-family
+  // occupancy (the public quote defaults occupancy to singleFamily → 1.00×
+  // instead of e.g. hotel 1.30×), and a real measured building — the public
+  // route substitutes a synthetic 2,000 sqft (buildingSizeMeasured=false)
+  // that the pricer would otherwise treat as a valid footprint.
+  const bedBugScopeOpts = typeof services.bedBug === 'object' ? services.bedBug : {};
+  const bedBugScoped = Number(bedBugScopeOpts.rooms) > 0
+    && ['apartment', 'hotel', 'studentHousing'].includes(String(bedBugScopeOpts.occupancyType || ''))
+    && input.buildingSizeMeasured !== false;
+  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: bedBugScoped })) {
+    const bedBugOptions = bedBugScopeOpts;
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
     const result = priceBedBugTreatment(property, {
       ...bedBugOptions,
@@ -1614,8 +1624,14 @@ function generateEstimate(input) {
     }));
   }
 
-  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control', { scopedOneTime: true })) {
-    const opts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
+  // Commercial bypass only with a POSITIVE quantity (codex #3594 r4 P1): the
+  // admin V2 adapter emits birdBoxQuantity: 0 when cleared, and
+  // priceRodentBirdBoxes returns null for it — the selected service would
+  // silently vanish instead of surfacing as a manual quote.
+  const birdBoxOpts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
+  const birdBoxScoped = Number(birdBoxOpts.birdBoxQuantity) > 0;
+  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control', { scopedOneTime: birdBoxScoped })) {
+    const opts = birdBoxOpts;
     const result = priceRodentBirdBoxes({
       birdBoxType: opts.birdBoxType,
       birdBoxQuantity: opts.birdBoxQuantity,

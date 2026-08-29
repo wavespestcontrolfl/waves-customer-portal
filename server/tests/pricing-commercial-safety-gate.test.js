@@ -1242,6 +1242,16 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
       { rodentWireMesh: { meshLinearFeet: 0, meshSubstrate: 'stucco' } },
       { sanitation: { tier: 'standard' } },
       { sanitation: { tier: 'heavy', affectedSqFt: 0 } },
+      // Bird boxes with no/zero quantity (V2 adapter emits 0 when cleared) —
+      // the pricer returns null for 0, so the bypass would DROP the line
+      // (codex #3594 r4 P1).
+      { rodentBirdBoxes: { birdBoxType: 'standard_bird_box' } },
+      { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 0 } },
+      // Bed bug without explicit commercial scope: single-family occupancy
+      // (the public-quote default → 1.00× instead of hotel 1.30×) or no rooms
+      // (codex #3594 r4 P1).
+      { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' } },
+      { bedBug: { method: 'CHEMICAL', rooms: 0, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
       { rodentTrapping: true },
       { rodentGuarantee: true },
       { oneTimeMosquito: true },
@@ -1270,6 +1280,24 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
         }),
       ]);
     }
+  });
+
+  test('gate ON: commercial bed bug stays manual when the building size is the public synthetic default', () => {
+    process.env[GATE] = 'true';
+    const unmeasured = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSizeMeasured: false,
+      services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+    }));
+    expect(unmeasured.lineItems).toEqual([
+      expect.objectContaining({ service: 'commercial_pest', quoteRequired: true, requiresManualReview: true }),
+    ]);
+    const measured = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSizeMeasured: true,
+      services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+    }));
+    expect(measured.lineItems.find((l) => l.service === 'bed_bug')).toMatchObject({ isCommercial: true, commercialPricingMode: 'auto_estimate' });
   });
 
   test('gate ON: residential estimates are untouched (no commercial marking)', () => {
@@ -1329,6 +1357,27 @@ describe('estimateHasCommercialOneTime — commercial stamp signal for one-time-
       isCommercial: true, commercialPricingMode: 'auto_estimate',
     }]))).toBe(false);
     expect(estimateHasCommercialOneTime(wizard([]))).toBe(false);
+  });
+
+  test('round trip: gate-on commercial trenching keeps its identity through the legacy mapper (ONE_TIME_SERVICES path)', () => {
+    // Trenching maps via v1OtItems, not the specialty branch pre-slab uses —
+    // the admin save persists ONLY the mapped result (codex #3594 r4 P1).
+    process.env[GATE] = 'true';
+    const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { trenching: { perimeterLF: 200 } },
+    })));
+    const row = (mapped.oneTime?.items || []).find((i) => i.service === 'trenching');
+    expect(row).toMatchObject({ isCommercial: true, commercialPricingMode: 'auto_estimate', taxable: true });
+    expect(estimateHasCommercialOneTime({ result: mapped })).toBe(true);
+    // Residential trenching carries no commercial fields at all.
+    delete process.env[GATE];
+    const resRow = (mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'residential',
+      services: { trenching: { perimeterLF: 200 } },
+    }))).oneTime?.items || []).find((i) => i.service === 'trenching');
+    expect(resRow).toBeDefined();
+    expect(resRow.isCommercial).toBeUndefined();
   });
 
   test('round trip: gate-on commercial pre-slab survives the legacy mapper as a stampable signal', () => {
