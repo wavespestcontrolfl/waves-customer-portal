@@ -329,3 +329,74 @@ test('non-rodent reports keep the strict same-line pick first, then fall back to
     windowStart: '08:00:00',
   });
 });
+
+// Termite bait-station reports (#3600): the dashboard's "next monitoring
+// visit" is the first upcoming BAIT-STATION appointment, picked over the
+// whole candidate window — not the collapsed same-line pick, which may be an
+// earlier liquid/trench/inspection visit. Catalog completion profile
+// (project_type termite_bait_station) is the authority via
+// service_key_snapshot / service_id; name tokens judge only unlinked rows.
+const TERMITE_SERVICE = {
+  ...BASE_SERVICE,
+  id: 'service-termite',
+  service_line: 'termite',
+  service_type: 'Termite Bait Station Service',
+};
+
+test('termite report: next monitoring visit skips an earlier liquid visit for the later bait-station row', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-liquid', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Liquid Treatment', window_start: '09:00:00' },
+      { id: 'scheduled-bait', customer_id: 'customer-1', scheduled_date: '2999-04-03', status: 'confirmed', service_type: 'Termite Bait Station Service', window_start: '10:00:00' },
+    ],
+  });
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-next', knex);
+  // same-line pick is unchanged (the liquid visit IS the next termite visit)
+  expect(data.nextAppointment.serviceType).toBe('Termite Liquid Treatment');
+  expect(data.termiteNextMonitoringVisit).toEqual({
+    serviceType: 'Termite Bait Station Service',
+    scheduledDate: '2999-04-03',
+    windowStart: '10:00:00',
+  });
+});
+
+test('termite report: the catalog completion profile is authoritative in both directions', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    services: [
+      { id: 'svc-custom', service_key: 'termite_bait_quarterly' },
+      { id: 'svc-liquid', service_key: 'termite_liquid' },
+    ],
+    service_completion_profiles: [
+      { service_key: 'termite_bait_quarterly', active: true, project_type: 'termite_bait_station' },
+      { service_key: 'termite_liquid', active: true, project_type: 'termite_liquid' },
+    ],
+    scheduled_services: [
+      // bait-sounding label but linked to the liquid profile → vetoed
+      { id: 'scheduled-veto', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Termite Station Follow-up', window_start: '09:00:00', service_id: 'svc-liquid' },
+      // renamed plan with no bait token, linked to the bait profile → admitted
+      { id: 'scheduled-custom', customer_id: 'customer-1', scheduled_date: '2999-02-03', status: 'confirmed', service_type: 'Custom Termite Plan', window_start: '11:00:00', service_key_snapshot: 'termite_bait_quarterly' },
+    ],
+  });
+  const data = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-profile', knex);
+  expect(data.termiteNextMonitoringVisit).toEqual({
+    serviceType: 'Custom Termite Plan',
+    scheduledDate: '2999-02-03',
+    windowStart: '11:00:00',
+  });
+});
+
+test('termite report: no bait-station appointment → null (never the cross-line fallback); non-termite reports never carry it', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-pest', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'Quarterly Pest Control Service', window_start: '09:00:00' },
+    ],
+  });
+  const termite = await buildReportV1Data(TERMITE_SERVICE, 'token-termite-none', knex);
+  expect(termite.nextAppointment.serviceType).toBe('Quarterly Pest Control Service');
+  expect(termite.termiteNextMonitoringVisit).toBeNull();
+  const pest = await buildReportV1Data(BASE_SERVICE, 'token-pest-none', knex);
+  expect(pest.termiteNextMonitoringVisit).toBeNull();
+});

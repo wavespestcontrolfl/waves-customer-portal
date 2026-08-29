@@ -164,7 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
-const { buildTermiteReportV2, termiteReportV2PdfSignature, isTermiteBaitServiceName, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
+const { buildTermiteReportV2, termiteReportV2PdfSignature, TERMITE_BAIT_TYPED_TYPE } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -551,15 +551,6 @@ async function buildServiceReportV1ResponseData(service, token, {
     try {
       const serviceData = parseJsonObject(service.service_data);
       const typedSnapshot = serviceData?.typedReportSnapshot;
-      // Bait-station appointments only: the top-level nextAppointment
-      // falls back to the customer's next visit of ANY line (report-data.js),
-      // and even a termite-line liquid/trench/inspection visit is not a
-      // monitoring visit. Already null in pdf/static modes
-      // (stripLiveOnlyScheduleFields ran above).
-      const nextVisit = data.nextAppointment
-        && isTermiteBaitServiceName(data.nextAppointment.serviceType)
-        ? data.nextAppointment
-        : null;
       const termiteReportV2 = buildTermiteReportV2({
         typedSnapshotValues: typedSnapshot?.values || null,
         typedReportType: data.typedReport.type,
@@ -568,13 +559,20 @@ async function buildServiceReportV1ResponseData(service, token, {
         // The dashboard replaces the typed Today's Result card, so it must
         // carry the tech's required next-step commitment itself.
         nextStep: data.typedReport.todaysResult?.nextStep || null,
-        nextVisit,
+        // First upcoming BAIT-STATION appointment, selected by report-data
+        // over the full candidate window (the top-level nextAppointment may
+        // be an earlier liquid/trench visit or a cross-line fallback).
+        // Already null in pdf/static modes (stripLiveOnlyScheduleFields).
+        nextVisit: data.termiteNextMonitoringVisit || null,
         // Same typed-report double-print guard as the pest/mosquito heroes.
         technicianReport: null,
       });
       if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
     } catch { /* best-effort — never block the report */ }
   }
+  // Consumed by the dashboard payload above; the customer surface carries it
+  // as termiteReportV2.nextVisit only.
+  delete data.termiteNextMonitoringVisit;
 
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1

@@ -4,6 +4,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
+const { isTermiteBaitServiceName, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -1534,6 +1535,7 @@ function structuredCustomerConcern(structured = {}) {
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
+  delete data.termiteNextMonitoringVisit;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4252,6 +4254,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   let nextAppointment = null;
   let sameLineNextAppointment = null;
+  // Live-view only (stripLiveOnlyScheduleFields), termite line only.
+  let termiteNextMonitoringVisit = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4352,6 +4356,45 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     sameLineNextAppointment = toNextAppointment(nextApptRow);
     nextAppointment = sameLineNextAppointment
       || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
+
+    // Termite bait-station reports: the "next monitoring visit" is the first
+    // upcoming BAIT-STATION appointment, selected here while the candidate
+    // rows are still in hand — the collapsed same-line pick above may be an
+    // earlier liquid/trench/inspection visit, which is termite work but not
+    // monitoring (codex P1 #3600 r3). Authority order mirrors the rodent
+    // pick: the catalog's completion profile (project_type
+    // termite_bait_station) resolved through the row's durable
+    // service_key_snapshot or its service_id link; name tokens judge only
+    // unlinked/unresolvable rows. Best-effort — an unavailable profile table
+    // degrades to name matching, never throws.
+    if (serviceLine === 'termite') {
+      const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
+      let baitKeys = null;
+      let keyByServiceId = null;
+      try {
+        const profileRows = await knex('service_completion_profiles')
+          .where({ active: true, project_type: TERMITE_BAIT_TYPED_TYPE })
+          .select('service_key');
+        baitKeys = new Set((Array.isArray(profileRows) ? profileRows : [])
+          .map((row) => String(row?.service_key || '').trim())
+          .filter(Boolean));
+        const linkedIds = [...new Set(rows.map((row) => row?.service_id).filter(Boolean).map(String))];
+        const catalogRows = linkedIds.length
+          ? await knex('services').whereIn('id', linkedIds).select('id', 'service_key')
+          : [];
+        keyByServiceId = new Map((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => row && row.id)
+          .map((row) => [String(row.id), String(row.service_key || '')]));
+      } catch { baitKeys = null; keyByServiceId = null; }
+      const baitRow = rows.find((row) => {
+        const key = String(row?.service_key_snapshot || '').trim()
+          || (keyByServiceId && row?.service_id ? keyByServiceId.get(String(row.service_id)) || '' : '');
+        // A resolvable catalog key is authoritative in BOTH directions.
+        if (key && baitKeys) return baitKeys.has(key);
+        return isTermiteBaitServiceName(row?.service_type);
+      }) || null;
+      termiteNextMonitoringVisit = toNextAppointment(baitRow);
+    }
   } catch { /* best-effort */ }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
@@ -4827,6 +4870,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    termiteNextMonitoringVisit,
     termiteBonds,
     relatedDocuments,
     visitTimeline,
