@@ -6,6 +6,10 @@ import {
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
 import {
+  isPestDefaultMixVisit,
+  pestDefaultMixSelections,
+} from "../../lib/pest-default-mix";
+import {
   PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
   catalogUnitOption,
@@ -15,10 +19,8 @@ import {
   defaultApplicationMethod,
   derivedTotalAmount,
   filterLabelTargetsForLine,
-  isPestDefaultMixVisit,
   labelTargetLines,
   MAX_LABEL_TARGET_PREFILL,
-  pestDefaultMixSelections,
   productControlsTargets,
   productTargetsNutrition,
 } from "./SchedulePage.jsx";
@@ -507,15 +509,25 @@ describe("filterLabelTargetsForLine", () => {
     ]);
   });
 
-  it("prefills Talstar P's full spider list on a pest visit and none of it on lawn", () => {
-    // The 20260830000020 list (owner 2026-08-29): all three are pest-line
-    // targets within the prefill cap, so the whole list rides a recurring
-    // pest or re-service completion and stays off lawn/T&S completions.
-    const spiders = ["Widow spiders", "Orb-weaver spiders", "Jumping spiders"];
-    expect(filterLabelTargetsForLine(spiders, lines("Quarterly Pest Control"))).toEqual(spiders);
-    expect(filterLabelTargetsForLine(spiders, lines("Pest Re-Service"))).toEqual(spiders);
-    expect(filterLabelTargetsForLine(spiders, lines("Lawn Care Program"))).toEqual([]);
-    expect(filterLabelTargetsForLine(spiders, lines("Tree & Shrub Care"))).toEqual([]);
+  it("splits Talstar P's 20260830000020 list: spiders on pest, chinch/fire ants on lawn", () => {
+    // Owner 2026-08-29 + codex P1 on #3611: the spiders lead the list so a
+    // pest visit's 3-target cap keeps exactly them, while the preserved
+    // lawn targets keep the chinch-curative prefill alive on lawn visits.
+    const talstarNext = [
+      "Widow spiders",
+      "Orb-weaver spiders",
+      "Jumping spiders",
+      "Southern chinch bugs",
+      "Fire ants",
+    ];
+    const spiders = talstarNext.slice(0, 3);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Quarterly Pest Control"))).toEqual(spiders);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Pest Re-Service"))).toEqual(spiders);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Lawn Care Program"))).toEqual([
+      "Southern chinch bugs",
+      "Fire ants",
+    ]);
+    expect(filterLabelTargetsForLine(talstarNext, lines("Tree & Shrub Care"))).toEqual([]);
   });
 
   it("keeps only lawn-relevant targets on a lawn visit (fire ants are both)", () => {
@@ -702,27 +714,53 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
     { id: 5, name: "Non-ionic Surfactant", category: "adjuvant" },
   ];
 
-  it("seeds recurring general-pest visits and pest re-services only", () => {
-    expect(isPestDefaultMixVisit({ serviceType: "Quarterly Pest Control Service" })).toBe(true);
-    expect(isPestDefaultMixVisit({ serviceType: "Bi-Monthly Pest Control Service" })).toBe(true);
-    expect(isPestDefaultMixVisit({ serviceType: "General Pest Control (Monthly)" })).toBe(true);
-    expect(isPestDefaultMixVisit({ serviceType: "Pest Re-Service" })).toBe(true);
-    expect(isPestDefaultMixVisit({ serviceType: "Pest Control Re-Service" })).toBe(true);
+  it("seeds every canonical recurring general-pest alias and pest re-services", () => {
+    // The recurring vocabulary mirrors the 20260514000009 alias set —
+    // all three naming generations plus the legacy forms (codex P1 on
+    // #3611: Semiannual and "Recurring Pest Control" were missed).
+    [
+      "General Pest Control",
+      "General Pest Control (Monthly)",
+      "General Pest Control (Bi-Monthly)",
+      "General Pest Control (Quarterly)",
+      "General Pest Control (Semiannual)",
+      "General Pest Control Service (Bi-Monthly)",
+      "General Pest Control Service (Semiannual)",
+      "Monthly Pest Control Service",
+      "Bi-Monthly Pest Control Service",
+      "Quarterly Pest Control Service",
+      "Semiannual Pest Control Service",
+      "Monthly Pest Control",
+      "Bi-Monthly Pest Control",
+      "Quarterly Pest Control",
+      "Recurring Pest Control",
+      "Pest Re-Service",
+      "Pest Control Re-Service",
+    ].forEach((serviceType) =>
+      expect(isPestDefaultMixVisit({ serviceType }), serviceType).toBe(true),
+    );
     // The callback FLAG counts even when the cloned visit keeps its
     // recurring display name.
     expect(isPestDefaultMixVisit({ serviceType: "Pest Control Service", isCallback: true })).toBe(true);
   });
 
   it("stays off one-time and specialty pest lanes, and off other lines", () => {
-    expect(isPestDefaultMixVisit({ serviceType: "Pest Control Service" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Initial Pest Cleanout" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Rodent Monitoring (Monthly)" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Bed Bug Treatment" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Flea & Tick Yard Treatment" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "German Roach Cleanout" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Mosquito Control (Monthly)" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Lawn Care Re-Service" })).toBe(false);
-    expect(isPestDefaultMixVisit({ serviceType: "Quarterly Termite Active Bait Station Service" })).toBe(false);
+    [
+      "Pest Control Service", // bare = the one-time job (alias-list exclusion)
+      "General Pest Control (Initial)", // initial scope differs (alias-list exclusion)
+      "General Pest Control + Lawn Care", // combo (alias-list exclusion)
+      "Initial Pest Cleanout",
+      "Rodent Monitoring (Monthly)",
+      "Bed Bug Treatment",
+      "Flea & Tick Yard Treatment",
+      "German Roach Cleanout",
+      "Mosquito Control (Monthly)",
+      "Lawn Care Re-Service",
+      "Quarterly Termite Active Bait Station Service",
+      "WDO Inspection (Termite Letter)",
+    ].forEach((serviceType) =>
+      expect(isPestDefaultMixVisit({ serviceType }), serviceType).toBe(false),
+    );
   });
 
   it("resolves Taurus SC, Talstar P, and the pest surfactant with the house totals", () => {
@@ -730,20 +768,23 @@ describe("default pest tank mix (owner 2026-08-29)", () => {
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
       ["Taurus SC", 4],
       ["Talstar P", 4],
-      // The plain non-ionic tank-mix adjuvant wins over the LESCO lawn
-      // surfactant even though the LESCO row sorts first.
+      // Exact identity only — the LESCO lawn surfactant is never eligible.
       ["Non-ionic Surfactant", 0.25],
     ]);
   });
 
-  it("skips an entry the catalog no longer carries instead of guessing", () => {
-    const selections = pestDefaultMixSelections(
-      CATALOG.filter((p) => p.name !== "Taurus SC"),
-    );
-    expect(selections.map((s) => s.product.name)).toEqual([
-      "Talstar P",
-      "Non-ionic Surfactant",
-    ]);
+  it("skips a missing entry instead of substituting another product", () => {
+    expect(
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Taurus SC"))
+        .map((s) => s.product.name),
+    ).toEqual(["Talstar P", "Non-ionic Surfactant"]);
+    // With the intended surfactant retired, the LESCO lawn surfactant must
+    // NOT be auto-recorded in its place (codex P1 on #3611) — the entry is
+    // skipped.
+    expect(
+      pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Non-ionic Surfactant"))
+        .map((s) => s.product.name),
+    ).toEqual(["Taurus SC", "Talstar P"]);
   });
 });
 

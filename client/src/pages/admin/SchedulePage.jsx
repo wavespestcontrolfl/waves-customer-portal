@@ -42,6 +42,10 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import {
+  isPestDefaultMixVisit,
+  pestDefaultMixSelections,
+} from "../../lib/pest-default-mix";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
@@ -291,64 +295,6 @@ function toggleProductAreaValue(currentValue, area, orderedChoices) {
     ? selected.filter((a) => a !== area)
     : orderedChoices.filter((a) => selected.includes(a) || a === area);
   return next.join(", ");
-}
-// Default tank mix for recurring general-pest and pest re-service
-// completions (owner 2026-08-29): the Products list always STARTS with
-// Taurus SC, Talstar P, and the non-ionic surfactant, with the house totals
-// prefilled — 4 oz of each concentrate, 0.25 oz of surfactant. Every row
-// stays editable/removable; the seed runs once per panel open, never
-// re-adds a row the tech removed, and never fights a restored draft or a
-// hand-built list. Matching is by catalog name — patterns are ordered
-// most-specific-first so the pest tank-mix adjuvant wins over the LESCO
-// lawn surfactant; an entry the catalog no longer carries is skipped.
-const PEST_DEFAULT_MIX = [
-  { patterns: [/^taurus\s*sc\b/i], totalAmount: 4 },
-  { patterns: [/^talstar\s*p\b/i], totalAmount: 4 },
-  { patterns: [/^non-?ionic\s+surfactant$/i, /surfactant/i], totalAmount: 0.25 },
-];
-
-// The default mix belongs on recurring general-pest maintenance visits and
-// pest re-services (callbacks) ONLY — one-time and specialty pest lanes
-// (rodent, bed bug, flea/tick, bee/wasp, roach cleanouts, ant jobs) keep
-// their own product flows. Mirrors the CompletionPanel's own callback
-// detection (serviceType token or the isCallback flag).
-export function isPestDefaultMixVisit(service) {
-  const raw =
-    service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
-  if (detectServiceCategory(raw) !== "pest") return false;
-  const s = String(raw).toLowerCase();
-  if (
-    /rodent|\brats?\b|\bmice\b|\bmouse\b|\bmoles?\b|bed\s*bug|flea|tick|\bbees?\b|wasp|roach|\bants?\b|cleanout|exclusion/.test(
-      s,
-    )
-  )
-    return false;
-  const isReservice =
-    service?.isCallback === true || /re-?service|callback/.test(s);
-  const isRecurringGeneralPest = /quarterly|bi-?monthly|monthly|general pest/.test(s);
-  return isReservice || isRecurringGeneralPest;
-}
-
-// Resolve the mix against the loaded catalog: first row matching each
-// entry's ordered patterns wins, no row claimed twice.
-export function pestDefaultMixSelections(products) {
-  const rows = Array.isArray(products) ? products : [];
-  const used = new Set();
-  const selections = [];
-  for (const entry of PEST_DEFAULT_MIX) {
-    let match = null;
-    for (const pattern of entry.patterns) {
-      match = rows.find(
-        (p) => p && !used.has(p.id) && pattern.test(String(p.name || "").trim()),
-      );
-      if (match) break;
-    }
-    if (match) {
-      used.add(match.id);
-      selections.push({ product: match, totalAmount: entry.totalAmount });
-    }
-  }
-  return selections;
 }
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },

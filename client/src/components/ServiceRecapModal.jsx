@@ -15,6 +15,7 @@
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
+import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 
 const PALETTES = {
   dark: {
@@ -196,6 +197,38 @@ export default function ServiceRecapModal({
           if (preselect.size) {
             setSelected(preselect);
             setRates(seededRates);
+          }
+        }
+        // Default pest tank mix (owner 2026-08-29, shared with
+        // CompletionPanel via lib/pest-default-mix — codex P1 on #3611):
+        // a FRESH recurring general-pest or pest re-service recap
+        // pre-selects Taurus SC, Talstar P, and the non-ionic surfactant
+        // so the primary field-tech completion starts from the house mix
+        // too. Rates seed exactly as a manual tap would; this lane
+        // records no amounts, so the 4/4/0.25-oz totals live only on the
+        // full completion form. Never seeds over an existing record
+        // (reopen/resend must preserve what was applied) and fails
+        // closed on a failed record lookup, same as the recorded-
+        // products path above. Everything stays deselectable/editable.
+        if (
+          !data?.existingRecord &&
+          !data?.existingRecordLoadFailed &&
+          Array.isArray(data?.products) &&
+          isPestDefaultMixVisit({
+            ...(service || {}),
+            serviceType: service?.serviceType || data?.service?.serviceType,
+          })
+        ) {
+          const mixSelect = new Set();
+          const mixRates = {};
+          pestDefaultMixSelections(data.products).forEach(({ product }) => {
+            mixSelect.add(product.id);
+            const prefill = catalogRatePrefill(product, data?.service?.serviceType);
+            if (prefill) mixRates[product.id] = prefill;
+          });
+          if (mixSelect.size) {
+            setSelected(mixSelect);
+            setRates(mixRates);
           }
         }
         if (!data?.service?.hasPhone) setSendText(false);
