@@ -1499,10 +1499,15 @@ function generateEstimate(input) {
     );
     lineItems.push(result);
   }
-  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control', { scopedOneTime: true })) {
-    const foamOptions = typeof services.foam === 'object' && services.foam !== null
-      ? services.foam
-      : {};
+  // Commercial bypass only with a POSITIVE explicit point count (pre-audit of
+  // the codex #3594 r4 pattern): priceFoamDrill defaults to 5 points when the
+  // count is absent, so an unscoped commercial request would get a firm
+  // 5-point price. Residential keeps the default.
+  const foamOptions = typeof services.foam === 'object' && services.foam !== null
+    ? services.foam
+    : {};
+  const foamScoped = Number(foamOptions.points) > 0;
+  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control', { scopedOneTime: foamScoped })) {
     const result = priceFoamDrill(Object.prototype.hasOwnProperty.call(foamOptions, 'points') ? foamOptions.points : undefined, {
       urgency: foamOptions.urgency || 'ROUTINE',
       afterHours: foamOptions.afterHours || false,
@@ -1549,7 +1554,14 @@ function generateEstimate(input) {
     // floors) — this is the LIVE producer shape (property-lookup-v2 sends
     // services.exclusion with pricingVersion:'v2'; codex #3594 P1). V1 keeps
     // the manual quote: its minimum floors key off HOME sqft.
-    scopedOneTime: services.exclusion.pricingVersion === 'v2',
+    // V2 is per-point/per-LF scoped — but only when at least one section has
+    // a positive count; an all-zero V2 request still prices the point-only
+    // floor + inspection fee as a firm line (pre-audit of the codex #3594 r4
+    // pattern). Unscoped → manual quote.
+    scopedOneTime: services.exclusion.pricingVersion === 'v2'
+      && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
+        'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
+        .some((k) => Number(services.exclusion[k]) > 0),
   })) {
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.sanitation
@@ -1764,7 +1776,9 @@ function generateEstimate(input) {
     const result = calculatePluggingPrice(services.rodentPlugging);
     lineItems.push(result);
   }
-  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control', { scopedOneTime: true })) {
+  // Same rule: calculateFoamPrice bills ≥1 can even at 0 application points.
+  const termiteFoamScoped = Number(services.termiteFoam?.applicationPoints) > 0;
+  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control', { scopedOneTime: termiteFoamScoped })) {
     const result = calculateFoamPrice(services.termiteFoam);
     lineItems.push(result);
   }

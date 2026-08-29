@@ -2634,8 +2634,10 @@ function estimateHasCommercialOneTime(estimateData = {}) {
     && item.isCommercial === true
     && item.commercialPricingMode === 'auto_estimate'
     // NOT requiresManualReview: pre-slab is priced AND review-flagged by
-    // design; only quoteRequired marks an unpriced manual-quote row.
-    && item.quoteRequired !== true;
+    // design; only quoteRequired marks an unpriced manual-quote row — and a
+    // requiresMeasurement row (trenching with no perimeter) carries no price.
+    && item.quoteRequired !== true
+    && item.requiresMeasurement !== true;
   if (estimateOneTimeItemsFromData(estimateData).some(isPricedCommercialRow)) return true;
   // Quote-wizard drafts (POST /public/quote/calculate) persist the commercial
   // markers ONLY under engineResult.lineItems — no mapped oneTime container

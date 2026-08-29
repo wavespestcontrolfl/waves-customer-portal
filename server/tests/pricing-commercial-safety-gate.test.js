@@ -1115,7 +1115,7 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
     { services: { sanitation: { tier: 'standard', affectedSqFt: 400 } }, service: 'rodent_sanitation' },
     { services: { rodentInspection: true }, service: 'rodent_inspection' },
     { services: { foam: { points: 6 } }, service: 'foam_drill' },
-    { services: { termiteFoam: { points: 6 } }, service: 'termite_foam' },
+    { services: { termiteFoam: { applicationPoints: 6 } }, service: 'termite_foam' },
   ];
 
   test('gate OFF: every scoped one-time still collapses to the commercial manual quote', () => {
@@ -1252,6 +1252,15 @@ describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pri
       // (codex #3594 r4 P1).
       { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' } },
       { bedBug: { method: 'CHEMICAL', rooms: 0, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+      // Foam defaults to 5 points when absent; termite foam bills ≥1 can at 0
+      // points; an all-zero exclusion V2 still prices floor + inspection —
+      // each needs a positive explicit unit to bypass.
+      { foam: {} },
+      { foam: { points: 0 } },
+      { termiteFoam: {} },
+      { termiteFoam: { applicationPoints: 0 } },
+      { exclusion: { pricingVersion: 'v2' } },
+      { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 0, meshSoftLF: 0 } },
       { rodentTrapping: true },
       { rodentGuarantee: true },
       { oneTimeMosquito: true },
@@ -1357,6 +1366,12 @@ describe('estimateHasCommercialOneTime — commercial stamp signal for one-time-
       isCommercial: true, commercialPricingMode: 'auto_estimate',
     }]))).toBe(false);
     expect(estimateHasCommercialOneTime(wizard([]))).toBe(false);
+    // A measurement-required commercial row (trenching, no perimeter) is not
+    // a PRICED row — no stamp signal.
+    expect(estimateHasCommercialOneTime({ result: { oneTime: { items: [{
+      service: 'trenching', price: null, requiresMeasurement: true,
+      isCommercial: true, commercialPricingMode: 'auto_estimate',
+    }] } } })).toBe(false);
   });
 
   test('round trip: gate-on commercial trenching keeps its identity through the legacy mapper (ONE_TIME_SERVICES path)', () => {
