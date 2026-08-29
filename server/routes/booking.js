@@ -3641,18 +3641,7 @@ async function createSelfBooking(payload = {}) {
               row.window_end = null;
             }
           }
-          // Visit-group seam, post-sweep (codex #3590 r5): group each
-          // surviving seeded row against existing compatible stops using
-          // its NORMALIZED window/tech. Demoted (windowless) rows are
-          // skipped — the office places them first. Best-effort savepoint
-          // inside maybeGroupRow.
-          {
-            const { maybeGroupRow } = require('../services/visit-groups');
-            for (const row of seededRows) {
-              if (!row?.id || !row.window_start) continue;
-              await maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
-            }
-          }
+
           if (setupFeeHandoffEligible) {
             await stampDisclosedSetupFee(trx, { stampServiceRow: seriesParentRow });
           }
@@ -3707,6 +3696,20 @@ async function createSelfBooking(payload = {}) {
           } catch (linkErr) {
             logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking, rolled back to savepoint): ${linkErr.message}`);
             await trx.raw('ROLLBACK TO SAVEPOINT wizard_activation_linkage');
+          }
+          // Visit-group seam, post-sweep AND post-linkage (codex #3590
+          // r5/r7): group each surviving seeded row using its NORMALIZED
+          // window/tech and its LINKED property_id — grouping before
+          // linkAcceptedEstimateProperty could match null-property legacy
+          // rows at another address. Demoted (windowless) rows are
+          // skipped — the office places them first. Best-effort savepoint
+          // inside maybeGroupRow.
+          {
+            const { maybeGroupRow } = require('../services/visit-groups');
+            for (const row of seededRows) {
+              if (!row?.id || !row.window_start) continue;
+              await maybeGroupRow(row.id, { database: trx, createdBy: 'seeder' });
+            }
           }
           // Transaction-health probe: throws if anything above left the
           // transaction aborted, so the activation can never "commit" as

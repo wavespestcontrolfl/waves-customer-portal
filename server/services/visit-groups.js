@@ -202,6 +202,24 @@ async function visitActivity(visitId, trx = db) {
   };
 }
 
+/**
+ * Recompute a visit's window as the union of its remaining non-terminal
+ * members (codex r7 P2): removing the earliest/latest child must shrink
+ * the union or later joins can match a stale range.
+ */
+async function recomputeVisitWindow(t, visitId) {
+  const members = await t('scheduled_services').where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('window_start', 'window_end');
+  if (!members.length) return;
+  const starts = members.map((m) => m.window_start).filter(Boolean);
+  const ends = members.map((m) => m.window_end).filter(Boolean);
+  await t('service_visits').where({ id: visitId }).update({
+    window_start: starts.length ? starts.sort()[0] : null,
+    window_end: ends.length ? ends.sort().slice(-1)[0] : null,
+  });
+}
+
 async function nextStopSeq(trx, baseKey) {
   const row = await trx('service_visits')
     .where({ stop_base_key: baseKey })
@@ -443,14 +461,17 @@ async function splitChild({ visitId, scheduledServiceId, createdBy }) {
       .where({ visit_id: visitId })
       .whereNotIn('status', TERMINAL_ROW_STATUSES)
       .count('id as n').first();
+    let dissolved = false;
     if (Number(remaining.n) <= 1) {
       const still = await visitActivity(visitId, t);
       if (canDissolve(still).ok) {
         await t('scheduled_services').where({ visit_id: visitId }).update({ visit_id: null });
         await t('service_visits').where({ id: visitId })
           .update({ status: 'dissolved', close_reason: 'operator', closed_at: t.fn.now() });
+        dissolved = true;
       }
     }
+    if (!dissolved) await recomputeVisitWindow(t, visitId);
     return { detached: child.id, visitId };
   });
 }
@@ -500,7 +521,10 @@ async function handleChildTerminal(scheduledServiceId) {
         .where({ visit_id: visit.id })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .count('id as n').first();
-      if (Number(remaining.n) > 1) return false;
+      if (Number(remaining.n) > 1) {
+        await recomputeVisitWindow(t, visit.id);
+        return false;
+      }
       const activity = await visitActivity(visit.id, t);
       if (!canDissolve(activity).ok) return false;
       await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
@@ -533,8 +557,11 @@ async function handleChildStopChanged(scheduledServiceId) {
       const visit = await t('service_visits').where({ id: row.visit_id }).first();
       if (!visit || String(visit.status) !== 'open') return false;
       await lockStop(t, visit.stop_base_key);
-      const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
-        .first('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
+      const fresh = await t('scheduled_services as ss')
+        .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+        .where('ss.id', row.id).forUpdate('ss')
+        .first('ss.id', 'ss.visit_id', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end',
+          'ss.technician_id', 'ss.status', 'svc.groupable', 'svc.group_family');
       if (!fresh || String(fresh.visit_id) !== String(visit.id)) return false;
       // A FROZEN visit (packet/artifact/link/payment) never loses members
       // to a stop edit (codex r6): the recorded artifacts must keep their
@@ -576,6 +603,10 @@ async function handleChildStopChanged(scheduledServiceId) {
       const stillMatches = dateOnly(fresh.scheduled_date) === dateOnly(visit.scheduled_date)
         && overlapsMembers
         && !techConflict
+        // An Edit that reclassifies the SERVICE (new service_id) must keep
+        // the same-family rule enforced at creation (codex r7).
+        && Boolean(fresh.groupable)
+        && familiesCompatible(fresh.group_family, visit.group_family)
         && !JOIN_INELIGIBLE_STATUSES.includes(String(fresh.status || ''));
       if (stillMatches) {
         // The move stayed inside the stop but may have shifted the union —
@@ -598,14 +629,17 @@ async function handleChildStopChanged(scheduledServiceId) {
         .where({ visit_id: visit.id })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
         .count('id as n').first();
+      let dissolved = false;
       if (Number(remaining.n) <= 1) {
         const activity = await visitActivity(visit.id, t);
         if (canDissolve(activity).ok) {
           await t('scheduled_services').where({ visit_id: visit.id }).update({ visit_id: null });
           await t('service_visits').where({ id: visit.id })
             .update({ status: 'dissolved', close_reason: 'row_moved', closed_at: t.fn.now() });
+          dissolved = true;
         }
       }
+      if (!dissolved) await recomputeVisitWindow(t, visit.id);
       return true;
     });
   } catch (err) {
@@ -708,9 +742,22 @@ async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
       && windowsOverlap(row.window_start, row.window_end, p.window_start, p.window_end));
     if (!compatible.length) return null;
     const attachedVisit = compatible.find((p) => p.visit_id);
-    const subset = attachedVisit
+    let subset = attachedVisit
       ? compatible.filter((p) => !p.visit_id || String(p.visit_id) === String(attachedVisit.visit_id))
       : compatible;
+    // Technician partition (codex r7 P2): when the new row is unassigned
+    // and partners span two technicians, keep ONE tech's partition
+    // (the attached visit's tech when present, else the first assigned
+    // partner's) plus unassigned partners — otherwise createOrJoinVisit
+    // rejects the whole mixed set and nothing groups.
+    if (!row.technician_id) {
+      const partTechs = [...new Set(subset.map((p) => p.technician_id).filter(Boolean).map(String))];
+      if (partTechs.length > 1) {
+        const keep = (attachedVisit && attachedVisit.technician_id && String(attachedVisit.technician_id))
+          || partTechs[0];
+        subset = subset.filter((p) => !p.technician_id || String(p.technician_id) === keep);
+      }
+    }
     const rows = [{ id: row.id }, ...subset.map((p) => ({ id: p.id }))];
     if (database && database.isTransaction) {
       // Inside a caller transaction (converter/seeder) the work must run

@@ -910,16 +910,17 @@ async function transitionJobStatus({
       void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
       });
-      // Visit-group seam, reverse direction (codex #3590 r6): a
-      // compensated cancellation can revert AFTER the terminal hook
-      // already detached the row (and possibly dissolved its visit).
-      // Rather than restoring lost state, regroup from scratch — the
-      // revived row and its former partners are all ungrouped again, so
-      // maybeGroupRow rebuilds the stop under the same join rules.
-      // Gate-checked + best-effort inside the helper.
-      void require('./visit-groups').maybeGroupRow(jobId, { createdBy: 'dispatch' }).catch((e) => {
-        logger.warn(`[job-status] visit-group revival seam failed for ${jobId}: ${e.message}`);
-      });
+      // Visit-group seam, reverse direction (codex #3590 r6, narrowed
+      // r7): ONLY a compensated terminal reversal regroups — the terminal
+      // hook may have detached the row (and dissolved its visit), so
+      // rebuild the stop from scratch under the same join rules. Ordinary
+      // forward transitions (pending→confirmed, →en_route, →on_site)
+      // never regroup here; stamping happens at scheduling only.
+      if (['cancelled', 'skipped', 'no_show'].includes(String(fromStatus || ''))) {
+        void require('./visit-groups').maybeGroupRow(jobId, { createdBy: 'dispatch' }).catch((e) => {
+          logger.warn(`[job-status] visit-group revival seam failed for ${jobId}: ${e.message}`);
+        });
+      }
     }
   }
 

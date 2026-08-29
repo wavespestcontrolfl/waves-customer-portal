@@ -13171,7 +13171,10 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
   let recapLegacyVisitId = null;
   try {
     const gate = await require('../services/visit-groups').ensureLegacyCompletable(req.params.serviceId);
-    if (!gate.ok) {
+    if (!gate.ok && gate.reason === 'not_found') {
+      // Missing/stale service id: let the route's own lookup produce its
+      // usual 404 instead of a misleading visit_grouped 409 (codex r7 P2).
+    } else if (!gate.ok) {
       return res.status(409).json({
         error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
         code: 'visit_grouped',
