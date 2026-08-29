@@ -935,7 +935,10 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}
               </Bullet>
             ))}
-            {activity && activity.levelWord && (
+            {/* Termite V2 owns the reconciled activity reading (map pins may
+                escalate a frozen "None observed") — the frozen gauge bullet
+                would contradict it (codex P2 #3600 r10). */}
+            {activity && activity.levelWord && !termiteV2 && (
               <Bullet>
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>

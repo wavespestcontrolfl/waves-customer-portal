@@ -221,6 +221,20 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(hero).getByText('Moderate feeding')).toBeInTheDocument();
   });
 
+  it('the visit-history current row restates the reconciled V2 headline, not the frozen snapshot headline', async () => {
+    const history = JSON.parse(JSON.stringify(termiteReportV2));
+    history.typedVisitTimeline = { visits: [
+      { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+      { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+    ] };
+    const { container } = renderReport(history);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const card = container.querySelector('#typed-visit-timeline');
+    expect(card).not.toBeNull();
+    expect(within(card).getAllByText('Termite activity observed at 2 stations')).toHaveLength(1);
+    expect(within(card).getAllByText('No termite activity observed')).toHaveLength(1);
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);

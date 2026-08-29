@@ -410,6 +410,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.match(/2 of the 12 stations inspected/g)).toHaveLength(1);
   });
 
+  it('termite V2 suppresses the frozen activity-gauge bullet that could contradict the reconciled status', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      activity: { label: 'Termite Activity', levelWord: 'No active signs observed today', score: 0 },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toMatch(/No active signs observed today/);
+    expect(container.textContent).toMatch(/Termite activity observed at 2 stations/);
+  });
+
   it('does not claim treated areas when the only application is a station check', () => {
     // treatment-map.js isRenderableApplication excludes method 'station_check'
     const data = {

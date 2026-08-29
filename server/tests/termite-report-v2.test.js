@@ -82,6 +82,13 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
     expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0 })[0].value).toBe('12 of 12');
   });
 
+  it('a recorded total above the checked count (no inaccessible count) is partial coverage, never "all"', () => {
+    const copy = buildTodaysResultCopy({ statusKey: 'protected', checked: 10, total: 12, activityCount: 0, inaccessible: 0 });
+    expect(copy.headline).toBe('10 of 12 stations inspected');
+    expect(copy.body).toMatch(/in the 10 stations we inspected today/);
+    expect(copy.body).not.toMatch(/all 10/);
+  });
+
   it('partial access leads with "N of M inspected" and promises the re-check', () => {
     const copy = buildTodaysResultCopy({ statusKey: 'protected', checked: 10, total: 12, activityCount: 0, servicedToday: false, inaccessible: 2 });
     expect(copy.headline).toBe('10 of 12 stations inspected');

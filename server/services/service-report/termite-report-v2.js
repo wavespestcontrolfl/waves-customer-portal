@@ -151,12 +151,20 @@ function buildTodaysResultCopy({
       body: `No termite activity was observed in the ${checked} station${plural(checked)} we were able to inspect.${accessNote}`,
     };
   }
-  // "all N" only when a denominator was documented (recorded total, or an
-  // explicit inaccessible count) — a checked count alone never claims the
-  // whole network (codex P2 #3600 r8). Property-neutral: the same profile
-  // serves commercial bait programs (warehouse, office, multifamily), so
-  // never "your home".
-  const scope = total ? `all ${checked}` : `${checked}`;
+  // A recorded total ABOVE the checked count with no inaccessible count is
+  // still a partial visit (the counts are not relationally validated) —
+  // partial-coverage wording, never "all" (codex P2 #3600 r10).
+  if (total && total > checked) {
+    return {
+      headline: `${checked} of ${total} stations inspected`,
+      body: `No termite activity was observed in the ${checked} station${plural(checked)} we inspected today.`,
+    };
+  }
+  // "all N" only when the documented total equals the checked count — a
+  // checked count alone never claims the whole network (codex P2 #3600 r8).
+  // Property-neutral: the same profile serves commercial bait programs
+  // (warehouse, office, multifamily), so never "your home".
+  const scope = total && total === checked ? `all ${checked}` : `${checked}`;
   return {
     headline: 'No termite activity observed',
     body: `We inspected ${scope} bait station${plural(checked)} around the property today. No termite activity was observed at the stations inspected.`,

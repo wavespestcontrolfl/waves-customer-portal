@@ -5532,6 +5532,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // spaced — see the recurring pest control report"). The two review
   // mounts are mutually exclusive on this flag.
   const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
+  // Termite V2: the visit-history card's CURRENT row carries the reconciled
+  // dashboard headline instead of the frozen snapshot headline.
+  const termiteReconciledTimeline = data.termiteReportV2?.status?.label && Array.isArray(data.typedVisitTimeline?.visits)
+    ? {
+      ...data.typedVisitTimeline,
+      visits: data.typedVisitTimeline.visits.map((visit) => (visit?.isCurrent
+        ? { ...visit, headline: data.termiteReportV2.status.label }
+        : visit)),
+    }
+    : null;
   // Termite V2: only genuine product applications survive into Products
   // Applied (bait cartridge / station-check rows are monitoring).
   const termiteProductApplications = data.termiteReportV2
@@ -9120,7 +9130,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             2+ visits, so this renders nothing everywhere else. Bed bug folds
             these rows into the Visit Timeline card instead (owner 2026-07-31)
             — suppressed here only when the merged rows actually rendered. */}
-        {!mergeTypedVisitHistory && <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />}
+        {/* Termite V2: the current row restates the reconciled V2 headline
+            (visit-backed pins may escalate a frozen "None observed"), so the
+            history never disagrees with the hero (codex P2 #3600 r10). */}
+        {!mergeTypedVisitHistory && <TypedVisitTimelineCard timeline={termiteReconciledTimeline || data.typedVisitTimeline} />}
 
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
