@@ -81,21 +81,22 @@ describe('20260829000020 public_quote_selectable', () => {
 });
 
 describe('20260829000021 engine_keys backfill', () => {
-  test('sets NULL arrays, appends to flea_tick, never overwrites an admin array, refuses a second ACTIVE claimant', async () => {
+  test('stamps a NULL array, takes the lock, refuses a second ACTIVE claimant', async () => {
     const db = { services: [
       svc('palm_injection'),
-      svc('cockroach_control', { engine_keys: ['admin_custom'] }),
-      svc('flea_tick', { engine_keys: ['flea_knockdown_single'] }),
       svc('other_row', { engine_keys: ['palm_injection'] }), // ACTIVE row already claims palm_injection
     ], system_settings: [] };
     await backfill.up(fakeKnex(db));
     expect(db.locked).toBe(true); // owner-check → stamp span is serialized
-    const ek = (k) => db.services.find((r) => r.service_key === k).engine_keys;
-    expect(ek('flea_tick')).toEqual(['flea_knockdown_single', 'flea_package']);
-    expect(ek('cockroach_control')).toEqual(['admin_custom', 'pest_initial_roach']); // appended, admin key kept
-    expect(ek('palm_injection')).toBeNull(); // refused: an active row claims it
-    const applied = JSON.parse(db.system_settings[0].value).applied.map((a) => a.service_key).sort();
-    expect(applied).toEqual(['cockroach_control', 'flea_tick']);
+    expect(db.services.find((r) => r.service_key === 'palm_injection').engine_keys).toBeNull(); // refused
+    expect(JSON.parse(db.system_settings[0].value).applied).toEqual([]);
+  });
+  test('appends to an existing admin array instead of overwriting it', async () => {
+    const db = { services: [svc('palm_injection', { engine_keys: ['admin_custom'] })], system_settings: [] };
+    await backfill.up(fakeKnex(db));
+    expect(db.services[0].engine_keys).toEqual(['admin_custom', 'palm_injection']);
+    await backfill.down(fakeKnex(db));
+    expect(db.services[0].engine_keys).toEqual(['admin_custom']);
   });
   test('an archived historical claimant does not suppress the live mapping', async () => {
     const db = { services: [svc('palm_injection'), svc('palm_treatment', { is_active: false, is_archived: true, engine_keys: ['palm_injection'] })], system_settings: [] };
@@ -108,13 +109,15 @@ describe('20260829000021 engine_keys backfill', () => {
     expect(keys).not.toContain('rodent_trapping_followup');
     expect(keys).not.toContain('rodent_sanitation');
     expect(keys).not.toContain('termite_bond');
+    expect(keys).not.toContain('pest_initial_roach');
+    expect(keys).not.toContain('flea_package');
   });
   test('down() removes exactly what up() added, restoring NULL where it was NULL', async () => {
-    const db = { services: [svc('palm_injection'), svc('flea_tick', { engine_keys: ['flea_knockdown_single'] })], system_settings: [] };
+    const db = { services: [svc('palm_injection')], system_settings: [] };
     await backfill.up(fakeKnex(db));
+    expect(db.services[0].engine_keys).toEqual(['palm_injection']);
     await backfill.down(fakeKnex(db));
-    expect(db.services.find((r) => r.service_key === 'palm_injection').engine_keys).toBeNull();
-    expect(db.services.find((r) => r.service_key === 'flea_tick').engine_keys).toEqual(['flea_knockdown_single']);
+    expect(db.services[0].engine_keys).toBeNull();
   });
 });
 

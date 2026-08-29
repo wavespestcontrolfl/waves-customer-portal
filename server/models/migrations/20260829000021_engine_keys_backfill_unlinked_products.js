@@ -7,15 +7,17 @@
  * the pricing engine but no row claimed their key, so bookings landed with
  * service_id = null and resolved by name only:
  *
- *   palm_injection     → palm_injection
- *   pest_initial_roach → cockroach_control (standalone roach treatment)
- *   flea_package       → flea_tick (already claims flea_knockdown_single)
+ *   palm_injection → palm_injection
  *
- * Deliberately NOT backfilled:
- *   - one_time_lawn: SHARED with Lawn Pest Knockdown (codex #3485 r1 P1 —
- *     containment cannot tell the two products apart);
- *   - rodent_trapping_followup: an aggregate follow-up COUNT line, not a
- *     one-appointment identity (accept-path contract);
+ * Deliberately NOT backfilled (each needs a distinct catalog row or a
+ * visit-count-aware conversion before a durable identity is safe):
+ *   - one_time_lawn: SHARED with Lawn Pest Knockdown (codex #3485 r1 P1);
+ *   - rodent_trapping_followup: an aggregate follow-up COUNT line;
+ *   - pest_initial_roach: admin-configurable treatment count (single visit
+ *     or a plan's first visit) vs cockroach_control's fixed two-treatment
+ *     program with a required follow-up;
+ *   - flea_package: a two-visit elimination package vs flea_tick's single
+ *     treatment (already mapped by flea_knockdown_single);
  *   - rodent_sanitation (3 tiers), termite_bond (3 terms), trap_only_retainer
  *     (PR B): one engine key, several rows — the linker refuses multi-claims.
  *
@@ -26,8 +28,6 @@
 const STATE_KEY = 'migration.20260829000021.state';
 const SEEDS = [
   { service_key: 'palm_injection', add: ['palm_injection'] },
-  { service_key: 'cockroach_control', add: ['pest_initial_roach'] },
-  { service_key: 'flea_tick', add: ['flea_package'] },
 ];
 
 function parseKeys(v) {
