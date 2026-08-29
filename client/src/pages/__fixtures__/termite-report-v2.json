@@ -357,6 +357,10 @@
       {
         "label": "Stations serviced",
         "value": "3"
+      },
+      {
+        "label": "Bait condition",
+        "value": "Moderate feeding"
       }
     ],
     "supportingMetric": {

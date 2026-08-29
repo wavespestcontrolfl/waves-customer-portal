@@ -142,6 +142,10 @@ describe('buildTodaysMetrics', () => {
       { label: 'Stations serviced', value: '3' },
     ]);
     expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0 })[1].value).toBe('None observed');
+    // bait condition is a hero metric (the typed card drops the field)
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0, baitConsumption: 'None — bait intact' })[3]).toEqual({ label: 'Bait condition', value: 'Intact' });
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0, baitConsumption: 'Heavy feeding' })[3]).toEqual({ label: 'Bait condition', value: 'Heavy feeding' });
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0 })).toHaveLength(3);
     // Activity recorded with no count: "Observed", never "None observed"
     // under a headline that says otherwise.
     expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: null, activityObserved: true, servicedCount: 0 })[1].value).toBe('Observed');
@@ -239,7 +243,8 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
   it('clean visit assembles a good-tone hero with three metrics and no serviced claim', () => {
     const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', visitSequence: 3 });
     expect(out.status).toEqual({ key: 'protected', tone: 'good', label: 'No termite activity observed' });
-    expect(out.metrics).toHaveLength(3);
+    expect(out.metrics).toHaveLength(4);
+    expect(out.metrics[3]).toEqual({ label: 'Bait condition', value: 'Intact' });
     expect(out.statusSummary).not.toMatch(/serviced/);
     expect(out.visitSequence).toBe(3);
     expect(out.nextStep).toBeNull();
@@ -297,6 +302,24 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', technicianReport: '  Reviewed copy.  ' });
     expect(out.aiSummary).toEqual({ headline: null, body: 'Reviewed copy.' });
     expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', technicianReport: '' }).aiSummary).toBeNull();
+  });
+
+  it('visit-backed activity pins escalate a "None observed" form select — never a clean headline beside active stations', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: CLEAN_VALUES,
+      typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 2, serviced: 0, inaccessible: 0 },
+    });
+    expect(out.status.key).toBe('action');
+    expect(out.status.label).toBe('Termite activity observed at 2 stations');
+    expect(out.metrics[1].value).toBe('2 stations');
+    // pins never DOWNGRADE an explicit activity selection
+    const kept = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted' },
+      typedReportType: 'termite_bait_station',
+      stationSummary: { total: 12, checked: 12, activity: 0, serviced: 0, inaccessible: 0 },
+    });
+    expect(kept.status.key).toBe('evidence');
   });
 
   it('legacy "None observed" + feeding → monitoring headline that keeps the feeding evidence', () => {

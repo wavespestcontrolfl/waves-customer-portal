@@ -68,13 +68,14 @@ const eyebrow = {
 // ── 1. Today's result: headline · body · three metrics ─────────────────────────
 // `narrative` = the tech-reviewed body (payload aiSummary.body), already
 // cleaned by the page the same way the typed Today's Result card cleans it.
-// Cross-visit trend sentence from the activity gauge payload (same words
-// ActivityCard prints): baseline visits claim no trend.
+// Cross-visit trend sentence from the activity gauge payload — the stored
+// trendWord already carries the interval ("increased since the last visit",
+// trendWordForScores), so it renders verbatim exactly as ActivityCard does;
+// baseline visits claim no trend.
 export function activityTrendLine(activity) {
   if (!activity || activity.score == null) return null;
   if (activity.isBaseline) return 'Baseline recorded today — trend starts next visit.';
-  if (activity.trend === 'stable') return 'Termite activity is holding steady since your last visit.';
-  if (activity.trendWord) return `Termite activity has ${activity.trendWord} since your last visit.`;
+  if (activity.trendWord) return `Termite activity has ${String(activity.trendWord).replace(/\.$/, '')}.`;
   return null;
 }
 

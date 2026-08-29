@@ -165,7 +165,17 @@ function buildTodaysResultCopy({
  * form with no station count renders "Observed", never "None observed"
  * beside a headline that says otherwise.
  */
-function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0, servicedToday = false }) {
+// Short bait-condition value for the hero metric row. The typed findings
+// card drops bait_consumption when the dashboard mounts, so the dashboard
+// must print it itself (codex P1 #3600 r6).
+const BAIT_CONDITION_METRIC = {
+  'None — bait intact': 'Intact',
+  'Light feeding': 'Light feeding',
+  'Moderate feeding': 'Moderate feeding',
+  'Heavy feeding': 'Heavy feeding',
+};
+
+function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0, servicedToday = false, baitConsumption = null }) {
   if (checked == null) return null;
   let activityValue = 'None observed';
   if (activityCount != null && activityCount > 0) activityValue = `${activityCount} station${plural(activityCount)}`;
@@ -175,11 +185,14 @@ function buildTodaysMetrics({ checked, total, activityCount = null, activityObse
   // print "0" under a body that says service was performed.
   let servicedValue = String(servicedCount || 0);
   if (!servicedCount && servicedToday) servicedValue = 'Performed';
-  return [
+  const metrics = [
     { label: 'Stations inspected', value: total && total !== checked ? `${checked} of ${total}` : `${checked} of ${checked}` },
     { label: 'Termite activity', value: activityValue },
     { label: 'Stations serviced', value: servicedValue },
   ];
+  const baitValue = BAIT_CONDITION_METRIC[baitConsumption] || (baitConsumption ? String(baitConsumption) : null);
+  if (baitValue) metrics.push({ label: 'Bait condition', value: baitValue });
+  return metrics;
 }
 
 /**
@@ -326,12 +339,23 @@ function buildTermiteReportV2({
   const servicedToday = servicedCount > 0
     || Boolean(String(values.bait_actions || '').trim())
     || Boolean(String(values.station_actions || '').trim());
-  const statusBase = resolveTermiteStatus({
+  const formStatus = resolveTermiteStatus({
     termiteActivity: values.termite_activity || null,
     baitConsumption: values.bait_consumption || null,
     checked,
     inaccessible,
   });
+  // Visit-backed activity pins can ESCALATE the status, never downgrade it:
+  // the form select and the per-station checks are entered separately and
+  // the completion guard does not reconcile them, so "None observed" beside
+  // two activity pins must not headline a clean visit (codex P2 #3600 r6).
+  // The pin legend reads "Termite activity observed", so pins escalate to
+  // 'action'. A tech's explicit activity selection is never understated
+  // because pins were left unmarked.
+  const pinActivity = visitBackedSummary(stationSummary)?.activity || 0;
+  const statusBase = pinActivity > 0 && (formStatus.key === 'protected' || formStatus.key === 'monitoring')
+    ? { key: 'action', tone: 'watch' }
+    : formStatus;
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const copy = buildTodaysResultCopy({
     statusKey: statusBase.key,
@@ -363,7 +387,7 @@ function buildTermiteReportV2({
   return {
     status,
     statusSummary,
-    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount, servicedToday }),
+    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount, servicedToday, baitConsumption: values.bait_consumption || null }),
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
     nextStep: nextStepText,
