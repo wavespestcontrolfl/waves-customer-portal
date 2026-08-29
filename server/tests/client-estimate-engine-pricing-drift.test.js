@@ -705,6 +705,14 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
 
+  test('legacy admin page batch-flow nextEstimate resets the customer binding through the binder (codex #3591 r32 P1)', () => {
+    const at = legacyAdminSource.indexOf('function nextEstimate() {');
+    expect(at).toBeGreaterThan(0);
+    const body = legacyAdminSource.slice(at, legacyAdminSource.indexOf('\n  }\n', at));
+    expect(body).toContain('bindMatchedCustomer(null);');
+    expect(body).not.toContain('setExistingCustomerMatch(null);');
+  });
+
   test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {
     // A bind cleared/replaced before its fetch resolved must not repopulate
     // the former customer's families for an unmatched fallback quote.

@@ -41,8 +41,9 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/estimate-converter', () => ({
   WAVEGUARD_SETUP_FEE: 99,
   recurringServiceKey: (svc = {}) => {
-    const raw = String(svc.name || '').toLowerCase();
+    const raw = String(svc.service_key || svc.name || '').toLowerCase();
     if (raw.includes('commercial')) return 'commercial_pest';
+    if (raw.includes('trapping')) return 'rodent_trapping';
     if (raw.includes('pest')) return 'pest_control';
     if (raw.includes('mosquito')) return 'mosquito';
     if (raw.includes('lawn')) return 'lawn_care';
@@ -71,9 +72,10 @@ const {
 
 const FUTURE = '2099-05-04';
 
-function setTables({ visit, customer, term, invoice } = {}) {
+function setTables({ visit, customer, term, invoice, catalog } = {}) {
   mockTableHandlers = {
     scheduled_services: { first: () => visit || null },
+    services: { first: () => (typeof catalog === 'function' ? catalog() : (catalog || null)) },
     customers: { first: () => customer || null },
     annual_prepay_terms: { first: () => term || null },
     invoices: { first: () => invoice || null },
@@ -141,6 +143,42 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     // Missing row throws (fail closed) rather than pricing the fragment.
     setTables({ visit: null });
     await expect(resolveDirectRodentSetupObligation(db, { id: 'gone', ...rodentVisit })).rejects.toThrow('not found');
+  });
+
+  test('service identity is CATALOG-first: a stale label never decides the setup obligation or the plan class (codex #3591 r32 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    // Stale 'Pest Control' label, linked to the bait program → setup owed,
+    // rodent plan class on the page.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Pest Control', service_id: 'svc-rb', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+    // Stale bait label, repointed to trapping → no setup, no rodent class.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: 'svc-trap', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: { service_key: 'rodent_trapping', name: 'Rodent Trapping' },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+    // Unlinked legacy row: the label still classifies.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: null, estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // A failed catalog read fails closed (throws) — never a label-only guess.
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Station Service', service_id: 'svc-rb', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+      catalog: () => { throw new Error('catalog down'); },
+    });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).rejects.toThrow('catalog down');
+    await expect(deriveSecurePlanContext({ request, visitId: 'v1' })).rejects.toThrow('catalog down');
   });
 
   test('qualifier lookup failure propagates (callers fail closed, never silently $0)', async () => {

@@ -2659,7 +2659,11 @@ function EstimateToolView() {
     setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
-    setExistingCustomerMatch(null);
+    // Reset through the binder (codex #3591 r32 P1): clearing only the match
+    // left existingQualifyingKeys + its ref holding the previous customer's
+    // families, so the next unmatched fallback quote inherited that tier /
+    // rodent setup waiver while saving with customerId null.
+    bindMatchedCustomer(null);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");

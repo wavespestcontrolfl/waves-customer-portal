@@ -139,7 +139,7 @@ function normalizedPattern(visit) {
 async function loadPlanVisit(scheduledServiceId, conn = db) {
   return conn('scheduled_services')
     .where({ id: scheduledServiceId })
-    .first('id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'estimated_price',
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'service_type', 'service_id', 'estimated_price',
       'is_recurring', 'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id',
       'pending_setup_fee', 'source_estimate_id');
 }
@@ -186,7 +186,25 @@ function seriesAnchorId(visit) {
 // unpersisted preview row (no id — the prepay-on-book preview prices a
 // booking that does not exist yet) is taken as given. A missing row throws
 // (callers fail closed).
-const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'source_estimate_id', 'recurring_parent_id'];
+const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id'];
+
+// The visit's service identity, CATALOG first (codex #3591 r32 P1): a
+// scheduled row's service_type label goes stale after a catalog
+// reassignment while service_id stays authoritative everywhere else. A
+// 'Pest Control'-labeled row linked to rodent_bait_quarterly IS the bait
+// program (setup owed, rodent plan class); a bait-labeled row repointed to
+// rodent_trapping is not. Unlinked legacy rows classify from the label. A
+// failed catalog read throws — callers fail closed (skip / unavailable /
+// refuse), never a label-only guess for a linked row.
+async function authoritativeServiceKey(database, row = {}) {
+  if (row.service_id) {
+    const catalog = await database('services').where({ id: row.service_id }).first('service_key', 'name');
+    if (catalog && (catalog.service_key || catalog.name)) {
+      return recurringServiceKey({ service_key: catalog.service_key || undefined, name: catalog.name || undefined });
+    }
+  }
+  return recurringServiceKey({ name: row.service_type });
+}
 async function loadAuthoritativeSetupVisit(database, visit) {
   if (!visit || !visit.id) return visit || {};
   const row = await database('scheduled_services').where({ id: visit.id }).first(...SETUP_VISIT_COLUMNS);
@@ -196,7 +214,7 @@ async function loadAuthoritativeSetupVisit(database, visit) {
 
 async function directRodentSetupForRow(database, row) {
   if (!row || !row.customer_id || row.source_estimate_id) return 0;
-  if (recurringServiceKey({ name: row.service_type }) !== 'rodent_bait') return 0;
+  if ((await authoritativeServiceKey(database, row)) !== 'rodent_bait') return 0;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
   const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
     .filter((key) => key !== 'rodent_bait');
@@ -255,7 +273,7 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
   const coverageCadence = prepayCoverageCadenceForPattern(pattern);
   if (!pattern || !visitsPerYear || !coverageCadence) return null;
 
-  const serviceKey = recurringServiceKey({ name: visit.service_type });
+  const serviceKey = await authoritativeServiceKey(db, visit);
   const planClass = PLAN_CLASS_BY_SERVICE_KEY[serviceKey] || null;
   if (!planClass) return null;
 
