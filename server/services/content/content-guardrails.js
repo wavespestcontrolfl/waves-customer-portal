@@ -299,12 +299,30 @@ const LINK_DESTINATION_RE = /^\s*(?:<([^<>\n]*)>|(\S+))(?:\s+(?:"(?:[^"\\]|\\.)*
 // (`![alt]()`, `![alt](<>)`) — CommonMark still renders it (with an empty
 // src), so the caller gets '' to reject; a reference definition needs a
 // real destination, so it gets null.
+// A bare destination must keep its parentheses BALANCED (an unmatched raw
+// `(` or `)` makes the construct literal text — CommonMark 6.6), escapes
+// honoured; backslash escapes of ASCII punctuation are then interpreted in
+// either form, so `/body-\(detail\).webp` validates `/body-(detail).webp`.
+function balancedBareDestination(dest) {
+  let depth = 0;
+  for (let k = 0; k < dest.length; k += 1) {
+    const ch = dest[k];
+    if (ch === '\\') { k += 1; continue; }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') { depth -= 1; if (depth < 0) return false; }
+  }
+  return depth === 0;
+}
+function unescapePunctuation(text) {
+  return String(text || '').replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
 function parseLinkDestination(text, { allowEmpty = false } = {}) {
   const str = String(text || '');
   if (str.trim() === '' || /^\s*<>\s*$/.test(str)) return allowEmpty ? '' : null;
   const m = str.match(LINK_DESTINATION_RE);
   if (!m) return null;
-  const dest = (m[1] !== undefined ? m[1] : m[2]).trim();
+  if (m[2] !== undefined && !balancedBareDestination(m[2])) return null;
+  const dest = unescapePunctuation((m[1] !== undefined ? m[1] : m[2]).trim());
   return dest || (allowEmpty ? '' : null);
 }
 const LINK_TITLE_ONLY_RE = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
@@ -322,7 +340,14 @@ function markdownReferenceDefinitions(str) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
     let rest = lines[i].slice(m[0].length);
-    if (rest.trim() === '') { rest = String(lines[i + 1] || '').trim(); i += 1; } // continuation line
+    if (rest.trim() === '') {
+      // Continuation line: consumed ONLY when it is a valid destination —
+      // otherwise it is left for the loop (it may be the next definition).
+      const next = String(lines[i + 1] || '');
+      if (!parseLinkDestination(next.trim())) continue;
+      rest = next.trim();
+      i += 1;
+    }
     const dest = parseLinkDestination(rest);
     if (!dest) continue;
     const label = normalizeReferenceLabel(m[1]);

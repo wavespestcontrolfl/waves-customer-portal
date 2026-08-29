@@ -4276,6 +4276,35 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/body 1.webp', '/images/blog/x/body-2.webp']);
   });
 
+  test('publishAstro (calendar/scheduler lane): under the gate a hero-only post gets its two body images in the same commit; the PR body carries the illustrated body (GH r18 P1)', async () => {
+    const post = {
+      id: 'post-bi', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => { const q = read; return q; });
+    gh.getFile.mockResolvedValue(null);
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    gh.createPr.mockResolvedValue({ number: 77, html_url: 'https://github.com/x/pull/77', head: { sha: 'multi' } });
+
+    await AstroPublisher.publishAstro('post-bi');
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual([
+      'public/images/blog/ant-trails-bradenton/hero.webp',
+      'public/images/blog/ant-trails-bradenton/body-1.webp',
+      'public/images/blog/ant-trails-bradenton/body-2.webp',
+      'src/content/blog/ant-trails-bradenton.md',
+    ]);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[3].content).content;
+    expect(AstroPublisher._internals.countBodyImages(written)).toBe(2);
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);

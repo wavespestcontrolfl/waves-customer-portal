@@ -1169,7 +1169,8 @@ const gates = {
 
   // Autonomous blog body images (owner rule 2026-08-27: every autopublished
   // post ships ≥3 images — hero + ≥2 in-article illustrations). When ON,
-  // publishOrUpdatePage generates the missing body images, commits them
+  // publishOrUpdatePage, publishRefresh and the calendar/scheduler lane's
+  // publishAstro generate the missing body images, commit them
   // beside the hero (/images/blog/<slug>/body-N.webp) and inserts them at the
   // end of two section's prose; generation failure parks the run (same
   // fail-closed posture as the hero). OFF in EVERY environment unless set to

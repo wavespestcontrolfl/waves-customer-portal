@@ -1150,11 +1150,35 @@ async function publishAstro(postId) {
       slug,
     );
 
-    const markdown = fm.stringify(data, body + '\n');
+    // 2d. Body images (owner rule: ≥3 images per post) — the SAME resolver
+    // and contract as the autonomous lanes. This calendar/scheduler lane
+    // auto-merges unattended once the build is green and Codex is clean, so
+    // it must not ship a hero-only post either. Their alts get the same
+    // narrow compliance pass as the hero alt.
+    const bodyImages = await resolveBodyImages({
+      frontmatter: data,
+      slug,
+      body,
+      existingFile: null,
+      brief: {},
+      // Fresh hero bytes, or the committed hero's repo path when reused.
+      siblings: [{ label: 'hero', buffer: heroImage?.buffer || null, repoPath: heroImage?.buffer ? null : (String(heroPublicRef || '').startsWith('/') ? `public${heroPublicRef}` : null) }],
+    });
+    if (bodyImages.newAlts.length) {
+      await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
+    }
+    const finalBody = bodyImages.body;
+    const markdown = fm.stringify(data, finalBody + '\n');
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
 
     await gh.createBranch(branch);
     branchCreated = true;
+    // Generated asset paths must still be free and pinned/reused pictures
+    // unchanged on the fresh branch (the catch below drops the orphan).
+    {
+      const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
+      if (conflicts.length) throw new Error(`body images for ${slug} changed since they were resolved on ${branch}: ${conflicts.join('; ')} — retry`);
+    }
 
     // 3. Hero + markdown in ONE commit (git data API). Splitting them into
     // per-file Contents API commits let Cloudflare register the branch
@@ -1169,12 +1193,13 @@ async function publishAstro(postId) {
         ...(heroImage?.buffer
           ? [{ path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`, buffer: heroImage.buffer }]
           : []),
+        ...bodyImages.files,
         { path: filePath, content: markdown },
       ],
     });
 
     // 4. PR
-    const prBody = buildPrBody({ post, slug, branch, content: body });
+    const prBody = buildPrBody({ post, slug, branch, content: finalBody });
     prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,

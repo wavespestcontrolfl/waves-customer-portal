@@ -4716,6 +4716,14 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     for (const bad of ['/a.webp trailing-junk', '/a.webp "t" junk', '', '   ', '<>']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
     // Inline images may carry an EMPTY destination — surfaced as '' for the caller to reject (GH r14).
     for (const empty of ['', '   ', '<>']) expect(guardrails.parseLinkDestination(empty, { allowEmpty: true })).toBe('');
+    // Bare destinations: balanced parentheses required (escapes honoured), punctuation escapes interpreted (GH r18).
+    expect(guardrails.parseLinkDestination('/images/body-(detail).webp')).toBe('/images/body-(detail).webp');
+    expect(guardrails.parseLinkDestination('/images/body-\\(detail\\).webp')).toBe('/images/body-(detail).webp');
+    expect(guardrails.parseLinkDestination('/images/body-\\(detail.webp')).toBe('/images/body-(detail.webp');
+    expect(guardrails.parseLinkDestination('</images/a\\_b.webp>')).toBe('/images/a_b.webp');
+    for (const bad of ['/images/body-(detail.webp', '/images/body-detail).webp', '/a)(b']) expect(guardrails.parseLinkDestination(bad)).toBeNull();
+    // An empty `[bad]:` followed by a VALID definition does not swallow it (GH r18).
+    expect([...guardrails.markdownReferenceDefinitions('[bad]:\n[good]: /images/good.webp').entries()]).toEqual([['good', '/images/good.webp']]);
     expect(guardrails.parseLinkDestination('junk here', { allowEmpty: true })).toBeNull();
   });
 
