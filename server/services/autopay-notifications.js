@@ -35,7 +35,7 @@ async function sendPreChargeReminders() {
     .where('monthly_rate', '>', 0)
     .where('billing_day', targetDay)
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier');
+    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier', 'billing_mode');
   // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
   // but the monthly cron never charges them (GUARD 3b) — never text a
   // reminder for a monthly charge that will not run (Codex round-2 + 5):
@@ -96,7 +96,9 @@ async function sendPreChargeReminders() {
         purpose: 'autopay',
         customerId: c.id,
         entryPoint: 'autopay_pre_charge_reminder',
-        metadata: { original_message_type: 'autopay_pre_charge' },
+        // Lane AT SEND TIME (codex #3607 r2): the owner digest classifies
+        // the send against this stamp, not the customer's lane at read time.
+        metadata: { original_message_type: 'autopay_pre_charge', billing_mode_at_send: c.billing_mode ?? null },
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`autopay reminder SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
@@ -153,7 +155,7 @@ async function sendCardExpiryWarnings() {
   const customers = await db('customers')
     .where({ active: true, autopay_enabled: true })
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
+    .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id', 'billing_mode');
 
   // Prepay-covered customers get NO card warning (getCardExpiryExemptions,
   // shared with the dashboard alert and the daily payment-expiry workflow):
@@ -216,6 +218,7 @@ async function sendCardExpiryWarnings() {
       rows.push({
         customer_id: customer.id,
         first_name: customer.first_name,
+        billing_mode: customer.billing_mode ?? null,
         phone: customer.phone,
         payment_method_id: target.id,
         brand: target.card_brand,
@@ -283,7 +286,7 @@ async function sendCardExpiryWarnings() {
         purpose: 'autopay',
         customerId: r.customer_id,
         entryPoint: 'autopay_card_expiry_warning',
-        metadata: { original_message_type: 'payment_expiry' },
+        metadata: { original_message_type: 'payment_expiry', billing_mode_at_send: r.billing_mode ?? null },
       });
       if (sendResult.blocked || sendResult.sent === false) {
         throw new Error(`card expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

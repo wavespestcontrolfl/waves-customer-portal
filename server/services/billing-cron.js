@@ -45,7 +45,8 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     purpose,
     customerId: customer.id,
     entryPoint,
-    metadata: { original_message_type: messageType },
+    // Lane AT SEND TIME (codex #3607 r2) — see autopay-sms-digest.js.
+    metadata: { original_message_type: messageType, billing_mode_at_send: customer.billing_mode ?? null },
   });
   if (sendResult.blocked || sendResult.sent === false) {
     throw new Error(`billing SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

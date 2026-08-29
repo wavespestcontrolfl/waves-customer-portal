@@ -70,12 +70,17 @@ async function loadSentAutopayTexts(since) {
     SELECT COUNT(*) OVER () AS total_count,
            -- Whole-window mismatch count (codex r1): a non-monthly recipient
            -- beyond the display page must still escalate the subject.
-           COUNT(*) FILTER (WHERE cu.id IS NULL OR cu.billing_mode IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
+           COUNT(*) FILTER (WHERE COALESCE(a.metadata ->> 'billing_mode_at_send', cu.billing_mode) IS DISTINCT FROM 'monthly_membership') OVER () AS mismatch_count,
            a.sent_at, a.entry_point, a.body_preview,
            a.metadata ->> 'original_message_type' AS message_type,
            a.customer_id,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           cu.billing_mode, cu.waveguard_tier, cu.monthly_rate
+           -- Lane AT SEND TIME (codex r2): every autopay send site stamps
+           -- billing_mode_at_send into the audit metadata; the live join is
+           -- only a fallback for rows written before the stamp existed.
+           COALESCE(a.metadata ->> 'billing_mode_at_send', cu.billing_mode) AS billing_mode,
+           CASE WHEN a.metadata ->> 'billing_mode_at_send' IS NOT NULL THEN 'at_send' ELSE 'live' END AS lane_source,
+           cu.waveguard_tier, cu.monthly_rate
     FROM messaging_audit_log a
     LEFT JOIN customers cu ON cu.id = a.customer_id
     WHERE a.channel = 'sms'
@@ -100,7 +105,8 @@ function composeAutopaySmsDigest(rows) {
   const lines = sends.map((r) => {
     // FAIL CLOSED (codex r1): a send with no customer row has an UNKNOWN
     // lane — it cannot be vouched for as a monthly member, so it escalates.
-    const lane = r.customer_id ? (r.billing_mode || 'NULL (inferred)') : 'unknown (no customer row)';
+    const laneValue = r.customer_id || r.lane_source === 'at_send' ? (r.billing_mode || 'NULL (inferred)') : 'unknown (no customer row)';
+    const lane = r.lane_source === 'live' && r.customer_id ? `${laneValue} (lane as of now)` : laneValue;
     const mismatch = r.billing_mode !== 'monthly_membership';
     return {
       when: etStamp(r.sent_at),

@@ -91,7 +91,7 @@ describe('sendPreChargeReminders — lane filter is unconditional', () => {
     const { sendPreChargeReminders } = require('../services/autopay-notifications');
     mockCustomers = [{
       id: 'cust-monthly', first_name: 'Member', phone: '+15550001111', monthly_rate: '33.33',
-      autopay_paused_until: null, waveguard_tier: 'Bronze',
+      autopay_paused_until: null, waveguard_tier: 'Bronze', billing_mode: 'monthly_membership',
     }];
 
     const r = await sendPreChargeReminders();
@@ -99,6 +99,8 @@ describe('sendPreChargeReminders — lane filter is unconditional', () => {
     expect(mockCalls.whereRaw).toContain(MONTHLY_LANE_SQL);
     expect(r.sent).toBe(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // The owner digest classifies against the lane AT SEND TIME (#3607).
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toEqual({ original_message_type: 'autopay_pre_charge', billing_mode_at_send: 'monthly_membership' });
     expect(logAutopay).toHaveBeenCalledWith('cust-monthly', 'pre_charge_reminder_sent', expect.any(Object));
   });
 });

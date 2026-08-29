@@ -103,6 +103,18 @@ describe('composeAutopaySmsDigest', () => {
     expect(composed.text).toContain('…and 79 more not shown');
   });
 
+  test('lane is the SEND-TIME stamp; a pre-stamp row falls back to the live join and says so (codex r2)', () => {
+    // billing_mode here is what the SQL already COALESCEd: the stamp wins.
+    const stamped = composeAutopaySmsDigest([row({ lane_source: 'at_send', billing_mode: 'per_application' })]);
+    expect(stamped.mismatches).toBe(1);
+    expect(stamped.text).toContain('lane per_application ·');
+    expect(stamped.text).not.toContain('(lane as of now)');
+
+    const live = composeAutopaySmsDigest([row({ lane_source: 'live' })]);
+    expect(live.mismatches).toBe(0);
+    expect(live.text).toContain('lane monthly_membership (lane as of now)');
+  });
+
   test('html escapes the preview and reports overflow beyond the page', () => {
     const composed = composeAutopaySmsDigest([row({ total_count: 80, body_preview: 'x <b>&</b>' })]);
     expect(composed.html).toContain('x &lt;b&gt;&amp;&lt;/b&gt;');
