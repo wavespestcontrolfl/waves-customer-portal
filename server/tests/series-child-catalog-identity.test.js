@@ -113,6 +113,26 @@ describe('resolveSeriesChildIdentity', () => {
     );
   });
 
+  test('inside a caller transaction the catalog read runs in a SAVEPOINT (nested trx), so a failed read cannot abort the caller\'s trx', async () => {
+    const parent = { id: 'p', service_id: null, service_type: 'Mosquito Control', recurring_pattern: 'monthly' };
+    const conn = fakeConn(CATALOG);
+    conn.isTransaction = true;
+    conn.transaction = jest.fn(async (fn) => fn(conn));
+    await expect(resolveSeriesChildIdentity(conn, parent)).resolves.toMatchObject({ service_id: 'svc-mosq' });
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+    // A read failing inside the savepoint still resolves verbatim.
+    const failing = fakeConn(CATALOG, { fail: true });
+    failing.isTransaction = true;
+    failing.transaction = jest.fn(async (fn) => fn(failing));
+    await expect(resolveSeriesChildIdentity(failing, parent)).resolves.toEqual({ service_type: 'Mosquito Control', service_id: null, service_key: null });
+    expect(failing.transaction).toHaveBeenCalledTimes(1);
+    // A plain (non-transaction) connection reads directly — no nested trx.
+    const plain = fakeConn(CATALOG);
+    plain.transaction = jest.fn();
+    await resolveSeriesChildIdentity(plain, parent);
+    expect(plain.transaction).not.toHaveBeenCalled();
+  });
+
   test('alias + exact label are read in ONE catalog query', async () => {
     let queries = 0;
     const parent = { id: 'p', service_id: null, service_type: 'General Pest Control Service (Bi-Monthly)', recurring_pattern: 'bimonthly' };

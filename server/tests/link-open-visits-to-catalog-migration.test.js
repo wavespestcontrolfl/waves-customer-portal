@@ -28,8 +28,14 @@ function fakeKnex(db, { missingTables = [], missingColumns = [] } = {}) {
       where(cond) { if (typeof cond === 'function') openOnly = true; else filters.push(cond); return q; },
       whereNull(col) { nulls.push(col); return q; },
       whereRaw(sql, b) {
-        if (!/^EXISTS \(SELECT 1 FROM services WHERE id = \? AND lower\(name\) = lower\(\?\) AND is_active = true\)$/.test(sql)) throw new Error(`unsupported ${sql}`);
-        raws.push(() => (db.services || []).some((s) => s.id === b[0] && String(s.name).toLowerCase() === String(b[1]).toLowerCase() && s.is_active === true));
+        if (!/^\(SELECT count\(\*\) FROM services WHERE lower\(name\) = lower\(\?\)\) = 1 AND EXISTS \(SELECT 1 FROM services WHERE id = \? AND lower\(name\) = lower\(\?\) AND is_active = true\)$/.test(sql)) throw new Error(`unsupported ${sql}`);
+        const [name, id, name2] = b;
+        raws.push(() => {
+          const svcs = db.services || [];
+          const sameName = svcs.filter((s) => String(s.name).toLowerCase() === String(name).toLowerCase());
+          return sameName.length === 1
+            && svcs.some((s) => s.id === id && String(s.name).toLowerCase() === String(name2).toLowerCase() && s.is_active === true);
+        });
         return q;
       },
       async select(...cols) { return rows().filter(match).map((r) => (cols.length ? Object.fromEntries(cols.map((c) => [c, r[c]])) : { ...r })); },
@@ -151,6 +157,28 @@ describe('20260829000060 up()', () => {
     expect(byId(db, 'v1').service_id).toBeNull();
     expect(byId(db, 'v2').service_id).toBe('svc-m');
     expect(readState(db).linked.map((r) => r.id)).toEqual(['v2']);
+  });
+
+  test('a SECOND catalog row taking the name between snapshot read and write makes the CAS miss (uniqueness re-checked at write time)', async () => {
+    const db = seedDb();
+    const orig = fakeKnex(db);
+    let added = false;
+    const wrapped = (t) => {
+      const q = orig(t);
+      const update = q.update;
+      q.update = async (payload) => {
+        if (!added && t === 'scheduled_services' && payload.service_id === 'svc-q') {
+          added = true;
+          db.services.push({ id: 'svc-q-twin', name: 'Quarterly Pest Control Service', service_key: 'pest_quarterly_twin', is_active: true });
+        }
+        return update(payload);
+      };
+      return q;
+    };
+    wrapped.schema = orig.schema;
+    await migration.up(wrapped);
+    expect(byId(db, 'v1').service_id).toBeNull();
+    expect(byId(db, 'v2').service_id).toBe('svc-m');
   });
 
   test('works without the service_key_snapshot column', async () => {

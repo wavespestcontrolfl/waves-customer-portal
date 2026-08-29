@@ -84,11 +84,19 @@ exports.up = async function up(knex) {
       continue;
     }
     const stampSnapshot = hasSnapshotCol && !snapshot && !!svc.service_key;
+    // Write-time re-check of BOTH halves of the evidence: the selected row
+    // still carries the name and is still active, AND the name is still
+    // unique across the whole catalog — an admin creating or renaming a
+    // second row to it after the snapshot read makes this write miss
+    // (codex P0; the catalog editor enforces no name uniqueness).
     let q = openVisitStatus(
       knex('scheduled_services')
         .where({ id: v.id, service_type: v.service_type })
         .whereNull('service_id')
-    ).whereRaw('EXISTS (SELECT 1 FROM services WHERE id = ? AND lower(name) = lower(?) AND is_active = true)', [svc.id, v.service_type]);
+    ).whereRaw(
+      '(SELECT count(*) FROM services WHERE lower(name) = lower(?)) = 1 AND EXISTS (SELECT 1 FROM services WHERE id = ? AND lower(name) = lower(?) AND is_active = true)',
+      [v.service_type, svc.id, v.service_type]
+    );
     // The snapshot is part of the identity the CAS checks either way: still
     // NULL when this write stamps it, still the matching key when it agreed.
     if (hasSnapshotCol) q = stampSnapshot ? q.whereNull('service_key_snapshot') : q.where({ service_key_snapshot: v.service_key_snapshot });

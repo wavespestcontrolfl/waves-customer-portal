@@ -133,6 +133,26 @@ async function resolveSeriesChildIdentity(conn, parent) {
   };
   if (!parent || !conn) return verbatim;
   try {
+    // SAVEPOINT (nested trx) when the caller handed us a transaction — the
+    // same posture as customerPrefersNoWeekends: a failed optional catalog
+    // read would otherwise leave the caller's trx ABORTED in Postgres
+    // despite the catch below (try/catch in a trx ≠ fail-open), and the
+    // child insert right after it would 25P02 instead of falling back to
+    // the parent label (codex #3604 r4 P1).
+    const read = (dbh) => resolveFromCatalog(dbh, parent, verbatim);
+    return conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
+  } catch (err) {
+    try {
+      require('./logger').warn(`[service-catalog-names] child identity resolution failed for parent ${parent.id || '?'} — using the parent label verbatim: ${err.message}`);
+    } catch { /* logger unavailable in a pure-util context */ }
+    return verbatim;
+  }
+}
+
+async function resolveFromCatalog(conn, parent, verbatim) {
+  {
     if (parent.service_id) {
       const row = await conn('services').where({ id: parent.service_id }).first('id', 'name', 'service_key');
       return row && row.name
@@ -174,11 +194,6 @@ async function resolveSeriesChildIdentity(conn, parent) {
     const hit = mapped.length ? mapped : exact;
     if (hit.length !== 1) return verbatim;
     return { service_type: hit[0].name, service_id: hit[0].id, service_key: hit[0].service_key || null };
-  } catch (err) {
-    try {
-      require('./logger').warn(`[service-catalog-names] child identity resolution failed for parent ${parent.id || '?'} — using the parent label verbatim: ${err.message}`);
-    } catch { /* logger unavailable in a pure-util context */ }
-    return verbatim;
   }
 }
 
