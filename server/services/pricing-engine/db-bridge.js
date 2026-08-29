@@ -1239,11 +1239,14 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     if (config.rodent_bait_brackets) {
       const rb = config.rodent_bait_brackets;
       if (Array.isArray(rb.brackets) && rb.brackets.length > 0) {
+        // Cents-preserving (codex #3591 r9 P2): the admin card shows the
+        // exact saved figure, so the runtime must price the same cents —
+        // r() rounds to whole dollars and would quote $90 for a saved $89.50.
         const parsed = rb.brackets
           .map((b) => ({
             maxSqFt: Number(b.max_sq_ft ?? b.maxSqFt),
             stations: Number(b.stations),
-            perVisit: r(Number(b.per_visit ?? b.perVisit)),
+            perVisit: Math.round(Number(b.per_visit ?? b.perVisit) * 100) / 100,
           }))
           .filter((b) => Number.isFinite(b.maxSqFt) && b.maxSqFt > 0
             && Number.isFinite(b.stations) && b.stations > 0
@@ -1265,16 +1268,22 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           constants.RODENT.baitBracketExtension.stationsPerStep = stationsPerStep;
         }
         if (Number(ext.per_visit_per_step ?? ext.perVisitPerStep) > 0) {
-          constants.RODENT.baitBracketExtension.perVisitPerStep = r(Number(ext.per_visit_per_step ?? ext.perVisitPerStep));
+          constants.RODENT.baitBracketExtension.perVisitPerStep = Math.round(Number(ext.per_visit_per_step ?? ext.perVisitPerStep) * 100) / 100;
         }
       }
       if (Number(rb.visits_per_year) > 0) constants.RODENT.baitVisitsPerYear = Number(rb.visits_per_year);
     }
     // One-time setup fee for non-WaveGuard members (owner 2026-08-29: $99;
     // migration 20260829000040 rewrites the legacy $199 row). A zero/absent
-    // value disables the fee entirely.
+    // value disables the fee entirely. Negative values never reach the
+    // runtime (codex #3591 r9 P2 — the engine drops a non-positive setup
+    // row, so a negative sync would silently disable the required charge);
+    // the admin validator rejects them up front, this is the belt.
     if (config.rodent_setup_fee?.value != null) {
-      constants.RODENT.baitSetupFee = r(config.rodent_setup_fee.value);
+      const setupFee = Number(config.rodent_setup_fee.value);
+      if (Number.isFinite(setupFee) && setupFee >= 0) {
+        constants.RODENT.baitSetupFee = Math.round(setupFee * 100) / 100;
+      }
     }
 
     // Inspection

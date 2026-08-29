@@ -37,7 +37,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { visitsPerYearForCadence, prepayCoverageCadenceForPattern } = require('./prepay-cadence');
 const { recurringServiceKey, WAVEGUARD_SETUP_FEE } = require('./estimate-converter');
-const { ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
+const { ANNUAL_PREPAY_DISCOUNT_PCT, RODENT } = require('./pricing-engine/constants');
 const { resolveBillingLane } = require('./billing-lane');
 const { portalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
@@ -95,22 +95,31 @@ function cents(n) {
  * or 'discount' (ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual). The
  * two never stack — owner ruling baked into constants.js.
  */
-function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass }) {
+// unwaivedSetupFee: a one-time setup the plan owes in BOTH modes — the
+// rodent bait-station setup for a non-member (owner 2026-08-29: waived only
+// by another WaveGuard service, never by prepay; the converter bills it on
+// the prepay invoice too). It rides prepay.total (the page total must equal
+// the minted invoice) while prepay.coverageTotal stays the per-visit
+// coverage money the term is sliced from (codex #3591 r9 P1).
+function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee = 0 }) {
   const annualBase = cents(Number(perVisit) * Number(visitsPerYear));
   const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
-  const prepayTotal = cents(annualBase * (1 - discountRate));
+  const coverageTotal = cents(annualBase * (1 - discountRate));
+  const setup = cents(Math.max(0, Number(unwaivedSetupFee) || 0));
   return {
     annualBase,
     prepay: {
-      total: prepayTotal,
-      discount: cents(annualBase - prepayTotal),
+      total: cents(coverageTotal + setup),
+      coverageTotal,
+      setupAmount: setup,
+      discount: cents(annualBase - coverageTotal),
       // Rendered label, server-derived so the client never holds a rate
       // constant. '' for the waiver class (the waiver line is the pitch).
       ratePctLabel: discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '',
     },
     setupFee: planClass === 'fee_waiver'
       ? { amount: WAVEGUARD_SETUP_FEE, waivedWithPrepay: true }
-      : null,
+      : (setup > 0 ? { amount: setup, waivedWithPrepay: false } : null),
   };
 }
 
@@ -219,7 +228,19 @@ async function deriveSecurePlanContext({ request, visitId }) {
   const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
   if (overlapEnd && today <= overlapEnd) return null;
 
-  const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+  // Direct (non-estimate) rodent bait series: the non-member $99 setup is
+  // assessed here too, not only at estimate conversion (codex #3591 r9 P1).
+  // "Member" = any OTHER qualifying recurring service already on the
+  // account (rodent never self-waives). Live constant (db-synced); zero =
+  // fee disabled. Lookup failures propagate → card-only page (fail closed).
+  let unwaivedSetupFee = 0;
+  if (serviceKey === 'rodent_bait') {
+    const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+    const otherQualifiers = (await loadExistingQualifyingServiceKeys(db, visit.customer_id) || [])
+      .filter((key) => key !== 'rodent_bait');
+    if (otherQualifiers.length === 0) unwaivedSetupFee = Number(RODENT.baitSetupFee) || 0;
+  }
+  const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
 
   return {
     mode: 'recurring',
@@ -413,7 +434,14 @@ async function selectSecurePlan({ token, plan }) {
 
   const coverageServiceType = visit.service_type;
   const visitCount = context.visitsPerYear;
-  const amount = context.prepay.total;
+  // Coverage money (sliced across the prepaid visits) vs. the unwaived
+  // one-time setup that rides the same invoice as its own line — the
+  // invoice total the customer saw is the sum (codex #3591 r9 P1).
+  const coverageAmount = cents(context.prepay.coverageTotal ?? context.prepay.total);
+  const setupAmount = context.setupFee && context.setupFee.waivedWithPrepay === false
+    ? cents(context.setupFee.amount)
+    : 0;
+  const amount = cents(coverageAmount + setupAmount);
 
   let payToken = null;
   try {
@@ -494,9 +522,15 @@ async function selectSecurePlan({ token, plan }) {
         lineItems: [{
           description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
           quantity: 1,
-          unit_price: amount,
+          unit_price: coverageAmount,
           category: 'Annual prepay',
-        }],
+        },
+        ...(setupAmount > 0 ? [{
+          description: 'Bait Station Setup — one-time',
+          quantity: 1,
+          unit_price: setupAmount,
+          category: 'Setup fee',
+        }] : [])],
         // Deliberately does NOT match the accept-minted marker regex — the
         // dispatch auto-charge allowance keys accept invoices on that text.
         notes: `Annual prepay selected by the customer from their secure appointment link (visit ${visit.id}).`,
@@ -513,8 +547,10 @@ async function selectSecurePlan({ token, plan }) {
         customerId: visit.customer_id,
         prepayInvoiceId: invoice.id,
         planLabel: `${coverageServiceType} Annual Prepay`,
-        monthlyRate: cents(amount / 12),
-        prepayAmount: cents(Number(invoice.total)),
+        monthlyRate: cents(coverageAmount / 12),
+        // Coverage basis excludes the setup share (renewals slice this
+        // across covered visits — setup is not per-visit coverage money).
+        prepayAmount: cents(Number(invoice.total) - setupAmount),
         termStart,
         coverageServiceType,
         coverageVisitCount: visitCount,
@@ -558,6 +594,7 @@ async function selectSecurePlan({ token, plan }) {
           coverage_service_type: coverageServiceType,
           coverage_visit_count: visitCount,
           per_visit_amount: context.perVisit,
+          setup_fee_amount: setupAmount,
           term_start: termStart,
           source: 'secure_plan_choice',
         }),

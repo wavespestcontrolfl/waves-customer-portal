@@ -47,8 +47,13 @@ jest.mock('../services/estimate-converter', () => ({
     if (raw.includes('mosquito')) return 'mosquito';
     if (raw.includes('lawn')) return 'lawn_care';
     if (raw.includes('wdo')) return 'wdo';
+    if (raw.includes('rodent')) return 'rodent_bait';
     return raw.replace(/[^a-z0-9]+/g, '_');
   },
+}));
+let mockQualifyingKeys = async () => [];
+jest.mock('../services/waveguard-existing-services', () => ({
+  loadExistingQualifyingServiceKeys: (...args) => mockQualifyingKeys(...args),
 }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 jest.mock('../services/call-booking-catalog', () => ({
@@ -56,7 +61,7 @@ jest.mock('../services/call-booking-catalog', () => ({
 }));
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
 
-const { ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+const { ANNUAL_PREPAY_DISCOUNT_PCT, RODENT } = require('../services/pricing-engine/constants');
 const {
   buildSecurePlanContext,
   deriveSecurePlanContext,
@@ -94,6 +99,7 @@ const request = { id: 'r1', scheduled_service_id: 'v1', selected_plan: null };
 
 beforeEach(() => {
   mockGateOn = true;
+  mockQualifyingKeys = async () => [];
   setTables({ visit: { ...baseVisit }, customer: { ...baseCustomer } });
 });
 
@@ -131,6 +137,42 @@ describe('buildSecurePlanContext', () => {
       annualBase: 540,
       prepay: { total: 540, discount: 0, ratePctLabel: '' },
       setupFee: { amount: 99, waivedWithPrepay: true },
+    });
+  });
+
+  test('direct rodent bait series, NON-member → discount class + the unwaived $99 setup rides prepay.total (codex #3591 r9 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait']; // only its own series on the account
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    const setup = Number(RODENT.baitSetupFee);
+    expect(setup).toBeGreaterThan(0);
+    expect(ctx).toMatchObject({
+      mode: 'recurring',
+      planClass: 'discount',
+      perVisit: 89,
+      visitsPerYear: 4,
+      annualBase: 356,
+      prepay: { total: Math.round((coverage + setup) * 100) / 100, coverageTotal: coverage, setupAmount: setup },
+      setupFee: { amount: setup, waivedWithPrepay: false },
+    });
+  });
+
+  test('direct rodent bait series, MEMBER (another qualifying service on the account) → no setup fee', async () => {
+    mockQualifyingKeys = async () => ['pest_control', 'rodent_bait'];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' },
+      customer: { ...baseCustomer },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+    expect(ctx).toMatchObject({
+      planClass: 'discount',
+      prepay: { total: coverage, coverageTotal: coverage, setupAmount: 0 },
+      setupFee: null,
     });
   });
 

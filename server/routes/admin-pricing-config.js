@@ -17,9 +17,9 @@ router.use(adminAuthenticate, requireAdmin);
 // Best-effort audit insert: a failure must never block the pricing edit
 // itself, but it must be visible in logs (a bare catch here previously
 // swallowed every failure silently).
-async function insertPricingAudit({ configKey, oldValue, newValue, changedBy, reason }) {
+async function insertPricingAudit({ configKey, oldValue, newValue, changedBy, reason, conn = db }) {
   try {
-    await db('pricing_config_audit').insert({
+    await conn('pricing_config_audit').insert({
       config_key: configKey,
       old_value: oldValue === undefined ? null : JSON.stringify(oldValue),
       new_value: newValue === undefined ? null : JSON.stringify(newValue),
@@ -252,10 +252,32 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!isPositive(ext.per_sq_ft)) return fail('extension.per_sq_ft must be a positive number');
     if (!Number.isInteger(num(ext.stations_per_step)) || num(ext.stations_per_step) < 0) return fail('extension.stations_per_step must be a non-negative integer');
     if (!isPositive(ext.per_visit_per_step)) return fail('extension.per_visit_per_step must be a positive dollar amount');
-    if (data?.visits_per_year !== undefined
-      && (!Number.isInteger(num(data.visits_per_year)) || num(data.visits_per_year) < 1)) {
-      return fail('visits_per_year must be a positive integer');
+    // Whole cents only (codex #3591 r9 P2): db-bridge syncs these to the
+    // cent, so a sub-cent save would quote a price the card never showed.
+    const subCent = (v) => Math.abs(num(v) * 100 - Math.round(num(v) * 100)) > 1e-6;
+    for (const [i, b] of data.brackets.entries()) {
+      if (subCent(b.per_visit)) return fail(`brackets[${i}].per_visit must not have sub-cent precision`);
     }
+    if (subCent(ext.per_visit_per_step)) return fail('extension.per_visit_per_step must not have sub-cent precision');
+    // The program is QUARTERLY end to end — customer copy, the converter's
+    // follow-up seeding (estimate-converter seeds rodent follow-ups only for
+    // a quarterly pattern) and the public ranges all assume 4. A different
+    // cadence would charge N applications while describing and scheduling
+    // 4 (codex #3591 r9 P1), so the editable value is pinned to 4 until
+    // every consumer supports a configurable cadence.
+    if (data?.visits_per_year !== undefined && num(data.visits_per_year) !== 4) {
+      return fail('visits_per_year must be 4 — the rodent bait program is quarterly end to end (copy, follow-up seeding, public ranges)');
+    }
+  } else if (configKey === 'rodent_setup_fee') {
+    // Non-member bait-station setup: a non-negative dollar amount, whole
+    // cents; zero is the documented "disable the fee" setting. A negative
+    // value would install a negative live constant that the engine then
+    // silently drops (setup row emitted only for a positive price) — the
+    // save would report success while the required charge vanished
+    // (codex #3591 r9 P2).
+    const fee = num(data?.value);
+    if (!Number.isFinite(fee) || fee < 0) return fail('rodent_setup_fee.value must be a non-negative dollar amount (0 disables the fee)');
+    if (Math.abs(fee * 100 - Math.round(fee * 100)) > 1e-6) return fail('rodent_setup_fee.value must not have sub-cent precision');
   } else if (configKey === 'rodent_waveguard') {
     if (data?.tier_qualifier !== undefined && typeof data.tier_qualifier !== 'boolean') {
       return fail('rodent_waveguard.tier_qualifier must be a boolean');
@@ -820,7 +842,6 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     }
     const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();
-    await db('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
     // rodent_bait policy lives in TWO live stores (codex #3591 r3 P1):
     // service_discount_rules feeds invoice/schedule discount paths
     // (discount-engine applyTierDiscount) while the pricing engine reads
@@ -828,42 +849,49 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
     // from it). An edit here must mirror the shared flags into the
     // authoritative row, or operators split generated-estimate behavior
     // from billing behavior. Migration 20260829000040 aligned the rows;
-    // this keeps them aligned on every subsequent edit.
-    if (req.params.serviceKey === 'rodent_bait'
-      && (updates.tier_qualifier !== undefined || updates.exclude_from_pct_discount !== undefined)) {
-      const waveguardRow = await db('pricing_config').where({ config_key: 'rodent_waveguard' }).first();
-      if (waveguardRow) {
-        let waveguardData = {};
-        try {
-          waveguardData = typeof waveguardRow.data === 'string' ? JSON.parse(waveguardRow.data) : (waveguardRow.data || {});
-        } catch { waveguardData = {}; }
-        const nextData = { ...waveguardData };
-        if (typeof updates.tier_qualifier === 'boolean') nextData.tier_qualifier = updates.tier_qualifier;
-        if (typeof updates.exclude_from_pct_discount === 'boolean') nextData.exclude_from_pct_discount = updates.exclude_from_pct_discount;
-        if (JSON.stringify(nextData) !== JSON.stringify(waveguardData)) {
-          await db('pricing_config')
-            .where({ config_key: 'rodent_waveguard' })
-            .update({ data: JSON.stringify(nextData), updated_at: new Date() });
-          await insertPricingAudit({
-            configKey: 'rodent_waveguard',
-            oldValue: waveguardData,
-            newValue: nextData,
-            changedBy: req.technician?.name,
-            reason: req.body.reason || 'Mirrored from Discount Rules edit (rodent_bait shared policy)',
-          });
-          // Same immediate-resync pattern the pricing_config PUT uses —
-          // the mirrored flags must reach the engine now, not on the next
-          // cache cycle.
-          try {
-            const modular = require('../services/pricing-engine');
-            if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
-          } catch { /* non-fatal */ }
-          try {
-            const bridge = require('../services/pricing-engine/db-bridge');
-            if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
-          } catch { /* non-fatal */ }
-        }
-      }
+    // this keeps them aligned on every subsequent edit — in ONE transaction
+    // with the rules write (codex #3591 r9 P1, both directions), so a
+    // mirror failure rolls the edit back instead of splitting policy.
+    let mirroredWaveguard = null;
+    await db.transaction(async (trx) => {
+      await trx('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+      if (req.params.serviceKey !== 'rodent_bait'
+        || (updates.tier_qualifier === undefined && updates.exclude_from_pct_discount === undefined)) return;
+      const waveguardRow = await trx('pricing_config').where({ config_key: 'rodent_waveguard' }).forUpdate().first();
+      if (!waveguardRow) return;
+      let waveguardData = {};
+      try {
+        waveguardData = typeof waveguardRow.data === 'string' ? JSON.parse(waveguardRow.data) : (waveguardRow.data || {});
+      } catch { waveguardData = {}; }
+      const nextData = { ...waveguardData };
+      if (typeof updates.tier_qualifier === 'boolean') nextData.tier_qualifier = updates.tier_qualifier;
+      if (typeof updates.exclude_from_pct_discount === 'boolean') nextData.exclude_from_pct_discount = updates.exclude_from_pct_discount;
+      if (JSON.stringify(nextData) === JSON.stringify(waveguardData)) return;
+      await trx('pricing_config')
+        .where({ config_key: 'rodent_waveguard' })
+        .update({ data: JSON.stringify(nextData), updated_at: new Date() });
+      await insertPricingAudit({
+        configKey: 'rodent_waveguard',
+        oldValue: waveguardData,
+        newValue: nextData,
+        changedBy: req.technician?.name,
+        reason: req.body.reason || 'Mirrored from Discount Rules edit (rodent_bait shared policy)',
+        conn: trx,
+      });
+      mirroredWaveguard = nextData;
+    });
+    if (mirroredWaveguard) {
+      // Same immediate-resync pattern the pricing_config PUT uses — the
+      // mirrored flags must reach the engine now, not on the next cache
+      // cycle.
+      try {
+        const modular = require('../services/pricing-engine');
+        if (modular.syncConstantsFromDB) await modular.syncConstantsFromDB();
+      } catch { /* non-fatal */ }
+      try {
+        const bridge = require('../services/pricing-engine/db-bridge');
+        if (bridge.invalidatePricingConfigCache) bridge.invalidatePricingConfigCache();
+      } catch { /* non-fatal */ }
     }
     if (existing) {
       const changedFields = Object.keys(updates).filter(
@@ -1149,40 +1177,40 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
       if (name !== undefined) updates.name = name;
       if (description !== undefined) updates.description = description;
       await trx('pricing_config').where({ config_key: req.params.key }).update(updates);
+
+      // rodent_bait policy lives in TWO live stores (codex #3591 r4 P1 — the
+      // reverse direction of the Discount Rules mirror): a rodent_waveguard
+      // edit through this generic card must also land on
+      // service_discount_rules.rodent_bait, or the invoice/schedule discount
+      // paths keep the old policy while generated estimates use the new one.
+      // SAME transaction as the pricing_config write (codex #3591 r9 P1): a
+      // mirror failure rolls the whole edit back — an operator edit can never
+      // split generated-estimate policy from invoice/schedule policy. The
+      // audit row stays best-effort (insertPricingAudit never throws).
+      if (req.params.key === 'rodent_waveguard' && normalizedData
+        && (typeof normalizedData.tier_qualifier === 'boolean' || typeof normalizedData.exclude_from_pct_discount === 'boolean')
+        && await trx.schema.hasTable('service_discount_rules')) {
+        const ruleUpdates = { updated_at: new Date() };
+        if (typeof normalizedData.tier_qualifier === 'boolean') ruleUpdates.tier_qualifier = normalizedData.tier_qualifier;
+        if (typeof normalizedData.exclude_from_pct_discount === 'boolean') ruleUpdates.exclude_from_pct_discount = normalizedData.exclude_from_pct_discount;
+        const mirrored = await trx('service_discount_rules')
+          .where({ service_key: 'rodent_bait' })
+          .update(ruleUpdates);
+        if (mirrored) {
+          await insertPricingAudit({
+            configKey: 'discount_rules:rodent_bait',
+            oldValue: null,
+            newValue: ruleUpdates,
+            changedBy: req.technician?.name,
+            reason: 'Mirrored from rodent_waveguard pricing-config edit (shared policy)',
+            conn: trx,
+          });
+        }
+      }
       return true;
     });
     if (!found) return res.status(404).json({ error: 'Config not found' });
     if (validationError) return res.status(400).json({ error: validationError });
-
-    // rodent_bait policy lives in TWO live stores (codex #3591 r4 P1 — the
-    // reverse direction of the Discount Rules mirror): a rodent_waveguard
-    // edit through this generic card must also land on
-    // service_discount_rules.rodent_bait, or the invoice/schedule discount
-    // paths keep the old policy while generated estimates use the new one.
-    if (req.params.key === 'rodent_waveguard' && normalizedData
-      && (typeof normalizedData.tier_qualifier === 'boolean' || typeof normalizedData.exclude_from_pct_discount === 'boolean')) {
-      try {
-        if (await db.schema.hasTable('service_discount_rules')) {
-          const ruleUpdates = { updated_at: new Date() };
-          if (typeof normalizedData.tier_qualifier === 'boolean') ruleUpdates.tier_qualifier = normalizedData.tier_qualifier;
-          if (typeof normalizedData.exclude_from_pct_discount === 'boolean') ruleUpdates.exclude_from_pct_discount = normalizedData.exclude_from_pct_discount;
-          const mirrored = await db('service_discount_rules')
-            .where({ service_key: 'rodent_bait' })
-            .update(ruleUpdates);
-          if (mirrored) {
-            await insertPricingAudit({
-              configKey: 'discount_rules:rodent_bait',
-              oldValue: null,
-              newValue: ruleUpdates,
-              changedBy: req.technician?.name,
-              reason: 'Mirrored from rodent_waveguard pricing-config edit (shared policy)',
-            });
-          }
-        }
-      } catch (mirrorErr) {
-        logger.warn(`[pricing-config] rodent_waveguard → service_discount_rules mirror failed: ${mirrorErr.message}`);
-      }
-    }
 
     try {
       const modular = require('../services/pricing-engine');

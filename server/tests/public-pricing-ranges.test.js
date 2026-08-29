@@ -66,6 +66,21 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('rodent bait sweeps the LIVE bracket ladder — an operator-added narrow bracket is sampled (codex #3591 r9 P2)', () => {
+    const constants = require('../services/pricing-engine/constants');
+    const original = constants.RODENT.baitBrackets;
+    constants.RODENT.baitBrackets = [{ maxSqFt: 900, stations: 3, perVisit: 59 }, ...original];
+    try {
+      const refreshed = computePublicPricingRanges({ refresh: true });
+      const row = refreshed.services.find((svc) => svc.key === 'rodent_bait_program');
+      // 900 sf is not a hardcoded sample point; only the live ladder reaches it.
+      expect(row.low).toBeLessThanOrEqual(59);
+    } finally {
+      constants.RODENT.baitBrackets = original;
+      computePublicPricingRanges({ refresh: true });
+    }
+  });
+
   test('every service sweeps without errors', () => {
     expect(payload.errors).toEqual([]);
   });

@@ -109,6 +109,10 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
   if (!planContext || planContext.mode !== 'recurring') return null;
   const { perVisit, visitsPerYear, annualBase, prepay, setupFee, planClass } = planContext;
   const discounted = planClass === 'discount' && prepay.discount > 0;
+  // A fee-waiver plan's setup is waived by prepay; a non-member rodent bait
+  // plan's bait-station setup is NOT (owner 2026-08-29) — it rides the
+  // prepay invoice as its own line and prepay.total already includes it.
+  const setupWaivedByPrepay = !!setupFee && setupFee.waivedWithPrepay !== false;
 
   return (
     <div style={{ marginTop: 18 }}>
@@ -134,9 +138,11 @@ export default function SecurePlanChoice({ planContext, selected, onSelect, disa
           priceSuffix={`/ year · ${visitsPerYear} application${visitsPerYear === 1 ? '' : 's'}`}
           strike={discounted ? fmtMoney(annualBase) : null}
           sub={setupFee
-            ? `Pay once today and the ${fmtMoney(setupFee.amount)} setup fee is waived. No charges after your visits.`
+            ? (setupWaivedByPrepay
+              ? `Pay once today and the ${fmtMoney(setupFee.amount)} setup fee is waived. No charges after your visits.`
+              : `Includes the one-time ${fmtMoney(setupFee.amount)} setup fee. Pay once today. No charges after your visits.`)
             : 'Pay once today. No charges after your visits.'}
-          badge={setupFee
+          badge={setupWaivedByPrepay
             ? <Badge tone="green">{fmtMoney(setupFee.amount)} setup fee waived</Badge>
             : (discounted ? <Badge tone="green">You save {fmtMoney(prepay.discount)}</Badge> : null)}
         />

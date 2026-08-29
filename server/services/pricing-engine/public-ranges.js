@@ -426,6 +426,17 @@ function buildRows() {
     notes: 'Single-visit knockdown or 2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
   }));
 
+  const RODENT_PUBLIC_MAX_SQFT = 20000;
+  function rodentBaitSweepFootprints() {
+    const brackets = Array.isArray(constants.RODENT.baitBrackets) ? constants.RODENT.baitBrackets : [];
+    const ext = constants.RODENT.baitBracketExtension || {};
+    const points = brackets.map((b) => Number(b.maxSqFt)).filter((n) => Number.isFinite(n) && n > 0);
+    const top = points.length ? Math.max(...points) : 0;
+    const step = Number(ext.perSqFt) > 0 ? Number(ext.perSqFt) : 1000;
+    for (let f = top + step; f < RODENT_PUBLIC_MAX_SQFT; f += step) points.push(f);
+    points.push(RODENT_PUBLIC_MAX_SQFT);
+    return points;
+  }
   add('rodent_bait_program', () => rangeRow({
     key: 'rodent_bait_program',
     name: 'Rodent Bait Station Program',
@@ -437,8 +448,13 @@ function buildRows() {
     // accept up to 20,000 sf and the ladder EXTENDS above 6,750 (codex
     // #3591 r3 P2) — sweep the bracket boundaries and the supported upper
     // footprint too so the published high matches the largest exact quote.
+    // Sample points come from the LIVE ladder (codex #3591 r9 P2): each
+    // configured bracket's inclusive max (every bracket is flat inside, so
+    // its boundary IS its price) plus every extension step up to the public
+    // 20,000 sf cap — an operator-edited/added bracket is always sampled,
+    // never a second hardcoded ladder here.
     values: sweepValues(
-      [...new Set([...FOOTPRINTS_SQFT, 1750, 2750, 3750, 4750, 5750, 6750, 8000, 12000, 20000])].map((f) => ({ f })),
+      [...new Set([...FOOTPRINTS_SQFT, ...rodentBaitSweepFootprints()])].map((f) => ({ f })),
       ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
       // Tier-discounted customer-paid values (rodent takes the WaveGuard %
       // since 2026-08-29) widen the low — same pattern as pest/lawn.

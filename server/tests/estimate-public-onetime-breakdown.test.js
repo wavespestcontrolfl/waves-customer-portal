@@ -7347,6 +7347,54 @@ describe('public estimate one-time breakdown', () => {
     })).toMatch(/Choose pay per application/);
   });
 
+  test('invoice copy names the bait-station setup a non-member rodent plan bills (codex #3591 r9 P1)', () => {
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 89,
+    })).toEqual(expect.objectContaining({
+      totalAmount: 188,
+      payPrefCardSub: 'Invoice includes bait station setup + first application ($188.00).',
+    }));
+    expect(buildStandardPayPerApplicationInvoiceCopy({
+      setupAmount: 99,
+      setupLabel: 'bait station setup',
+      firstApplicationAmount: 0,
+    })).toEqual(expect.objectContaining({
+      payAfterBody: 'Approve now; after you confirm, we send the bait station setup invoice for $99.00 so you can pay before service.',
+      payPrefCardSub: 'Invoice includes bait station setup ($99.00).',
+    }));
+  });
+
+  test('standalone non-member rodent estimate: displayed invoice totals carry the frozen $99 bait-station setup in BOTH payment modes (codex #3591 r9 P1)', () => {
+    const html = renderPage('rodent-setup-token', {
+      id: 'estimate-rodent-setup',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 29.67,
+      annualTotal: 356,
+      onetimeTotal: 99,
+      tier: 'Bronze',
+    }, {
+      result: {
+        recurring: {
+          services: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perTreatment: 89, visitsPerYear: 4, perApplicationBilled: true, stations: 5 }],
+        },
+        oneTime: { items: [{ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 }], specItems: [] },
+        specItems: [],
+        results: {},
+      },
+    });
+    expect(html).toContain('<span>Bait Station Setup</span><strong data-rodent-setup-due="99">$99.00</strong>');
+    // Standard: setup + first application = $99 + $89.
+    expect(html).toContain('data-standard-invoice-total data-standard-setup-due="99">$188.00</strong>');
+    expect(html).toContain('Invoice includes bait station setup + first application ($188.00).');
+    // Prepay: the setup rides the prepay invoice as its own line (never waived by prepay).
+    expect(html).toContain('data-prepay-setup-due="99"');
+    expect(html).toContain('<span>Bait Station Setup</span><strong>$99.00</strong>');
+  });
+
   test('pay-per-application invoice copy matches setup and first application charges', () => {
     expect(buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: 99,

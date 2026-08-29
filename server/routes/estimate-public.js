@@ -2831,6 +2831,10 @@ function buildStandardPayPerApplicationInvoiceCopy({
   setupAmount = 0,
   firstApplicationAmount = 0,
   fallbackNoPaymentCopy = 'No payment is charged on this page. Your first service visit will be billed after completion.',
+  // What the setup share IS — 'WaveGuard setup' (membership fee), 'bait
+  // station setup' (a non-member's rodent plan), or both. The copy must
+  // name what the invoice bills (codex #3591 r9 P1).
+  setupLabel = 'WaveGuard setup',
 } = {}) {
   const setup = roundPositiveMoney(setupAmount);
   const firstApplication = roundPositiveMoney(firstApplicationAmount);
@@ -2846,7 +2850,7 @@ function buildStandardPayPerApplicationInvoiceCopy({
       firstApplicationAmount: firstApplication,
       totalAmount: total,
       payAfterBody: `Approve now; after you confirm, we send the setup + first application invoice for ${fmtMoney(total)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup + first application (${fmtMoney(total)}).`,
+      payPrefCardSub: `Invoice includes ${setupLabel} + first application (${fmtMoney(total)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${fmtMoney(total)}.`,
     };
   }
@@ -2858,8 +2862,8 @@ function buildStandardPayPerApplicationInvoiceCopy({
       setupAmount: setup,
       firstApplicationAmount: firstApplication,
       totalAmount: total,
-      payAfterBody: `Approve now; after you confirm, we send the WaveGuard setup invoice for ${fmtMoney(setup)} so you can pay before service.`,
-      payPrefCardSub: `Invoice includes WaveGuard setup (${fmtMoney(setup)}).`,
+      payAfterBody: `Approve now; after you confirm, we send the ${setupLabel} invoice for ${fmtMoney(setup)} so you can pay before service.`,
+      payPrefCardSub: `Invoice includes ${setupLabel} (${fmtMoney(setup)}).`,
       billingSmall: `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setup)} setup invoice so you can pay in-flow.`,
     };
   }
@@ -5160,22 +5164,36 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     : null;
   const billingModeAttr = canChooseOneTime ? ' data-mode-only="recurring"' : '';
   const setupDueToday = showMembershipFee ? membershipFee : 0;
+  // Disclosed rodent bait-station setup (owner 2026-08-29): the accept path
+  // bills the FROZEN amount on the standard invoice and the prepay path
+  // bills it on the prepay invoice (estimate-converter), so every total
+  // this card shows must carry it too — the customer was shown an invoice
+  // $99 under the one actually created (codex #3591 r9 P1). Same frozen
+  // resolver the accept uses; a locked estimate discloses nothing.
+  const rodentSetupDueToday = !locked
+    ? require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData)
+    : 0;
+  const standardSetupDue = Math.round((setupDueToday + rodentSetupDueToday) * 100) / 100;
+  const standardSetupLabel = setupDueToday > 0 && rodentSetupDueToday > 0
+    ? 'WaveGuard + bait station setup'
+    : (rodentSetupDueToday > 0 ? 'bait station setup' : 'WaveGuard setup');
   const standardInvoiceFirstApplicationAmount = !selectedServiceTierBillsMonthlyForView
     && firstServiceVisitTotal != null
     && firstServiceVisitTotal > 0
     ? firstServiceVisitTotal
     : 0;
   const standardInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy({
-    setupAmount: setupDueToday,
+    setupAmount: standardSetupDue,
+    setupLabel: standardSetupLabel,
     firstApplicationAmount: standardInvoiceFirstApplicationAmount,
     fallbackNoPaymentCopy: pageCopy.noPaymentCopy,
   });
   const standardInvoiceTotal = standardInvoiceCopy.totalAmount;
-  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
+  const standardInvoiceDynamicTotalHtml = `<span data-standard-invoice-copy-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</span>`;
   const standardInvoiceBillingSmallHtml = standardInvoiceCopy.hasSetup && standardInvoiceCopy.hasFirstApplication
     ? `No payment is charged on this page. After confirmation, we open an invoice for setup plus the first application totaling ${standardInvoiceDynamicTotalHtml}.`
     : (standardInvoiceCopy.hasSetup
-        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(setupDueToday)} setup invoice so you can pay in-flow.`
+        ? `No payment is charged on this page. After confirmation, we open the ${fmtMoney(standardSetupDue)} setup invoice so you can pay in-flow.`
         : (standardInvoiceCopy.hasFirstApplication
             ? `No payment is charged on this page. After confirmation, we open the first application invoice for ${standardInvoiceDynamicTotalHtml}.`
             : escapeHtml(pageCopy.noPaymentCopy)));
@@ -5208,7 +5226,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   });
   const prepayRefreshFloor = annualPrepayWaivesMembership ? 0 : prepayComponents.protectedFloor;
   const prepayRefreshRate = annualPrepayWaivesMembership ? 0 : prepayComponents.discountRate;
-  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"`;
+  // The setup attr is emitted only when a setup is due, so the attribute
+  // shape of every non-rodent page stays byte-identical.
+  const prepayRefreshAttrs = `data-prepay-protected-floor="${prepayRefreshFloor}" data-prepay-configured-rate="${prepayRefreshRate}"${rodentSetupDueToday > 0 ? ` data-prepay-setup-due="${Number(rodentSetupDueToday)}"` : ''}`;
   // Effective rate can drop below 1% when the lawn program minimum (or the
   // non-discountable margin floor) protects most of the base — show one
   // decimal there so the copy never reads "save 0%".
@@ -5223,10 +5243,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // case and hide the prepay option instead of advertising ~$0 savings.
   const showAnnualPrepayOption = prepayEligibleMix && !isExistingMember
     && (annualPrepayWaivesMembership || (prepayDiscountAmount > 0 && prepayDiscountRate >= 0.001));
+  // The prepay invoice carries the disclosed bait-station setup as its own
+  // line (converter, codex r4) — never waived by prepay — so the displayed
+  // total includes it (codex #3591 r9 P1); on a taxable commercial prepay
+  // the setup line is taxed with the rest (converter r7), so it joins the
+  // subtotal BEFORE tax.
   const prepayInvoiceTotal = annualPrepayWaivesMembership
-    ? annualTotal
+    ? Math.round((annualTotal + rodentSetupDueToday) * 100) / 100
     : (() => {
-      const base = Math.max(0, prepayResolved.amount);
+      const base = Math.round((Math.max(0, prepayResolved.amount) + rodentSetupDueToday) * 100) / 100;
       // Commercial prepay is taxed on the taxable pest share — quote the
       // TAX-INCLUSIVE total here so the page matches the invoice/PaymentIntent
       // the converter creates (same blended rate + post-discount allocation +
@@ -5280,8 +5305,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
           ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong data-rodent-setup-due="${Number(rodentSetupDueToday)}">${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
-          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
+          ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(standardSetupDue || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
         ${membershipSetupWaivedForExistingCustomer && !locked ? `<p class="billing-small">Setup waived &mdash; you're already a Waves customer.</p>` : ''}
         <p class="billing-small">${standardInvoiceBillingSmallHtml}</p>
@@ -5300,6 +5326,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <div class="payment-summary-list">
           <div class="payment-summary-row"><span>Annual plan total</span><strong data-annual-total>${fmtMoney(annualTotal)}</strong></div>
           ${prepayMembershipSummaryHtml}
+          ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
         <p class="billing-small">${est.depositPolicy?.required
@@ -6580,7 +6607,10 @@ ${shellQuestionsBar()}
       const protectedFloor = Number(el.dataset.prepayProtectedFloor || 0);
       const floor = Math.min(annual, protectedFloor);
       const discountable = Math.max(0, roundMoney(annual - floor));
-      return Math.max(0, roundMoney(floor + discountable * (1 - rate)));
+      // The disclosed bait-station setup rides the prepay invoice as its
+      // own (never-waived) line — same server-side total rule.
+      const setupDue = Number(el.dataset.prepaySetupDue || 0);
+      return Math.max(0, roundMoney(floor + discountable * (1 - rate) + setupDue));
     };
     document.querySelectorAll('[data-prepay-invoice-total]').forEach((el) => {
       el.textContent = fmt(prepayTotalFor(el));

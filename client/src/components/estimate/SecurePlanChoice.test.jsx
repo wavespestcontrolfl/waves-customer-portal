@@ -53,6 +53,21 @@ describe('SecurePlanChoice', () => {
     expect(screen.queryByText(/save \d/i)).not.toBeInTheDocument();
   });
 
+  it('unwaived setup (non-member rodent bait): prepay copy says the fee is INCLUDED, never waived (codex #3591 r9 P1)', () => {
+    render(<SecurePlanChoice planContext={{
+      ...DISCOUNT_CONTEXT,
+      prepay: { total: 437.2, coverageTotal: 338.2, setupAmount: 99, discount: 17.8, ratePctLabel: '5%' },
+      annualBase: 356,
+      setupFee: { amount: 99, waivedWithPrepay: false },
+    }} selected={null} onSelect={() => {}} />);
+    expect(screen.getByText(/Plus a one-time \$99\.00 setup fee on your first visit's invoice/)).toBeInTheDocument();
+    expect(screen.getByText(/Includes the one-time \$99\.00 setup fee\. Pay once today\./)).toBeInTheDocument();
+    expect(screen.queryByText(/setup fee is waived/)).toBeNull();
+    expect(screen.queryByText(/setup fee waived/)).toBeNull();
+    expect(screen.getByText('You save $17.80')).toBeInTheDocument();
+    expect(screen.getByText('$437.20')).toBeInTheDocument();
+  });
+
   it('discount mix: percent label, strikethrough base, and savings badge from the payload', () => {
     render(<SecurePlanChoice planContext={DISCOUNT_CONTEXT} selected={null} onSelect={() => {}} />);
     expect(screen.getByText('Prepay the year — save 7%')).toBeInTheDocument();

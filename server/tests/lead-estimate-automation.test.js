@@ -159,6 +159,33 @@ describe('lead estimate automation gate', () => {
     }));
   });
 
+  test('rodent bait lead drafts keep the new-model provenance (perApplicationBilled / stations / pricingBasis) — codex #3591 r9 P0', () => {
+    const readiness = evaluateLeadEstimateAutomationReadiness({
+      phone: '+19415550199',
+      intake: {
+        email: 'lead@example.com',
+        serviceInterest: 'Rodent bait station service',
+        normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
+      },
+    });
+    const draft = buildAutomatedLeadDraftEstimate({
+      readiness,
+      intake: { serviceInterest: 'Rodent bait station service', fullAddress: '123 Main St, Venice, FL 34285' },
+      body: { homeSqFt: 2200, lotSqFt: 9000 },
+    });
+    expect(draft.estimateData.services).toMatchObject({ rodentBait: {} });
+    const rodent = draft.estimateData.engineResult.lineItems.find((l) => l.service === 'rodent_bait');
+    // Residential lines carry the marker + station allowance (the commercial
+    // pricer adds pricingBasis; either signal defeats the legacy pin).
+    expect(rodent).toEqual(expect.objectContaining({
+      perApplicationBilled: true,
+      stations: 5,
+    }));
+    // The persisted shape must NOT read as a pre-realignment legacy plan.
+    const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    expect(rodentBaitLegacyReplaySignal(draft.estimateData)).toBeNull();
+  });
+
   test('keeps unsupported scoped services in manual review draft state', () => {
     const readiness = evaluateLeadEstimateAutomationReadiness({
       phone: '+19415550199',

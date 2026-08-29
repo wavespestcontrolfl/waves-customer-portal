@@ -96,7 +96,7 @@ const {
   normalizeRoachType,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
   pestProgramFloorAnnual, validateEstimateDiscounts,
   serviceManualRecurringDiscountEligible,
 } = require('./discount-engine');
@@ -1853,6 +1853,41 @@ function generateEstimate(input) {
       }
       if (item.total) {
         item.totalBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.total;
+        item.totalAfterDiscount = item.total;
+      }
+      continue;
+    }
+
+    // A PINNED legacy rodent replay carries its disclosed dollar figure and
+    // the full legacy posture (never % discounted) as line flags. The
+    // service-key policy now says rodent_bait IS tier-discounted, so keying
+    // the discount off the policy alone would replay a verified $49/mo pin
+    // at $529.20/yr under Silver+ (codex #3591 r9 P0). The pinned line keeps
+    // its amount — no discount pass at all. Gated on the pin marker, not on
+    // lineFlagsBlockPercentDiscount alone: palm injection carries the same
+    // %-exclusion flags yet still needs this pass for its FLAT tier credits
+    // (annualAfterCredits) — the flags block the percentage, not the pass.
+    if (item.legacyPinnedReplay === true && lineFlagsBlockPercentDiscount(item)) {
+      item.discount = {
+        serviceKey,
+        waveGuardTier: waveGuardTier.tier,
+        appliedDiscounts: [],
+        effectiveDiscount: 0,
+        totalDiscount: 0,
+        discountable: false,
+        lineFlagsBlocked: true,
+      };
+      if (item.annual) {
+        item.annualBeforeDiscount = item.annual;
+        item.annualAfterDiscount = item.annual;
+        item.monthlyAfterDiscount = Number(item.monthly) > 0
+          ? Math.round(Number(item.monthly) * 100) / 100
+          : Math.round(item.annual / 12 * 100) / 100;
+      } else if (item.price) {
+        item.priceBeforeDiscount = item.price;
+        item.priceAfterDiscount = item.price;
+      } else if (item.total) {
+        item.totalBeforeDiscount = item.total;
         item.totalAfterDiscount = item.total;
       }
       continue;

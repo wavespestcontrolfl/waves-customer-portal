@@ -339,6 +339,14 @@ function compactLineItem(item = {}) {
     // would clamp a v2 automated draft's opt-outs at the lower v1 floor
     // (codex #2966 r6 P1 — same contract as the quote-wizard mirror).
     pricingVersion: item.pricingVersion ?? undefined,
+    // Rodent bait new-model provenance (codex #3591 r9 P0): the saved-
+    // estimate replay treats a rodent row WITHOUT these as a pre-realignment
+    // legacy plan (pinned monthly, no tier count, no %). Every compact
+    // persisted shape must carry them — same contract as the quote-wizard
+    // mirror (public-quote.js) and the wizard draft mirror (estimate-public).
+    perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
+    stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
+    pricingBasis: item.pricingBasis ?? undefined,
     quoteRequired: item.quoteRequired || item.requiresManualReview || item.requiresMeasurement || false,
     reason: item.reason || item.manualReviewReason || item.manualReviewReasons?.[0] || null,
   };

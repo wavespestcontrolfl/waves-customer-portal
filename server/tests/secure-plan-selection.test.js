@@ -47,8 +47,13 @@ jest.mock('../services/estimate-converter', () => ({
     const raw = String(svc.name || '').toLowerCase();
     if (raw.includes('pest')) return 'pest_control';
     if (raw.includes('lawn')) return 'lawn_care';
+    if (raw.includes('rodent')) return 'rodent_bait';
     return raw.replace(/[^a-z0-9]+/g, '_');
   },
+}));
+let mockQualifyingKeys = async () => [];
+jest.mock('../services/waveguard-existing-services', () => ({
+  loadExistingQualifyingServiceKeys: (...args) => mockQualifyingKeys(...args),
 }));
 jest.mock('../utils/portal-url', () => ({ portalUrl: (p) => `https://portal.test${p}` }));
 jest.mock('../services/call-booking-catalog', () => ({
@@ -115,6 +120,7 @@ function updatesFor(table) {
 
 beforeEach(() => {
   mockGateOn = true;
+  mockQualifyingKeys = async () => [];
   mockDbCalls = [];
   mockResolveForInvoice.mockReset().mockResolvedValue(null);
   mockOverlapLock.mockReset().mockResolvedValue(undefined);
@@ -127,6 +133,60 @@ beforeEach(() => {
     total: lineItems[0].unit_price, // residential, untaxed — total === line
   }));
   setTables();
+});
+
+describe('selectSecurePlan — direct rodent bait series (non-member setup, codex #3591 r9 P1)', () => {
+  const { RODENT, ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
+  const rodentVisit = { ...pestVisit, service_type: 'Quarterly Rodent Bait Station Service', estimated_price: '89.00' };
+  const coverage = Math.round(356 * (1 - ANNUAL_PREPAY_DISCOUNT_PCT) * 100) / 100;
+  const setup = Number(RODENT.baitSetupFee);
+  beforeEach(() => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    setTables({
+      scheduled_services: {
+        first: () => ({ ...rodentVisit }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    // Residential, untaxed — total is the sum of the lines.
+    mockInvoiceCreate.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-1', token: 'invtok', invoice_number: 'INV-100',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+  });
+
+  test('per_application stamps the bait-station setup on the series parent (the first completion mint bills it)', async () => {
+    expect(setup).toBeGreaterThan(0);
+    const result = await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(result).toEqual({ ok: true, plan: 'per_application' });
+    expect(updatesFor('scheduled_services')[0]).toMatchObject({ pending_setup_fee: setup });
+  });
+
+  test('prepay_annual mints the setup as its OWN line (never waived by prepay); the term is sliced from coverage money only', async () => {
+    const result = await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(result).toEqual({ ok: true, plan: 'prepay_annual', payUrl: 'https://portal.test/pay/invtok' });
+    const createArgs = mockInvoiceCreate.mock.calls[0][0];
+    expect(createArgs.lineItems).toEqual([
+      expect.objectContaining({ unit_price: coverage, quantity: 1, category: 'Annual prepay' }),
+      expect.objectContaining({ unit_price: setup, quantity: 1, description: 'Bait Station Setup — one-time' }),
+    ]);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({
+      coverageServiceType: 'Quarterly Rodent Bait Station Service',
+      coverageVisitCount: 4,
+      prepayAmount: coverage,
+      monthlyRate: Math.round(coverage / 12 * 100) / 100,
+    });
+  });
+
+  test('member (another qualifying service on the account) → no stamp, no setup line', async () => {
+    mockQualifyingKeys = async () => ['pest_control'];
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    mockDbCalls = [];
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+  });
 });
 
 describe('selectSecurePlan — per_application', () => {

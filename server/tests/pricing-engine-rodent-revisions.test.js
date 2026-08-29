@@ -245,6 +245,25 @@ describe('revised rodent pricing rules', () => {
     expect(mappedRodentRow.waveGuardDiscountEligible).toBe(false);
     expect(rodentBaitLegacyReplaySignal({ result: mapped })).toEqual({ monthly: 49 });
 
+    // Silver+ replay (codex #3591 r9 P0): a pinned $49/mo row with pest on
+    // the estimate and a prior lawn plan reaches Silver — the pinned line
+    // must keep its disclosed $588/yr (no tier %), while pest takes Silver.
+    const silverReplay = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+      priorQualifyingServices: ['lawn_care'],
+      rodentBaitLegacyReplay: { monthly: 49 },
+    }));
+    expect(silverReplay.waveGuard.tier).toBe('silver');
+    const silverBait = silverReplay.lineItems.find(i => i.service === 'rodent_bait');
+    expect(silverBait.annualAfterDiscount).toBe(588);
+    expect(silverBait.monthlyAfterDiscount).toBe(49);
+    expect(silverBait.discount.effectiveDiscount).toBe(0);
+    const silverPest = silverReplay.lineItems.find(i => i.service === 'pest_control');
+    expect(silverPest.discount.effectiveDiscount).toBeGreaterThan(0);
+    expect(silverReplay.summary.recurringAnnualAfterDiscount).toBe(
+      Math.round((silverPest.annualAfterDiscount + 588) * 100) / 100,
+    );
+
     // Commercial: pin the stored cost-buildup annual exactly.
     const commercialReplay = generateEstimate(baseInput({
       propertyType: 'commercial',
@@ -547,5 +566,44 @@ describe('gross inspection fields reach the FINAL mapper projection (codex #3521
     expect(row.price).toBe(63.75);
     expect(row.priceBeforeDiscount).toBe(75);
     expect(row.recurringCustomerDiscountRate).toBe(0.15);
+  });
+});
+
+describe('admin pricing-config validation for the rodent rows (codex #3591 r9)', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  const brackets = (overrides = {}) => ({
+    brackets: [
+      { max_sq_ft: 1750, stations: 4, per_visit: 79 },
+      { max_sq_ft: 2750, stations: 5, per_visit: 89 },
+    ],
+    extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10 },
+    visits_per_year: 4,
+    ...overrides,
+  });
+
+  test('visits_per_year is pinned to 4 — the program is quarterly end to end (P1)', () => {
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets()).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({ visits_per_year: 6 })).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({ visits_per_year: 1 })).ok).toBe(false);
+  });
+
+  test('bracket prices accept cents but never sub-cent precision (P2)', () => {
+    const halfDollar = brackets();
+    halfDollar.brackets[1].per_visit = 89.5;
+    expect(validatePricingConfigData('rodent_bait_brackets', halfDollar).ok).toBe(true);
+    const subCent = brackets();
+    subCent.brackets[1].per_visit = 89.501;
+    expect(validatePricingConfigData('rodent_bait_brackets', subCent).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_bait_brackets', brackets({
+      extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10.001 },
+    })).ok).toBe(false);
+  });
+
+  test('rodent_setup_fee: non-negative whole cents; zero disables; negative rejected (P2)', () => {
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 99 }).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 0 }).ok).toBe(true);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: -1 }).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 99.001 }).ok).toBe(false);
+    expect(validatePricingConfigData('rodent_setup_fee', { value: 'abc' }).ok).toBe(false);
   });
 });
