@@ -1970,16 +1970,25 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
       if (seriesMoveId && ownsSeriesText) {
         try {
+          let closeOwed = false;
           if (sms.sent) {
             // The anchor's reminder close is PART of this claimed effect —
             // before the text concludes — so a pass that dies here leaves
             // the claim (retried), never a concluded text beside a still-
             // armed due reminder (codex r15 P1). The routes' later cover/
-            // close is idempotent over this.
+            // close is idempotent over this. markRescheduleNoticeSent
+            // swallows its error and resolves null: then the TEXT is done
+            // but the close is owed — recorded as customer_notified with
+            // notified_at NULL, the state the reconciler's close-only
+            // branch finishes without re-sending (codex r16 P1).
             const AppointmentReminders = require('./appointment-reminders');
-            await AppointmentReminders.markRescheduleNoticeSent([job.id]);
+            const closed = await AppointmentReminders.markRescheduleNoticeSent([job.id]);
+            closeOwed = closed === null || closed === undefined;
           }
-          if (sms.sent || sms.reason === 'QUIET_HOURS_HOLD') {
+          if (closeOwed) {
+            await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true, notified_at: null });
+            logger.warn(`[rain-out] series text sent for ${job.id} but the reminder close failed — left for the reconciler to redo the close`);
+          } else if (sms.sent || sms.reason === 'QUIET_HOURS_HOLD') {
             // Sent — or QUEUED: a quiet-hours hold is a deferral the sender
             // delivers itself once the window opens, so the text is OWNED
             // and concluded here (customer_notified true). Leaving it as a

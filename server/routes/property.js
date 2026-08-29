@@ -271,20 +271,32 @@ router.put('/preferences', async (req, res, next) => {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
 
-    const existing = await db('property_preferences')
-      .where({ customer_id: req.customerId })
-      .first();
-
-    if (existing) {
-      await db('property_preferences')
+    // The read-then-upsert holds the customer-scoped preference advisory
+    // lock (`property-preferences:<customerId>`): a collective series move
+    // takes the same lock before it re-judges the weekday preference under
+    // its own locks, so a preference written — INCLUDING a first row a
+    // FOR SHARE read could not lock — while that move waits cannot slip
+    // between its verdict and its commit (codex r16 P2).
+    const existing = await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(req.customerId)],
+      );
+      const current = await trx('property_preferences')
         .where({ customer_id: req.customerId })
-        .update({ ...updates, updated_at: db.fn.now() });
-    } else {
-      await db('property_preferences').insert({
-        customer_id: req.customerId,
-        ...updates,
-      });
-    }
+        .first();
+      if (current) {
+        await trx('property_preferences')
+          .where({ customer_id: req.customerId })
+          .update({ ...updates, updated_at: trx.fn.now() });
+      } else {
+        await trx('property_preferences').insert({
+          customer_id: req.customerId,
+          ...updates,
+        });
+      }
+      return current;
+    });
 
     // Return the full updated record
     const prefs = await db('property_preferences')

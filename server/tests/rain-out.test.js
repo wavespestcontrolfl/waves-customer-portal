@@ -954,6 +954,24 @@ describe('rain-out service', () => {
       expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-09-12'), expect.stringContaining('2026-12-12')]);
     });
 
+    test('gate on: a sent Quick Move text whose anchor reminder close FAILED records "text done, close owed" (customer_notified, notified_at NULL) for the reconciler — never a concluded text beside an armed reminder', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      db.fn = { now: jest.fn(() => 'now()') };
+      const claim = chain({ update: jest.fn().mockResolvedValue(1) });
+      const stamp = chain({ update: jest.fn().mockResolvedValue(1) });
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...RECURRING_SERVICE }) })],
+        series_moves: [claim, stamp],
+      });
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({ seriesMoveId: 'sm-1', rescheduledOccurrences: [{ id: 'svc-1', date: '2026-06-12', windowStart: '13:00' }] });
+      const AppointmentReminders = require('../services/appointment-reminders');
+      AppointmentReminders.markRescheduleNoticeSent.mockResolvedValueOnce(null);
+      const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM123' });
+      await RainOut.commit({ ...DAY_MOVE_ARGS, notifyCustomer: true });
+      expect(stamp.update).toHaveBeenCalledWith({ customer_notified: true, notified_at: null });
+    });
+
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();

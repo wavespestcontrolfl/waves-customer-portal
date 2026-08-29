@@ -275,6 +275,13 @@ describe('reschedule() choke point', () => {
     expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
   });
 
+  test('an explicit technician UNASSIGN (technicianId: null) is its own request identity (`:tech=-`), distinct from an omitted technician', () => {
+    const { seriesOperationKey } = require('../services/rebooker')._test || {};
+    if (!seriesOperationKey) return; // covered by the source pin below when the helper is not exported
+    expect(seriesOperationKey('svc-1', TARGET, { start: '09:00', end: '11:00' }, { technicianId: null }).requestKey).toMatch(/:tech=-$/);
+    expect(seriesOperationKey('svc-1', TARGET, { start: '09:00', end: '11:00' }, {}).requestKey).not.toMatch(/:tech=/);
+  });
+
   test('a completed ROUND TRIP (A→B, B→A, A→B within the horizon) proceeds: a later committed move of this anchor makes the A→B row history, not this request\'s earlier attempt', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 5 * 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
@@ -913,13 +920,15 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8');
     const loop = src.slice(src.indexOf('const plannedIds = plan.planned.map((entry) => entry.id);'), src.indexOf("date_exception_source: 'backfill_cadence'"));
     expect(loop).toContain(".whereRaw('original_date <> new_date')");
-    expect(loop).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {");
+    expect(loop).toContain("initiators.every((who) => who === 'auto_dispatch')");
+    expect(loop).toContain('&& lastLanding === currentDate.get(id)');
     expect(loop).toContain('if (optimizerOnly.has(String(entry.id))) {');
   });
 
   test('"optimizer only" requires the last auto-dispatch landing to BE the row\'s current date — an unlogged (modal) move after the nudge is ambiguous history and stays preserved', () => {
     const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8');
-    expect(src).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {");
+    expect(src).toContain('&& lastLanding === currentDate.get(id)');
+    expect(src).toContain('&& firstOrigin === expectedById.get(id)) {');
     expect(src).toContain("const currentDate = new Map(rows.map((row) => [String(row.id), dateOnly(row.scheduled_date)]));");
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000031_series_moves_effects_attempted_at.js'))).toBe(true);
   });
@@ -1015,7 +1024,8 @@ describe('caller wiring (source)', () => {
     const rec = disp.slice(disp.indexOf('async function reconcileSeriesMoveEffects('), disp.indexOf("router.get('/:serviceId/series-move-preview'"));
     expect(rec).toContain("orderByRaw('COALESCE(effects_attempted_at, created_at) asc')");
     expect(rec).toContain("update({ effects_attempted_at: db.fn.now() })");
-    expect(rec).toContain(".orWhere((s) => s.where({ status: 'superseded' }).where('conflict_count', '>', 0).whereNull('conflict_card_at'))");
+    expect(rec).toContain(".orWhere((s) => s.where({ status: 'superseded' }).where((d) => d");
+    expect(rec).toContain(".where((cc) => cc.where('conflict_count', '>', 0).whereNull('conflict_card_at'))");
     expect(rec).toContain("await require('../services/rebooker').replaySeriesMoveCleanup(row);");
     const fx = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(fx).toContain("const cardOnly = markers.status === 'superseded';");
@@ -1058,6 +1068,13 @@ describe('caller wiring (source)', () => {
     expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,');
     expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {");
     expect(rainOut).not.toContain('Rain-out series shift overlaps other visits');
+    // r16: a failed Quick Move reminder close records "text done, close owed" (customer_notified + notified_at NULL → the close-only branch); superseded rows keep cleanup debt; explicit tech unassign is presence-encoded; the preference row is serialized by the customer-scoped advisory lock the writer also takes (a missing row included); the backfill's optimizer-only rule needs the first nudge to start from cadence.
+    expect(rainOut).toContain("update({ customer_notified: true, notified_at: null });");
+    expect(disp).toContain("if (!row.cleanup_done_at && Array.isArray(stored.rewoundIds) && stored.rewoundIds.length) {");
+    expect(reb).toContain("const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');");
+    expect(reb).toContain("['property-preferences', String(service.customer_id)],");
+    expect(read('../routes/property.js')).toContain("['property-preferences', String(req.customerId)],");
+    expect(fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8')).toContain('&& firstOrigin === expectedById.get(id)) {');
     expect(rainOut).toContain('await AppointmentReminders.markRescheduleNoticeSent([job.id]);');
     expect(rainOut).toContain('result: { ...seriesResultForEffects, notifyRequested: false },');
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).

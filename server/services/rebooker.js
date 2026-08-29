@@ -227,13 +227,16 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
   // self-serve path validates a specific tech's slot): two requests for the
   // same slot with different techs are different requests, never a replay
   // (hook r27 P1).
-  const techKey = options.technicianId ? `:tech=${String(options.technicianId)}` : '';
+  // Presence-encoded: an explicit `technicianId: null` (unassign) is a
+  // request of its own, distinct from an omitted technician (codex r16 P2).
+  const techRequested = Object.prototype.hasOwnProperty.call(options, 'technicianId');
+  const techKey = techRequested ? `:tech=${options.technicianId ? String(options.technicianId) : '-'}` : '';
   const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}${techKey}`;
-  const technicianId = options.technicianId ? String(options.technicianId) : null;
+  const technician = techRequested ? { id: options.technicianId ? String(options.technicianId) : null } : null;
   if (typeof options.operationKey === 'string' && options.operationKey) {
-    return { key: options.operationKey, derived: false, requestKey, technicianId };
+    return { key: options.operationKey, derived: false, requestKey, technician };
   }
-  return { key: requestKey, derived: true, requestKey, technicianId };
+  return { key: requestKey, derived: true, requestKey, technician };
 }
 // A replay additionally requires the anchor to still sit exactly where the
 // committed move left it (date + window from its recorded occurrence).
@@ -241,16 +244,19 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
 // that technician too (the anchor row's after-snapshot) and the anchor must
 // still be assigned to them — a move that landed with another tech is not
 // this request's result.
-function priorStillCurrent(prior, service, technicianId = null) {
+function priorStillCurrent(prior, service, technician = null) {
   const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
     || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
   const after = occ ? { date: occ.date ?? occ.after?.scheduled_date, start: occ.windowStart ?? occ.after?.window_start, end: occ.windowEnd ?? occ.after?.window_end } : null;
   if (!after) return false;
   const hm = (t) => (t ? String(t).slice(0, 5) : null);
-  if (technicianId) {
+  if (technician) {
+    // Requested (possibly an explicit unassign): the landing and the live
+    // anchor must carry exactly that assignment.
     const anchorRow = Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null;
     const landedTech = anchorRow?.after?.technician_id ?? null;
-    if (String(landedTech ?? '') !== String(technicianId) || String(service.technician_id ?? '') !== String(technicianId)) return false;
+    const want = technician.id ?? '';
+    if (String(landedTech ?? '') !== String(want) || String(service.technician_id ?? '') !== String(want)) return false;
   }
   return dateOnly(after.date) === dateOnly(service.scheduled_date)
     && hm(after.start) === hm(service.window_start)
@@ -262,7 +268,7 @@ function priorStillCurrent(prior, service, technicianId = null) {
 // lookup saw (or null) BEFORE any decision, so a later transactional
 // conflict can tell a row committed concurrently with this attempt from
 // the row this attempt already judged (see findConcurrentSeriesMoveWinner).
-async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey, technicianId = null }, service = null, newDate = null, expect = null, observed = null) {
+async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey, technician = null }, service = null, newDate = null, expect = null, observed = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
@@ -280,7 +286,7 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey, 
       code: 'OPERATION_KEY_REUSED',
     });
   }
-  if (service && !priorStillCurrent(prior, service, technicianId)) {
+  if (service && !priorStillCurrent(prior, service, technician)) {
     // The anchor no longer sits where the prior move left it. Two cases share
     // this shape: a STALE retry of the prior move (dangerous — its window is
     // obsolete) and a LEGITIMATE new move back to the same slot (A→B, B→C,
@@ -332,7 +338,7 @@ async function findConcurrentSeriesMoveWinner(conn, serviceId, opKey, observedPr
   if (observedPrior && String(winner.id) === String(observedPrior.id)) return null;
   if (opKey.requestKey && winner.request_key && winner.request_key !== opKey.requestKey) return null;
   const fresh = await conn('scheduled_services').where({ id: serviceId }).first('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
-  if (!fresh || !priorStillCurrent(winner, fresh, opKey.technicianId)) return null;
+  if (!fresh || !priorStillCurrent(winner, fresh, opKey.technician)) return null;
   return winner;
 }
 
@@ -1732,6 +1738,15 @@ class SmartRebooker {
           // held through commit keeps the verdict the projection used from
           // changing underneath it (codex r13 P2). A missing row locks
           // nothing (no preference → weekends allowed, as projected).
+          // …and the customer-scoped preference advisory lock the writer
+          // (routes/property.js) holds around its read-then-upsert, so a
+          // FIRST preference row — which a FOR SHARE read cannot lock — is
+          // serialized too (codex r16 P2). Taken after the maintenance lock;
+          // the writer holds nothing this transaction needs.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(service.customer_id)],
+          );
           const lockedPreference = await trx('property_preferences')
             .where({ customer_id: service.customer_id })
             .forShare()

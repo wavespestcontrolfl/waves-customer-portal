@@ -14503,10 +14503,13 @@ async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit 
         // A Quick Move text claimed by a pass that died before sending.
         .orWhere((q5) => q5.where({ source_surface: 'quick_move', notify_requested: true, customer_notified: false })
           .where('notified_at', '<', new Date(Date.now() - SERIES_EFFECTS_LEASE_MS)))))
-      .orWhere((s) => s.where({ status: 'superseded' }).where('conflict_count', '>', 0).whereNull('conflict_card_at')))
+      .orWhere((s) => s.where({ status: 'superseded' }).where((d) => d
+        .where((cc) => cc.where('conflict_count', '>', 0).whereNull('conflict_card_at'))
+        // Cleanup debt survives supersession (codex r16 P1).
+        .orWhere((cl) => cl.whereNull('cleanup_done_at').whereRaw("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0")))))
     .orderByRaw('COALESCE(effects_attempted_at, created_at) asc')
     .limit(limit)
-    .select('id', 'anchor_service_id', 'customer_id', 'new_date', 'result', 'rows', 'notify_requested', 'status');
+    .select('id', 'anchor_service_id', 'customer_id', 'new_date', 'result', 'rows', 'notify_requested', 'status', 'cleanup_done_at', 'conflict_count', 'conflict_card_at');
   if (rows.length) {
     try {
       await db('series_moves').whereIn('id', rows.map((r) => r.id)).update({ effects_attempted_at: db.fn.now() });
@@ -14521,10 +14524,13 @@ async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit 
     try {
       // A pass that died between the commit and the rebooker's post-commit
       // loop left rewound techs pinned / trackers stale — the same
-      // idempotent cleanup an operation_key replay runs (codex r10 P1).
-      if (row.status === 'committed') {
+      // idempotent cleanup an operation_key replay runs (codex r10 P1),
+      // owed by committed AND superseded rows alike (codex r16 P1).
+      if (!row.cleanup_done_at && Array.isArray(stored.rewoundIds) && stored.rewoundIds.length) {
         await require('../services/rebooker').replaySeriesMoveCleanup(row);
       }
+      // A superseded row selected for cleanup debt alone owes no card pass.
+      if (row.status === 'superseded' && !(Number(row.conflict_count) > 0 && !row.conflict_card_at)) { finished += 1; continue; }
       const out = await applySeriesMoveEffects({
         result: { ...stored, seriesMoveId: row.id },
         serviceId: row.anchor_service_id,

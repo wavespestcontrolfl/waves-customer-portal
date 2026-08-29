@@ -170,14 +170,17 @@ async function backfillCadenceDeviations(knex) {
     // optimizer put it there — it is regenerated from cadence, not
     // preserved. Rows with no log at all (pre-lane Edit-appointment moves)
     // and rows with any manual move stay in the plan (hook r16 P1).
-    // "Optimizer only" means the optimizer's placement IS the row's current
-    // date: every logged date move was auto_dispatch AND the latest one
-    // landed on the date the row still sits on. A row the pre-lane modal
-    // moved AFTER an optimizer nudge wrote no log, so its current date
-    // differs from the last logged landing — ambiguous history, preserved
-    // (codex r10 P0).
+    // "Optimizer only" means the optimizer's placement IS the row's whole
+    // displacement: every logged date move was auto_dispatch, the latest
+    // one landed on the date the row still sits on (a pre-lane modal move
+    // AFTER a nudge wrote no log and leaves the dates apart — codex r10
+    // P0), AND the first nudge started FROM the cadence date (a pre-lane
+    // modal move BEFORE a nudge is invisible in the log except as an
+    // original_date that already sat off cadence — codex r16 P0). Anything
+    // else is ambiguous history and stays preserved.
     const plannedIds = plan.planned.map((entry) => entry.id);
     const currentDate = new Map(rows.map((row) => [String(row.id), dateOnly(row.scheduled_date)]));
+    const expectedById = new Map(plan.planned.map((entry) => [String(entry.id), entry.expected]));
     const optimizerOnly = new Set();
     if (plannedIds.length) {
       const moveLogs = await knex('reschedule_log')
@@ -186,16 +189,20 @@ async function backfillCadenceDeviations(knex) {
         .whereNotNull('new_date')
         .whereRaw('original_date <> new_date')
         .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
-        .select('scheduled_service_id', 'initiated_by', 'new_date');
+        .select('scheduled_service_id', 'initiated_by', 'original_date', 'new_date');
       const byService = new Map();
       for (const log of moveLogs) {
-        const entry = byService.get(String(log.scheduled_service_id)) || { initiators: [], lastLanding: null };
+        const entry = byService.get(String(log.scheduled_service_id)) || { initiators: [], firstOrigin: null, lastLanding: null };
+        if (entry.firstOrigin === null) entry.firstOrigin = dateOnly(log.original_date);
         entry.initiators.push(String(log.initiated_by || ''));
         entry.lastLanding = dateOnly(log.new_date);
         byService.set(String(log.scheduled_service_id), entry);
       }
-      for (const [id, { initiators, lastLanding }] of byService) {
-        if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {
+      for (const [id, { initiators, firstOrigin, lastLanding }] of byService) {
+        if (initiators.length
+          && initiators.every((who) => who === 'auto_dispatch')
+          && lastLanding === currentDate.get(id)
+          && firstOrigin === expectedById.get(id)) {
           optimizerOnly.add(id);
         }
       }
