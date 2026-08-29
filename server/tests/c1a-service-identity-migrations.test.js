@@ -121,19 +121,20 @@ describe('20260829000021 engine_keys backfill', () => {
     expect(keys).not.toContain('pest_initial_roach');
     expect(keys).not.toContain('flea_package');
   });
-  test('down() removes exactly what up() added, restoring NULL where it was NULL', async () => {
+  test('down() is a no-op: the stamp is additive and an admin re-added mapping is indistinguishable from the seed', async () => {
     const db = { services: [svc('palm_injection')], system_settings: [] };
     await backfill.up(fakeKnex(db));
     expect(db.services[0].engine_keys).toEqual(['palm_injection']);
     await backfill.down(fakeKnex(db));
-    expect(db.services[0].engine_keys).toBeNull();
+    expect(db.services[0].engine_keys).toEqual(['palm_injection']);
+    expect(db.system_settings).toHaveLength(1);
   });
-  test('down() leaves an admin-edited array entirely alone (reverts only the exact value up() wrote)', async () => {
+  test('a rerun does not re-stamp a row an admin cleared back to NULL', async () => {
     const db = { services: [svc('palm_injection')], system_settings: [] };
     await backfill.up(fakeKnex(db));
-    db.services[0].engine_keys = ['palm_injection', 'admin_added'];
-    await backfill.down(fakeKnex(db));
-    expect(db.services[0].engine_keys).toEqual(['palm_injection', 'admin_added']);
+    db.services[0].engine_keys = null; // admin cleared it
+    await backfill.up(fakeKnex(db));
+    expect(db.services[0].engine_keys).toBeNull();
   });
 });
 
