@@ -149,6 +149,10 @@ const STATE_COPY = {
   in_progress: { title: 'Your technician is on the way', body: "This visit is already underway, so it can't be changed online. Need us? Text or call." },
   in_progress_on_site: { title: 'Your technician has arrived', body: "This visit is underway, so it can't be changed online. Need us? Text or call." },
   past: { title: "This visit's time has passed", body: "If we missed each other, pick a new time below - or text or call and we'll sort it out." },
+  // Grouped visit: /reschedule/:token refuses every grouped visit while the
+  // unit move is staff-only (#3609), so the past-state recovery is the
+  // call/text path, never a "Pick a new time" link that dead-ends.
+  past_grouped: { title: "This visit's time has passed", body: "If we missed each other, text or call and we'll move the whole visit together for you." },
   // Staff are choosing the replacement slot; the old date/window on the row
   // is stale and deliberately not shown as booked.
   pending_rebook: { title: "We're finding you a new time", body: "Your reschedule request is in - our office is picking the new slot and we'll text you as soon as it's set." },
@@ -377,14 +381,19 @@ export default function AppointmentPage() {
   }
 
   if (data?.state !== 'upcoming') {
+    const grouped = !!data?.service?.visit;
     const stateKey = data?.state === 'in_progress' && data?.phase === 'on_site'
       ? 'in_progress_on_site'
-      : data?.state;
+      : data?.state === 'past' && grouped
+        ? 'past_grouped'
+        : data?.state;
     const copy = STATE_COPY[stateKey] || STATE_COPY.not_available;
     // A missed pending/confirmed visit stays self-service rebookable
     // (reschedule-public deliberately allows it) - the token in this URL is
     // the same reschedule token, so the recovery path costs one link.
-    const action = data?.state === 'past'
+    // Not for a grouped visit: the reschedule route rejects it (reason
+    // 'grouped'), so the link would be a deterministic dead end (codex r12).
+    const action = data?.state === 'past' && !grouped
       ? { href: `/reschedule/${token}`, label: 'Pick a new time' }
       : null;
     return <Page><MessageCard title={copy.title} body={copy.body} action={action} /></Page>;

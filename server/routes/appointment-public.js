@@ -296,6 +296,25 @@ async function confirmGroupedSiblings(trx, svc) {
   return done;
 }
 
+// The calendar file's DTSTART: the visit's shared start when grouped (the
+// arrival promise the page shows), the row's own start otherwise.
+function calendarWindowStart(svc, visitInfo) {
+  return visitInfo?.visit?.windowStart || hhmm(svc?.window_start);
+}
+
+// Locked re-read guard for the already-confirmed grouped fan-out (codex r12
+// P1): the pre-lock loadByToken/slotMatchesShown pass proves nothing about
+// the row AFTER a concurrent move, so under the stop lock the row must still
+// (a) belong to the visit the page described, (b) still be confirmed, and
+// (c) still sit at the slot the customer was shown. Anything else reloads
+// as CHANGED rather than confirming siblings at a slot nobody saw.
+function confirmedRowStillShown(cur, svc, shown) {
+  return !!cur
+    && String(cur.visit_id || '') === String(svc.visit_id || '')
+    && String(cur.status || '').toLowerCase() === 'confirmed'
+    && slotMatchesShown(cur, shown);
+}
+
 // Run `fn(trx)` under the token row's stop lock, retrying lockStopForRow's
 // VISIT_STOP_MOVED like every other caller; returns false when the retry
 // is exhausted (the route answers CHANGED, never a 500 — codex r10).
@@ -444,8 +463,10 @@ router.get('/:token', async (req, res, next) => {
       // follow-up / outbound-review awaiting office confirmation) may be
       // customer-confirmed, so the button never renders into a 409. For a
       // grouped visit the tap confirms every confirmable member, so the
-      // button also shows from an already-confirmed member's link while a
-      // sibling can still be confirmed (the POST fans out).
+      // button also shows from an already-confirmed member's link — whether
+      // the customer or staff confirmed it (codex r12) — while a sibling
+      // can still be confirmed (the POST fans out on any confirmed row at
+      // the shown slot).
       confirmable: visitInfo.visit
         ? (visitInfo.visit.anyConfirmable && ['pending', 'confirmed'].includes(String(svc.status).toLowerCase()) && !dispatchOwnedUnreviewed(svc))
         : (String(svc.status).toLowerCase() === 'pending' && !dispatchOwnedUnreviewed(svc)),
@@ -519,7 +540,10 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     if (!calendarIcsAvailable(svc)) return res.status(404).json({ error: 'Not found' });
 
     const date = apptDateStr(svc.scheduled_date);
-    const start = hhmm(svc.window_start);
+    // Grouped visit: the event starts at the STOP's canonical start, the
+    // same window the page promised — a later member's link must not file a
+    // calendar event that disagrees with its own page (codex r12).
+    const start = calendarWindowStart(svc, await visitServicesFor(svc));
 
     // ET wall-clock -> real instants, so the event lands correctly in any
     // device timezone. The event spans the customer-quoted 2-hour arrival
@@ -605,21 +629,31 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // customer_confirmed; returning success there would mark the client's
     // stale date/window as confirmed instead of reloading the move.
     if (String(svc.status).toLowerCase() === 'confirmed') {
+      // Grouped visit (codex r11/r12): this member is already confirmed —
+      // by the customer OR by staff — but the page offered the confirm for
+      // the whole stop (the GET's confirmable flag keys on the VISIT), so
+      // the tap fans out to the still-pending confirmable siblings. WHO
+      // confirmed this row is irrelevant here: slotMatchesShown above
+      // already proved the row sits at the slot the customer saw, which is
+      // the only thing the customer-vs-rebooker verdict protects on an
+      // ungrouped row. Under the stop lock the row is re-read and must
+      // STILL be a confirmed member of this visit at the shown slot (P1) —
+      // a move landing between the pre-lock read and the lock otherwise
+      // confirms siblings at a slot nobody was shown.
+      if (svc.visit_id) {
+        const ok = await underStopLock(svc, async (trx) => {
+          const cur = await trx('scheduled_services')
+            .where({ id: svc.id })
+            .first('visit_id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start');
+          if (!confirmedRowStillShown(cur, svc, req.body)) {
+            throw Object.assign(new Error('row changed under lock'), { code: 'VISIT_STOP_MOVED' });
+          }
+          await confirmGroupedSiblings(trx, svc);
+        });
+        if (!ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+        return res.json({ success: true, confirmed: true });
+      }
       if (confirmRaceVerdict(svc) === 'idempotent_success') {
-        // Grouped visit (codex r11): this member is already confirmed but
-        // the page offered the confirm for the whole stop — fan out to the
-        // still-pending confirmable siblings under the stop lock, with the
-        // token row's membership re-proven on the locked row.
-        if (svc.visit_id) {
-          const ok = await underStopLock(svc, async (trx) => {
-            const cur = await trx('scheduled_services').where({ id: svc.id }).first('visit_id');
-            if (!cur || String(cur.visit_id || '') !== String(svc.visit_id)) {
-              throw Object.assign(new Error('membership changed'), { code: 'VISIT_STOP_MOVED' });
-            }
-            await confirmGroupedSiblings(trx, svc);
-          });
-          if (!ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
-        }
         return res.json({ success: true, confirmed: true });
       }
       return res.status(409).json({
@@ -782,6 +816,8 @@ router._test = {
   dispatchOwnedUnreviewed,
   visitServicesFor,
   confirmGroupedSiblings,
+  calendarWindowStart,
+  confirmedRowStillShown,
 };
 
 module.exports = router;

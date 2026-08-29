@@ -231,6 +231,25 @@ describe('AppointmentPage non-upcoming states', () => {
     }
   });
 
+  it('a past grouped visit gets the call/text guidance, never a "Pick a new time" link that /reschedule refuses', async () => {
+    stubFetch({ get: jsonResponse({ state: 'past', service: { type: 'Pest Control' }, appointment: {} }) });
+    renderPage();
+    expect(await screen.findByText(/time has passed/)).toBeInTheDocument();
+    expect(screen.getByText('Pick a new time')).toHaveAttribute('href', '/reschedule/deadbeef');
+    cleanup();
+
+    stubFetch({ get: jsonResponse({
+      state: 'past',
+      service: { type: 'Pest Control', visit: { serviceCount: 2, services: ['Pest Control', 'Lawn Fertilization'], windowStart: '09:00' } },
+      appointment: {},
+    }) });
+    renderPage();
+    expect(await screen.findByText(/time has passed/)).toBeInTheDocument();
+    expect(screen.getByText(/move the whole visit together/)).toBeInTheDocument();
+    expect(screen.queryByText('Pick a new time')).not.toBeInTheDocument();
+    expect(screen.getByText('Text Waves')).toBeInTheDocument();
+  });
+
   it('a 404 token shows the friendly not-found card', async () => {
     stubFetch({ get: jsonResponse({ error: 'Not found' }, 404) });
 

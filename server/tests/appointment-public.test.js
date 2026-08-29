@@ -380,3 +380,31 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
   });
 });
+
+describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
+  const { confirmedRowStillShown, calendarWindowStart } = appointmentRouter._test;
+  const shown = { date: '2026-08-05', windowStart: '09:00' };
+  const svc = { id: 'b', visit_id: 'v1' };
+
+  test('the locked re-read must still be a confirmed member of the visit AT THE SHOWN SLOT', () => {
+    const cur = { visit_id: 'v1', status: 'confirmed', customer_confirmed: false, scheduled_date: '2026-08-05', window_start: '09:00:00' };
+    // staff-confirmed at the shown slot fans out (P2): who confirmed the row is irrelevant once the slot is proven
+    expect(confirmedRowStillShown(cur, svc, shown)).toBe(true);
+    expect(confirmedRowStillShown({ ...cur, customer_confirmed: true }, svc, shown)).toBe(true);
+    // moved to a new date/window after the pre-lock check (P1) → CHANGED, never a sibling fan-out
+    expect(confirmedRowStillShown({ ...cur, scheduled_date: '2026-08-06' }, svc, shown)).toBe(false);
+    expect(confirmedRowStillShown({ ...cur, window_start: '11:00:00' }, svc, shown)).toBe(false);
+    // split out of the visit, un-confirmed, or gone
+    expect(confirmedRowStillShown({ ...cur, visit_id: 'v2' }, svc, shown)).toBe(false);
+    expect(confirmedRowStillShown({ ...cur, status: 'pending' }, svc, shown)).toBe(false);
+    expect(confirmedRowStillShown(null, svc, shown)).toBe(false);
+    // a missing client slot fails closed like slotMatchesShown
+    expect(confirmedRowStillShown(cur, svc, {})).toBe(false);
+  });
+
+  test('the calendar file starts at the VISIT start when grouped, the row start otherwise', () => {
+    expect(calendarWindowStart({ window_start: '10:00:00' }, { visit: { windowStart: '09:00' } })).toBe('09:00');
+    expect(calendarWindowStart({ window_start: '10:00:00' }, {})).toBe('10:00');
+    expect(calendarWindowStart({ window_start: '10:00:00' }, { visit: { windowStart: null } })).toBe('10:00');
+  });
+});
