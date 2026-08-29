@@ -1590,6 +1590,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const primary = members.find((m) => String(m.id) === String(serviceId));
         if (!primary || members.length < 2) return null;
+        // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
+        // its per-run change budget from an unlocked pre-read; the member
+        // count that actually moves is decided here, under the stop lock,
+        // and must fit the budget the caller still has — or nothing moves.
+        if (Number.isFinite(options.maxUnitSize) && members.length > options.maxUnitSize) {
+          throw Object.assign(new Error(`Cannot move this stop as a unit: ${members.length} grouped services exceed the caller's remaining change budget (${options.maxUnitSize})`), { statusCode: 409, code: 'VISIT_UNIT_OVER_CAP', isOperational: true, memberCount: members.length });
+        }
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
         // moved as a unit by STAFF, on the direct (non-series) path only —
         // the surfaces whose callers handle partial results. A customer
@@ -1731,8 +1738,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const participating = plan.targets.filter((x) => x.id !== target.id && !failed.some((f) => f.id === x.id));
     const excludeExpect = participating.map((x) => ({ id: x.id, visit_id: plan.visitId, ...(landedState[x.id] || x.expect), ...optOutFence }));
     const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...participating.map((x) => x.id)].map(String))];
+    // The primary's CAS always carries the unit fence (locked membership +
+    // planned technician); a caller's own expect fields are MERGED on top,
+    // never replace it (codex r8). A caller fencing via expectAnchor /
+    // expectSchedule keeps those and still gets the unit keys.
+    const primaryExpect = {
+      ...(callerFenced ? {} : target.expect),
+      visit_id: plan.visitId,
+      technician_id: target.expect.technician_id,
+      ...(options.expect || {}),
+    };
     const memberOpts = target.isPrimary
-      ? { ...options, ...(callerFenced ? {} : { expect: target.expect }), visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...options, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future

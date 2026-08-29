@@ -199,3 +199,32 @@ test('a full grouped move reports movedCount = every moved row', async () => {
   const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
   expect(res.movedCount).toBe(2);
 });
+
+test('a failed visit-parent retarget after a full member move is an explicit failure carrying movedCount', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    warnings: ['visit parent retarget failed: boom'],
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], parentRetargetFailed: true, members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'confirmed' },
+    ] },
+  });
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+  ];
+  db.mockImplementation(() => queue.shift());
+  await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false }))
+    .rejects.toMatchObject({ code: 'VISIT_PARENT_RETARGET_FAILED', movedCount: 2 });
+});
+
+test('the remaining per-run budget is handed to the unit move as maxUnitSize', async () => {
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
+  ];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false, remainingChanges: 4 });
+  expect(SmartRebooker.reschedule.mock.calls[0][5].maxUnitSize).toBe(4);
+});

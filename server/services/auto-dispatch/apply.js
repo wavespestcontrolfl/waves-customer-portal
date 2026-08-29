@@ -89,6 +89,10 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
+  // Remaining per-run change budget (orchestrator): a grouped visit whose
+  // LOCKED member count exceeds it is refused inside the unit move before
+  // any write (VISIT_UNIT_OVER_CAP) — the pre-read reservation is advisory.
+  if (Number.isFinite(config.remainingChanges)) options.maxUnitSize = Math.max(0, config.remainingChanges);
   const techChanged = !!best.technician_id
     && String(best.technician_id) !== String(service.technician_id || '');
   if (techChanged) options.technicianId = best.technician_id;
@@ -229,6 +233,15 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     throw Object.assign(
       new Error(`grouped visit only partly moved — ${partialFailed.map((f) => `${f.id}: ${f.reason}`).join('; ')}`),
       { code: 'VISIT_PARTIAL_MOVE', movedCount, failedMembers: partialFailed.map((f) => f.id) },
+    );
+  }
+  // Every member moved but the visit record could not follow (codex r8):
+  // the cleanup seam may detach/dissolve the group against a parent that
+  // still names the old stop — an escalation, not a success.
+  if (moveResult?.visitMove?.parentRetargetFailed) {
+    throw Object.assign(
+      new Error(`grouped visit moved but its visit record could not be retargeted — ${(moveResult.warnings || []).join('; ')}`),
+      { code: 'VISIT_PARENT_RETARGET_FAILED', movedCount },
     );
   }
 

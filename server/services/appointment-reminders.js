@@ -1519,6 +1519,16 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
           logger.info(`[appt-remind] Confirmation superseded by cancel/reschedule for ${scheduledServiceId}`);
           return false;
         }
+        // A silent move that KEPT the confirmation pending (keepPendingConfirmation
+        // — a grouped sibling moved by moveVisitAsUnit) changed appointment_time
+        // underneath this in-flight send; the time this sender formatted is
+        // stale. Skip WITHOUT marking: the stranded-confirmation sweep re-reads
+        // the row and sends the new time (codex #3609 r8).
+        const freshAt = fresh.appointment_time ? new Date(fresh.appointment_time).getTime() : null;
+        if (freshAt != null && freshAt !== apptTime.getTime()) {
+          logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — appointment time changed under the send; the sweep resends with the new time`);
+          return false;
+        }
       }
 
       // Outside the send window: return WITHOUT marking confirmation_sent —

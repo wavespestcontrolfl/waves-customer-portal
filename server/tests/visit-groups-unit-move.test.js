@@ -214,8 +214,14 @@ describe('moveVisitAsUnit', () => {
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expectAnchor: { scheduled_date: '2026-08-30' } } });
-    expect(rebooker.reschedule.mock.calls[0][5].expect).toBeUndefined();
+    // a caller fencing via expectAnchor keeps it AND still gets the unit fence on expect (codex r8)
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ visit_id: 'v1', technician_id: 't1' });
     expect(rebooker.reschedule.mock.calls[0][5].expectAnchor).toEqual({ scheduled_date: '2026-08-30' });
+    // a caller's own expect fields are merged ON TOP of the unit fence, never replace it
+    jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
+    rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { expect: { auto_dispatch_locked: false, status: 'confirmed' } } });
+    expect(rebooker.reschedule.mock.calls[0][5].expect).toEqual({ visit_id: 'v1', technician_id: 't1', auto_dispatch_locked: false, status: 'confirmed' });
   });
 
   test('sibling reminder sync is fenced with expectSchedule against a newer move', async () => {
@@ -369,5 +375,16 @@ describe('moveVisitAsUnit', () => {
     const rebooker = fakeRebooker();
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(rebooker.reschedule.mock.calls[1][5].expect).toMatchObject({ visit_id: 'v1', technician_id: 't2' });
+  });
+
+  test('maxUnitSize: a locked plan larger than the caller\'s remaining change budget is refused before any write', async () => {
+    db.__script = script({ members: [member('a'), member('b'), member('c')] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { maxUnitSize: 2 } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_UNIT_OVER_CAP', memberCount: 3 });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    db.__script = script({ members: [member('a'), member('b'), member('c')] });
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { maxUnitSize: 3 } });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(3);
   });
 });

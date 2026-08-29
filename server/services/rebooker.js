@@ -1152,7 +1152,7 @@ class SmartRebooker {
         // deadlock between their primary transactions (codex r6).
         const ids = [...new Set([String(serviceId), ...options.excludeExpect.map((x) => String(x.id))])].sort();
         const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate()
-          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const norm = (v) => (v ? String(v).slice(0, 5) : null);
         const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
         for (const exp of options.excludeExpect) {
