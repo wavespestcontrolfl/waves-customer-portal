@@ -428,6 +428,9 @@ const INELIGIBLE_COPY = {
   in_progress: 'Your technician is already on the way for this visit, so it can\'t be moved online.',
   past: 'This visit\'s scheduled time has passed, so it can\'t be moved online.',
   not_available: 'This appointment can\'t be rescheduled online.',
+  // Grouped visit (two or more services at one stop): the office moves the
+  // whole visit together; self-serve is staff-only for now (#3609).
+  grouped: 'This appointment includes more than one service, so it can\'t be moved online yet. We\'ll move the whole visit together for you.',
 };
 
 function IneligibleCard({ data }) {

@@ -1653,7 +1653,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // old slot before the next, earlier-shifted stop claims it. Day moves land on
   // a different (empty) date — order doesn't matter, and keeping anchor-first
   // there fires its reply-alt SMS first.
-  const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
+  // The anchor's OWN visit siblings are moved by the anchor's unit move
+  // and must not represent the visit ahead of it (codex #3609 r4): under a
+  // tail-first reversal a sibling would move the whole visit first and the
+  // anchor — the only row that carries the operator's customerNote — would
+  // be skipped as covered, dropping the note. They go last: covered by
+  // then, or moved individually only if the anchor itself failed.
+  const anchorVisitSiblings = service.visit_id
+    ? jobs.filter((j) => j.id !== serviceId && String(j.visit_id || '') === String(service.visit_id))
+    : [];
+  const mainJobs = anchorVisitSiblings.length ? jobs.filter((j) => !anchorVisitSiblings.includes(j)) : jobs;
+  const orderedJobs = [...((isSameDay && siblingDelta > 0) ? [...mainJobs].reverse() : mainJobs), ...anchorVisitSiblings];
 
   // Exclusion = ONLY the row being moved, per move. Its own pre-move
   // position must not clash against its own target (the rebooker also

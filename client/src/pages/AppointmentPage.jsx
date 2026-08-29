@@ -473,7 +473,9 @@ export default function AppointmentPage() {
               {confirming ? 'Confirming…' : 'Confirm this appointment'}
             </button>
             <div style={{ fontSize: 14, color: S.muted, marginTop: 10, textAlign: 'center', lineHeight: 1.5 }}>
-              Time doesn't work? Pick a different one below — no call needed.
+              {data.rescheduleToken
+                ? "Time doesn't work? Pick a different one below — no call needed."
+                : "Time doesn't work? Text or call us and we'll sort it out."}
             </div>
           </>
         )}
@@ -512,6 +514,17 @@ export default function AppointmentPage() {
           <a href={`/reschedule/${data.rescheduleToken}`} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             See open times
           </a>
+        </Card>
+      ) : data.service?.visit ? (
+        /* Grouped visit: self-serve moves are staff-only for now (#3609) —
+           say so here instead of offering a slot picker that would refuse. */
+        <Card>
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+            Need a different time?
+          </div>
+          <div data-testid="visit-grouped-reschedule" style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+            This visit includes more than one service, so we'll move the whole visit together for you — just text or call.
+          </div>
         </Card>
       ) : null}
 

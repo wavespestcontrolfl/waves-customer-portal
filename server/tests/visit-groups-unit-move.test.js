@@ -71,9 +71,13 @@ describe('shiftClock', () => {
 describe('moveVisitAsUnit', () => {
   // scheduled_services.select answers the PLAN read (forUpdate) with `members`
   // and the RETARGET read (no forUpdate) with `landed`.
-  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0 }) => ({
+  // The pre-primary REVALIDATION read (whereIn id, no forUpdate) answers with
+  // `revalidate` (default: the members as planned, i.e. unchanged).
+  const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: maxSeq } : visit) },
-    scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
+    scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+      : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? (revalidate || members.map((m) => ({ ...m, visit_id: 'v1' })))
+        : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
   });
 
   test('ungrouped row / not open visit / single live member ⇒ null (plain move)', async () => {
@@ -91,7 +95,7 @@ describe('moveVisitAsUnit', () => {
     ] });
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', reason: 'rain', initiatedBy: 'admin', options: { allowLive: false, expect: { scheduled_date: '2026-08-30', window_start: '09:00' }, expectOccurrenceIds: ['x'], technicianId: 't1' } });
-    expect(out.visitMove).toEqual({ visitId: 'v1', moved: ['a', 'b'], failed: [] });
+    expect(out.visitMove).toMatchObject({ visitId: 'v1', moved: ['a', 'b'], failed: [] });
     expect(out.success).toBe(true);
     // primary first with the requested window + the caller's own pins; sibling shifted +4h with a fence from ITS locked row, never the primary's
     const [pCall, sCall] = rebooker.reschedule.mock.calls;
@@ -155,7 +159,7 @@ describe('moveVisitAsUnit', () => {
     db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landed: [{ id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' }] });
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(out.visitMove).toEqual({ visitId: 'v1', moved: ['a'], failed: [{ id: 'b', reason: 'member b boom', code: 'SLOT_TAKEN' }] });
+    expect(out.visitMove).toMatchObject({ visitId: 'v1', moved: ['a'], failed: [{ id: 'b', reason: 'member b boom', code: 'SLOT_TAKEN' }] });
     expect(out.warnings.some((w) => /1 grouped service\(s\) did not move/.test(w))).toBe(true);
     const patch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update' && c.values.scheduled_date);
     expect(patch.values).toMatchObject({ scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' });
@@ -218,13 +222,59 @@ describe('moveVisitAsUnit', () => {
     expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
   });
 
-  test('exact retry of a committed move on a recurring primary re-enters the rebooker (series replay contract) instead of a generic no-op', async () => {
-    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02', is_recurring: true }), member('b', { scheduled_date: '2026-09-02' })] });
-    const rebooker = { reschedule: jest.fn(async () => ({ success: true, replayed: true, seriesMoveId: 'sm1', rescheduledOccurrences: [{ id: 'a' }] })), rescheduleSeries: jest.fn() };
-    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
-    expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true });
-    expect(out).toMatchObject({ replayed: true, seriesMoveId: 'sm1', visitMove: { alreadyAtTarget: true } });
+  test('exact retry of a committed move on a recurring primary re-enters the rebooker (series replay contract) ONLY when the request could have created a series operation', async () => {
+    const committed = () => script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02', is_recurring: true }), member('b', { scheduled_date: '2026-09-02' })] });
+    const replayer = () => ({ reschedule: jest.fn(async () => ({ success: true, replayed: true, seriesMoveId: 'sm1', rescheduledOccurrences: [{ id: 'a' }] })), rescheduleSeries: jest.fn() });
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      db.__script = committed();
+      let rebooker = replayer();
+      const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+      expect(rebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true });
+      expect(out).toMatchObject({ replayed: true, seriesMoveId: 'sm1', visitMove: { alreadyAtTarget: true } });
+      // explicit single policy (Quick Move fallback / auto-dispatch): plain no-op, no re-entry
+      db.__script = committed(); rebooker = replayer();
+      const single = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'single' } });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+      expect(single).toMatchObject({ success: true, visitMove: { alreadyAtTarget: true } });
+    } finally { delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; }
+    // collective gate dark: no series operation could exist → plain no-op
+    db.__script = committed();
+    const rebooker = replayer();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('siblings are always single-row moves (seriesPolicy single), and visitMove.members carries each moved row\'s pre-move status', async () => {
+    db.__script = script({ members: [member('a'), member('b', { status: 'pending', is_recurring: true })] });
+    const rebooker = fakeRebooker();
+    const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { seriesPolicy: 'auto' } });
+    expect(rebooker.reschedule.mock.calls[1][5]).toMatchObject({ seriesPolicy: 'single', visitPolicy: 'single' });
+    expect(out.visitMove.members).toEqual([
+      { id: 'a', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 'b', isPrimary: false, previousStatus: 'pending' },
+    ]);
+  });
+
+  test('adminWindowRules: a DERIVED sibling window that breaks the admin rules refuses the move before any write', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', options: { adminWindowRules: true } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    // without the admin flag (rain-out, auto-dispatch) the derived :30 window is the rebooker's call, as before
+    db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
+    expect(rebooker.reschedule.mock.calls[1][2]).toBe('13:30-14:30');
+  });
+
+  test('a planned sibling that left the visit or its slot between plan and primary write fails the move closed (VISIT_PLAN_STALE) before the primary commits', async () => {
+    db.__script = script({ members: [member('a'), member('b')], revalidate: [{ id: 'b', visit_id: 'other', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_PLAN_STALE', memberId: 'b' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
   });
 
   test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning — by the full target stop, not the date alone', async () => {

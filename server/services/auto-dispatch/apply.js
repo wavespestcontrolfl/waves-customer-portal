@@ -125,7 +125,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // later visit -7d and compound on the next run) — hard-coded here, not a
   // caller convention (owner ruling 2026-08-28).
   options.seriesPolicy = 'single';
-  await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
+  const moveResult = await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
   // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts
   // only PENDING recurring rows for plan-extend / plan_ending, so silently
@@ -155,6 +155,32 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     }
   } catch (stampErr) {
     logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for ${service.id} (move already applied): ${stampErr.message}`);
+  }
+
+  // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit): every
+  // sibling went through the same reschedule() and was forced 'confirmed'
+  // too. Apply the identical restoration + bookkeeping per moved sibling
+  // from its pre-move state, so a pending recurring sibling keeps counting
+  // toward plan extension (codex #3609 r4). Best-effort, like the tapped row.
+  const siblingMembers = (moveResult?.visitMove?.members || []).filter((m) => m && !m.isPrimary && String(m.id) !== String(service.id));
+  for (const sib of siblingMembers) {
+    try {
+      const stamp = {
+        last_auto_dispatch_at: db.fn.now(),
+        last_auto_dispatch_run_id: runId,
+        auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
+        updated_at: db.fn.now(),
+      };
+      if (sib.previousStatus === 'pending') stamp.status = 'pending';
+      await db('scheduled_services').where({ id: sib.id }).update(stamp);
+      if (sib.previousStatus === 'pending') {
+        await db('job_status_history').insert({
+          job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+        });
+      }
+    } catch (stampErr) {
+      logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for grouped sibling ${sib.id} (move already applied): ${stampErr.message}`);
+    }
   }
 
   // Keep appointment_reminders aligned with the new date/time — otherwise the

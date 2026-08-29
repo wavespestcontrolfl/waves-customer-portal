@@ -325,6 +325,7 @@ router.get('/:token', async (req, res, next) => {
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
     const { state, phase } = pageState(svc);
+    const visitInfo = await visitServicesFor(svc);
     const base = {
       state,
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
@@ -337,7 +338,9 @@ router.get('/:token', async (req, res, next) => {
       // one; the SMS that carried the link already did (codex r9).
       // Visit group (visit-group-scope.md §4): the page lists every service
       // at this stop, so one reminder link covers the grouped visit.
-      service: { type: await resolveServiceLabel(svc), ...(await visitServicesFor(svc)) },
+      // (visitInfo is resolved above the payload so rescheduleToken can key
+      // off it too.)
+      service: { type: await resolveServiceLabel(svc), ...visitInfo },
       appointment: {
         date: apptDateStr(svc.scheduled_date),
         windowStart: hhmm(svc.window_start),
@@ -387,7 +390,10 @@ router.get('/:token', async (req, res, next) => {
       // (codex #3429 r3 P2): an unreviewed dispatch-owned booking's reminder
       // now arms before office confirm, and the page must not render a
       // "See open times" CTA whose destination deterministically refuses.
-      rescheduleToken: dispatchOwnedUnreviewed(svc) ? null : svc.reschedule_token,
+      // A grouped visit is not customer self-reschedulable while the unit
+      // move is staff-only (codex #3609 r4): no token → the page renders the
+      // call/text guidance instead of a "See open times" CTA that would 409.
+      rescheduleToken: (dispatchOwnedUnreviewed(svc) || visitInfo.visit) ? null : svc.reschedule_token,
     });
   } catch (err) {
     next(err);

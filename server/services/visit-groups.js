@@ -1587,7 +1587,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         const members = await t('scheduled_services').where({ visit_id: visit.id })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
-          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring');
+          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes');
         const primary = members.find((m) => String(m.id) === String(serviceId));
         if (!primary || members.length < 2) return null;
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
@@ -1622,6 +1622,17 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             targetStart = isPrimary ? win.start : shiftClock(m.window_start, delta);
             targetEnd = isPrimary ? (win.end || (m.window_end ? shiftClock(m.window_end, delta) : null)) : shiftClock(m.window_end, delta);
             window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
+            // Dispatch validates only the tapped window up front; a DERIVED
+            // sibling window must pass the same admin rules (on the hour,
+            // ends by the day cutoff) BEFORE the first member write, or a
+            // chain shifted past the cutoff would persist (codex r4).
+            if (!isPrimary && options.adminWindowRules === true) {
+              try {
+                require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: targetStart, windowEnd: targetEnd, durationMinutes: m.estimated_duration_minutes });
+              } catch (e) {
+                throw Object.assign(new Error(`Cannot move this stop: a grouped service's shifted time is not allowed — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
+              }
+            }
           }
           const norm = (v) => (v ? String(v).slice(0, 5) : null);
           const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
@@ -1631,7 +1642,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             && (!win.start || (!m.window_start && !isPrimary) || (norm(m.window_start) === norm(targetStart) && norm(m.window_end) === norm(targetEnd)))
             && techMatches;
           return {
-            id: m.id, isPrimary, window, alreadyAtTarget,
+            id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
             startHHMM: norm(targetStart) || norm(m.window_start) || null,
             original: { date: dateOnly(m.scheduled_date), window: m.window_start ? `${norm(m.window_start)}-${norm(m.window_end) || norm(m.window_start)}` : null },
             // Per-member fence from the LOCKED row (codex r1): the caller's
@@ -1660,7 +1671,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // rebooker so a committed series move REPLAYS with its own contract
     // (seriesMoveId, occurrences, cleanup) instead of a generic no-op
     // (codex r3); the members are already at the target, nothing moves.
-    if (plan.primaryRecurring) {
+    // Only a request that could actually have created a series_moves
+    // operation re-enters (codex r4): an explicit seriesPolicy 'single'
+    // (Quick Move's fallback, auto-dispatch) or a dark collective gate
+    // keeps the plain no-op — re-entering would insert a second log row
+    // and repeat the caller's effects, or 409 a fenced retry.
+    if (plan.primaryRecurring && options.seriesPolicy !== 'single' && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true') {
       const replay = await rebooker.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, visitPolicy: 'single', skipVisitSeam: true });
       return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
     }
@@ -1683,8 +1699,32 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const callerFenced = options.expect || options.expectAnchor || options.expectSchedule;
     const memberOpts = target.isPrimary
       ? { ...options, ...(callerFenced ? {} : { expect: target.expect }), visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds }
-      : { ...siblingBase, expect: target.expect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
+      // A sibling is ALWAYS a single-row move (codex r4): the dispatch
+      // surface previewed/acknowledged series scope for the tapped row
+      // only, so a recurring sibling must never shift its own future
+      // series undisclosed.
+      : { ...siblingBase, expect: target.expect, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
     try {
+      if (target.isPrimary) {
+        // The plan's locks were released: a planned sibling split from the
+        // visit and re-booked INTO the primary's target would be hidden
+        // from the primary's occupancy probes by the exclusion set. Verify
+        // every excluded sibling still holds its snapshotted old slot and
+        // membership right before the primary commits (codex r4).
+        const sibs = plan.targets.filter((x) => !x.isPrimary);
+        const now = await db('scheduled_services').whereIn('id', sibs.map((x) => x.id)).select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end');
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        for (const sib of sibs) {
+          const cur = now.find((r) => String(r.id) === String(sib.id));
+          const same = cur && String(cur.visit_id) === String(plan.visitId)
+            && dateOnly(cur.scheduled_date) === sib.expect.scheduled_date
+            && norm(cur.window_start) === norm(sib.expect.window_start)
+            && norm(cur.window_end) === norm(sib.expect.window_end);
+          if (!same) {
+            throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), { statusCode: 409, code: 'VISIT_PLAN_STALE', memberId: sib.id, isOperational: true });
+          }
+        }
+      }
       // Explicit series scope (a direct rescheduleSeries caller) is
       // preserved for the primary regardless of the collective gate (r2).
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
@@ -1788,7 +1828,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
 
   if (failed.length) warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
-  const visitMove = { visitId: plan.visitId, moved, failed, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
+  // members: per-row pre-move state so a caller with its own post-move
+  // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
+  // to EVERY row this move touched, not just the tapped one (codex r4).
+  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus }));
+  const visitMove = { visitId: plan.visitId, moved, failed, members, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
 }
 

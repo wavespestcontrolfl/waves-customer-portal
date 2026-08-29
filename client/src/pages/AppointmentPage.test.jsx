@@ -152,6 +152,18 @@ describe('AppointmentPage upcoming visit', () => {
     expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00' });
   });
 
+  it('a grouped visit (no reschedule token) lists its services and offers the call/text path instead of a slot picker', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({
+      service: { type: 'Quarterly Pest Control', visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'] } },
+      rescheduleToken: null,
+    })) });
+    renderPage();
+    expect(await screen.findByTestId('visit-services')).toHaveTextContent('This visit includes Quarterly Pest Control · Lawn Fertilization.');
+    expect(screen.getByTestId('visit-grouped-reschedule')).toHaveTextContent("we'll move the whole visit together");
+    expect(screen.queryByText('See open times')).toBeNull();
+    expect(screen.getByText("Time doesn't work? Text or call us and we'll sort it out.")).toBeTruthy();
+  });
+
   it('an already-confirmed visit shows no Confirm CTA', async () => {
     stubFetch({ get: jsonResponse(upcomingPayload({ confirmed: true })) });
 

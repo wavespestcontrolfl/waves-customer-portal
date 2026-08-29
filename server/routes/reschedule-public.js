@@ -256,6 +256,30 @@ function eligibility(svc, now = new Date()) {
   return { ok: true };
 }
 
+// A grouped visit (two or more live services at one stop) is not customer
+// self-reschedulable while the unit move is staff-only (visit-groups
+// moveVisitAsUnit refuses customer-initiated grouped moves): the surfaces
+// must say so BEFORE the customer picks a slot, not 409 at commit
+// (codex #3609 r4). Reason 'grouped' renders the call/text guidance.
+async function groupedVisit(svc) {
+  if (!svc || !svc.visit_id) return false;
+  try {
+    const row = await db('scheduled_services').where({ visit_id: svc.visit_id })
+      .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
+      .count({ n: 'id' }).first();
+    return Number(row?.n || 0) >= 2;
+  } catch (err) {
+    logger.warn(`[reschedule-public] grouped-visit lookup failed for ${svc.id}: ${err.message}`);
+    return false;
+  }
+}
+
+async function eligibilityAsync(svc, now = new Date()) {
+  const elig = eligibility(svc, now);
+  if (!elig.ok) return elig;
+  return (await groupedVisit(svc)) ? { ok: false, reason: 'grouped' } : elig;
+}
+
 async function loadByToken(token) {
   return db('scheduled_services as s')
     .leftJoin('customers as c', 's.customer_id', 'c.id')
@@ -273,6 +297,7 @@ async function loadByToken(token) {
       's.service_type',
       's.estimated_duration_minutes',
       's.is_recurring',
+      's.visit_id',
       's.recurring_pattern',
       's.recurring_parent_id',
       's.self_booking_id',
@@ -452,7 +477,7 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = eligibility(svc);
+    const elig = await eligibilityAsync(svc);
     const base = {
       state: elig.ok ? 'reschedulable' : 'not_reschedulable',
       reason: elig.ok ? null : elig.reason,
@@ -539,7 +564,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = eligibility(svc);
+    const elig = await eligibilityAsync(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -604,7 +629,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const elig = eligibility(svc);
+    const elig = await eligibilityAsync(svc);
     if (!elig.ok) {
       return res.status(409).json({ error: 'This appointment can no longer be rescheduled online.', reason: elig.reason });
     }
@@ -879,6 +904,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
 router._test = {
   eligibility,
+  eligibilityAsync,
   bookingRange,
   searchParseOpts,
   apptDateStr,

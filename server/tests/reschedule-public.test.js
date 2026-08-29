@@ -18,7 +18,7 @@ const smsMigration = require('../models/migrations/20260702000011_reschedule_lin
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
 const {
-  eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
+  eligibility, eligibilityAsync, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
   seriesScopeMismatch,
@@ -480,5 +480,29 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
       }),
     }));
     await expect(buildRescheduleLink('svc-1')).resolves.toEqual({ url: null, line: '' });
+  });
+});
+
+describe('grouped visits are refused before slot selection (codex #3609 r4)', () => {
+  const NOW = new Date('2026-07-01T12:00:00Z');
+  function wireCount(n) {
+    const api = { where: () => api, whereNotIn: () => api, count: () => api, first: async () => ({ n: String(n) }) };
+    mockDb.mockImplementation(() => api);
+  }
+  test('two or more live services at the stop → not reschedulable, reason grouped', async () => {
+    wireCount(2);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'grouped' });
+  });
+  test('a single-member visit or an ungrouped row keeps the sync verdict (no query when ungrouped)', async () => {
+    wireCount(1);
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: true });
+    mockDb.mockClear();
+    expect(await eligibilityAsync({ status: 'confirmed', scheduled_date: '2026-07-10', visit_id: null }, NOW)).toEqual({ ok: true });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+  test('terminal verdicts win without a membership query', async () => {
+    mockDb.mockClear();
+    expect(await eligibilityAsync({ status: 'completed', scheduled_date: '2026-07-10', visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'completed' });
+    expect(mockDb).not.toHaveBeenCalled();
   });
 });

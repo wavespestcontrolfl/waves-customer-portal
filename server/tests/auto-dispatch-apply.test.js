@@ -110,3 +110,29 @@ test('aborts when window_end changed since scoring', async () => {
   await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
   expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
 });
+
+test('a grouped stop moved as a unit: every moved sibling gets the same bookkeeping stamp and pending restoration as the tapped row', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending' },
+    ] },
+  });
+  const updateTapped = jest.fn().mockResolvedValue(1);
+  const updateSib = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: updateTapped },
+    { where() { return this; }, update: updateSib },
+    { insert }, // sibling's compensating confirmed→pending row
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
+  expect(res).toMatchObject({ ok: true, post_status: 'confirmed' });
+  expect(updateTapped.mock.calls[0][0].status).toBeUndefined();
+  expect(updateSib.mock.calls[0][0]).toMatchObject({ status: 'pending', last_auto_dispatch_run_id: 'run1', auto_dispatch_change_count: { raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' } });
+  expect(insert).toHaveBeenCalledWith({ job_id: 's2', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
+});
