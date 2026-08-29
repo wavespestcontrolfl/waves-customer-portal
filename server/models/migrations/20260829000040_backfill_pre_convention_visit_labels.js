@@ -97,6 +97,16 @@ const UNLINKED_MAPPING = [
   ['Lawn Care Service', 'bimonthly', 'Bi-Monthly Lawn Care Service'],
 ];
 
+// Labels that carry their cadence in the text — the only ones an UNATTACHED
+// draft (no visit, no linkage) can be relabeled from without guessing.
+// Each must map to exactly one target above; the sweep re-checks that.
+const UNATTACHED_LABELS = [
+  'Quarterly Pest Control',
+  'General Pest Control (Quarterly)',
+  'General Pest Control (Semiannual)',
+  'General Pest Control (Bi-Monthly)',
+];
+
 // Linked rows relabel from their own services.name, but only while carrying
 // one of these known-stale generics (never a deliberate custom label, and
 // never a label that is itself a current catalog name — that's a linkage
@@ -241,8 +251,15 @@ async function relabelInvoice(knex, inv, frozen, from, to, state) {
   // timestamp THIS write stamped: down() compares against that, never
   // against a value re-read at rollback time (which would be the owner's
   // later edit and would let the rollback clobber it — r4 P2).
+  // line_items is jsonb: the driver hands back a decoded array, and handing
+  // an array straight back to an update would be encoded as a Postgres
+  // ARRAY, not JSON (r6 P2) — store the prior as the JSON text down() will
+  // write, exactly as up() wrote its own value.
   const prior = {};
-  for (const field of Object.keys(patch)) prior[field] = inv[field] == null ? null : inv[field];
+  for (const field of Object.keys(patch)) {
+    const v = inv[field];
+    prior[field] = v == null ? null : (field === 'line_items' && typeof v !== 'string' ? JSON.stringify(v) : v);
+  }
   const after = await knex('invoices').where({ id: inv.id }).first(knex.raw('updated_at::text AS updated_at_cas'));
   state.invoices.push({
     id: inv.id,
@@ -475,21 +492,21 @@ exports.up = async function up(knex) {
 
   for (const group of groups.values()) await fanOutSnapshots(knex, group, state);
 
-  // Unattached drafts: only labels that resolved to exactly one target
-  // across the mapping AND everything actually relabeled above.
+  // Unattached drafts: only the labels that NAME their own cadence
+  // (UNATTACHED_LABELS) — a draft with no visit has no cadence or linkage
+  // to say which plan it is, so a bare generic ("Pest Control", "General
+  // Pest Control", "Lawn Care Service") stays, and a target inferred from
+  // whichever linked visits or add-ons happen to exist at migration time
+  // is never used (an accidental singleton, r6 P1).
   if (await knex.schema.hasTable('invoices')) {
-    const targets = new Map();
-    const note = (from, to) => {
-      if (!targets.has(from)) targets.set(from, new Set());
-      targets.get(from).add(to);
-    };
-    // Same fail-closed target guard as Leg A: a mapping whose target the
-    // catalog doesn't carry neither relabels visits nor drafts (r5 P2).
-    for (const [from, , to] of UNLINKED_MAPPING) if (catalog.has(to)) note(from, to);
-    for (const { from, to } of groups.values()) note(from, to);
-    for (const [from, tos] of targets) {
+    for (const from of UNATTACHED_LABELS) {
+      const tos = new Set(UNLINKED_MAPPING.filter(([l]) => l === from).map(([, , to]) => to));
       if (tos.size !== 1 || catalog.has(from)) continue;
-      await relabelUnattachedInvoices(knex, from, [...tos][0], state);
+      const to = [...tos][0];
+      // Same fail-closed target guard as Leg A: a mapping whose target the
+      // catalog doesn't carry neither relabels visits nor drafts (r5 P2).
+      if (!catalog.has(to)) continue;
+      await relabelUnattachedInvoices(knex, from, to, state);
     }
   }
 

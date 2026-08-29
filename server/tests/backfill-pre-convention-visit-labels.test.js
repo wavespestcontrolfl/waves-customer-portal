@@ -197,9 +197,10 @@ function seedDb() {
       { id: 'sb-5', service_type: 'Owner Custom Booking Label' },
     ],
     invoices: [
-      // draft for u1: title + service_type + one line item swap
+      // draft for u1: title + service_type + one line item swap. line_items
+      // is a DECODED array here — the jsonb shape node-postgres hands back.
       { id: 'i-u1', scheduled_service_id: 'u1', status: 'draft', title: 'Quarterly Pest Control — first visit', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig',
-        line_items: JSON.stringify([{ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }]) },
+        line_items: [{ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }] },
       // SENT invoice for u1 — history, untouched
       { id: 'i-u1-sent', scheduled_service_id: 'u1', status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       // scheduled invoice for l1 on a FROZEN payer statement — issued document, untouched
@@ -218,8 +219,13 @@ function seedDb() {
       { id: 'i-free-2', scheduled_service_id: null, status: 'draft', title: 'Quarterly Pest Control + General Pest Control (Semiannual)', service_type: null, payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-amb', scheduled_service_id: null, status: 'draft', title: 'Pest Control', service_type: 'Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-sent', scheduled_service_id: null, status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
-      // uniquely mapped label whose TARGET is absent from the catalog — fail closed, untouched
+      // bare generics: no cadence in the label, no visit to supply one — untouched
+      // ('Lawn Care Service' additionally has its mapping target absent from the catalog)
       { id: 'i-free-nocat', scheduled_service_id: null, status: 'draft', title: 'Lawn Care Service', service_type: 'Lawn Care Service', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      { id: 'i-free-gp', scheduled_service_id: null, status: 'draft', title: 'General Pest Control', service_type: 'General Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      // linked-only generic: seen with ONE target among linked rows (l5 → Monthly) — an
+      // accidental singleton, never used for a draft
+      { id: 'i-free-linkedonly', scheduled_service_id: null, status: 'draft', title: 'Pest Control Service', service_type: 'Pest Control Service', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
     ],
     payer_statements: [
       { id: 'ps-closed', status: 'issued' },
@@ -375,7 +381,9 @@ describe('20260829000040 backfill up()', () => {
     expect(inv(db, 'i-free-q').title).toBe('Quarterly Pest Control Service — first visit');
     expect(inv(db, 'i-free-amb').service_type).toBe('Pest Control');
     expect(inv(db, 'i-free-sent').service_type).toBe('Quarterly Pest Control');
-    expect(inv(db, 'i-free-nocat').service_type).toBe('Lawn Care Service'); // target missing from catalog → fail closed
+    expect(inv(db, 'i-free-nocat').service_type).toBe('Lawn Care Service'); // bare generic (+ target missing)
+    expect(inv(db, 'i-free-gp').service_type).toBe('General Pest Control'); // bare generic
+    expect(inv(db, 'i-free-linkedonly').service_type).toBe('Pest Control Service'); // linked-only singleton
     // A combined unattached draft gets EVERY unambiguous component swapped.
     expect(inv(db, 'i-free-2').title).toBe('Quarterly Pest Control Service + Semiannual Pest Control Service');
 
@@ -390,6 +398,7 @@ describe('20260829000040 backfill up()', () => {
       prior: {
         title: 'Quarterly Pest Control — first visit',
         service_type: 'Quarterly Pest Control',
+        // the decoded jsonb array is stored as the JSON text down() will write
         line_items: JSON.stringify([{ description: 'Quarterly Pest Control', category: 'Quarterly Pest Control', amount: 100 }, { description: 'Fuel surcharge', category: 'fee', amount: 5 }]),
       },
       written: {
@@ -439,7 +448,11 @@ describe('20260829000040 down()', () => {
     }
     const strip = (rows) => rows.map(({ updated_at, ...r }) => r);
     expect(strip(db.appointment_reminders)).toEqual(strip(before.appointment_reminders));
-    expect(strip(db.invoices)).toEqual(strip(before.invoices));
+    // A restored jsonb line_items comes back as JSON TEXT (what a real update
+    // must send) — compare structurally, and assert the type explicitly.
+    const norm = (rows) => strip(rows).map((r) => ({ ...r, line_items: typeof r.line_items === 'string' ? JSON.parse(r.line_items) : r.line_items }));
+    expect(norm(db.invoices)).toEqual(norm(before.invoices));
+    expect(typeof inv(db, 'i-u1').line_items).toBe('string');
     expect(db.system_settings).toHaveLength(0);
   });
 
