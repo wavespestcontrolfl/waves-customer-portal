@@ -378,8 +378,14 @@ const DESTINATION_ONLY_RE = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
 // Backslash escapes of ASCII punctuation are interpreted before the label
 // is compared (`[shot\!]` matches `[shot!]`), then case fold + whitespace
 // collapse.
+// CommonMark caps a link label at 999 characters INSIDE the brackets (raw,
+// before unescaping) — an overlong label defines nothing and its reference
+// stays literal text (GH r26).
+const REFERENCE_LABEL_MAX = 999;
 function normalizeReferenceLabel(label) {
-  return String(label || '').replace(/\\([!-/:-@[-`{-~])/g, '$1').trim().replace(/\s+/g, ' ').toLowerCase();
+  const raw = String(label || '');
+  if (raw.length > REFERENCE_LABEL_MAX) return '';
+  return raw.replace(/\\([!-/:-@[-`{-~])/g, '$1').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 // A link reference definition cannot INTERRUPT a paragraph (CommonMark
 // 4.7): it is recognised only at a block start — the first line, after a
@@ -410,6 +416,9 @@ function markdownReferenceDefinitions(str, { depths = null, inList = null } = {}
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
+    // Overlong label ⇒ not a definition; the line is paragraph text (it must
+    // neither define nor be blanked, and must not chain lastDefinitionEnd).
+    if (m[2].length > REFERENCE_LABEL_MAX) continue;
     if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
     let rest = lines[i].slice(m[0].length);
     if (rest.trim() === '') {
@@ -447,6 +456,9 @@ function blankReferenceDefinitions(str, { depths = null, inList = null } = {}) {
   for (let i = 0; i < lines.length; i += 1) {
     const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
+    // Overlong label ⇒ not a definition; the line is paragraph text (it must
+    // neither define nor be blanked, and must not chain lastDefinitionEnd).
+    if (m[2].length > REFERENCE_LABEL_MAX) continue;
     if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
     const rest = lines[i].slice(m[0].length);
     let destLine = -1;

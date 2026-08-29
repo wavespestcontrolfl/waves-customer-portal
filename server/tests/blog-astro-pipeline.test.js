@@ -5414,6 +5414,22 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyImageRefs('<div>\n[pic]: /images/blog/x/body-1.webp\n\n![a][pic]', { mdx: false })).toEqual([]);
   });
 
+  test('bodyImageRefs: .md raw HTML block types 3/4/5 (processing instruction, declaration, CDATA) hide the Markdown inside them; .mdx does not use HTML blocks (GH r26)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const body = '<?x\n![pi](/images/blog/x/body-1.webp)\n?>\n\n<![CDATA[\n![cd](/images/blog/x/body-2.webp)\n]]>\n\n<!DECL\n![decl](/images/blog/x/body-3.webp)\nattr>\n\n![real](/images/blog/x/body-4.webp)';
+    expect(bodyImageRefs(body, { mdx: false }).map((r) => r.alt)).toEqual(['real']);
+    // A same-line close ends the block on its own line.
+    expect(bodyImageRefs('<?x ?>\n\n![a](/images/blog/x/body-1.webp)', { mdx: false }).map((r) => r.alt)).toEqual(['a']);
+  });
+
+  test('bodyImageRefs: a reference label over 999 characters neither defines nor renders — the reference stays literal text (GH r26)', () => {
+    const { bodyImageRefs } = AstroPublisher._internals;
+    const long = 'x'.repeat(1000);
+    const ok = 'y'.repeat(999);
+    const body = `[${long}]: /images/blog/x/body-1.webp\n\n![alt][${long}]\n\n[${ok}]: /images/blog/x/body-2.webp\n\n![kept][${ok}]`;
+    expect(bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([['kept', '/images/blog/x/body-2.webp']]);
+  });
+
   test('assertBodyImagesAtHead: a .md head whose two images sit inside raw HTML blocks withholds; the same body in .mdx passes (GH r24)', async () => {
     const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
     const heroSrc = '/images/2025/12/shrub-diseases.webp';

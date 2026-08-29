@@ -2230,6 +2230,17 @@ function blankJsxAndExpressions(text) {
 // output (quote markers and list indent already removed, code/comments/
 // <pre> blanked, newlines preserved).
 const HTML_BLOCK_TYPE1_RE = /^<(script|pre|style|textarea)(?:\s|>|$)/i;
+// Types 3/4/5 (GH r26): a processing instruction, declaration or CDATA
+// section is a raw HTML block running to its own end marker (which may sit
+// on the opening line) — `<?x\n![hidden](/x.webp)\n?>` renders no image in
+// `.md`. Type 2 (comments) is already blanked by the shared stripper
+// upstream. CDATA is matched before declarations (`<![` is not `<!letter`,
+// but order keeps the intent explicit).
+const HTML_BLOCK_DELIMITED = [
+  { open: /^ {0,3}<\?/, close: /\?>/ }, // type 3
+  { open: /^ {0,3}<!\[CDATA\[/, close: /\]\]>/ }, // type 5
+  { open: /^ {0,3}<![A-Za-z]/, close: />/ }, // type 4
+];
 const HTML_BLOCK_TYPE6_RE = /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>|$)/i;
 const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
 function blankMarkdownHtmlBlocks(text) {
@@ -2246,6 +2257,14 @@ function blankMarkdownHtmlBlocks(text) {
     if (t1) {
       closeRe = new RegExp(`</${t1[1]}>`, 'i');
       const done = closeRe.test(l);
+      if (done) closeRe = null;
+      prevBlank = false;
+      return blankLine(l);
+    }
+    const delim = HTML_BLOCK_DELIMITED.find((d) => d.open.test(l));
+    if (delim) {
+      closeRe = delim.close;
+      const done = closeRe.test(l.replace(delim.open, ''));
       if (done) closeRe = null;
       prevBlank = false;
       return blankLine(l);
