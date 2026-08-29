@@ -69,17 +69,24 @@ async function ghFetch(pathOrUrl, { method = 'GET', body, headers = {}, retries 
 
 // ── Contents API ──────────────────────────────────────────────────
 
+// Contents-API path: encodeURI leaves `?`/`#` bare, so a filename holding a
+// literal `?` would be read as a query string and a committed file reported
+// missing (GH r29). Encode per segment, keeping the `/` separators.
+function encodeContentsPath(path) {
+  return String(path || '').split('/').map(encodeURIComponent).join('/');
+}
+
 async function listDir(path, ref) {
   const { owner, repo, defaultBranch } = env();
   const refQ = ref ? `?ref=${encodeURIComponent(ref)}` : `?ref=${defaultBranch}`;
-  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}${refQ}`);
+  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}${refQ}`);
   return Array.isArray(out) ? out : [];
 }
 
 async function getFile(path, ref) {
   const { owner, repo, defaultBranch } = env();
   const refQ = ref ? `?ref=${encodeURIComponent(ref)}` : `?ref=${defaultBranch}`;
-  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}${refQ}`);
+  const out = await ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}${refQ}`);
   if (!out || Array.isArray(out)) return null;
   const content = out.content ? Buffer.from(out.content, 'base64').toString('utf8') : '';
   return { sha: out.sha, path: out.path, content, raw: out };
@@ -93,7 +100,7 @@ async function putFile({ path, content, message, branch, sha }) {
     branch,
   };
   if (sha) body.sha = sha;
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, { method: 'PUT', body });
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, { method: 'PUT', body });
 }
 
 async function putBinary({ path, buffer, message, branch, sha }) {
@@ -104,13 +111,13 @@ async function putBinary({ path, buffer, message, branch, sha }) {
     branch,
   };
   if (sha) body.sha = sha;
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, { method: 'PUT', body });
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, { method: 'PUT', body });
 }
 
 async function deleteFile({ path, message, branch, sha }) {
   const { owner, repo } = env();
   if (!sha) throw new Error('deleteFile requires file sha');
-  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeURI(path)}`, {
+  return ghFetch(`/repos/${owner}/${repo}/contents/${encodeContentsPath(path)}`, {
     method: 'DELETE',
     body: { message, branch, sha },
   });
@@ -289,6 +296,31 @@ async function updatePr(number, { title, body } = {}) {
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`, { method: 'PATCH', body: fields });
 }
 
+// Blob by SHA (git data API): base64 content up to 100 MB — the fallback
+// for a committed asset whose contents-API response carries metadata but no
+// inline bytes (files over 1 MB).
+// Paths a head branch changes relative to the default branch (compare API:
+// `base...head`, three-dot = merge-base diff, i.e. exactly what the PR
+// carries into the merge). Files GitHub lists are capped at 300 — far above
+// any content PR.
+async function compareFiles(head, base) {
+  const { owner, repo, defaultBranch } = env();
+  const out = await ghFetch(`/repos/${owner}/${repo}/compare/${encodeURIComponent(base || defaultBranch)}...${encodeURIComponent(head)}`);
+  // A renamed entry changes BOTH paths (the old one is deleted by the
+  // merge), so both are reported as PR-changed.
+  const files = [];
+  for (const f of Array.isArray(out?.files) ? out.files : []) {
+    if (f?.filename) files.push(f.filename);
+    if (f?.previous_filename) files.push(f.previous_filename);
+  }
+  return { files, mergeBaseSha: out?.merge_base_commit?.sha || null };
+}
+
+async function getBlob(sha) {
+  const { owner, repo } = env();
+  return ghFetch(`/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(sha)}`);
+}
+
 async function deleteRef(branch) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
@@ -339,6 +371,8 @@ module.exports = {
   getPr,
   closePr,
   updatePr,
+  getBlob,
+  compareFiles,
   deleteRef,
   retireBranch,
   verifyAccess,

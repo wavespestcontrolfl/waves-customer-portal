@@ -165,6 +165,9 @@ function opensHiddenContent(tag) {
   return false;
 }
 
+// HTML void elements: never open a child, never carry a close tag.
+const VOID_TAG_NAMES = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
 // NESTING-AWARE: a regex stopping at the first </span> left the tail of a
 // hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
 function blankHiddenContent(str) {
@@ -176,27 +179,68 @@ function blankHiddenContent(str) {
 // as SEEN — a CTA anchor's visible wording — without discarding merely
 // styled copy.
 function blankDefinitelyHiddenContent(str) {
-  return blankContentWhere(str, opensDefinitelyHidden);
+  return blankContentWhere(str, opensDefinitelyHidden, { keepSummary: true });
 }
-function blankContentWhere(str, opens) {
+// `keepSummary`: a closed <details> hides its body, but its <summary> is
+// what the reader sees — the certainty walker keeps the first summary's
+// content visible (the attribution walker stays conservative).
+function blankContentWhere(str, opens, { keepSummary = false } = {}) {
   const text = String(str || '');
   const out = text.split('');
   const tags = [...eachTag(text)];
+  // Pass 1 — every hidden container's range.
+  const ranges = [];
   for (let t = 0; t < tags.length; t += 1) {
     const tag = tags[t];
     if (tag.isClose || tag.selfClosing || !opens(tag)) continue;
     let depth = 1;
     let endIdx = -1;
+    let endTagIdx = -1;
     for (let u = t + 1; u < tags.length; u += 1) {
       const other = tags[u];
       if (other.name !== tag.name || other.selfClosing) continue;
-      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; break; } }
+      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; endTagIdx = u; break; } }
       else depth += 1;
     }
     // Never closed → blank to end: unterminated hidden content cannot be
     // proven visible either.
-    const stop = endIdx === -1 ? text.length - 1 : endIdx;
-    for (let k = tag.start; k <= stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    ranges.push({ t, tag, start: tag.start, stop: endIdx === -1 ? text.length - 1 : endIdx, endTagIdx });
+  }
+  for (const r of ranges) for (let k = r.start; k <= r.stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  // Pass 2 — a closed <details>'s <summary> is visible ONLY when the
+  // <details> itself is not inside another hidden container.
+  if (keepSummary) {
+    for (const r of ranges) {
+      if (r.tag.name !== 'details') continue;
+      const insideOther = ranges.some((o) => o !== r && o.start <= r.start && r.stop <= o.stop);
+      if (insideOther) continue;
+      // …and only the FIRST <summary> that is a DIRECT child of the
+      // <details> is the disclosure widget (HTML: "the first summary element
+      // child"); a summary nested deeper (`<details><div><summary>…`) stays
+      // inside the collapsed body (GH r24). Direct = no unclosed element
+      // between the <details> open tag and the summary's open tag; void
+      // elements never open a child.
+      const last = r.endTagIdx === -1 ? tags.length : r.endTagIdx;
+      let open = null;
+      let childDepth = 0;
+      for (let u = r.t + 1; u < last; u += 1) {
+        const x = tags[u];
+        if (x.selfClosing || VOID_TAG_NAMES.has(x.name)) continue;
+        if (x.isClose) { childDepth = Math.max(0, childDepth - 1); continue; }
+        if (childDepth === 0 && x.name === 'summary') { open = x; break; }
+        childDepth += 1;
+      }
+      const close = open ? tags.slice(tags.indexOf(open) + 1, last).find((x) => x.name === 'summary' && x.isClose) : null;
+      if (!open || !close) continue;
+      // Restore the summary's own text only — a hidden container NESTED in
+      // the summary (`<summary><span hidden>…`) keeps its pass-one blanks
+      // (hook P1: the whole span copied back resurrected it).
+      const nested = ranges.filter((o) => o !== r && o.start > open.end && o.stop < close.start);
+      for (let k = open.end + 1; k < close.start; k += 1) {
+        if (nested.some((o) => o.start <= k && k <= o.stop)) continue;
+        out[k] = text[k];
+      }
+    }
   }
   return out.join('');
 }
@@ -253,55 +297,325 @@ function blankExpressions(str) {
 // the tail of the URL behind as attributable text. This is a balanced,
 // escape-aware scanner; anything malformed blanks WHOLE so no fragment of it
 // can attribute.
-function blankMarkdownLinkDestinations(str) {
-  // REFERENCE links render only their label: "[Local plan][1]" plus a
-  // "[1]: https://…/Orkin" definition showed readers a local price while the
-  // invisible definition supplied the attribution (Codex r10). Blank the
-  // definition lines and the "[ref]" tails; labels stay where they are.
-  const text = String(str || '')
-    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan)
-    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan);
-  const out = text.split('');
-  const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
-  for (let i = 0; i < text.length; i += 1) {
-    if (text[i] !== '[') continue;
-    const isImage = i > 0 && text[i - 1] === '!';
-    // Balanced label scan.
+// REFERENCE links render only their label: "[Local plan][1]" plus a
+// "[1]: https://…/Orkin" definition showed readers a local price while the
+// invisible definition supplied the attribution (Codex r10). Blank the
+// definition lines, the "[ref]" tails and inline link TITLES
+// ("[a](/x \"title\")" — the title is never rendered text); labels and
+// destinations stay where they are. Length-preserving. Also the body-image
+// scanner's non-rendered-link pass (astro-publisher).
+// A CommonMark thematic break (`***`, `---`, `___`, spaced variants such as
+// `- - -`), judged on a quote-stripped line. It interrupts a paragraph and a
+// list item in the rendered scanner below, and the body-image scanner treats
+// it as a section divider that is never prose. ONE classification — every
+// scanner that asks "is this a break?" asks here.
+const THEMATIC_BREAK_RE = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+function isThematicBreak(line) {
+  return THEMATIC_BREAK_RE.test(String(line || ''));
+}
+// A block that INTERRUPTS a paragraph / list item without a blank line: an
+// ATX heading or a thematic break.
+const INTERRUPTING_BLOCK_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+function isInterruptingBlock(line) {
+  return INTERRUPTING_BLOCK_RE.test(line) || isThematicBreak(line);
+}
+
+// Link reference definitions (`[label]: /dest "title"`) → Map(normalized
+// label → destination). CommonMark label matching: case-folded, interior
+// whitespace collapsed; the FIRST definition of a label wins. The
+// destination may sit on the NEXT line (`[label]:` then `  /dest` — one
+// line ending is allowed between label and destination). Callers pass the
+// code/comment-stripped text (a definition inside a fence is code).
+// Labels honour backslash escapes (`[body\]shot]`); matching keeps the raw
+// escaped text on both sides (CommonMark does not unescape labels).
+// A definition may be the FIRST thing in a list item (`- [pic]: /x.webp`,
+// `1. [pic]: /x.webp`): the marker (1–4 spaces after it — five or more
+// make the rest indented code) is captured so the block-start rule can
+// treat the line as a new container (GH r24).
+const REF_DEFINITION_LABEL_RE = /^[ \t]*(?:((?:[-*+]|\d{1,9}[.)]))[ \t]{1,4})?\[((?:[^\]\\\n]|\\.)+)\]:[ \t]*/;
+// The WHOLE remainder must be a destination plus an optional quoted or
+// parenthesized title — trailing junk (`/dest.webp trailing-junk`) makes the
+// line an ordinary paragraph in CommonMark, so its label defines nothing and
+// `![alt][label]` renders as literal text, not a picture.
+const LINK_DESTINATION_RE = /^\s*(?:<([^<>\n]*)>|(\S+))(?:\s+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?\s*$/;
+// ONE destination grammar for reference definitions and inline links/images:
+// the text after `[label]:` or inside `(...)` must be a destination plus an
+// optional quoted/parenthesized title and nothing else. Returns the
+// destination, or null when the text is not a valid destination (it then
+// renders as literal text).
+// `allowEmpty`: an inline image/link may have an EMPTY destination
+// (`![alt]()`, `![alt](<>)`) — CommonMark still renders it (with an empty
+// src), so the caller gets '' to reject; a reference definition needs a
+// real destination, so it gets null.
+// A bare destination must keep its parentheses BALANCED (an unmatched raw
+// `(` or `)` makes the construct literal text — CommonMark 6.6), escapes
+// honoured; backslash escapes of ASCII punctuation are then interpreted in
+// either form, so `/body-\(detail\).webp` validates `/body-(detail).webp`.
+function balancedBareDestination(dest) {
+  let depth = 0;
+  for (let k = 0; k < dest.length; k += 1) {
+    const ch = dest[k];
+    if (ch === '\\') { k += 1; continue; }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') { depth -= 1; if (depth < 0) return false; }
+  }
+  return depth === 0;
+}
+function unescapePunctuation(text) {
+  return String(text || '').replace(/\\([!-/:-@[-`{-~])/g, '$1');
+}
+function parseLinkDestination(text, { allowEmpty = false } = {}) {
+  const str = String(text || '');
+  if (str.trim() === '' || /^\s*<>\s*$/.test(str)) return allowEmpty ? '' : null;
+  const m = str.match(LINK_DESTINATION_RE);
+  if (!m) return null;
+  if (m[2] !== undefined && !balancedBareDestination(m[2])) return null;
+  const dest = unescapePunctuation((m[1] !== undefined ? m[1] : m[2]).trim());
+  return dest || (allowEmpty ? '' : null);
+}
+const LINK_TITLE_ONLY_RE = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
+const DESTINATION_ONLY_RE = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
+// Backslash escapes of ASCII punctuation are interpreted before the label
+// is compared (`[shot\!]` matches `[shot!]`), then case fold + whitespace
+// collapse.
+// CommonMark caps a link label at 999 characters INSIDE the brackets (raw,
+// before unescaping) — an overlong label defines nothing and its reference
+// stays literal text (GH r26).
+const REFERENCE_LABEL_MAX = 999;
+function normalizeReferenceLabel(label) {
+  const raw = String(label || '');
+  if (raw.length > REFERENCE_LABEL_MAX) return '';
+  return raw.replace(/\\([!-/:-@[-`{-~])/g, '$1').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+// A link reference definition cannot INTERRUPT a paragraph (CommonMark
+// 4.7): it is recognised only at a block start — the first line, after a
+// blank line, after an ATX heading / thematic break, or directly after
+// another accepted definition. `Intro\n[pic]: /x.webp` is paragraph text.
+// `depths` / `inList` (per line, from blankNonRenderedMarkdownWithDepths):
+// a container transition — entering/leaving a blockquote or a list item —
+// starts a new block too (`Intro\n> [pic]: /x.webp` defines `pic`).
+// `marker`: the line carries its own list-item marker (`- [pic]: /x`), so
+// it opens a NEW list item — a new block even between two adjacent items
+// that share depth and list membership (`- Intro` then `- [pic]: /x`,
+// GH r24). A bullet or a `1.` item may interrupt the paragraph before it;
+// an ordered item starting at any other number may not (CommonMark 5.2),
+// and is then paragraph text.
+function definitionMayStartAt(lines, i, lastDefinitionEnd, { depths = null, inList = null, marker = null } = {}) {
+  if (i === 0 || lastDefinitionEnd === i - 1) return true;
+  const prev = lines[i - 1];
+  if (prev.trim() === '' || isInterruptingBlock(prev)) return true;
+  // A completed Setext heading ends its block: `Heading\n===\n[pic]: /x`
+  // starts a definition (GH r29). The `=` line is an underline only when a
+  // paragraph line precedes it — otherwise it is itself paragraph text and
+  // the next line merely continues it. (`---` already counts as a break.)
+  if (/^ {0,3}=+[ \t]*$/.test(prev) && i >= 2 && lines[i - 2].trim() !== '' && !isInterruptingBlock(lines[i - 2])) return true;
+  if (depths && (depths[i] || 0) !== (depths[i - 1] || 0)) return true;
+  if (marker) return !/^\d/.test(marker) || parseInt(marker, 10) === 1;
+  if (inList && !!inList[i] !== !!inList[i - 1]) return true;
+  return false;
+}
+function markdownReferenceDefinitions(str, { depths = null, inList = null } = {}) {
+  const defs = new Map();
+  const lines = String(str || '').split('\n');
+  let lastDefinitionEnd = -2;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(REF_DEFINITION_LABEL_RE);
+    if (!m) continue;
+    // Overlong label ⇒ not a definition; the line is paragraph text (it must
+    // neither define nor be blanked, and must not chain lastDefinitionEnd).
+    if (m[2].length > REFERENCE_LABEL_MAX) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
+    let rest = lines[i].slice(m[0].length);
+    if (rest.trim() === '') {
+      // Continuation line: consumed ONLY when it is a valid destination —
+      // otherwise it is left for the loop (it may be the next definition).
+      const next = String(lines[i + 1] || '');
+      if (!parseLinkDestination(next.trim())) continue;
+      rest = next.trim();
+      i += 1;
+    }
+    const dest = parseLinkDestination(rest);
+    if (!dest) continue;
+    lastDefinitionEnd = i;
+    // A title-only line after a destination-only line belongs to the
+    // definition too (the blanker consumes it likewise).
+    if (DESTINATION_ONLY_RE.test(rest) && lines[i + 1] !== undefined && LINK_TITLE_ONLY_RE.test(lines[i + 1])) { i += 1; lastDefinitionEnd = i; }
+    const label = normalizeReferenceLabel(m[2]);
+    if (!label || defs.has(label)) continue;
+    defs.set(label, dest);
+  }
+  return defs;
+}
+
+// `keepReferenceTails`: leave `][label]` reference tails in place — the
+// balanced scanner below then decides per occurrence (an IMAGE reference
+// is kept under keepImages; a link reference is still blanked).
+// Blank exactly the reference definitions the strict parser recognizes
+// (same walk as markdownReferenceDefinitions): a `[label]:` line whose
+// remainder — or whose continuation line — is a valid destination. A
+// reference-looking prefix followed by anything else is paragraph text and
+// stays (an image on that line still renders and must still be seen).
+function blankReferenceDefinitions(str, { depths = null, inList = null } = {}) {
+  const lines = String(str || '').split('\n');
+  let lastDefinitionEnd = -2;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(REF_DEFINITION_LABEL_RE);
+    if (!m) continue;
+    // Overlong label ⇒ not a definition; the line is paragraph text (it must
+    // neither define nor be blanked, and must not chain lastDefinitionEnd).
+    if (m[2].length > REFERENCE_LABEL_MAX) continue;
+    if (!definitionMayStartAt(lines, i, lastDefinitionEnd, { depths, inList, marker: m[1] || null })) continue;
+    const rest = lines[i].slice(m[0].length);
+    let destLine = -1;
+    let destText = '';
+    if (rest.trim() !== '') {
+      if (parseLinkDestination(rest)) { lines[i] = blankSpan(lines[i]); destLine = i; destText = rest; }
+    } else {
+      const next = lines[i + 1];
+      if (next !== undefined && next.trim() !== '' && parseLinkDestination(next)) {
+        lines[i] = blankSpan(lines[i]);
+        lines[i + 1] = blankSpan(next);
+        destLine = i + 1;
+        destText = next;
+      }
+    }
+    if (destLine < 0) continue;
+    // A title may follow on the NEXT line after a destination-only line
+    // (`[pic]: /x.webp` then `"title"`): CommonMark consumes it with the
+    // definition, so it is not rendered text.
+    const title = lines[destLine + 1];
+    if (DESTINATION_ONLY_RE.test(destText) && title !== undefined && LINK_TITLE_ONLY_RE.test(title)) {
+      lines[destLine + 1] = blankSpan(title);
+      i = destLine + 1;
+    } else {
+      i = destLine;
+    }
+    lastDefinitionEnd = i;
+  }
+  return lines.join('\n');
+}
+function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false, depths = null, inList = null } = {}) {
+  const defsBlanked = blankReferenceDefinitions(str, { depths, inList });
+  return (keepReferenceTails ? defsBlanked : defsBlanked.replace(/\]\s*\[[^\]\n]*\]/g, blankSpan))
+    .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
+}
+
+// `keepImages`: leave image syntax in place (the body-image scanner needs
+// the images themselves) while still blanking every LINK destination — an
+// image nested inside a link destination renders nothing and is blanked
+// with it; an image inside a link LABEL renders and stays.
+// Reference-style images (`![alt][label]`, `![alt][]`, `![alt]`) RENDER a
+// picture exactly like an inline image, so under keepImages their reference
+// tails are kept for the image scanner to resolve against the body's
+// definitions (markdownReferenceDefinitions); reference-style LINKS are
+// blanked to their label either way.
+// Number of consecutive backslashes immediately before `idx` — odd = the
+// character at `idx` is escaped (Markdown escape parity).
+function backslashRunBefore(text, idx) {
+  let n = 0;
+  for (let k = idx - 1; k >= 0 && text[k] === '\\'; k -= 1) n += 1;
+  return n;
+}
+
+// THE balanced Markdown link/image scanner. Yields one span per `[label]`
+// whose label closes: `isImage` (an unescaped `!` precedes the label),
+// `labelStart`/`labelEnd` (the brackets), and `kind`:
+//   'inline'    — `](dest)` with balanced parentheses: destStart..destEnd
+//                 is the text inside the parentheses;
+//   'reference' — `][label]` tail: refStart..refEnd is the text inside;
+//   'malformed' — `](` never closes: `end` is where scanning stopped;
+//   'none'      — a bare `[label]` (shortcut reference or plain brackets).
+// Labels may nest brackets (`[Technician [close-up]]`) and escape them
+// (`\]`); a label or destination stops at a paragraph end. An escaped
+// opening bracket (`\[x](y)`) is still scanned as a link — the citation
+// rules rely on that (an escaped link is literal text, so blanking its
+// destination errs toward "uncited", the safe direction); only the `!`
+// image marker honours escape parity. Every consumer that needs to know
+// where a link or image is asks here — the blanker below and the
+// body-image scanner alike.
+function* eachMarkdownLink(text) {
+  const str = String(text || '');
+  // A LINK label may legally contain an image (`[![alt](/x.webp)](/url)`),
+  // so a link span is not skipped over: scanning continues inside its
+  // label, and only its `](destination)` / `][label]` tail is jumped.
+  const tailSkips = [];
+  for (let i = 0; i < str.length; i += 1) {
+    const skip = tailSkips.find((t) => t.from === i);
+    if (skip) { i = skip.to; continue; }
+    if (str[i] !== '[') continue;
+    const isImage = i > 0 && str[i - 1] === '!' && backslashRunBefore(str, i - 1) % 2 === 0;
     let depth = 0;
     let j = i;
-    for (; j < text.length; j += 1) {
-      const ch = text[j];
+    for (; j < str.length; j += 1) {
+      const ch = str[j];
       if (ch === '\\') { j += 1; continue; }
       if (ch === '[') depth += 1;
       else if (ch === ']') { depth -= 1; if (depth === 0) break; }
-      else if (ch === '\n' && text[j + 1] === '\n') break; // paragraph end
+      else if (ch === '\n' && str[j + 1] === '\n') break; // paragraph end
     }
-    if (j >= text.length || text[j] !== ']' || text[j + 1] !== '(') continue;
-    const labelStart = i;
-    const labelEnd = j;
-    // Balanced destination scan.
-    let k = j + 1;
-    let pdepth = 0;
-    for (; k < text.length; k += 1) {
-      const ch = text[k];
-      if (ch === '\\') { k += 1; continue; }
-      if (ch === '(') pdepth += 1;
-      else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
-      else if (ch === '\n' && text[k + 1] === '\n') break;
+    if (j >= str.length || str[j] !== ']') continue;
+    const span = { isImage, start: isImage ? i - 1 : i, labelStart: i, labelEnd: j, kind: 'none', end: j };
+    if (str[j + 1] === '[') {
+      // Reference tail: escape-aware (`[body\]shot]`), no unescaped `[`,
+      // single line — otherwise the tail is not a label and the span stays
+      // a bare `[label]`.
+      let tailEnd = -1;
+      for (let k = j + 2; k < str.length; k += 1) {
+        const ch = str[k];
+        if (ch === '\\') { k += 1; continue; }
+        if (ch === ']') { tailEnd = k; break; }
+        if (ch === '[' || ch === '\n') break;
+      }
+      if (tailEnd >= 0) {
+        span.kind = 'reference'; span.refStart = j + 2; span.refEnd = tailEnd - 1; span.end = tailEnd;
+      }
+    } else if (str[j + 1] === '(') {
+      let k = j + 1;
+      let pdepth = 0;
+      for (; k < str.length; k += 1) {
+        const ch = str[k];
+        if (ch === '\\') { k += 1; continue; }
+        if (ch === '(') pdepth += 1;
+        else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
+        else if (ch === '\n' && str[k + 1] === '\n') break;
+      }
+      if (k >= str.length || str[k] !== ')') { span.kind = 'malformed'; span.end = Math.min(k, str.length - 1); }
+      else { span.kind = 'inline'; span.destStart = j + 2; span.destEnd = k - 1; span.end = k; }
     }
-    if (k >= text.length || text[k] !== ')') {
+    yield span;
+    // A bare `[label]` is not consumed: a link nested inside it (`[a [b](x)]`)
+    // is still found by the continuing scan. An IMAGE span is consumed whole
+    // (its alt renders as text, never as pictures); a LINK span's label is
+    // scanned for nested images, only its tail is skipped.
+    if (span.kind === 'none') continue;
+    if (span.isImage) i = span.end;
+    else tailSkips.push({ from: span.labelEnd, to: span.end });
+  }
+}
+
+function blankMarkdownLinkDestinations(str, { keepImages = false, depths = null, inList = null } = {}) {
+  const text = blankLinkDefinitionsAndTitles(str, { keepReferenceTails: keepImages, depths, inList });
+  const out = text.split('');
+  const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  for (const span of eachMarkdownLink(text)) {
+    const { isImage, labelStart, labelEnd, end } = span;
+    if (span.kind === 'reference') {
+      // Reference tail `[label]` (only reachable with keepReferenceTails).
+      if (!(isImage && keepImages)) {
+        blank(labelStart, labelStart);       // "["
+        blank(labelEnd, end);                // "][label]"
+      }
+    } else if (span.kind === 'malformed') {
       // Malformed: blank everything we scanned so no fragment attributes.
-      blank(isImage ? labelStart - 1 : labelStart, Math.min(k, text.length - 1));
-      i = Math.min(k, text.length - 1);
-      continue;
+      blank(isImage ? labelStart - 1 : labelStart, end);
+    } else if (span.kind === 'inline') {
+      if (isImage) {
+        if (!keepImages) blank(labelStart - 1, end); // an image renders no text at all
+      } else {
+        blank(labelStart, labelStart);       // "["
+        blank(labelEnd, end);                // "](destination)"
+      }
     }
-    if (isImage) {
-      blank(labelStart - 1, k); // an image renders no text at all
-    } else {
-      blank(labelStart, labelStart);       // "["
-      blank(labelEnd, k);                  // "](destination)"
-    }
-    i = k;
   }
   return out.join('');
 }
@@ -2176,7 +2490,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // An interrupting block (ATX heading or thematic break) ends the list
     // even with no blank line — neither can lazily continue a list item.
     // A dashes-only break ("- - -") is a break, not a list marker.
-    const fenceInterrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    const fenceInterrupting = isInterruptingBlock(stripped);
     const listItem = fenceInterrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     // The tracked list column applies only at ITS quote depth — a line at
     // a different depth measures against a fresh (zero) column.
@@ -2222,6 +2536,12 @@ function blankNonRenderedMarkdownWithDepths(text) {
   let listContentIndent = 0;
   let prevBlank = true;
   const outDepths = [];
+  // Per line: is it LIST content (a marker line, an item's continuation or
+  // lazy continuation, blank lines inside the list)? Consumers that only
+  // want TOP-LEVEL blocks (the body-image scanner) read this instead of
+  // re-deriving list membership from raw indentation — a 1–3 space
+  // indented top-level heading or paragraph is NOT nested (CommonMark).
+  const outInList = [];
   const outText = fenced.split('\n').map((l, i) => {
     // A fence-geometry list end recorded by pass 3 (the fence lines it
     // judged are blanked here, so this pass cannot re-derive it).
@@ -2245,7 +2565,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // INTERRUPTING block (ATX heading, thematic break — dashes-only "- - -"
     // included — or a DEDENTED blockquote) ends the list even with no blank
     // line; none can lazily continue a list item.
-    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped)
+    const interrupting = isInterruptingBlock(stripped)
       || Boolean(quotePrefix && listContext && rawIndent < listContentIndent);
     const listItem = interrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
@@ -2256,6 +2576,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
       listContext = false;
     }
     prevBlank = blank;
+    outInList.push(listContext);
     if (indented) {
       if (!listContext) return '';
       const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
@@ -2263,7 +2584,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     }
     return stripped.replace(/^\s+/, '');
   }).join('\n');
-  return { text: outText, depths: outDepths };
+  return { text: outText, depths: outDepths, inList: outInList };
 }
 
 function blankNonRenderedMarkdown(text) {
@@ -4700,6 +5021,20 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
+  // scanner (astro-publisher's body-image scan masks with these, never a
+  // parallel regex).
+  eachTag,
+  blankExpressions,
+  blankLinkDefinitionsAndTitles,
+  blankMarkdownLinkDestinations,
+  markdownReferenceDefinitions,
+  normalizeReferenceLabel,
+  parseLinkDestination,
+  eachMarkdownLink,
+  isThematicBreak,
+  isInterruptingBlock,
+  blankHiddenContent,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,
   unsupportedBodySyntaxAdded,

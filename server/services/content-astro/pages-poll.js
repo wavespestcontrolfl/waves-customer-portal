@@ -237,6 +237,64 @@ async function pollPost(post, { allowMerge = true } = {}) {
           logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} (per-poll cap reached); retries next tick`);
           return { ok: true, url, mergeDeferred: true };
         }
+        // Body-image contract at the HEAD (owner rule: ≥3 images per post).
+        // publishAstro enforced it when the PR opened — only if the gate was
+        // on THEN; a PR opened under the old setting must not auto-merge
+        // hero-only once the gate flips. Same posture as the human-merge
+        // withhold above: park the claim at pending_review for an admin.
+        // The base tip the body-image check validated against — handed to
+        // mergeAstro, which re-checks it inside its merge lock (GH r25).
+        let validatedBaseSha = null;
+        {
+          const pub = require('./astro-publisher');
+          if (typeof pub.assertBodyImagesAtHead === 'function' && post.astro_branch_name) {
+            let check;
+            try {
+              // publishAstro's own slug fallback (a nullable slug publishes
+              // under slugify(title)); the poll projection may omit both.
+              let pathPost = post;
+              if (!post.slug) {
+                const row = await db('blog_posts').where({ id: post.id }).first('slug', 'title');
+                pathPost = { slug: row?.slug, title: row?.title || post.title };
+              }
+              check = await pub.assertBodyImagesAtHead({ frontmatter: {}, branch: post.astro_branch_name, filePath: pub.scheduledBlogFilePathForPost(pathPost) });
+            } catch (checkErr) {
+              check = { ok: false, transient: true, reason: `body-image check failed: ${checkErr.message}` };
+            }
+            if (!check.ok && check.transient) {
+              // Operational (GitHub 5xx / network) — the claim stays armed
+              // and the next tick re-checks; only a completed contract miss
+              // parks below.
+              logger.warn(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — body-image check could not complete: ${check.reason}`);
+              return { ok: true, url, mergeDeferred: true, reason: 'body_image_check_transient' };
+            }
+            if (!check.ok) {
+              await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
+                .update({ publish_status: 'pending_review', astro_publish_error: `body images: ${check.reason}`.slice(0, 1000), updated_at: new Date() });
+              logger.warn(`[pages-poll] auto-merge WITHHELD for ${post.slug || post.id} — body images: ${check.reason}; PR left open for admin merge`);
+              return { ok: true, url, bodyImagesWithheld: true };
+            }
+            // Unchanged assets were validated as the DEFAULT branch carried
+            // them at that moment (same posture as autonomous-pr-poller
+            // step 3.7): a base push since then could swap one under the
+            // merge — re-read the tip and let the next tick re-validate.
+            if (check.baseSha) {
+              let tip = null;
+              try {
+                const ghc = require('./github-client');
+                tip = await ghc.getBranchSha(ghc.env().defaultBranch);
+              } catch (tipErr) {
+                logger.warn(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — default-branch tip unavailable: ${tipErr.message}`);
+                return { ok: true, url, mergeDeferred: true, reason: 'base_tip_unavailable' };
+              }
+              if (tip && tip !== check.baseSha) {
+                logger.info(`[pages-poll] auto-merge deferred for ${post.slug || post.id} — base moved during gating (${String(check.baseSha).slice(0, 9)} → ${String(tip).slice(0, 9)})`);
+                return { ok: true, url, mergeDeferred: true, reason: 'base_moved_during_gating' };
+              }
+              validatedBaseSha = check.baseSha;
+            }
+          }
+        }
         try {
           const { mergeAstro } = require('./astro-publisher');
           // Pin the merge to the commit this GREEN deploy was built from:
@@ -247,7 +305,7 @@ async function pollPost(post, { allowMerge = true } = {}) {
           // deploymentCommitSha may be null (CF metadata missing) — mergeAstro
           // treats null as "no build-commit assertion" and still enforces its
           // own Codex-clear + head-pinned merge.
-          await mergeAstro(post.id, { expectHeadSha: deploymentCommitSha(deploy) });
+          await mergeAstro(post.id, { expectHeadSha: deploymentCommitSha(deploy), expectBaseSha: validatedBaseSha });
           logger.info(`[pages-poll] auto-merged PR for ${post.slug || post.id} (preview build succeeded)`);
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {

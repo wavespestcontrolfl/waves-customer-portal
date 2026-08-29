@@ -583,6 +583,10 @@ const ContentScheduler = {
           // Curated hero URL that 404s / isn't an image — fails identically
           // every attempt (AI hero GENERATION failures stay untagged/transient).
           'BLOG_HERO_MEDIA_FAILED',
+          // Body-image contract failures (no insertion slots, unreadable or
+          // duplicate pictures) are properties of the content too — and each
+          // retry would pay for image generations again.
+          'BLOG_BODY_IMAGES_FAILED',
         ]);
         // Only release a claim WE hold — if the claim update itself failed
         // (or another instance holds it), writing here would stomp the

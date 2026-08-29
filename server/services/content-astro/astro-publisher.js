@@ -29,6 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
+const { decodeHTMLStrict } = require('entities');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
@@ -806,13 +807,13 @@ async function fetchImageBuffer(url) {
 // filename (hero.webp) so the merge step can persist the path deterministically.
 // Mandatory (throws on failure → publish fails loudly) so the merge-time
 // /images/blog/<slug>/hero.webp assumption always holds.
-async function compressToWebp(buffer) {
+async function compressToWebp(buffer, { width = 1600 } = {}) {
   const sharp = require('sharp');
   return sharp(buffer)
     // Bake EXIF orientation into pixels before stripping metadata — a curated
     // phone/camera JPEG with an Orientation tag would otherwise serve sideways.
     .rotate()
-    .resize({ width: 1600, withoutEnlargement: true })
+    .resize({ width, withoutEnlargement: true })
     .webp({ quality: 80 })
     .toBuffer();
 }
@@ -1354,11 +1355,53 @@ async function publishAstro(postId) {
       slug,
     );
 
-    const markdown = fm.stringify(data, body + '\n');
+    // 2d. Body images (owner rule: ≥3 images per post) — the SAME resolver
+    // and contract as the autonomous lanes. This calendar/scheduler lane
+    // auto-merges unattended once the build is green and Codex is clean, so
+    // it must not ship a hero-only post either. Their alts get the same
+    // narrow compliance pass as the hero alt.
     const filePath = `${ASTRO_BLOG_DIR}/${slug}.md`;
+    // A republish of a merged post finds its pictures only in the LIVE
+    // Markdown (blog_posts.content never receives the inserted references),
+    // so the live file is what lets the resolver REUSE body-N instead of
+    // generating (and paying for) higher-numbered replacements.
+    const liveFile = await gh.getFile(filePath);
+    const bodyImages = await resolveBodyImages({
+      frontmatter: data,
+      slug,
+      body,
+      existingFile: liveFile ? { path: filePath, file: liveFile } : null,
+      brief: {},
+      mdx: false, // this lane writes a flat `.md`
+      // Fresh hero bytes, or the committed hero's repo path when reused —
+      // derived from the frontmatter's RELATIVE src (buildFrontmatter turns
+      // the stored absolute hub URL of a merged post back into it).
+      siblings: [{ label: 'hero', buffer: heroImage?.buffer || null, repoPath: heroImage?.buffer ? null : (String(data?.hero_image?.src || '').startsWith('/') ? `public${data.hero_image.src}` : null) }],
+    });
+    if (bodyImages.newAlts.length) {
+      await assertComplianceClear({ title: post.title, body: '', meta: bodyImages.newAlts, city: post.city, keyword: post.keyword, tag: post.tag }, `${slug} (generated body image alts)`);
+    }
+    const finalBody = bodyImages.body;
+    const markdown = fm.stringify(data, finalBody + '\n');
 
     await gh.createBranch(branch);
     branchCreated = true;
+    // Optimistic lock (the catch below drops the orphan branch): the post
+    // must still carry the SHA it was read at (the tree write replaces it
+    // unconditionally — a concurrent edit on main would otherwise be
+    // overwritten and auto-merged), a NEW post's path must still be absent,
+    // and generated / pinned / reused / superseded pictures must be as
+    // resolved. A plain (transient) error → the scheduler retries.
+    {
+      const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
+      const onBranch = await gh.getFile(filePath, branch);
+      if (liveFile) {
+        if (!onBranch || onBranch.sha !== liveFile.sha) conflicts.push(`${filePath} (post changed: expected ${liveFile.sha}, found ${onBranch?.sha || 'missing'})`);
+      } else if (onBranch) {
+        conflicts.push(`${filePath} (appeared since the publish was resolved)`);
+      }
+      if (conflicts.length) throw new Error(`${slug} changed since it was resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+    }
 
     // 3. Hero + markdown in ONE commit (git data API). Splitting them into
     // per-file Contents API commits let Cloudflare register the branch
@@ -1373,12 +1416,14 @@ async function publishAstro(postId) {
         ...(heroImage?.buffer
           ? [{ path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`, buffer: heroImage.buffer }]
           : []),
+        ...bodyImages.files,
         { path: filePath, content: markdown },
       ],
+      deletes: bodyImages.deletes || [],
     });
 
     // 4. PR
-    const prBody = buildPrBody({ post, slug, branch, content: body });
+    const prBody = buildPrBody({ post, slug, branch, content: finalBody });
     prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
@@ -1485,14 +1530,14 @@ async function publishAstro(postId) {
 // and hand-authored posts may still be .md. Given a path or base (with or
 // without extension), try .mdx first, then .md. Returns { path, file } (file =
 // github-client getFile result: { sha, path, content, raw }) or null.
-async function resolveExistingAstroFile(pathOrBase) {
+async function resolveExistingAstroFile(pathOrBase, { ref = null } = {}) {
   if (!pathOrBase) return null;
   const base = String(pathOrBase).replace(/\.mdx?$/, '');
   // Only blog posts migrate to .mdx (so they can use MDX components); service
   // and location pages stay .md, so don't waste a lookup or change their path.
   const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
   for (const ext of exts) {
-    const file = await gh.getFile(`${base}${ext}`);
+    const file = ref ? await gh.getFile(`${base}${ext}`, ref) : await gh.getFile(`${base}${ext}`);
     if (file) return { path: `${base}${ext}`, file };
   }
   return null;
@@ -1515,13 +1560,13 @@ function blogRouteKey(value) {
 // clobber it; a candidate with no readable slug is adopted (it occupies the path
 // we resolved it from). Lets publishOrUpdatePage update/migrate an existing post
 // in place whether it lives at the flat or the category path.
-async function firstExistingRouteFile(basePaths, routeSlug) {
+async function firstExistingRouteFile(basePaths, routeSlug, { ref = null } = {}) {
   const want = blogRouteKey(routeSlug);
   const seen = new Set();
   for (const base of basePaths) {
     if (!base || seen.has(base)) continue;
     seen.add(base);
-    const found = await resolveExistingAstroFile(base);
+    const found = await resolveExistingAstroFile(base, { ref });
     if (!found) continue;
     let existingSlug = '';
     try {
@@ -1535,15 +1580,17 @@ async function firstExistingRouteFile(basePaths, routeSlug) {
 }
 
 async function resolveExistingAstroFileForTarget(targetUrlOrPath, opts = {}) {
+  // `opts.ref`: resolve against a branch (the PR head) instead of main.
+  const { ref = null } = opts;
   const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
   if (target) {
-    const resolved = await resolveExistingAstroFile(target);
+    const resolved = await resolveExistingAstroFile(target, { ref });
     if (resolved) return resolved;
   }
 
   const registryPath = await registryAstroPathForTarget(targetUrlOrPath, opts);
   if (registryPath && registryPath !== target) {
-    const resolved = await resolveExistingAstroFile(registryPath);
+    const resolved = await resolveExistingAstroFile(registryPath, { ref });
     if (resolved) return resolved;
   }
 
@@ -1825,6 +1872,1099 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   return generated;
 }
 
+// ── Body images (publish-time) ──────────────────────────────────────
+//
+// Owner rule 2026-08-27: every autopublished post ships ≥3 images — the hero
+// plus at least BODY_IMAGE_MIN in-article illustrations. The writer emits
+// prose only; the publisher adds the illustrations deterministically so the
+// rule never depends on prompt compliance:
+//   - each image is generated from one H2 section (heading = subject, first
+//     prose paragraph = context) and inserted at the END of that section's
+//     prose — the shape the reference post (quarterly-pest-control.mdx) uses;
+//   - files commit beside the hero as /images/blog/<slug>/body-N.webp in the
+//     same atomic commit; an update run reuses a body-N.webp already on main
+//     (with the alt the live body carries) instead of regenerating;
+//   - failure is fail-closed (BLOG_BODY_IMAGES_FAILED, deterministic → parks
+//     the run for review), mirroring the hero.
+// Dark-shipped behind GATE_BLOG_BODY_IMAGES (feature-gates.blogBodyImages).
+const BODY_IMAGE_MIN = 2;
+const BODY_IMAGE_WIDTH = 1200;
+// Framing rotates per slot (the hero is the wide shot) so the three pictures
+// differ in kind, not just subject.
+const BODY_IMAGE_SHOTS = ['close-up', 'action', 'environment'];
+// dHash distance (of 64 bits) at or below which two images are the same
+// picture for a reader — regenerate once with the next framing, then park.
+const NEAR_DUPLICATE_MAX_DISTANCE = 12;
+
+// 64-bit difference hash: grayscale 9×8, each bit = left pixel darker than
+// its right neighbour. Robust to resize/recompress, blind to palette.
+// Alpha is flattened onto white first and pixels are indexed by the channel
+// count Sharp actually returned — an RGBA source must hash like its opaque
+// twin, never as interleaved luma/alpha bytes. A buffer Sharp cannot decode
+// (corrupt file, pixel limit) is a DETERMINISTIC body-image failure: the
+// same bytes fail the same way every run, so the run parks instead of
+// retry-looping.
+async function imageDHash(buffer) {
+  const sharp = require('sharp');
+  let data;
+  let info;
+  try {
+    ({ data, info } = await sharp(buffer)
+      // Display orientation first: an orientation-tagged JPEG and its
+      // auto-oriented WebP twin are the same picture to a reader.
+      .rotate()
+      .flatten({ background: '#ffffff' })
+      .grayscale()
+      .resize(9, 8, { fit: 'fill' })
+      .raw()
+      .toBuffer({ resolveWithObject: true }));
+  } catch (err) {
+    const e = new Error(`body image could not be decoded for the distinctness check: ${err.message}`);
+    e.code = 'BLOG_BODY_IMAGES_FAILED';
+    e.cause = err;
+    throw e;
+  }
+  const ch = Math.max(1, Number(info?.channels) || 1);
+  const at = (x, y) => data[(y * 9 + x) * ch];
+  const bits = new Array(64);
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits[y * 8 + x] = at(x, y) < at(x + 1, y) ? 1 : 0;
+  return bits;
+}
+function hammingDistance(a, b) {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d += 1;
+  return d;
+}
+// Bytes of an image already committed in the Astro repo (contents API
+// returns base64 for files < 1 MB — every hero/body WebP is far under). Null
+// when unavailable; callers then treat the image as unverifiable for the
+// near-duplicate check and regenerate rather than reuse blind.
+// Only a MISSING or unreadable asset is null (the contents API answers 404
+// with null): an operational failure (GitHub 5xx, network) is thrown, not
+// swallowed — callers turn null into a deterministic park, and a transient
+// outage must instead propagate so the runner retries the publish.
+async function committedImageBuffer(repoPath, getFile = (path) => gh.getFile(path)) {
+  const file = await getFile(repoPath);
+  if (!file) return null;
+  let b64 = file?.raw?.content;
+  // The contents API omits inline bytes for files over 1 MB (metadata with
+  // an empty `content`): the blob is fetched by SHA instead — a large legacy
+  // hero is a real, verifiable picture, not a missing one.
+  if (!b64 && file?.raw?.sha && typeof gh.getBlob === 'function') {
+    const blob = await gh.getBlob(file.raw.sha);
+    b64 = blob?.content;
+  }
+  if (!b64) return null;
+  const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
+  return buffer.length ? buffer : null;
+}
+
+// Picture-level half of the body-image contract, shared with remediation:
+// every referenced image (fetched via `getFile`, e.g. on the PR branch) must
+// differ visually from the hero and from each other. Returns { ok, reason }.
+async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
+  const seen = [];
+  const hero = String(heroSrc || '');
+  if (hero) {
+    // Fail closed: without the hero's bytes a body image cannot be proven
+    // different from it.
+    const buf = hero.startsWith('/') ? await committedImageBuffer(`public${hero}`, getFile) : null;
+    if (!buf) return { ok: false, reason: `hero bytes unavailable for ${hero} — cannot verify body images differ from the hero` };
+    seen.push({ label: 'hero', hash: await imageDHash(buf) });
+  }
+  for (const src of srcs) {
+    const buf = await committedImageBuffer(`public${src}`, getFile);
+    if (!buf) return { ok: false, reason: `image bytes unavailable for ${src}` };
+    const dup = await nearDuplicateOf(buf, seen);
+    if (dup.label) return { ok: false, reason: `${src} is a near-duplicate of ${dup.label} — body images must be distinct pictures` };
+    seen.push({ label: src, hash: dup.hash });
+  }
+  return { ok: true, reason: null };
+}
+
+// Merge-time contract for the autonomous PR poller: with the gate ON, the
+// post file at the PR HEAD must satisfy the whole body-image contract (refs
+// valid, ≥ minimum distinct, distinct pictures) — a PR opened while the gate
+// was OFF must not auto-merge hero-only the moment the gate flips.
+// Returns { ok, reason }; anything unreadable fails closed.
+// Result contract: `{ ok: true }` (or `gate_off`), `{ ok: false, reason }`
+// for a completed contract miss (deterministic — callers withhold/park), or
+// `{ ok: false, transient: true, reason }` when the check could not complete
+// (GitHub read failure) — callers defer and retry, never park.
+async function assertBodyImagesAtHead(args) {
+  try {
+    return await assertBodyImagesAtHeadInner(args);
+  } catch (err) {
+    return { ok: false, reason: err.message, transient: err?.code !== 'BLOG_BODY_IMAGES_FAILED' };
+  }
+}
+async function assertBodyImagesAtHeadInner({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
+  if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
+  if (!branch) return { ok: false, reason: 'PR head branch unknown' };
+  // Assets are validated as the MERGE will carry them: a path the PR did
+  // not change resolves to the default branch's current blob (that is what
+  // the merge takes), only PR-changed paths resolve on the head. The
+  // default branch tip is captured here so the merge step can refuse when
+  // the base moved after this check (`baseSha`).
+  let changed = new Set();
+  let baseSha = null;
+  let mergeBaseSha = null;
+  if (typeof gh.compareFiles === 'function') {
+    const cmp = await gh.compareFiles(branch);
+    changed = new Set(cmp?.files || []);
+    mergeBaseSha = cmp?.mergeBaseSha || null;
+  }
+  if (typeof gh.getBranchSha === 'function' && typeof gh.env === 'function') {
+    baseSha = await gh.getBranchSha(gh.env().defaultBranch) || null;
+  }
+  // Unchanged assets are read AT the captured base tip, not the moving
+  // default-branch ref — a base push between the tip capture and this read
+  // could otherwise turn into a deterministic park (GH r29). baseSha null
+  // (client without getBranchSha) falls back to the default branch.
+  const getFile = (path) => (changed.size === 0 || changed.has(path) ? gh.getFile(path, branch) : gh.getFile(path, baseSha || undefined));
+  let found = null;
+  let label = '';
+  let legacyHeroSrcs = [];
+  if (actionType === 'refresh_existing_page') {
+    // EXACTLY publishRefresh's target resolution (explicit file_path, else
+    // URL → path, else the content_registry source path — a blog canonical
+    // outside /blog/ lives there), on the PR head. Only a RESOLVED non-blog
+    // file is exempt; an unresolved target fails closed.
+    found = filePath
+      ? await resolveExistingAstroFile(filePath, { ref: branch })
+      : await resolveExistingAstroFileForTarget(targetUrl, { ref: branch });
+    label = filePath || targetUrl || 'refresh target';
+    if (!found) return { ok: false, reason: `refresh target ${label} not found on ${branch}` };
+    if (!isBlogTarget(found.path)) return { ok: true, reason: 'non_blog_target' };
+    // Grandfather: ONLY the exact hero reference(s) the post on MAIN already
+    // embeds in its body — a hero ref the refresh introduces or changes is
+    // validated normally.
+    const live = await resolveExistingAstroFile(found.path);
+    if (live?.file?.content) {
+      try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src, { mdx: !/\.md$/i.test(String(live.path || found.path)) }); } catch (_) { legacyHeroSrcs = []; }
+    }
+  } else if (filePath) {
+    // Scheduler lane: publishAstro writes a known flat `.md` path — read
+    // EXACTLY that file (resolveExistingAstroFile would prefer a stale
+    // `.mdx` sibling when both exist).
+    const file = await gh.getFile(filePath, branch);
+    found = file ? { path: filePath, file } : null;
+    label = filePath;
+  } else {
+    // EXACTLY the file publishOrUpdatePage wrote: the route-matched existing
+    // file (category or flat path, .mdx or legacy .md), else the new
+    // category-route .mdx.
+    let slug;
+    try {
+      slug = categoryRouteSlug(slugPathFromFrontmatter(frontmatter || {}), normalizeAutonomousCategory(frontmatter || {}, brief || {}));
+    } catch (err) {
+      return { ok: false, reason: `post slug unresolved: ${err.message}` };
+    }
+    found = await firstExistingRouteFile([`${ASTRO_BLOG_DIR}/${slug}`, `${ASTRO_BLOG_DIR}/${slugLeafOf(slug)}`], slug, { ref: branch });
+    if (!found) {
+      const path = `${ASTRO_BLOG_DIR}/${slug}.mdx`;
+      const file = await getFile(path);
+      if (file) found = { path, file };
+    }
+    label = slug;
+  }
+  if (!found?.file?.content) return { ok: false, reason: `post file for ${label} not found on ${branch}` };
+  // The body is read from the PR head, but the MERGE carries main's edits
+  // to the same file when GitHub can combine them (e.g. main dropped one
+  // image reference in a section the PR left alone). A post that changed
+  // on the default branch since the branch was cut is withheld for a
+  // rebase / human merge rather than validated on a copy the merge will
+  // not ship.
+  if (mergeBaseSha) {
+    const [onBase, atFork] = await Promise.all([gh.getFile(found.path), gh.getFile(found.path, mergeBaseSha)]);
+    if ((onBase?.sha || null) !== (atFork?.sha || null)) {
+      return { ok: false, reason: `${found.path} changed on the default branch since ${branch} was cut (${(atFork?.sha || 'absent').slice(0, 9)} → ${(onBase?.sha || 'absent').slice(0, 9)}) — the merged body cannot be validated from the PR head; rebase or merge by hand` };
+    }
+  }
+  let parsed;
+  try { parsed = fm.parse(found.file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
+  const body = String(parsed?.content || '');
+  const heroSrc = String(parsed?.data?.hero_image?.src || '');
+  // Validated as the file on the branch RENDERS: a `.md` post's raw HTML
+  // blocks hide the Markdown inside them (an image there is literal text).
+  // Own managed-namespace keys: the frontmatter route, its category route
+  // (what publishOrUpdatePage stamps and files under), and the file-derived
+  // slug — any of them is "own"; only a clearly foreign namespace parks.
+  const ownSlugs = [String(found.path || '').replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')];
+  try {
+    const fmSlug = slugPathFromFrontmatter(parsed?.data || {});
+    ownSlugs.push(fmSlug, categoryRouteSlug(fmSlug, normalizeAutonomousCategory(parsed?.data || {}, brief || {})));
+  } catch (_) { /* no safe frontmatter slug — file key only */ }
+  const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs, mdx: !/\.md$/i.test(String(found.path)), slug: ownSlugs });
+  if (!valid.ok) return { ok: false, reason: valid.reason };
+  if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
+  const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
+  if (!pictures.ok) return { ok: false, reason: pictures.reason };
+  return { ok: true, reason: null, baseSha };
+}
+
+// An image-generation error is transient when any provider attempt was
+// retryable (5xx / rate limit / timeout) or the failure is a network-shaped
+// error around the download — nothing about the content caused it.
+const TRANSIENT_HTTP_STATUS_RE = /^(?:408|425|429|5\d\d)$/;
+function attemptIsTransient(a) {
+  const r = a?.result || a || {};
+  if (r.retryable === true) return true;
+  // Some providers (Gemini) record a 429 / 5xx as `fatal` — the STATUS says
+  // it was a temporary response, so it is classified by status here.
+  return TRANSIENT_HTTP_STATUS_RE.test(String(r.status ?? ''));
+}
+function isTransientImageError(err) {
+  const attempts = Array.isArray(err?.attempts) ? err.attempts : [];
+  if (attempts.length) return attempts.some(attemptIsTransient);
+  return /\b(?:5\d\d|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|timeout|timed out|rate limit)\b/i.test(String(err?.message || '')) || /^E(?:CONN|TIMEDOUT|NOTFOUND|AI_AGAIN)/.test(String(err?.code || ''));
+}
+
+async function nearDuplicateOf(buffer, siblings) {
+  const hash = await imageDHash(buffer);
+  for (const sib of siblings) if (hammingDistance(hash, sib.hash) <= NEAR_DUPLICATE_MAX_DISTANCE) return { label: sib.label, hash };
+  return { label: null, hash };
+}
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
+// Upper bound on body-N names scanned per post before parking (a directory
+// full of files this run can neither reuse nor overwrite is a human problem).
+const BODY_IMAGE_NAME_SCAN_MAX = 50;
+const BODY_IMAGE_SKIP_HEADING_RE = /\b(?:faq|faqs|frequently asked|questions|sources|references|summary|bottom line|key takeaways|next steps)\b/i;
+
+function bodyImagesEnabled() {
+  try { return require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { return false; }
+}
+
+// Rendered image references in the body — fenced code is skipped (an
+// `![x](y)` inside a code block is text, not an image).
+// Only an ODD backslash run escapes the "!" (Markdown escape parity).
+// Destination = up to the first whitespace; ONE level of balanced parens is
+// part of the path ("/body-(detail).webp"), as CommonMark allows.
+// Inline OR reference-style image: `![alt](dest)`, `![alt][label]`,
+// `![alt][]` (collapsed), `![alt]` (shortcut). A reference form renders a
+// picture only when its label has a definition in the body — an undefined
+// label is text, not an image.
+// An angle-bracketed inline destination (`](</images/a b.webp>)`, valid
+// CommonMark, may hold spaces) is rewritten to its equivalent bare form
+// (`](/images/a%20b.webp)`) BEFORE tag masking — `</images/…>` otherwise
+// reads as a closing HTML tag and is blanked. Same-line rewrite: line
+// indices hold. Bare destinations are percent-DECODED when resolved so the
+// committed-file check sees the real path.
+// Both inline (`](<dest>`) and definition (`[label]: <dest>`, also with the
+// destination on the continuation line) forms are normalized — either
+// would otherwise read as an HTML closing tag to the tag masker.
+const ANGLE_DESTINATION_RE = /(\]\(|^[ \t]*\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:\n[ \t]*)?)<((?:[^<>\\\n]|\\.)*)>/gm;
+// Characters that are structural in a bare destination — spaces and
+// parentheses — are percent-encoded (`</a.webp)variant>` → `/a.webp%29variant`)
+// and decoded back when the destination is resolved, so the path the
+// browser requests is the path that gets validated.
+function normalizeAngleDestinations(text) {
+  // EVERY character between the brackets is part of the destination —
+  // leading/trailing spaces included (CommonMark keeps them), so they are
+  // encoded, never trimmed away.
+  // Escapes are honoured (`\>` is a literal `>` inside the brackets) and the
+  // escaped punctuation is interpreted before encoding, as CommonMark does.
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.replace(/\\([!-/:-@[-`{-~])/g, '$1').replace(/[ ()<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
+}
+// CommonMark resolves HTML character references in a destination BEFORE
+// the URL is emitted (`body&amp;detail.webp` renders a request for
+// `body&detail.webp`; `&#x2F;` is `/`) — so both inline and reference
+// destinations are entity-decoded first, then percent-decoded, and the
+// committed-file check probes the path the browser asks for (GH r24).
+// Strict = the full HTML5 named list with the `;` mandatory, as the spec
+// requires; an unknown or unterminated reference stays literal text.
+function decodeDestination(src) {
+  const text = decodeHTMLStrict(String(src ?? ''));
+  // The browser resolves `?query`/`#fragment` BEFORE percent-decoding, so
+  // `/detail.webp?v=2` requests `detail.webp` (validated by pathname) while
+  // `%3F` stays a literal character in the filename. The body keeps the
+  // authored URL — refs are validation identity, never rewritten (GH r27).
+  const path = text.split(/[?#]/)[0];
+  try { return decodeURIComponent(path); } catch (_) { return path; }
+}
+// Every image the rendered body shows — inline (`![alt](dest "title")`),
+// full/collapsed/shortcut reference (`![alt][label]`, `![alt][]`, `![alt]`)
+// — found with the guardrails' balanced scanner run over the WHOLE
+// newline-preserving text (a label may wrap across a soft line break), each
+// tagged with the line its `![` sits on. An inline destination must satisfy
+// the full destination-plus-optional-title grammar (parseLinkDestination) or
+// the construct is literal text, not a picture; reference labels resolve
+// through `defs` (markdownReferenceDefinitions); a malformed image is text.
+function imageRefsInText(text, defs) {
+  const out = [];
+  const str = String(text || '');
+  let line = 0;
+  let cursor = 0;
+  for (const span of contentGuardrails.eachMarkdownLink(str)) {
+    if (!span.isImage) continue;
+    for (; cursor < span.start; cursor += 1) if (str[cursor] === '\n') line += 1;
+    const alt = str.slice(span.labelStart + 1, span.labelEnd).replace(/\s+/g, ' ').trim();
+    if (span.kind === 'inline') {
+      // An EMPTY destination still renders (empty src) → surfaced as '' so
+      // validation rejects it rather than the image vanishing from the scan.
+      const dest = contentGuardrails.parseLinkDestination(str.slice(span.destStart, span.destEnd + 1), { allowEmpty: true });
+      if (dest !== null) out.push({ alt, src: decodeDestination(dest), line });
+      continue;
+    }
+    if (span.kind === 'malformed') continue;
+    const tail = span.kind === 'reference' ? str.slice(span.refStart, span.refEnd + 1) : '';
+    const label = contentGuardrails.normalizeReferenceLabel(tail || alt);
+    if (label && defs && defs.has(label)) out.push({ alt, src: decodeDestination(defs.get(label)), line });
+  }
+  return out;
+}
+
+// The body with every non-rendered region blanked (fenced/indented code,
+// code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
+// still address the original text. Shared stripper, so "rendered" here means
+// exactly what the table scanner and CTA extraction mean by it.
+// Markdown image syntax inside a JSX/HTML tag (an attribute string) or an
+// MDX expression is data, not a rendered image — mask tags (multi-line
+// components included) and balanced {…} expressions after the shared
+// stripper has removed code and comments.
+// Tags are walked QUOTE-AWARE (content-guardrails.eachTag — a quoted
+// attribute may contain ">") and MDX expressions are blanked balanced and
+// quote-aware (blankExpressions); both keep newlines so line indices hold.
+function blankJsxAndExpressions(text) {
+  const str = String(text || '');
+  const out = str.split('');
+  for (const tag of contentGuardrails.eachTag(str)) {
+    for (let k = tag.start; k <= tag.end; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return contentGuardrails.blankExpressions(out.join(''));
+}
+
+// CommonMark HTML blocks (spec 4.6) — the `.md` (remark) case only. In a
+// legacy `.md` post a line opening a block-level HTML element (type 6:
+// `<div>`, `<figure>`, `<p>`, … — or any complete tag alone on a line
+// that does not interrupt a paragraph, type 7) starts an HTML BLOCK that
+// runs to the next blank line, and EVERYTHING in it is raw HTML: a
+// `![alt](/x.webp)` inside `<div>…</div>` is literal text on the page, not
+// a picture (GH r24). `.mdx` has no HTML blocks — JSX children are parsed
+// as Markdown and such an image renders — so this masks only when the
+// caller says the file is `.md`. Type 1 (`<script>`/`<style>`/`<pre>`/
+// `<textarea>`) runs to its closing tag. Input is the shared stripper's
+// output (quote markers and list indent already removed, code/comments/
+// <pre> blanked, newlines preserved).
+const HTML_BLOCK_TYPE1_RE = /^<(script|pre|style|textarea)(?:\s|>|$)/i;
+// Types 3/4/5 (GH r26): a processing instruction, declaration or CDATA
+// section is a raw HTML block running to its own end marker (which may sit
+// on the opening line) — `<?x\n![hidden](/x.webp)\n?>` renders no image in
+// `.md`. Type 2 (comments) is already blanked by the shared stripper
+// upstream. CDATA is matched before declarations (`<![` is not `<!letter`,
+// but order keeps the intent explicit).
+const HTML_BLOCK_DELIMITED = [
+  { open: /^ {0,3}<\?/, close: /\?>/ }, // type 3
+  { open: /^ {0,3}<!\[CDATA\[/, close: /\]\]>/ }, // type 5
+  { open: /^ {0,3}<![A-Za-z]/, close: />/ }, // type 4
+];
+const HTML_BLOCK_TYPE6_RE = /^<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:\s|\/?>|$)/i;
+const HTML_BLOCK_TYPE7_RE = /^(?:<[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?)*\s*\/?>|<\/[A-Za-z][A-Za-z0-9-]*\s*>)\s*$/;
+// A list item may OPEN an HTML block (`- <div>`): the block then runs inside
+// the item and its content is raw HTML (GH r28). The stripper removes list
+// INDENT but keeps the marker, so opener detection runs on the line with a
+// leading marker removed.
+const LIST_MARKER_PREFIX_RE = /^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+/;
+function blankMarkdownHtmlBlocks(text, { depths = null, inList = null } = {}) {
+  const lines = String(text || '').split('\n');
+  let closeRe = null; // type 1: ends on the line carrying the closing tag
+  let inBlock = false; // types 6/7: end at a blank line
+  // A type-7 block needs a BLOCK BOUNDARY, not specifically a blank line
+  // (hook P1): a heading or thematic break ends the previous block, so a
+  // standalone `<span>` directly after `## H` opens a raw HTML block. Only
+  // a paragraph line (ordinary text) blocks it — type 7 cannot interrupt a
+  // paragraph. A closed HTML block is a boundary too.
+  let atBoundary = true;
+  const blankLine = (l) => ' '.repeat(l.length);
+  return lines.map((l, i) => {
+    const blank = l.trim() === '';
+    // Entering/leaving a blockquote or list item starts a new block even
+    // mid-paragraph — a quote can interrupt, so `Intro\n> <span>` opens a
+    // type-7 HTML block inside the quote (GH r29). The stripper removed the
+    // quote marker; `depths`/`inList` carry the container structure. A line
+    // carrying its own list marker opens a new item likewise.
+    if (i > 0 && ((depths && (depths[i] || 0) !== (depths[i - 1] || 0))
+      || (inList && !!inList[i] !== !!inList[i - 1])
+      || LIST_MARKER_PREFIX_RE.test(l))) atBoundary = true;
+    if (closeRe) { const done = closeRe.test(l); if (done) { closeRe = null; atBoundary = true; } return blankLine(l); }
+    if (inBlock) { if (blank) { inBlock = false; atBoundary = true; return l; } return blankLine(l); }
+    const core = l.replace(LIST_MARKER_PREFIX_RE, '');
+    const t1 = core.match(HTML_BLOCK_TYPE1_RE);
+    if (t1) {
+      closeRe = new RegExp(`</${t1[1]}>`, 'i');
+      const done = closeRe.test(l);
+      if (done) closeRe = null;
+      atBoundary = done;
+      return blankLine(l);
+    }
+    const delim = HTML_BLOCK_DELIMITED.find((d) => d.open.test(core));
+    if (delim) {
+      closeRe = delim.close;
+      const done = closeRe.test(core.replace(delim.open, ''));
+      if (done) closeRe = null;
+      atBoundary = done;
+      return blankLine(l);
+    }
+    if (HTML_BLOCK_TYPE6_RE.test(core) || (atBoundary && HTML_BLOCK_TYPE7_RE.test(core))) { inBlock = true; atBoundary = false; return blankLine(l); }
+    atBoundary = blank || contentGuardrails.isInterruptingBlock(l);
+    return l;
+  }).join('\n');
+}
+
+// Rendered view of the body plus each line's blockquote depth: shared
+// stripper (code, spans, comments, <pre>; quote markers and list indent
+// removed) → link destinations / reference definitions / titles blanked with
+// images kept (a `![..]` nested in a link destination goes with it; one in a
+// link label renders and stays) → tags + MDX expressions.
+// `inList` (per line, from the shared scanner's list tracking) tells the
+// section scanner which blocks are list content; `defs` are the body's link
+// reference definitions, read BEFORE link blanking removes them, so a
+// reference-style image (`![alt][label]`) resolves to its destination.
+// `mdx` (default true — autonomous posts publish as .mdx): false for a
+// legacy `.md` file, whose CommonMark HTML blocks are raw text
+// (blankMarkdownHtmlBlocks); callers pass the TARGET file's extension.
+function renderedBodyView(body, { mdx = true } = {}) {
+  const { text: stripped, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const text = mdx ? stripped : blankMarkdownHtmlBlocks(stripped, { depths, inList });
+  // Children of a container a reader DEFINITELY never sees (<script>,
+  // <template>, <div hidden>, aria-hidden, display:none, closed <details>,
+  // …) are blanked by the guardrails' certainty-only walker. The
+  // attribution rules' stricter walker (any class/style = unprovable) is
+  // the wrong tool here: a picture inside a merely styled <div> IS
+  // rendered and must be validated, not dropped from the scan.
+  const visible = normalizeAngleDestinations(contentGuardrails.blankDefinitelyHiddenContent(text));
+  // Definitions are read from the JSX/MDX-MASKED text: a `[label]: dest`
+  // inside a tag attribute or a `{…}` expression is data Astro never
+  // renders, so it must not resolve an outside `![alt][label]`.
+  const defs = contentGuardrails.markdownReferenceDefinitions(blankJsxAndExpressions(visible), { depths, inList });
+  const rendered = blankJsxAndExpressions(
+    contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true, depths, inList }),
+  );
+  return { text: rendered, lines: rendered.split('\n'), depths, inList: inList || [], defs };
+}
+function renderedBodyLines(body, opts = {}) {
+  return renderedBodyView(body, opts).lines;
+}
+
+function bodyImageRefs(body, opts = {}) {
+  const { text, defs } = renderedBodyView(body, opts);
+  return imageRefsInText(text, defs);
+}
+
+function countBodyImages(body, opts = {}) {
+  return bodyImageRefs(body, opts).length;
+}
+
+function headingKey(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Plain-text lead of a paragraph for the generation prompt: links → label,
+// decoration stripped, clamped.
+function proseLead(text) {
+  return String(text || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[*_`~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+// Lines that open something other than a prose paragraph: lists, quotes,
+// tables, MDX/HTML blocks, images, definition-ish labels, fences.
+const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\{)/;
+
+// Scan the body into H2 sections and return up to `wanted` insertion slots,
+// spread across the article. A slot is the line index AFTER the last prose
+// paragraph of an eligible section (no image yet, not a FAQ/summary-style
+// section). Fenced code is never split. The intro (text before the first
+// heading) is the fallback slot when too few sections qualify.
+function scanBodySections(body, { title = '', mdx = true } = {}) {
+  const lines = String(body || '').split('\n');
+  // ALL structure (headings, blank lines, paragraph openers, images) is read
+  // off the rendered view — fenced/indented code, code spans, comments and
+  // <pre> are blank there, so a "## heading" inside a comment or a fence is
+  // never a section and a code sample is never prose. Only TOP-LEVEL blocks
+  // are placement candidates: a heading or paragraph counts only at quote
+  // depth 0 and outside list content (both read off the shared scanner's
+  // per-line depth / list tracking — an H2 inside a blockquote or a list
+  // item is neither a section nor a slot: an image inserted there would
+  // land outside the quote or break the list). A top-level block with 1–3
+  // leading spaces is still top-level (CommonMark). Raw lines feed the
+  // lead text.
+  const { text: renderedText, lines: rendered, depths, inList, defs } = renderedBodyView(body, { mdx });
+  const topLevel = (i) => (depths[i] || 0) === 0 && !inList[i];
+  const refsByLine = new Map();
+  for (const ref of imageRefsInText(renderedText, defs)) {
+    if (!refsByLine.has(ref.line)) refsByLine.set(ref.line, []);
+    refsByLine.get(ref.line).push(ref);
+  }
+  const sections = [];
+  let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
+  let paraStart = -1;
+  const closePara = (end) => {
+    if (paraStart < 0) return;
+    if (topLevel(paraStart) && !NON_PROSE_LINE_RE.test(rendered[paraStart])) {
+      cur.lastProse = end; // insert BEFORE this index
+      if (!cur.lead) cur.lead = proseLead(lines.slice(paraStart, end).join(' '));
+    }
+    paraStart = -1;
+  };
+  const recordImages = (i) => { for (const ref of refsByLine.get(i) || []) { cur.hasImage = true; cur.images.push(ref.src); } };
+  for (let i = 0; i < rendered.length; i++) {
+    const line = rendered[i];
+    // A container change (quote depth, list membership) without a blank
+    // line ends the paragraph: nested lines are not part of the top-level
+    // prose (its lead) and the slot stays above the nested block.
+    if (paraStart >= 0 && ((depths[i] || 0) !== (depths[paraStart] || 0) || !!inList[i] !== !!inList[paraStart])) closePara(i);
+    const heading = topLevel(i) ? line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/) : null;
+    if (heading) {
+      closePara(i);
+      // Only an H2 opens a new section: H3+ sub-headings stay INSIDE the
+      // current H2 range, so their prose, images and lead roll up to it (an
+      // H2 whose prose lives entirely under H3s is still eligible, and an
+      // image under an H3 marks the H2 illustrated). An H1 closes the range.
+      if (heading[1].length <= 2) {
+        sections.push(cur);
+        const text = heading[2].replace(/!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?/g, ' ').replace(/\s+/g, ' ').trim();
+        cur = heading[1].length === 2 ? { heading: text, start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
+      }
+      // An image embedded in the heading itself illustrates the section it
+      // opens (or the one it sits in).
+      recordImages(i);
+      continue;
+    }
+    recordImages(i);
+    if (line.trim() === '') { closePara(i); continue; }
+    // A dashes-only or equals-only underline DIRECTLY under a top-level
+    // paragraph is a SETEXT heading (CommonMark): the paragraph is heading
+    // text, not prose, and — like its ATX twin — `---` opens an H2 section
+    // while `===` (H1) closes the current range. The underline must sit in
+    // the same (top-level) container as the paragraph: `> ---` or `- ---`
+    // under a paragraph is a nested break, not its underline.
+    const setext = paraStart >= 0 && topLevel(paraStart) && topLevel(i) ? line.match(/^ {0,3}(-+|=+)[ \t]*$/) : null;
+    if (setext) {
+      const text = rendered.slice(paraStart, i).join(' ').replace(/!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])?/g, ' ').replace(/\s+/g, ' ').trim();
+      // Images in the heading text were recorded on the section being
+      // closed while its lines were read as prose — they belong to the
+      // section the heading opens (same as an ATX heading's images).
+      const moved = [];
+      for (let k = paraStart; k < i; k += 1) for (const ref of refsByLine.get(k) || []) moved.push(ref.src);
+      if (moved.length) {
+        for (const src of moved) { const at = cur.images.indexOf(src); if (at >= 0) cur.images.splice(at, 1); }
+        cur.hasImage = cur.images.length > 0;
+      }
+      paraStart = -1;
+      sections.push(cur);
+      cur = setext[1][0] === '-' ? { heading: text, start: i, images: [...moved], hasImage: moved.length > 0 } : { heading: cur.heading, start: i, sub: true, images: [...moved], hasImage: moved.length > 0 };
+      continue;
+    }
+    // A standalone thematic break (`---`, `***`, `- - -`) is a divider, never
+    // prose: it closes the paragraph before it (the slot stays ABOVE the
+    // divider, inside the section it illustrates) and opens none — a section
+    // holding only a divider has no prose to generate from.
+    if (contentGuardrails.isThematicBreak(line)) { closePara(i); continue; }
+    if (paraStart < 0) paraStart = i;
+  }
+  closePara(rendered.length);
+  sections.push(cur);
+  return { lines, sections };
+}
+
+// The H2 heading a committed image sits under in the LIVE body (null when
+// the body no longer references it).
+function liveSectionForImage(content, src, { title = '', mdx = true } = {}) {
+  const { sections } = scanBodySections(content, { title, mdx });
+  return sections.find((sec) => sec.images.includes(src)) || null;
+}
+// A section's CONTEXT for reuse decisions: heading + the opening prose the
+// image was generated from (headings like "What to expect" carry no subject
+// on their own).
+function sectionContextKey(heading, lead) {
+  return `${headingKey(heading)}|${headingKey(lead).slice(0, 120)}`;
+}
+
+function bodyImageSlots(body, wanted, { title = '', mdx = true } = {}) {
+  const { sections } = scanBodySections(body, { title, mdx });
+  const eligible = sections.filter((sec) => !sec.intro && !sec.sub && !sec.hasImage
+    && sec.lastProse != null && !BODY_IMAGE_SKIP_HEADING_RE.test(sec.heading));
+  const picked = [];
+  const n = eligible.length;
+  // Centered spread: 2 images over 3 sections → 1st and 3rd; over 4 → 2nd and 4th.
+  for (let k = 0; k < wanted && k < n; k++) picked.push(eligible[Math.round(((k + 0.5) * n) / wanted - 0.5)]);
+  if (picked.length < wanted) {
+    const intro = sections.find((sec) => sec.intro && sec.lastProse != null && !sec.hasImage);
+    if (intro && !picked.includes(intro)) picked.unshift(intro);
+  }
+  return picked.slice(0, wanted).map((sec) => ({
+    insertAt: sec.lastProse,
+    heading: sec.heading,
+    lead: sec.lead || '',
+  }));
+}
+
+// Insert `![alt](src)` lines at the given slots (descending so indices stay
+// valid), each on its own paragraph.
+function insertBodyImages(body, placements) {
+  const lines = String(body || '').split('\n');
+  const ordered = [...placements].sort((a, b) => b.insertAt - a.insertAt);
+  for (const { insertAt, src, alt } of ordered) {
+    const label = String(alt || '').replace(/[\[\]]/g, '').replace(/\s+/g, ' ').trim();
+    // Blank lines only where the neighbours don't already provide them —
+    // never a global whitespace rewrite (fenced code keeps its blank lines).
+    const before = insertAt > 0 && lines[insertAt - 1].trim() !== '' ? [''] : [];
+    const after = insertAt < lines.length && lines[insertAt].trim() !== '' ? [''] : [];
+    lines.splice(insertAt, 0, ...before, `![${label}](${src})`, ...after);
+  }
+  return lines.join('\n').trim();
+}
+
+// A committed body image is reusable for a NEW slot only when the live body
+// still references it (its alt is the only truthful description of the
+// picture) AND it sat under the same H2 heading — a rewritten or reordered
+// article must not inherit an accurate-but-unrelated picture. Returns the
+// live alt, or null (regenerate).
+function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lead = '', mdx = true } = {}) {
+  const content = existingFile?.file?.content;
+  if (!content) return null;
+  let liveBody;
+  let liveTitle = '';
+  try {
+    const parsed = fm.parse(content);
+    liveBody = parsed?.content ?? String(content);
+    liveTitle = String(parsed?.data?.title || '').trim();
+  } catch { liveBody = String(content); }
+  const ref = bodyImageRefs(liveBody, { mdx }).find((r) => r.src === src);
+  if (!ref?.alt) return null;
+  // The intro pseudo-section is named by the TITLE; the live side must use
+  // the live file's title, not the new draft's, or a retitled article
+  // would always match its old intro illustration.
+  // Rescanned in the live file's own flavour — a raw HTML block before a
+  // section's prose must not change the derived lead in `.md` (GH r27).
+  const liveSection = liveSectionForImage(liveBody, src, { title: liveTitle || title, mdx });
+  if (!liveSection) return null;
+  // Same heading AND same opening prose — a rewritten section under a kept
+  // heading gets a new picture.
+  if (sectionContextKey(liveSection.heading, liveSection.lead) !== sectionContextKey(slotHeading, lead)) return null;
+  return ref.alt;
+}
+
+// Shared validity contract for the body's image references (publisher at
+// PR-open time; codex-remediation re-checks a rewritten body against the PR
+// branch): every rendered `![..](src)` must (a) not be the hero — the layout
+// renders it, a body that embeds it repeats the picture — and (b) resolve to
+// a file committed at `getFile` (an invented path or remote URL would ship
+// as a broken image). Returns { ok, reason, distinct } — distinct = number
+// of distinct verified sources.
+// `legacyHeroSrcs`: the exact hero reference(s) a LIVE legacy post already
+// repeats in its body (the pre-2026 convention), grandfathered on refresh —
+// those refs, by exact src, are excluded from the count and the checks
+// instead of parking the refresh. Any OTHER hero ref (another post's hero,
+// a changed or invented `/hero.*` path) is validated normally: the
+// grandfather covers what already ships, never what the refresh introduces.
+// `slug`: the post's own managed-namespace key(s) (string or array) — when
+// given, a reference into ANOTHER post's `/images/blog/<slug>/body-N`
+// namespace fails: that file is publisher-owned by the other post, and its
+// next refresh may sweep it (GH r28). The HEAD check passes every key the
+// post can legitimately be filed under (frontmatter route, category route,
+// file path) — writer-flat frontmatter and the stamped category route must
+// both count as "own".
+async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [], mdx = true, slug = null }) {
+  const ownKeys = (Array.isArray(slug) ? slug : [slug]).filter(Boolean).map((v) => String(v).replace(/^\/+|\/+$/g, '').toLowerCase());
+  // A raw <img> is outside the writer's plain-Markdown subset: it renders a
+  // picture the Markdown scan cannot see, so it can neither count toward the
+  // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
+  // this keeps the publisher fail-closed on its own).
+  const stripped = contentGuardrails.blankNonRenderedMarkdown(String(body || ''));
+  for (const tag of contentGuardrails.eachTag(stripped)) {
+    if (/^<img\b/i.test(stripped.slice(tag.start, tag.end + 1))) {
+      return { ok: false, reason: `body contains a raw <img> tag (${stripped.slice(tag.start, Math.min(tag.end + 1, tag.start + 80))}) — body images must be plain Markdown images`, distinct: 0 };
+    }
+  }
+  const hero = String(heroSrc || '');
+  const isHeroRef = (src) => (hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src);
+  // Grandfather by OCCURRENCE: the live body's hero references are exempt
+  // one-for-one; a refresh that repeats the same reference again is
+  // validated (and fails) normally.
+  const grandfathered = new Map();
+  for (const src of (Array.isArray(legacyHeroSrcs) ? legacyHeroSrcs : []).map((v) => String(v || ''))) {
+    if (src && isHeroRef(src)) grandfathered.set(src, (grandfathered.get(src) || 0) + 1);
+  }
+  const refs = bodyImageRefs(body, { mdx }).filter((r) => {
+    const src = String(r.src || '');
+    const left = grandfathered.get(src) || 0;
+    if (left > 0) { grandfathered.set(src, left - 1); return false; }
+    return true;
+  });
+  for (const ref of refs) {
+    const src = String(ref.src || '');
+    if (isHeroRef(src)) {
+      return { ok: false, reason: `body embeds the hero image (${src}) — the layout renders the hero; body images must be distinct illustrations`, distinct: 0 };
+    }
+    // A required illustration must be accessible: an authored image with no
+    // alt text is not accepted toward the minimum (generated images always
+    // carry a vetted alt) — fail closed rather than ship `![](…)`.
+    if (!String(ref.alt || '').trim()) {
+      return { ok: false, reason: `body image ${src || 'with empty src'} has no alt text — every in-article image needs a descriptive alt`, distinct: 0 };
+    }
+    if (ownKeys.length) {
+      const managed = src.match(/^\/images\/blog\/(.+)\/body-\d+\.webp$/i);
+      if (managed && !ownKeys.includes(managed[1].toLowerCase())) {
+        return { ok: false, reason: `body references another post's generated image (${src}) — publisher-managed body images belong to their own post and may be swept by its next refresh`, distinct: 0 };
+      }
+    }
+    const committed = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
+      && await getFile(`public${src}`);
+    if (!committed) {
+      return { ok: false, reason: `body references an image that is not committed in the Astro repo (${src || 'empty src'})`, distinct: 0 };
+    }
+  }
+  return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size, refs };
+}
+
+// The exact hero reference OCCURRENCES the LIVE body embeds (legacy
+// convention) → refresh grandfathers that many of each src and nothing else.
+function legacyHeroRefs(body, heroSrc, { mdx = true } = {}) {
+  const hero = String(heroSrc || '');
+  const out = [];
+  for (const r of bodyImageRefs(body, { mdx })) {
+    const src = String(r.src || '');
+    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) out.push(src);
+  }
+  return out;
+}
+
+// `siblings` = already-resolved images with bytes (the freshly generated
+// hero) that every body image must differ from.
+// `mdx`: the TARGET file's flavour (false for the scheduler's flat `.md`
+// and a legacy `.md` refresh written back in place) — decides whether raw
+// HTML blocks hide the Markdown inside them (renderedBodyView).
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [], mdx = true }) {
+  const none = { body, files: [], images: [], newAlts: [], deletes: [], pinned: [] };
+  if (!bodyImagesEnabled()) return none;
+  // A refresh draft may RETAIN a publisher-managed reference while
+  // rewriting its section: the picture then ships under prose it may no
+  // longer describe, bypassing the reuse context check (GH r28). Managed
+  // names are the publisher's to move: a retained own-namespace ref whose
+  // draft section no longer matches the LIVE section context is stripped
+  // here, and the normal allocation below regenerates for that section
+  // (the stripped file is reused elsewhere or swept as superseded).
+  if (existingFile?.file?.content) {
+    const liveFlavour = existingFile?.path ? !/\.md$/i.test(String(existingFile.path)) : mdx;
+    const ownPrefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+    const stale = new Set();
+    const { sections } = scanBodySections(body, { title: frontmatter?.title, mdx });
+    for (const sec of sections) {
+      for (const src of sec.images || []) {
+        if (!String(src || '').startsWith(ownPrefix) || !/body-\d+\.webp$/i.test(String(src))) continue;
+        if (!reusableLiveBodyImage(existingFile, src, sec.heading, { title: frontmatter?.title, lead: sec.lead, mdx: liveFlavour })) stale.add(src);
+      }
+    }
+    if (stale.size) body = stripManagedBodyImages(body, slug, { only: stale });
+  }
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs, mdx, slug });
+  if (!valid.ok) {
+    const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
+  // Distinct pictures, not references — two links to one file is one image.
+  const draftSrcs = new Set(valid.refs.map((r) => r.src));
+
+  // Every picture the body images must differ from — the hero (fresh bytes,
+  // or a REUSED hero fetched from the repo) and the draft's own committed
+  // images — enters the hash set BEFORE the minimum is judged: two draft
+  // paths holding the same picture, or a draft image that repeats the hero,
+  // are not distinct illustrations and park the run (the draft body is not
+  // ours to rewrite).
+  // Fail closed: a picture whose bytes cannot be read cannot be proven
+  // distinct, so it parks rather than slipping past the check.
+  const seen = [];
+  // Every committed picture this run's verdicts depend on is pinned to the
+  // blob it was judged on (re-checked on the fresh branch before the commit):
+  // a REUSED hero sibling here, the draft-authored pictures below.
+  const pinned = [];
+  for (const sib of siblings) {
+    let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
+    if (!buf && sib?.repoPath) {
+      const file = await gh.getFile(sib.repoPath);
+      buf = await committedImageBuffer(sib.repoPath, async () => file);
+      pinned.push({ repoPath: sib.repoPath, sha: file?.sha || null });
+    }
+    if (!buf && (sib?.repoPath || sib?.buffer)) {
+      const err = new Error(`autonomous blog body images: ${sib.label || 'hero'} bytes unavailable for ${slug} (${sib.repoPath || 'buffer'}) — cannot verify body images differ from it`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
+  }
+  // Every draft-authored picture is pinned too (its alt is the draft's, so
+  // the bytes must be the ones the alt describes).
+  for (const src of draftSrcs) {
+    const repoPath = `public${src}`;
+    const file = await gh.getFile(repoPath);
+    const buf = await committedImageBuffer(repoPath, async () => file);
+    pinned.push({ repoPath, sha: file?.sha || null });
+    if (!buf) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} references ${src} whose bytes cannot be read — cannot verify it is a distinct picture`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    const dup = await nearDuplicateOf(buf, seen);
+    if (dup.label) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} references ${src}, a near-duplicate of ${dup.label} — body images must be distinct pictures`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    seen.push({ label: src, hash: dup.hash });
+  }
+
+  const have = valid.distinct;
+  const need = BODY_IMAGE_MIN - have;
+  // Nothing to generate — but the draft may have DROPPED references to
+  // publisher-managed pictures (a refresh that replaces body-1/body-2 with
+  // two authored images): those files are still publicly addressable and
+  // hold managed names, so the sweep runs here too (GH r24).
+  if (need <= 0) return { ...none, body, pinned, ...(await supersededBodyImages({ slug, kept: draftSrcs, superseded: [] })) };
+
+  const slots = bodyImageSlots(body, need, { title: frontmatter?.title, mdx });
+  if (slots.length < need) {
+    const err = new Error(`autonomous blog body images: only ${slots.length} of ${need} insertion slot(s) found for ${slug} — the body needs at least ${need} prose section(s) without an image`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
+
+  const files = [];
+  const images = [];
+  const newAlts = [];
+  const placements = [];
+  const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
+  const heroSubject = String(frontmatter?.primary_keyword || frontmatter?.title || '').trim();
+  // body-N names: a name the draft already references is skipped (a draft
+  // carrying body-2.webp must not have it overwritten by a new generation
+  // that would then be linked twice); a name already COMMITTED in the repo
+  // is either REUSED (the live body still describes that picture and it is
+  // not a near-duplicate) or skipped — a committed path is never overwritten
+  // by a generation, so the atomic commit only ever ADDS asset paths (its
+  // lock can then require each one to still be absent on the fresh branch).
+  // Pass 1 — REUSE: every publisher-managed picture the LIVE body carries
+  // under this slug is matched to the slot whose section still describes it
+  // (same heading + opening prose, alt vetted, not a near-duplicate); the
+  // match is by SECTION, not by name order, so a rewritten first section
+  // never causes the second section's still-valid picture to be dropped.
+  const managedPrefix = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-`;
+  // The LIVE file keeps its own flavour (a legacy .md migrating to .mdx).
+  const liveMdx = existingFile?.path ? !/\.md$/i.test(String(existingFile.path)) : mdx;
+  const reusedBySlot = new Map(); // slot index → { src, repoPath, alt, hash, sha }
+  const taken = new Set();
+  if (existingFile?.file?.content) {
+    let liveBody = '';
+    try { liveBody = String(fm.parse(existingFile.file.content)?.content ?? existingFile.file.content); } catch { liveBody = String(existingFile.file.content); }
+    const liveManaged = [...new Set(bodyImageRefs(liveBody, { mdx: liveMdx }).map((r) => String(r.src || '')).filter((src) => src.startsWith(managedPrefix) && !draftSrcs.has(src)))];
+    for (let k = 0; k < slots.length; k++) {
+      const slot = slots[k];
+      for (const src of liveManaged) {
+        if (taken.has(src)) continue;
+        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead, mdx: liveMdx });
+        // A reused alt is customer-facing copy too: it must clear the same
+        // guardrails as a generated alt (no fallback → regenerate) and it
+        // joins the compliance second pass below.
+        const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
+        if (!vettedAlt) continue;
+        const repoPath = `public${src}`;
+        const onMain = await gh.getFile(repoPath);
+        const committed = await committedImageBuffer(repoPath, async () => onMain);
+        if (!committed) continue;
+        // A reused picture obeys the same rule as a generated one: if it
+        // duplicates the (possibly new) hero or a sibling, a NEW picture is
+        // generated instead.
+        const dup = await nearDuplicateOf(committed, seen);
+        if (dup.label) { logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — generating a new picture instead of reusing`); continue; }
+        reusedBySlot.set(k, { src, repoPath, alt: vettedAlt, hash: dup.hash, sha: onMain?.sha || null });
+        taken.add(src);
+        seen.push({ label: src, hash: dup.hash });
+        break;
+      }
+    }
+  }
+  // Pass 2 — names: each remaining slot takes the next name that is FREE in
+  // the repo (a draft-referenced or reused name is skipped; an occupied name
+  // this run neither reuses nor references is SUPERSEDED — a publisher-
+  // managed picture of this post, deleted in the same commit, pinned to the
+  // blob seen here — so section rewrites never pile up public orphans until
+  // the name cap parks the post).
+  let n = 0;
+  const superseded = [];
+  for (let k = 0; k < slots.length; k++) {
+    const slot = slots[k];
+    const reuse = reusedBySlot.get(k) || null;
+    if (reuse) {
+      images.push({ src: reuse.src, alt: reuse.alt, reused: true, repoPath: reuse.repoPath, sha: reuse.sha });
+      newAlts.push(reuse.alt);
+      placements.push({ insertAt: slot.insertAt, src: reuse.src, alt: reuse.alt });
+      continue;
+    }
+    let src;
+    let repoPath;
+    for (;;) {
+      n += 1;
+      if (n > BODY_IMAGE_NAME_SCAN_MAX) {
+        const err = new Error(`autonomous blog body images: no free body-N name under ${slug} within ${BODY_IMAGE_NAME_SCAN_MAX} — the post's image directory is full of files this run cannot reuse`);
+        err.code = 'BLOG_BODY_IMAGES_FAILED';
+        throw err;
+      }
+      src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`;
+      repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
+      if (draftSrcs.has(src) || taken.has(src)) continue;
+      const onMain = await gh.getFile(repoPath);
+      if (!onMain) break; // free name → generate here
+      superseded.push({ repoPath, sha: onMain.sha || null });
+    }
+
+    let gen;
+    let buffer;
+    let hash;
+    // Framing rotates with the slot; a near-duplicate of the hero or a
+    // sibling regenerates ONCE with the next framing, then parks — three of
+    // the same picture never ship.
+    for (let attempt = 0; ; attempt++) {
+      const shot = BODY_IMAGE_SHOTS[(k + attempt) % BODY_IMAGE_SHOTS.length];
+      try {
+        const imageGenerator = require('../content/image-generator');
+        gen = await imageGenerator.generate({
+          title: frontmatter.title,
+          topic: slot.lead || frontmatter.meta_description,
+          keyword: slot.heading || frontmatter.primary_keyword,
+          city,
+          mode: 'blog-body',
+          shot,
+          avoid: heroSubject,
+        });
+        const img = await fetchImageBuffer(gen.dataUrl);
+        if (!img?.buffer) throw new Error('body image generation produced no usable image');
+        buffer = await compressToWebp(img.buffer, { width: BODY_IMAGE_WIDTH });
+      } catch (err) {
+        if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
+        const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
+        bodyErr.cause = err;
+        // Deterministic ONLY when nothing about a retry could change the
+        // outcome (every provider attempt non-retryable, or a decode/
+        // compression failure on the bytes). A provider 5xx / network blip
+        // stays untagged so the scheduler and the autonomous runner retry it
+        // — the same posture as the hero's generation failures.
+        if (!isTransientImageError(err)) bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
+        throw bodyErr;
+      }
+      const dup = await nearDuplicateOf(buffer, seen);
+      hash = dup.hash;
+      if (!dup.label) break;
+      if (attempt >= 1) {
+        const err = new Error(`autonomous blog body image ${n} for ${slug} ("${slot.heading}") is a near-duplicate of ${dup.label} even after regenerating with a different framing — parked so the post never ships repeated pictures`);
+        err.code = 'BLOG_BODY_IMAGES_FAILED';
+        throw err;
+      }
+      logger.warn(`[astro-publisher] body image ${n} for ${slug} is a near-duplicate of ${dup.label} (${shot}) — regenerating with the next framing`);
+    }
+    seen.push({ label: `body-${n}`, hash });
+    // Vision-described alt (fail-open) over the prompt-derived one, vetted by
+    // the same guardrails as the hero alt; the prompt-derived alt is the
+    // fallback — it describes what was asked for, never the writer's text.
+    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading });
+    const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
+    logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} ("${slot.heading}")`);
+    files.push({ path: repoPath, buffer });
+    images.push({ src, alt, reused: false });
+    newAlts.push(alt);
+    placements.push({ insertAt: slot.insertAt, src, alt });
+  }
+
+  const nextBody = insertBodyImages(body, placements);
+  if (countBodyImages(nextBody, { mdx }) < BODY_IMAGE_MIN) {
+    const err = new Error(`autonomous blog body images: ${slug} still has fewer than ${BODY_IMAGE_MIN} body images after insertion`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
+  // Deletions carry their own pins (checked by bodyImageCommitConflicts: a
+  // path already gone on the branch is simply dropped from the deletion
+  // list; a path whose blob changed is a conflict).
+  return { body: nextBody, files, images, newAlts, pinned, ...(await supersededBodyImages({ slug, kept: new Set([...draftSrcs, ...images.map((img) => img.src)]), superseded, files })) };
+}
+
+// Superseded = every publisher-managed asset of this post — the whole
+// directory listing, not just occupied names met below the first free one
+// — that the run neither reused nor referenced (`kept` = public srcs the
+// next body carries; `superseded` = occupied names met during allocation,
+// pinned to the blob seen; `files` = paths being generated this run).
+// Returns { deletes, deletePins } for the commit.
+async function supersededBodyImages({ slug, kept, superseded = [], files = [] }) {
+  const keptPaths = new Set([...kept].map((src) => `public${src}`));
+  const managed = new Map(superseded.map((d) => [d.repoPath, d]));
+  if (typeof gh.listDir === 'function') {
+    // A listing failure PROPAGATES (transient — no BLOG_BODY_IMAGES_FAILED
+    // code, so the run retries): a sweep built on a partial listing would
+    // leave orphaned body-N.webp public and their managed names occupied
+    // (GH r25). A directory that does not exist yet is an empty listing
+    // (github-client returns [] on 404), not an error.
+    let entries;
+    try { entries = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`)) || []; } catch (listErr) {
+      const err = new Error(`autonomous blog body images: could not list managed images for ${slug}: ${listErr.message}`);
+      err.cause = listErr;
+      throw err;
+    }
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (!e || e.type !== 'file' || !/^body-\d+\.webp$/i.test(String(e.name || ''))) continue;
+      const repoPath = e.path || `${ASTRO_HERO_DIR}/${slug}/${e.name}`;
+      if (!managed.has(repoPath)) managed.set(repoPath, { repoPath, sha: e.sha || null });
+    }
+  }
+  const deletes = [...managed.values()].filter((d) => !keptPaths.has(d.repoPath) && !files.some((f) => f.path === d.repoPath));
+  return { deletes: deletes.map((d) => d.repoPath), deletePins: Object.fromEntries(deletes.map((d) => [d.repoPath, d.sha])) };
+}
+
+// Paths a body-image commit depends on, re-checked on the FRESH branch just
+// before the commit: every generated asset must still be absent (allocated
+// as absent — a committed picture is never overwritten) and every REUSED
+// asset must still carry the blob its alt and section verdict were judged
+// on (a replacement landing on main mid-run would otherwise ship under a
+// stale alt). Returns conflict descriptions (empty = clean).
+async function bodyImageCommitConflicts(bodyImages, branch) {
+  const conflicts = [];
+  for (const f of bodyImages.files || []) {
+    if (await gh.getFile(f.path, branch)) conflicts.push(`${f.path} (appeared since it was allocated)`);
+  }
+  for (const img of (bodyImages.images || []).filter((i) => i.reused && i.repoPath)) {
+    const onBranch = await gh.getFile(img.repoPath, branch);
+    if (!onBranch || (img.sha && onBranch.sha !== img.sha)) conflicts.push(`${img.repoPath} (reused picture changed: expected ${img.sha}, found ${onBranch?.sha || 'missing'})`);
+  }
+  for (const pin of bodyImages.pinned || []) {
+    const onBranch = await gh.getFile(pin.repoPath, branch);
+    if (!onBranch || (pin.sha && onBranch.sha !== pin.sha)) conflicts.push(`${pin.repoPath} (pinned picture changed: expected ${pin.sha}, found ${onBranch?.sha || 'missing'})`);
+  }
+  // Superseded assets: already gone on the branch → nothing to delete
+  // (pruned in place, the commit must not delete a missing path); changed
+  // since they were listed → conflict.
+  if (Array.isArray(bodyImages.deletes) && bodyImages.deletes.length) {
+    const remaining = [];
+    for (const repoPath of bodyImages.deletes) {
+      const onBranch = await gh.getFile(repoPath, branch);
+      if (!onBranch) continue;
+      const expected = bodyImages.deletePins?.[repoPath] || null;
+      if (expected && onBranch.sha !== expected) { conflicts.push(`${repoPath} (superseded picture changed: expected ${expected}, found ${onBranch.sha})`); continue; }
+      remaining.push(repoPath);
+    }
+    bodyImages.deletes.splice(0, bodyImages.deletes.length, ...remaining);
+  }
+  return conflicts;
+}
+// Drop a branch no PR references yet (a retry cuts a fresh one).
+async function dropUnreferencedBranch(branch, why) {
+  try { await gh.deleteRef(branch); } catch (cleanupErr) {
+    logger.warn(`[astro-publisher] could not delete branch ${branch} after ${why}: ${cleanupErr.message}`);
+  }
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -1990,13 +3130,58 @@ async function publishOrUpdatePage(draft, brief = {}) {
     }, `${slug} (generated hero alt)`);
   }
 
+  // Body images (owner rule: ≥3 images per post) — resolved after the hero so
+  // a hero failure never burns two more generations, and before the branch is
+  // cut so a failure can't orphan a PR. Their alts (generated OR reused from
+  // the live post) are text the semantic gate never saw on this draft: the
+  // same narrow second pass as the hero alt.
+  const bodyImages = await resolveBodyImages({
+    frontmatter, slug, body, existingFile, brief,
+    mdx: true, // filePath is always `.mdx` here (a legacy `.md` migrates)
+    // Fresh hero bytes, or the committed hero's repo path when it was reused.
+    siblings: [{ label: 'hero', buffer: hero.buffer, repoPath: hero.buffer ? null : (String(hero.src || '').startsWith('/') ? `public${hero.src}` : null) }],
+  });
+  if (bodyImages.newAlts.length) {
+    await assertComplianceClear({
+      title: frontmatter.title,
+      body: '',
+      meta: bodyImages.newAlts,
+      city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+      keyword: frontmatter.primary_keyword,
+      tag: frontmatter.category,
+    }, `${slug} (generated body image alts)`);
+  }
+  const finalBody = bodyImages.body;
+
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const markdown = fm.stringify(frontmatter, `${body}\n`);
+  const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
 
   await gh.createBranch(branch);
+  // Reused body pictures are pinned to the blob they were judged on; a
+  // generated path must still be free. Any conflict is transient: the
+  // branch is dropped and the runner retries against the live repo.
+  // …and the post itself: an existing route must still carry the SHA the
+  // draft was merged against (the tree write replaces it unconditionally),
+  // and the destination path of a new post / legacy .md→.mdx migration
+  // must still be absent — otherwise a concurrent default-branch edit
+  // would be overwritten and auto-merged.
+  {
+    const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
+    if (existingFile) {
+      const onBranch = await gh.getFile(existingFile.path, branch);
+      if (!onBranch || onBranch.sha !== existingFile.file?.sha) conflicts.push(`${existingFile.path} (post changed: expected ${existingFile.file?.sha}, found ${onBranch?.sha || 'missing'})`);
+    }
+    if (!existingFile || existingFile.path !== filePath) {
+      if (await gh.getFile(filePath, branch)) conflicts.push(`${filePath} (appeared since the route was resolved)`);
+    }
+    if (conflicts.length) {
+      await dropUnreferencedBranch(branch, 'a pre-commit lock mismatch');
+      throw new Error(`${slug} changed since it was resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+    }
+  }
   // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero
   // still ships on the same branch as the frontmatter that references it
   // (mirrors publishAstro), but atomically: the multi-commit version of this
@@ -2009,15 +3194,16 @@ async function publishOrUpdatePage(draft, brief = {}) {
     message: `feat(blog): publish ${slug}`,
     files: [
       ...(hero.buffer ? [{ path: hero.repoPath, buffer: hero.buffer }] : []),
+      ...bodyImages.files,
       { path: filePath, content: markdown },
     ],
-    deletes: isLegacyMd ? [existingFile.path] : [],
+    deletes: [...(isLegacyMd ? [existingFile.path] : []), ...(bodyImages.deletes || [])],
   });
 
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: buildDraftPrBody({ frontmatter, slug, branch, content: body, brief }),
+    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief }),
   });
   await requestCodexReview({
     pr,
@@ -2281,9 +3467,40 @@ async function publishRefresh(draft, brief = {}) {
   const bodyChanged = newBody !== oldBody;
   const metaChanged = REFRESH_EDITABLE_META_FIELDS.some((f) => nextFrontmatter[f] !== currentFrontmatter[f]);
 
+  // Under the body-image gate the refresh lane is what brings an image-poor
+  // legacy post up to the contract, so an otherwise unchanged draft is NOT
+  // a no-op while the live body is short of the minimum (hero references
+  // do not count).
+  let liveShortOfImages = false;
+  // The refresh writes the resolved file back IN PLACE — a legacy `.md`
+  // stays `.md`, so its raw HTML blocks hide the Markdown inside them.
+  const refreshMdx = !/\.md$/i.test(String(filePath || ''));
+  // The managed-image directory is keyed by the PUBLISHED ROUTE — the
+  // frontmatter slug the creating lane stamped — not the source file's
+  // path: a flat file can render a nested route, and the new-post lane
+  // filed its body images under that route (GH r27). A legacy post
+  // without a safe frontmatter slug keeps the path-derived key.
+  let refreshAssetSlug;
+  try { refreshAssetSlug = slugPathFromFrontmatter(nextFrontmatter); }
+  catch (_) { refreshAssetSlug = filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''); }
+  if (refreshBlogTarget && bodyImagesEnabled()) {
+    // The SAME contract resolveBodyImages enforces — every reference
+    // committed, ≥ minimum distinct sources, distinct PICTURES (dHash) —
+    // judged on the live body; anything short of it means the refresh must
+    // run (and, for a broken live post, park for a human rather than
+    // silently completing as no_changes). A read error propagates.
+    const hero = String(nextFrontmatter?.hero_image?.src || '');
+    const getLive = (path) => gh.getFile(path);
+    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero, { mdx: refreshMdx }), mdx: refreshMdx, slug: [refreshAssetSlug, filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')] });
+    if (!valid.ok || valid.distinct < BODY_IMAGE_MIN) liveShortOfImages = true;
+    else {
+      const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc: hero, getFile: getLive });
+      liveShortOfImages = !pictures.ok;
+    }
+  }
   // Semantic no-op check (a parse→stringify round-trip rarely reproduces the
   // source byte-for-byte, so compare meaning, not text).
-  if (!bodyChanged && !metaChanged) {
+  if (!bodyChanged && !metaChanged && !liveShortOfImages) {
     return {
       url: canonicalForExistingPage(targetUrl, currentFrontmatter, filePath),
       status: 'no_changes', live: false, pr_number: null, pr_url: null, branch: null, preview_url: null, commit_sha: null,
@@ -2344,23 +3561,87 @@ async function publishRefresh(draft, brief = {}) {
     tag: nextFrontmatter.category,
   }, filePath);
 
-  const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
+  // Body images on refresh (owner rule: ≥3 images per post — a refresh is
+  // how the image-poor legacy posts gain theirs). Same resolver as the new-
+  // post lane: images the live body already carries are reused when their
+  // section context is unchanged, the rest are generated and committed
+  // beside the post; a live post that repeats its hero in the body (legacy
+  // convention) keeps THAT exact reference rather than parking — any other
+  // hero ref the draft introduces still parks. Blog targets only.
+  let refreshImages = { body: newBody, files: [], newAlts: [] };
+  if (refreshBlogTarget) {
+    const heroSrc = String(nextFrontmatter?.hero_image?.src || '');
+    refreshImages = await resolveBodyImages({
+      frontmatter: nextFrontmatter,
+      slug: refreshAssetSlug,
+      body: newBody,
+      existingFile: { path: filePath, file: existing },
+      brief,
+      siblings: heroSrc.startsWith('/') ? [{ label: 'hero', repoPath: `public${heroSrc}` }] : [],
+      legacyHeroSrcs: legacyHeroRefs(oldBody, heroSrc, { mdx: refreshMdx }),
+      mdx: refreshMdx,
+    });
+    if (refreshImages.newAlts.length) {
+      await assertComplianceClear({
+        title: nextFrontmatter.title,
+        body: '',
+        meta: refreshImages.newAlts,
+        city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
+        keyword: nextFrontmatter.primary_keyword,
+        tag: nextFrontmatter.category,
+      }, `${filePath} (generated body image alts)`);
+    }
+  }
+  const finalBody = refreshImages.body;
+  const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
   await gh.createBranch(branch);
-  const fileCommit = await gh.putFile({
-    path: filePath,
-    content: markdown,
-    message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
-    branch,
-    sha: existing.sha,
-  });
+  // Optimistic lock on the multi-file path: the tree write replaces paths
+  // unconditionally (no per-file SHA like putFile), and image generation
+  // ran BEFORE the branch was cut — a main-branch edit landing in between
+  // would be carried into the branch and silently overwritten by markdown
+  // diffed against the older read (then auto-merged). Re-read the target on
+  // the fresh branch and require the SHA the draft was diffed against; a
+  // mismatch is transient — the run retries against the new live content.
+  // The lock covers EVERY path the commit writes: the post must still carry
+  // the SHA it was diffed against, and each generated asset path (allocated
+  // as ABSENT from main — resolveBodyImages never overwrites a committed
+  // picture) must still be absent, or a concurrent write would be lost.
+  if (refreshImages.files.length || (refreshImages.deletes || []).length || (refreshImages.images || []).some((i) => i.reused) || (refreshImages.pinned || []).length) {
+    const conflicts = [];
+    const onBranch = await gh.getFile(filePath, branch);
+    if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
+    conflicts.push(...await bodyImageCommitConflicts(refreshImages, branch));
+    if (conflicts.length) {
+      // No PR references the branch yet — drop it, or every collision
+      // (the runner retries with a fresh shortId) leaves an orphan ref.
+      await dropUnreferencedBranch(branch, 'a refresh lock mismatch');
+      throw new Error(`refresh target changed since it was read on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
+    }
+  }
+  // New image bytes ride the SAME commit as the post (atomic, like the
+  // autonomous lane); with nothing to add the single-file put stays.
+  const fileCommit = (refreshImages.files.length || (refreshImages.deletes || []).length)
+    ? await gh.commitFiles({
+      branch,
+      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+      files: [...refreshImages.files, { path: filePath, content: markdown }],
+      deletes: refreshImages.deletes || [],
+    })
+    : await gh.putFile({
+      path: filePath,
+      content: markdown,
+      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+      branch,
+      sha: existing.sha,
+    });
 
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief, backfilledFields }),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields }),
   });
   await requestCodexReview({
     pr,
@@ -2460,7 +3741,13 @@ function canPublishRefresh(draft, brief = {}) {
 
 // ── Merge (approval → prod) ────────────────────────────────────────
 
-async function mergeAstro(postId, { expectHeadSha = null } = {}) {
+// `expectBaseSha`: the default-branch tip a caller's body-image check
+// validated unchanged assets against (pages-poll) — re-read inside the
+// topic-merge lock immediately before the merge call, since the gates
+// between the caller's check and mergePr are more async work and the merge
+// pins only the PR head (GH r25). A moved tip throws BLOG_BASE_MOVED
+// (retryable: the next tick re-validates against the new base).
+async function mergeAstro(postId, { expectHeadSha = null, expectBaseSha = null } = {}) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
   if (!post.astro_pr_number) throw new Error('post has no open PR');
@@ -2521,6 +3808,14 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       ? await doMerge()
       : await require('../content/topic-targeting-gate').withTopicMergeLock(db, async () => {
         await assertTopicTargetingStillClear(post, pr);
+        if (expectBaseSha) {
+          const tip = await gh.getBranchSha(gh.env().defaultBranch);
+          if (tip && tip !== expectBaseSha) {
+            const moved = new Error(`PR #${pr.number}: default branch moved during gating (${String(expectBaseSha).slice(0, 9)} → ${String(tip).slice(0, 9)}); re-verify body images before merge`);
+            moved.code = 'BLOG_BASE_MOVED';
+            throw moved;
+          }
+        }
         return doMerge();
       });
 
@@ -2823,12 +4118,19 @@ async function unpublishAstro(postId) {
   const branch = `content/unpublish-${slug}-${shortId()}`;
 
   try {
-    await gh.createBranch(branch);
-
+    // Everything read from MAIN comes first — a read failure here aborts
+    // before any branch exists, so a retry never leaves an orphan ref.
     const resolved = await resolveExistingAstroFile(`${ASTRO_BLOG_DIR}/${slug}`);
     if (!resolved) throw new Error(`markdown not found on main: ${ASTRO_BLOG_DIR}/${slug}.{mdx,md}`);
     const mdPath = resolved.path;
     const mdFile = resolved.file;
+    // Generated in-article pictures (body-N.webp) live beside the hero and
+    // would otherwise stay publicly addressable — and hold their names, so
+    // a later republish would pay for higher-numbered replacements. A
+    // listing failure aborts the unpublish (the admin retries).
+    const bodyAssets = (await gh.listDir(`${ASTRO_HERO_DIR}/${slug}`) || []).filter((e) => e && e.type === 'file' && /^body-\d+\.webp$/i.test(String(e.name || '')));
+
+    await gh.createBranch(branch);
 
     await gh.deleteFile({
       path: mdPath,
@@ -2854,11 +4156,19 @@ async function unpublishAstro(postId) {
         });
       }
     }
+    for (const asset of bodyAssets) {
+      await gh.deleteFile({
+        path: asset.path || `${ASTRO_HERO_DIR}/${slug}/${asset.name}`,
+        message: `chore(blog): remove body image ${asset.name} for ${slug}`,
+        branch,
+        sha: asset.sha,
+      });
+    }
 
     const prBody = [
       `**Unpublish from admin portal**`,
       ``,
-      `Removes \`${mdPath}\`${heroFile ? ' and committed hero image assets' : ''} from main.`,
+      `Removes \`${mdPath}\`${heroFile ? ' and committed hero image assets' : ''}${bodyAssets.length ? ` and ${bodyAssets.length} generated body image(s)` : ''} from main.`,
       ``,
       `Merge to take the post offline. After merge the post returns to \`draft\` state in the portal and can be republished later.`,
       ``,
@@ -3454,6 +4764,114 @@ function isCodexAuthor(login) {
   return value === 'chatgpt-codex-connector' || value === 'chatgpt-codex-connector[bot]';
 }
 
+// The flat path the calendar/scheduler lane (publishAstro) writes for a slug —
+// the path pages-poll re-validates at the HEAD before its unattended merge.
+function scheduledBlogFilePath(slug) {
+  return `${ASTRO_BLOG_DIR}/${slug}.md`;
+}
+// The same slug fallback publishAstro applies (a legacy/imported row may
+// have a null slug and publishes under slugify(title)).
+function scheduledBlogFilePathForPost(post) {
+  return scheduledBlogFilePath(post?.slug || slugify(post?.title || ''));
+}
+// Publisher-managed in-article pictures (`/images/blog/<slug>/body-N.webp`)
+// live in the Astro repo, never in blog_posts.content: a body mirrored back
+// into the row (scheduler-lane remediation) must not carry references that
+// exist only on a PR branch — a later republish would fail on them.
+// Every rendered form is removed via the shared scanner — inline images,
+// reference-style images (`![alt][pic]`) and the definitions that point at
+// a managed path — then lines left empty by the removal are dropped.
+// `only`: restrict removal to these srcs (a Set) — the stale-context strip
+// removes exactly the mismatched references (GH r28); without it every
+// managed reference for the slug is stripped (remediation mirror).
+function stripManagedBodyImages(body, slug, { only = null } = {}) {
+  const raw = String(body || '');
+  // Publisher-OWNED names only: `/images/blog/<slug>/body-<digits>.webp` —
+  // an authored `body-background.webp` is not ours to remove.
+  const managedRe = new RegExp(`^${ASTRO_HERO_PUBLIC_BASE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/${String(slug).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/body-\\d+\\.webp$`);
+  const isManaged = (src) => managedRe.test(String(src || '')) && (!only || only.has(String(src || '')));
+  // Only RENDERED occurrences are stripped: an image-like string inside a
+  // fence, a code span, a comment or an MDX expression is text the reader
+  // sees as written — the rendered view (same line count) decides.
+  // Code/comment-stripped AND JSX/MDX-masked (same as renderedBodyView's
+  // definition read): a `[label]:` inside a tag attribute or an expression
+  // defines nothing and must not drive a removal.
+  const unmasked = blankJsxAndExpressions(normalizeAngleDestinations(contentGuardrails.blankNonRenderedMarkdown(raw))).split('\n');
+  // POSITIONAL rendered-ness: the same masking WITHOUT angle normalization
+  // is length-preserving per line (only quote/list markers are stripped at
+  // the line start), so a raw span is rendered iff its `![label]` opener is
+  // still unblanked at its own columns — a code-span / comment / expression
+  // copy of the same image on the same line stays as written.
+  const maskedPos = blankJsxAndExpressions(contentGuardrails.blankNonRenderedMarkdown(raw)).split('\n');
+  const rawLines = raw.split('\n');
+  const lineStarts = [0];
+  for (let k = 0; k < raw.length; k += 1) if (raw[k] === '\n') lineStarts.push(k + 1);
+  const lineOf = (pos) => { let lo = 0; let hi = lineStarts.length - 1; while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; } return lo; };
+  const { depths: rawDepths, inList: rawInList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(raw);
+  const defs = contentGuardrails.markdownReferenceDefinitions(unmasked.join('\n'), { depths: rawDepths, inList: rawInList });
+  const removals = [];
+  for (const span of contentGuardrails.eachMarkdownLink(raw)) {
+    if (!span.isImage) continue;
+    const li = lineOf(span.start);
+    const rawLine = rawLines[li];
+    const maskedLine = String(maskedPos[li] || '');
+    const offset = rawLine.length - maskedLine.length; // stripped quote/list prefix
+    const col0 = span.start - lineStarts[li];
+    const colEnd = Math.min(span.labelEnd, lineStarts[li] + rawLine.length - 1) - lineStarts[li];
+    let renderedHere = col0 - offset >= 0;
+    for (let c = col0; renderedHere && c <= colEnd; c += 1) if (maskedLine[c - offset] !== rawLine[c]) renderedHere = false;
+    let src = null;
+    if (span.kind === 'inline') src = decodeDestination(contentGuardrails.parseLinkDestination(raw.slice(span.destStart, span.destEnd + 1), { allowEmpty: true }) || '');
+    else if (span.kind !== 'malformed') {
+      const tail = span.kind === 'reference' ? raw.slice(span.refStart, span.refEnd + 1) : '';
+      const label = contentGuardrails.normalizeReferenceLabel(tail || raw.slice(span.labelStart + 1, span.labelEnd));
+      if (label && defs.has(label)) src = decodeDestination(defs.get(label));
+    }
+    if (src && isManaged(src) && renderedHere) removals.push([span.start, span.end]);
+  }
+  // Splice the image syntax OUT but KEEP its newlines (a wrapped alt spans
+  // lines): line counts never change, so `lines[i]` and `rawLines[i]` stay
+  // aligned for the definition-line pass below. Every line a removed span
+  // covered is "touched": its leftover is tidied, an emptied line dropped.
+  let text = raw;
+  const touched = new Set();
+  for (const [from, to] of removals.sort((a, b) => b[0] - a[0])) {
+    for (let li = lineOf(from); li <= lineOf(to); li += 1) touched.add(li);
+    text = text.slice(0, from) + raw.slice(from, to + 1).replace(/[^\n]/g, '') + text.slice(to + 1);
+  }
+  const lines = text.split('\n');
+  const kept = [];
+  const titleOnly = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
+  const destOnly = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = rawLines[i].match(/^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:([ \t]*)(.*)$/);
+    if (m && String(unmasked[i] || '').trim() !== '') { // a definition inside code/comment is text
+      const label = contentGuardrails.normalizeReferenceLabel(m[1]);
+      if (defs.has(label) && isManaged(decodeDestination(defs.get(label)))) {
+        // Managed definition: drop the label line AND its continuation
+        // lines (destination on the next line, optional title after a
+        // destination-only line) — the whole definition, not its head.
+        let destText = m[3];
+        if (destText.trim() === '') { i += 1; destText = rawLines[i] || ''; }
+        if (destOnly.test(destText) && rawLines[i + 1] !== undefined && titleOnly.test(rawLines[i + 1])) i += 1;
+        continue;
+      }
+    }
+    if (touched.has(i)) {
+      const tidy = lines[i].replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,;:!?])/g, '$1').trim();
+      if (tidy === '') continue; // the line only held the removed image
+      kept.push(tidy);
+      continue;
+    }
+    kept.push(lines[i]);
+  }
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+// Same, keyed by the row (publishAstro's slug fallback for a nullable slug).
+function stripManagedBodyImagesForPost(body, post) {
+  return stripManagedBodyImages(body, post?.slug || slugify(post?.title || ''));
+}
+
 module.exports = {
   publishAstro,
   reconcileTopicBlockedPostPrs,
@@ -3478,6 +4896,12 @@ module.exports = {
   planInternalLinksForTarget,
   internalLinkPlanningDisabled,
   assertCodexReviewClear,
+  // Merge-time body-image contract for the autonomous PR poller.
+  assertBodyImagesAtHead,
+  scheduledBlogFilePath,
+  scheduledBlogFilePathForPost,
+  stripManagedBodyImages,
+  stripManagedBodyImagesForPost,
   // Length clamps reused by the autonomous runner to normalize a draft's
   // title/meta BEFORE the quality gate (the gate runs before publish, so the
   // in-publisher normalization above is too late to salvage a length overshoot).
@@ -3487,6 +4911,28 @@ module.exports = {
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,
+    resolveBodyImages,
+    bodyImageSlots,
+    insertBodyImages,
+    countBodyImages,
+    bodyImageRefs,
+    validateBodyImageRefs,
+    scanBodySections,
+    renderedBodyView,
+    imageRefsInText,
+    isTransientImageError,
+    assertBodyImagesAtHead,
+    legacyHeroRefs,
+    imageDHash,
+    hammingDistance,
+    committedImageBuffer,
+    assertDistinctPictures,
+    BODY_IMAGE_SHOTS,
+    NEAR_DUPLICATE_MAX_DISTANCE,
+    reusableLiveBodyImage,
+    BODY_IMAGE_MIN,
+    blankMarkdownHtmlBlocks,
+    supersededBodyImages,
     fetchImageBuffer,
     parseImageDataUrl,
     defaultHeroForCategory,
