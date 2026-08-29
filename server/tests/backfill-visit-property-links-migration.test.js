@@ -153,7 +153,27 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     hasColumn: async (t, c) => t in db && !missingTables.includes(t) && (db[t].length === 0 || c in db[t][0] || ['property_id'].includes(c)),
   };
   knex.fn = { now: () => 'NOW' };
+  knex.raw = async (sql) => {
+    if (!/^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT) \w+$/.test(String(sql))) throw new Error(`fake raw: ${sql}`);
+    db.__savepoints = (db.__savepoints || []).concat(String(sql).split(' ')[0]);
+  };
   return knex;
+}
+
+// Wrap a fake knex so a hook runs right after the FIRST select on `table`
+// (simulates a concurrent write landing between the scan and the update).
+function withRaceAfterFirstSelect(knex, table, hook) {
+  let fired = false;
+  const wrapped = (t) => {
+    const q = knex(t);
+    if (t === table && !fired) {
+      const sel = q.select;
+      q.select = async (...cols) => { const out = await sel(...cols); fired = true; hook(); return out; };
+    }
+    return q;
+  };
+  wrapped.schema = knex.schema; wrapped.fn = knex.fn; wrapped.raw = knex.raw;
+  return wrapped;
 }
 
 const visit = (db, id) => db.scheduled_services.find((r) => r.id === id);
@@ -221,7 +241,7 @@ describe('20260829000050 backfill visit property links', () => {
       }
       return q;
     };
-    wrapped.schema = knex.schema; wrapped.fn = knex.fn;
+    wrapped.schema = knex.schema; wrapped.fn = knex.fn; wrapped.raw = knex.raw;
     await migration.up(wrapped);
     expect(visit(db, 'v-stamped').property_id).toBeNull();
     expect(visit(db, 'v-mirror').property_id).toBeNull();
@@ -245,10 +265,70 @@ describe('20260829000050 backfill visit property links', () => {
       }
       return q;
     };
-    wrapped.schema = knex.schema; wrapped.fn = knex.fn;
+    wrapped.schema = knex.schema; wrapped.fn = knex.fn; wrapped.raw = knex.raw;
     await migration.up(wrapped);
     expect(property(db, 'p4').active).toBe(true);
     expect(state(db).deactivated).toEqual(['p6']);
+  });
+
+  test('up() does not retire the duplicate when the PRIMARY changed after the scan', async () => {
+    const db = seedDb();
+    const knex = withRaceAfterFirstSelect(fakeKnex(db), 'scheduled_services', () => {
+      // Admin re-pointed the primary to a different address since the scan.
+      Object.assign(property(db, 'p3'), { ...B, address_key: addressKey(B) });
+    });
+    await migration.up(knex);
+    expect(property(db, 'p4').active).toBe(true);
+    expect(property(db, 'p6').active).toBe(true);
+    expect(state(db).deactivated).toEqual([]);
+  });
+
+  test('up() reverts a retirement when an open reference lands during the UPDATE', async () => {
+    const db = seedDb();
+    const base = fakeKnex(db);
+    let armed = false;
+    const wrapped = (t) => {
+      const q = base(t);
+      if (t === 'customer_properties') {
+        const upd = q.update;
+        q.update = async (patch) => {
+          const n = await upd(patch);
+          // A booking commits a reference to p4 "while" the UPDATE ran —
+          // invisible to its NOT EXISTS, visible to the post-write re-check.
+          if (patch.active === false && n && !armed) { armed = true; db.scheduled_services.push({ id: 'v-late', customer_id: 'c3', status: 'pending', property_id: 'p4' }); }
+          return n;
+        };
+      }
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.fn = base.fn; wrapped.raw = base.raw;
+    await migration.up(wrapped);
+    expect(property(db, 'p4').active).toBe(true);
+    expect(state(db).deactivated).toEqual(['p6']);
+  });
+
+  test('down() survives a unique-index refusal on revival (savepoint) and still removes the state row', async () => {
+    const db = seedDb();
+    const base = fakeKnex(db);
+    await migration.up(base);
+    // Emulate the race the NOT EXISTS cannot see: the UPDATE itself hits the
+    // unique index (concurrent equal-key insert committing mid-statement).
+    const wrapped = (t) => {
+      const q = base(t);
+      if (t === 'customer_properties') {
+        const upd = q.update;
+        q.update = async (patch) => {
+          if (patch.active === true) throw new Error('duplicate key value violates unique constraint "customer_properties_customer_address_uniq"');
+          return upd(patch);
+        };
+      }
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.fn = base.fn; wrapped.raw = base.raw;
+    await expect(migration.down(wrapped)).resolves.toBeUndefined();
+    expect(property(db, 'p4').active).toBe(false);
+    expect(db.system_settings.find((r) => r.key === STATE_KEY)).toBeUndefined();
+    expect(db.__savepoints).toEqual(expect.arrayContaining(['SAVEPOINT', 'ROLLBACK']));
   });
 
   test('up() does not retire a labeled, blank-labeled, or non-unknown duplicate', async () => {

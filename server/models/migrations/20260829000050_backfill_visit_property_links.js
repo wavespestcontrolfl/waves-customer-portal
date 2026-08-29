@@ -183,7 +183,7 @@ exports.up = async function up(knex) {
       if (p.label != null) continue;
       if (p.occupancy_type !== 'unknown') continue;
       if (streetZipKey(p) !== primaryKey) continue;
-      candidates.push(p);
+      candidates.push({ ...p, primary });
     }
   }
   if (candidates.length) {
@@ -200,6 +200,14 @@ exports.up = async function up(knex) {
       const q = knex('customer_properties')
         .where({ id: p.id, active: true, is_primary: false, occupancy_type: 'unknown', address_key: p.address_key })
         .whereNull('label')
+        // The classification depends on the PRIMARY too: it must still be
+        // this customer's active primary with the observed address (codex
+        // #3601 r3 P1) — an admin re-pointing the primary since the scan
+        // makes the CAS miss.
+        .whereExists(function primaryUnchanged() {
+          this.select(1).from('customer_properties')
+            .where({ id: p.primary.id, customer_id: p.customer_id, is_primary: true, active: true, address_key: p.primary.address_key });
+        })
         .whereNotExists(function openVisitRef() {
           this.select(1).from('scheduled_services')
             .whereRaw('scheduled_services.property_id = customer_properties.id')
@@ -216,7 +224,21 @@ exports.up = async function up(knex) {
         });
       }
       const n = await q.update({ active: false, updated_at: knex.fn.now() });
-      if (n) state.deactivated.push(p.id);
+      if (!n) continue;
+      // Post-write re-check on a FRESH statement snapshot (codex #3601 r3
+      // P1): a booking that committed a reference while the UPDATE ran is
+      // invisible to that statement's NOT EXISTS. Writers only ever pick
+      // ACTIVE properties (customer-properties.js listProperties /
+      // primary lookups), so the exposure is a reference read-as-active
+      // before this deactivation committed; if one landed, revert.
+      const late = await liveReferencedPropertyIds(knex, [p.id]);
+      if (late.has(p.id)) {
+        await knex('customer_properties')
+          .where({ id: p.id, active: false })
+          .update({ active: true, updated_at: knex.fn.now() });
+        continue;
+      }
+      state.deactivated.push(p.id);
     }
   }
 
@@ -238,20 +260,30 @@ exports.down = async function down(knex) {
   // Duplicates: re-activate ONLY rows still inactive. The per-customer
   // active-address unique index would refuse a revival if an equal-key
   // active row appeared since — that row is the admin's, so leave ours
-  // retired. Checked BEFORE the update: a failed statement would abort the
-  // migration transaction and catching the JS error cannot recover it
-  // (codex #3601 r1 P1).
+  // retired. Two layers (codex #3601 r1 + r3 P1): the revival is ONE
+  // statement guarded by NOT EXISTS(equal-key active row), and it runs
+  // under a SAVEPOINT so a concurrent insert that still wins the unique
+  // index only rolls back this statement — never the migration
+  // transaction (a failed statement would otherwise leave the transaction
+  // aborted and the state-row deletion could not run).
   if (await knex.schema.hasTable('customer_properties')) {
     for (const id of state.deactivated || []) {
       const row = await knex('customer_properties').where({ id, active: false }).first();
       if (!row) continue;
-      const clash = await knex('customer_properties')
-        .where({ customer_id: row.customer_id, address_key: row.address_key, active: true })
-        .first();
-      if (clash) continue;
-      await knex('customer_properties')
-        .where({ id, active: false })
-        .update({ active: true, updated_at: knex.fn.now() });
+      await knex.raw('SAVEPOINT revive_property');
+      try {
+        await knex('customer_properties')
+          .where({ id, active: false })
+          .whereNotExists(function equalKeyActive() {
+            this.select(1).from('customer_properties')
+              .where({ customer_id: row.customer_id, address_key: row.address_key, active: true });
+          })
+          .update({ active: true, updated_at: knex.fn.now() });
+        await knex.raw('RELEASE SAVEPOINT revive_property');
+      } catch (err) {
+        await knex.raw('ROLLBACK TO SAVEPOINT revive_property');
+        if (!/unique|duplicate key/i.test(String(err && err.message))) throw err;
+      }
     }
   }
 
