@@ -14389,9 +14389,15 @@ const CallRecordingProcessor = {
     // (settled ones, or short/voicemail ones that can never settle) and
     // older answered calls never ring. Everything else keeps its recovery
     // retries in the remaining capacity, newest first.
+    // Gate-aware: with GATE_UNRECORDED_CALL_WATCHDOG off nothing ever
+    // settles, so the priority would pin >=25 long unrecorded calls at
+    // the front forever and starve shorter/voicemail rows of recovery —
+    // off means the original newest-first recovery order, byte-identical.
+    const { isEnabled } = require('../config/feature-gates');
+    const alertPriority = isEnabled('unrecordedCallWatchdog');
     const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
     const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
-    const rows = await db('call_log')
+    let candidates = db('call_log')
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
         'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
@@ -14401,8 +14407,9 @@ const CallRecordingProcessor = {
       .whereNotNull('twilio_call_sid')
       .where('created_at', '>=', db.raw("NOW() - INTERVAL '7 days'"))
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
-      .where('duration_seconds', '>', 10)
-      .orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
+      .where('duration_seconds', '>', 10);
+    if (alertPriority) {
+      candidates = candidates.orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
           AND COALESCE(call_log.answered_by, '') NOT IN (${exemptList})
           AND COALESCE(call_log.call_outcome, '') <> 'voicemail'
           AND NOT EXISTS (
@@ -14410,7 +14417,9 @@ const CallRecordingProcessor = {
             WHERE n.recipient_type = 'admin'
               AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
                    OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
-          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS])
+          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS]);
+    }
+    const rows = await candidates
       .orderBy('created_at', 'desc')
       .limit(25);
 
