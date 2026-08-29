@@ -182,6 +182,13 @@ t.timestamp('superseded_at');
 
 ### 3.3 `seo_link_prospects` — placements (existing; additive columns)
 
+**`pending` is NOT a status.** The retained moderated-submission flow (§7) stores a pending
+submission as `status='placed'` with the existing `pending:true` flag and no `live_url`; wherever
+this document says "`placed` (pending-flagged or not)" it means that single status value, and no
+status constraint, `PROSPECT_STATUSES` entry, `CLAIM_MODE_STATUSES` set or transition ever
+names a `pending` status. The four statuses v2 ADDS are exactly `awaiting_owner`, `watching`,
+`ready_for_credentials`, `ready_for_payment`.
+
 ```js
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
@@ -256,7 +263,7 @@ for submit/create-account) must be `AUTO_*` (gate on, re-run decision agreeing) 
 with a valid, **unconsumed, action-matching** approval. **An approval's scope is the whole
 action instance, not a single step:** the execution/`acquire` approval covers every step of
 one acquisition (create-account → email verification → resume → submit) and is consumed
-ONLY by the terminal outcome of the final submit (`placed`/`pending`/`failed`/`skipped`);
+ONLY by the terminal outcome of the final submit (`placed` (pending-flagged or not)/`failed`/`skipped`);
 intermediate steps verify it is valid and unconsumed but never consume it, and
 `satisfied_at` on the execution instance is set only after that final submit. Likewise the
 payment/`purchase` approval spans reserve → mint → submit and is consumed on the purchase's
@@ -370,15 +377,17 @@ t.string('provider').notNullable();    // the fixed provider record the credenti
 t.string('auth_scheme').notNullable(); // CHECK (auth_scheme IN ('hmac','bearer'))
 t.string('method').notNullable(); t.text('path').notNullable(); t.jsonb('query'); // canonical target as verified (mode/type/location …)
 t.string('endpoint').notNullable();    // CHECK (endpoint IN ('claim','report'))
-t.string('result').notNullable();      // CHECK (result IN ('empty_claim','leased','report_accepted','report_rejected')) — an EMPTY claim is a row too
+t.string('result').notNullable().defaultTo('authenticated'); // CHECK (result IN ('authenticated','empty_claim','leased','report_accepted','report_rejected')) — inserted as 'authenticated' immediately after verification, finalized by the handler; a row that stays 'authenticated' (handler crashed/timed out) still counts as an accepted bearer request for retirement; an EMPTY claim is a row too
 t.uuid('prospect_id'); t.uuid('attempt_id'); t.text('nonce');
 t.timestamp('received_at').notNullable().defaultTo(knex.fn.now());
 t.index(['auth_scheme','received_at']); t.index(['provider','received_at']);
 ```
 One row per ACCEPTED authentication on `/api/integrations/*-worker` claim/report — written inside
-the route AFTER signature/bearer verification and BEFORE the handler, whatever the handler then
-returns (an empty claim, a lease, an accepted or rejected report), so a legacy worker that keeps
-polling with bearer auth and receives nothing still leaves a row. `seo_link_attempts` is NOT the
+the route in two steps: the row is INSERTED with `result='authenticated'` immediately after
+signature/bearer verification and before the handler (its own short transaction, committed even if
+the handler later fails), then UPDATED by the handler to its outcome (an empty claim, a lease, an
+accepted or rejected report) — so a legacy worker that keeps polling with bearer auth and receives
+nothing still leaves a row, and a handler failure leaves the `authenticated` row rather than none. `seo_link_attempts` is NOT the
 audit (it exists only for execution actions and never for an empty claim). Rejected
 authentications (bad signature, replayed nonce, stale timestamp) are counted in the existing
 `auth_failures` metric, not here — the table records who was LET IN. The §1/§14 bearer
@@ -774,7 +783,7 @@ if not all finite(domain.spam_score, score, path.confidence) → INVALID        
 if path.acquisition_type in (not_reproducible, unknown) → INVALID             # nothing to execute
 if path.last_investigated_at is null → INVALID
 if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shipped claim() filters on these lists; an unclaimable lane never gets authority
-if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
+if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable, terms_accepted_by_send, execution_after_send) is not a literal boolean → INVALID   # every NOT NULL authority input of §3.2; table-tested per field
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and (not (Number.isSafeInteger(amount_cents) and amount_cents > 0) or path.currency !== 'USD'):
     if path.currency is a CONFIRMED non-USD currency (investigator read an explicit €/£/CAD/… marker, stored as currency='foreign'):
@@ -885,7 +894,7 @@ fee covering every profile on the shared account) creates only the PAYMENT GROUP
 `seo_link_prospects.payment_group_id` — NO purchase row exists at bridge time (a purchase needs a positive amount, a state and, when owner-gated, an approval; for paid outreach nothing is reserved until the publisher exposes a checkout, §7) — the ONE shared purchase is reserved in the locked checkout-time reservation and its id is then attached as `purchase_id` to every sibling's payment authority row; every sibling still gets its OWN payment authority
 row (the claim contract loads per-placement authorities, unchanged) with `level` copied
 from the group's decision — and a sibling created LATER (a new GBP location after the group's purchase already settled) is linked to that settled purchase (`purchase_id`) and its payment instance marked `satisfied_at` (`satisfied_reason='group_purchase'`) in the bridge transaction that creates it ONLY IF that purchase's paid term is still ACTIVE at bridge time, read from the SETTLED PURCHASE ROW (never from the new sibling, whose own `paid_through`/`renews_at` are still NULL and would make an expired term look non-expiring): the group's latest settled purchase (the SETTLED-PURCHASE predicate of §6.3: `state IN ('charged','reconciled_charged','manual_charged')` — the three terminal paid states of the §7 transition table, `charged` being the normal automated success — OR the settled zero-total completion `voided` + `void_reason='no_payment_required'` + `settled_at`; any `purchase_kind`) has `paid_through IS NULL` (its immutable `terms_snapshot.renewal_period = 'one_time'` — a non-expiring fee) OR `paid_through >= etDateString(now)` (both are ET calendar `date` values compared as dates via `server/utils/datetime-et.js`, never `date >= now()` — a timestamp comparison can expire the term during its final ET day), AND the group anchor placement's `renewal_status` (§3.3 — the placement whose id is `payment_group_id`) is not `lapsed`; a sibling added after the purchased term ended is NOT satisfied by the stale purchase — the bridge instead opens the group's renewal payment instance (or a new initial one if the membership was never renewable), which takes the ordinary §3.3b/§6.3 route (owner approval where the level requires it, budget reservation, one shared renewal purchase whose settlement satisfies every sibling) — since the all-time guard rightly refuses a second initial purchase for the group and `purchase_id` → the group's purchase, and the settlement
-of that one purchase marks `satisfied_at` on EVERY row in the group in the same transaction, and every OTHER sibling already parked in `ready_for_payment` for this group is RESUMED without a checkout: the acquire predicate (`claim(?mode=acquire)`, §7) admits a `ready_for_payment` placement whose payment instance is `satisfied_at IS NOT NULL` — the SATISFIED-GROUP RESUME — re-binding its retained `slot_reserved` submit attempt through `handoff_lease_token` (§3.3) so the successor performs the final submit exactly like a $0 completion, leaving `ready_for_payment` for Judge verification on the `placed`/`pending` report; such a lease can never mint (a mint requires an open purchase reservation, and a satisfied group has none), and `mode=payment` — which requires an open reservation — never leases them
+of that one purchase marks `satisfied_at` on EVERY row in the group in the same transaction, and every OTHER sibling already parked in `ready_for_payment` for this group is RESUMED without a checkout: the acquire predicate (`claim(?mode=acquire)`, §7) admits a `ready_for_payment` placement whose payment instance is `satisfied_at IS NOT NULL` — the SATISFIED-GROUP RESUME — re-binding its retained `slot_reserved` submit attempt through `handoff_lease_token` (§3.3) so the successor performs the final submit exactly like a $0 completion, leaving `ready_for_payment` for Judge verification on the `placed` (pending-flagged or not) report; such a lease can never mint (a mint requires an open purchase reservation, and a satisfied group has none), and `mode=payment` — which requires an open reservation — never leases them
 (a sibling's payment row is never independently approvable or reservable — its card is the
 group's; the §3.3b approval rule is therefore GROUP-scoped for the payment dimension: a
 sibling's `approval_id` references the group's approval, whose `prospect_id` is the group
@@ -1050,7 +1059,7 @@ t.string('void_reason');                            // CHECK (void_reason IS NUL
   the authorities satisfied and `paid_through`/`renews_at` written in that same report, so late
   siblings and the renewal scheduler can consume the term; ONLY on a paid EXECUTION path, where
   the card-boundary resume that completes the checkout is also the acquisition submit, does the
-  same report additionally carry `placed`/`pending` (§7) — the `placed`/`pending` coupling is a
+  same report additionally carry `placed` (pending-flagged or not) (§7) — the `placed` (pending-flagged or not) coupling is a
   property of that path kind, never a condition of settlement. If the no-card checkout does
   not complete successfully (outcome `failed`/`mutation_ambiguous` reconciled to not-completed),
   the payment instance is NOT satisfied — it is ended
@@ -1258,15 +1267,15 @@ concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no re
 through the same gate as a **distinct claimable step**: the first send leaves the row
 `status='contacted'`, `outreach_status='sent'` (as shipped) — EXCEPT the LATE SEND of an
 execution-bearing path with `execution_after_send=false` (§7), which runs after the acquisition
-already moved the row to `placed`/`pending`: that send transition writes ONLY the outreach
+already moved the row to `placed` (pending-flagged or not): that send transition writes ONLY the outreach
 columns (`outreach_status='sent'`, `outreach_sent_at`, `follow_up_due_at`, `follow_up_status='none'`)
 and NEVER `status` — the Judge owns `status` from `placed` onward (a demotion to `contacted`
 would drop the row from the verifier's `status='placed'` selection, §8) and the guard's
 `applyReportTransition` refuses a `status` write from a send/followup report on a row whose
-status is `placed`/`pending`/`live`/`indexed` (contract test). The conversation lifecycle is
+status is `placed` (pending-flagged or not)/`live`/`indexed` (contract test). The conversation lifecycle is
 therefore carried by the OUTREACH COLUMNS, not by `status`: every follow-up predicate below
 selects `outreach_status='sent'` + `follow_up_status` on rows whose `status` is `contacted`
-OR — only when the joined path has `execution_after_send=false` — `placed`/`pending`/`live`/`indexed`
+OR — only when the joined path has `execution_after_send=false` — `placed` (pending-flagged or not)/`live`/`indexed`
 (the guard's `FOLLOW_UP_STATUSES(path)` helper returns that set; a follow-up on a Judge-owned
 row is claimable and never demotes it either), so a follow-up is modelled on
 its own columns — `follow_up_due_at` (= sent + 10d), `follow_up_status`
@@ -1312,8 +1321,8 @@ together:
 - **Claim predicate is authority-aware, atomic and UNCONDITIONAL.** Today `claim()` filters
   only on prospect status/type. From step 4 it always joins the registry — no gate turns the
   old predicate back on; `GATE_LINK_AUTHORITY` is the GLOBAL automation kill switch — required for EVERY automated claim and every irreversible automated action whatever the stamped level (`AUTO_*` or owner-approved `OWNER_*` alike; only the human settlement form and owner-side UI actions are outside it) — and leases a row only when ALL hold inside the same locked select: placement status matches the
-  CLAIM MODE — `prospect` for initial acquisition / `mode=draft` / the initial `mode=send` — EXCEPT on an execution-bearing outreach path (communication AND an `acquire` instance, §6.2: `account_required` or a form/`content_submission` submit), where the two required actions are ORDERED by the path's `execution_after_send` flag (investigator-set, default true: the publisher's form/account step follows the pitch): with it true, `mode=send` claims at `prospect` and `mode=acquire` claims at `contacted`/`negotiating` ONLY after the communication instance's send has a terminal `sent` (the acquire predicate joins the satisfied send, so a status change by the send never strands the acquire); with it false, `mode=acquire` claims at `prospect` and the initial `mode=send` claims at `placed`/`pending` (a submitted-but-unverified placement — the send predicate joins the successful submit) as a LATE SEND that writes outreach columns only and leaves the Judge-owned `status` untouched (§6.4), its follow-up leasing on the same Judge-owned statuses; each ordering is a single directed edge in the §3.3b prerequisite graph and the placement-status set for each later-stage mode is listed in the guard's `CLAIM_MODE_STATUSES` map with the mode-specific tests; `execution_after_send` is a PERSISTED, REVISIONED path column (§3.2: NOT NULL, investigator JSON-schema output, in `revision_communication` and `revision_execution` and both dimensions' hashes/snapshots) — the claim reads it from the path row joined in the locked select, never from untracked investigation JSON, and the send/acquire authority rows bind to the revision that carried it;
-  `contacted`/`negotiating` (paid outreach) or `ready_for_payment` (paid execution paths) for `mode=payment`, `FOLLOW_UP_STATUSES(path)` (§6.4: `contacted`, plus the Judge-owned `placed`/`pending`/`live`/`indexed` when the path's `execution_after_send=false`) for `mode=followup` and for the follow-up `mode=draft` lease, and `contacted`/`negotiating`/`prospect` for `mode=terms` (a standalone `accept_terms` instance exposed after the initial email — leased only by the `deterministic_runner`, executes the guarded `acceptTerms()` phase, reports `terms_accepted`/`terms_changed`/`mutation_ambiguous`); `placed`/`live`/`indexed`
+  CLAIM MODE — `prospect` for initial acquisition / `mode=draft` / the initial `mode=send` — EXCEPT on an execution-bearing outreach path (communication AND an `acquire` instance, §6.2: `account_required` or a form/`content_submission` submit), where the two required actions are ORDERED by the path's `execution_after_send` flag (investigator-set, default true: the publisher's form/account step follows the pitch): with it true, `mode=send` claims at `prospect` and `mode=acquire` claims at `contacted`/`negotiating` ONLY after the communication instance's send has a terminal `sent` (the acquire predicate joins the satisfied send, so a status change by the send never strands the acquire); with it false, `mode=acquire` claims at `prospect` and the initial `mode=send` claims at `placed` (pending-flagged or not) (a submitted-but-unverified placement — the send predicate joins the successful submit) as a LATE SEND that writes outreach columns only and leaves the Judge-owned `status` untouched (§6.4), its follow-up leasing on the same Judge-owned statuses; each ordering is a single directed edge in the §3.3b prerequisite graph and the placement-status set for each later-stage mode is listed in the guard's `CLAIM_MODE_STATUSES` map with the mode-specific tests; `execution_after_send` is a PERSISTED, REVISIONED path column (§3.2: NOT NULL, investigator JSON-schema output, in `revision_communication` and `revision_execution` and both dimensions' hashes/snapshots) — the claim reads it from the path row joined in the locked select, never from untracked investigation JSON, and the send/acquire authority rows bind to the revision that carried it;
+  `contacted`/`negotiating` (paid outreach) or `ready_for_payment` (paid execution paths) for `mode=payment`, `FOLLOW_UP_STATUSES(path)` (§6.4: `contacted`, plus the Judge-owned `placed` (pending-flagged or not)/`live`/`indexed` when the path's `execution_after_send=false`) for `mode=followup` and for the follow-up `mode=draft` lease, and `contacted`/`negotiating`/`prospect` for `mode=terms` (a standalone `accept_terms` instance exposed after the initial email — leased only by the `deterministic_runner`, executes the guarded `acceptTerms()` phase, reports `terms_accepted`/`terms_changed`/`mutation_ambiguous`); `placed`/`live`/`indexed`
   for `mode=renewal` (each mode's extra predicate is defined where the mode is) — the
   `prospect` restriction is never applied to the later-stage modes; registry
   `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — `mode=draft` ALSO accepts `qualified` (an owner-gated outreach placement without a draft stays `qualified` until the draft exists; the draft-lease bullet below is the authority on that mode's predicate) — claimability is a
@@ -1397,8 +1406,8 @@ together:
   the outcome is in the **mode-specific outcome matrix** (draft ⇒ `drafted`/`skipped`/`failed`
   only; send/followup ⇒ `sent`/`send_error`/`skipped`/`failed`; renewal ⇒ the
   purchase outcomes only; the INITIAL `mode=payment` on a PAID OUTREACH path (`contacted`/`negotiating`, checkout exposed by the publisher, §7) ⇒ the purchase
-  outcomes only (`close_pending`→`charged`, `ambiguous`, `voided`/`no_payment_required` …) with the conversation lifecycle UNCHANGED — the placement stays `contacted`/`negotiating` and moves to `placed` only on the publisher's confirmation captured by the inbound matcher or a follow-up report, never by the payment report — while a `no_payment_required` outcome here (and on `mode=renewal`, whose row keeps its Judge-owned `live`/`indexed`) SETTLES the zero-total purchase in this same report transaction (§6.3: `settled_at`, authorities satisfied, `paid_through`/`renews_at`) with no `placed`/`pending` write; the INITIAL `mode=payment` on a paid EXECUTION path ⇒ the purchase
-  outcomes AND, atomically with the purchase transition, `placed`/`pending` (the card-boundary
+  outcomes only (`close_pending`→`charged`, `ambiguous`, `voided`/`no_payment_required` …) with the conversation lifecycle UNCHANGED — the placement stays `contacted`/`negotiating` and moves to `placed` only on the publisher's confirmation captured by the inbound matcher or a follow-up report, never by the payment report — while a `no_payment_required` outcome here (and on `mode=renewal`, whose row keeps its Judge-owned `live`/`indexed`) SETTLES the zero-total purchase in this same report transaction (§6.3: `settled_at`, authorities satisfied, `paid_through`/`renews_at`) with no `placed` (pending-flagged or not) write; the INITIAL `mode=payment` on a paid EXECUTION path ⇒ the purchase
+  outcomes AND, atomically with the purchase transition, `placed` (pending-flagged or not) (the card-boundary
   resume performs the final submission — it is both the purchase and the acquisition submit —
   so the placement leaves `ready_for_payment` for Judge verification in the same report);
   credentials/acquire ⇒ the execution outcomes incl. handoffs; a draft
