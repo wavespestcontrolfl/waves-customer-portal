@@ -36,8 +36,11 @@ const SELECTABLE_KEYS = [
   // specialty
   'bed_bug_treatment', 'fire_ant', 'flea_tick', 'bee_wasp_removal', 'tick_control', 'mud_dauber_removal', 'wildlife_trapping',
   // termite
+  // termite_active_annual / termite_active_bait_quarterly are servicing of
+  // EXISTING active stations (cartridge checks/replacement) — follow-ons, not
+  // acquisition products; excluded pending an explicit owner ruling.
   'termite_liquid', 'termite_bait', 'termite_bond_10yr', 'termite_bond_5yr', 'termite_bond_1yr', 'termite_monitoring',
-  'termite_active_annual', 'termite_active_bait_quarterly', 'bora_care', 'foam_recurring', 'termite_slab_pretreat',
+  'bora_care', 'foam_recurring', 'termite_slab_pretreat',
   'foam_drill', 'termite_pretreatment', 'termite_spot_treatment', 'termite_trenching',
   // tree & shrub
   'tree_shrub_program', 'tree_shrub_quarterly', 'tree_shrub_6week', 'palm_injection', 'palm_injection_semiannual',

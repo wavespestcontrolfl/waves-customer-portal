@@ -75,7 +75,7 @@ describe('20260829000020 public_quote_selectable', () => {
     expect(db.system_settings).toHaveLength(0);
   });
   test('every seeded key names a product a NEW customer buys — no follow-on/internal keys', () => {
-    const banned = /re_service|_setup|cartridge|followup|guarantee|renewal|membership|general_appointment|lawn_inspection|trap_only|combo|pest_termite_bait|rodent_monitoring/;
+    const banned = /re_service|_setup|cartridge|followup|guarantee|renewal|membership|general_appointment|lawn_inspection|trap_only|combo|pest_termite_bait|rodent_monitoring|termite_active_/;
     for (const k of selectable.SELECTABLE_KEYS) expect({ k, ok: !banned.test(k) }).toEqual({ k, ok: true });
   });
 });
