@@ -42,6 +42,7 @@ const BRACKETS_DATA = {
 // Single source for the up() catalog copy — down()'s per-field guards
 // compare against exactly these strings.
 const UP_SETUP_DESCRIPTION = 'One-time inspection, station hardware, placement, and mapping. Charged only for non-WaveGuard members — waived when the customer has any other WaveGuard recurring service.';
+const CATALOG_SETUP_AUDIT_KEY = 'services.rodent_bait_setup';
 const UP_SETUP_INTERNAL_NOTES = 'Owner directive 2026-08-29: $99, non-WaveGuard members only (no other qualifying recurring service on the estimate or account).';
 
 const CHANGELOG_IDENTITY = {
@@ -174,8 +175,22 @@ exports.up = async function up(knex) {
     await knex('pricing_config').where({ config_key: configKey }).del();
   }
 
-  // 5. Catalog setup-fee service row.
+  // 5. Catalog setup-fee service row. Snapshot the ACTUAL prior values first
+  // (prod pre-read 2026-08-29: base_price was NULL there, not the dev DB's
+  // 199) so down() restores what this environment really held.
   if (await knex.schema.hasTable('services')) {
+    const priorSetupRow = await knex('services').where({ service_key: 'rodent_bait_setup' }).first();
+    if (priorSetupRow) {
+      await audit(knex, CATALOG_SETUP_AUDIT_KEY, {
+        base_price: priorSetupRow.base_price == null ? null : Number(priorSetupRow.base_price),
+        description: priorSetupRow.description ?? null,
+        internal_notes: priorSetupRow.internal_notes ?? null,
+      }, {
+        base_price: 99,
+        description: UP_SETUP_DESCRIPTION,
+        internal_notes: UP_SETUP_INTERNAL_NOTES,
+      }, UP_REASON);
+    }
     await knex('services')
       .where({ service_key: 'rodent_bait_setup' })
       .update({
@@ -305,15 +320,37 @@ exports.down = async function down(knex) {
     // fields that still hold this migration's up() output — an operator
     // edit to the price OR the copy after up() is authoritative and
     // survives rollback untouched.
+    // Restore from the up() audit snapshot of THIS environment's prior row
+    // (prod held base_price NULL, dev held 199); the literal defaults below
+    // apply only when no snapshot was recorded.
     const setupRow = await knex('services').where({ service_key: 'rodent_bait_setup' }).first();
+    let priorSetup = null;
+    if (setupRow && await knex.schema.hasTable('pricing_config_audit')) {
+      const setupAudit = await knex('pricing_config_audit')
+        .where({ config_key: CATALOG_SETUP_AUDIT_KEY, changed_by: MIGRATION_TAG, reason: UP_REASON })
+        .orderBy('id', 'desc')
+        .first();
+      if (setupAudit?.old_value) {
+        try { priorSetup = JSON.parse(setupAudit.old_value); } catch { priorSetup = null; }
+        if (!priorSetup || typeof priorSetup !== 'object') priorSetup = null;
+      }
+    }
     if (setupRow) {
       const restore = {};
-      if (Number(setupRow.base_price) === 99) restore.base_price = 199.0;
+      if (Number(setupRow.base_price) === 99) {
+        restore.base_price = priorSetup
+          ? (priorSetup.base_price == null ? null : Number(priorSetup.base_price))
+          : 199.0;
+      }
       if (setupRow.description === UP_SETUP_DESCRIPTION) {
-        restore.description = 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.';
+        restore.description = priorSetup
+          ? (priorSetup.description ?? null)
+          : 'One-time inspection, station hardware, placement, and mapping. Waived in standard recurring sign-up flow.';
       }
       if (setupRow.internal_notes === UP_SETUP_INTERNAL_NOTES) {
-        restore.internal_notes = 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.';
+        restore.internal_notes = priorSetup
+          ? (priorSetup.internal_notes ?? null)
+          : 'Waived when bait service is added alongside any recurring plan. Only invoices for the rare non-recurring case.';
       }
       if (Object.keys(restore).length) {
         restore.updated_at = knex.fn.now();
