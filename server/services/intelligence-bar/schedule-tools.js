@@ -451,6 +451,18 @@ async function assignTechnician(input) {
     return changed + Number(alreadyOn);
   });
 
+  // Visit-group seam (visit-group-scope.md §2; codex #3590 r9): this
+  // writer bypasses assignDispatchJob, so it repairs grouped membership
+  // itself — a reassigned child whose tech now conflicts with its visit
+  // detaches (or the visit adopts, per the helper's rules). Post-commit,
+  // best-effort, no-op for ungrouped rows.
+  try {
+    const { handleChildStopChanged } = require('../visit-groups');
+    for (const sid of serviceIds) await handleChildStopChanged(sid);
+  } catch (vgErr) {
+    logger.warn(`[intelligence-bar:schedule] visit-group seam failed after assign: ${vgErr.message}`);
+  }
+
   logger.info(`[intelligence-bar:schedule] Assigned ${count} services to ${tech.name}`);
 
   return {
@@ -710,6 +722,15 @@ async function moveStopsToDay(input) {
     }
     movedIds.add(s.id);
     if (stopOverlapped) overlapMovedIds.push(s.id);
+    // Visit-group seam (codex #3590 r9): this writer moves the date
+    // directly (not via the rebooker), so it repairs grouped membership
+    // itself — a moved child leaves a visit that stays on the old date.
+    // Post-commit, best-effort, no-op for ungrouped rows.
+    try {
+      await require('../visit-groups').handleChildStopChanged(s.id);
+    } catch (vgErr) {
+      logger.warn(`[intelligence-bar:schedule] visit-group seam failed for moved ${s.id}: ${vgErr.message}`);
+    }
     // Rebooker-parity side effects of the live → confirmed flip above:
     // job_status_history audit row, tech_status release, customer tracker
     // refresh. Best-effort: the move is committed — a side-effect failure
@@ -922,6 +943,17 @@ async function swapTechAssignments(input) {
     if (bIds.length) await trx('scheduled_services').whereIn('id', bIds).update({ technician_id: techA.id, route_order: null, updated_at: new Date() });
     if (aIds.length) await trx('scheduled_services').whereIn('id', aIds).update({ technician_id: techB.id, route_order: null, updated_at: new Date() });
   });
+
+  // Visit-group seam (codex #3590 r9): a whole-day swap moves every child
+  // but not service_visits.technician_id — run the repair per row so each
+  // grouped visit either adopts the new tech (all members moved together)
+  // or detaches the divergent child. Post-commit, best-effort.
+  try {
+    const { handleChildStopChanged } = require('../visit-groups');
+    for (const sid of [...aIds, ...bIds]) await handleChildStopChanged(sid);
+  } catch (vgErr) {
+    logger.warn(`[intelligence-bar:schedule] visit-group seam failed after swap: ${vgErr.message}`);
+  }
 
   return {
     success: true,

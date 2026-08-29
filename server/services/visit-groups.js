@@ -638,19 +638,12 @@ async function handleChildStopChanged(scheduledServiceId) {
             .whereNull('technician_id').update({ technician_id: fresh.technician_id });
           visit.technician_id = fresh.technician_id;
         }
-        // The move stayed inside the stop but may have shifted the union —
-        // recompute the visit window from current members (codex P2).
-        const members = await t('scheduled_services').where({ visit_id: visit.id })
-          .whereNotIn('status', TERMINAL_ROW_STATUSES)
-          .select('window_start', 'window_end');
-        const starts = members.map((m) => m.window_start).filter(Boolean);
-        const ends = members.map((m) => m.window_end).filter(Boolean);
-        const patch = {};
-        const newStart = starts.length ? starts.sort()[0] : null;
-        const newEnd = ends.length ? ends.sort().slice(-1)[0] : null;
-        if (String(newStart || '') !== String(visit.window_start || '')) patch.window_start = newStart;
-        if (String(newEnd || '') !== String(visit.window_end || '')) patch.window_end = newEnd;
-        if (Object.keys(patch).length) await t('service_visits').where({ id: visit.id }).update(patch);
+        // The move stayed overlapping SOME member, but may have broken
+        // transitive connectivity (codex r9: a bridge moved to the front
+        // strands the tail) or shifted the union — run the connectivity-
+        // aware recompute, which dissolves a disconnected dissolvable
+        // visit and otherwise updates the union.
+        await recomputeVisitWindow(t, visit.id);
         return false;
       }
       await t('scheduled_services').where({ id: fresh.id }).update({ visit_id: null });
