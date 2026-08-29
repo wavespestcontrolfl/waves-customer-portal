@@ -4217,6 +4217,23 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).toEqual({ ok: true, reason: null, baseSha: 'main-tip-1' });
   });
 
+  test('bodyImageRefs: a reference definition inside a JSX attribute or a (multi-line) MDX expression defines nothing — the outside reference stays text (hook P1)', () => {
+    const body = [
+      '![a][jsx]',
+      '![b][expr]',
+      '![c][real]',
+      '',
+      '<Callout note="',
+      '[jsx]: /images/blog/x/body-1.webp',
+      '" />',
+      '{',
+      '  `[expr]: /images/blog/x/body-2.webp`',
+      '}',
+      '[real]: /images/blog/x/body-3.webp',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-3.webp']);
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);

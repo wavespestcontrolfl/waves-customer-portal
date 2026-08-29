@@ -1842,13 +1842,16 @@ function bodyImagesEnabled() {
 // reads as a closing HTML tag and is blanked. Same-line rewrite: line
 // indices hold. Bare destinations are percent-DECODED when resolved so the
 // committed-file check sees the real path.
-const ANGLE_DESTINATION_RE = /\]\(<([^<>\n]*)>/g;
+// Both inline (`](<dest>`) and definition (`[label]: <dest>`, also with the
+// destination on the continuation line) forms are normalized — either
+// would otherwise read as an HTML closing tag to the tag masker.
+const ANGLE_DESTINATION_RE = /(\]\(|^[ \t]*\[(?:[^\]\\\n]|\\.)+\]:[ \t]*(?:\n[ \t]*)?)<([^<>\n]*)>/gm;
 // Characters that are structural in a bare destination — spaces and
 // parentheses — are percent-encoded (`</a.webp)variant>` → `/a.webp%29variant`)
 // and decoded back when the destination is resolved, so the path the
 // browser requests is the path that gets validated.
 function normalizeAngleDestinations(text) {
-  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, dest) => `](${dest.trim().replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, prefix, dest) => `${prefix}${dest.trim().replace(/[ ()]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`)}`);
 }
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }
@@ -1923,7 +1926,10 @@ function renderedBodyView(body) {
   // the wrong tool here: a picture inside a merely styled <div> IS
   // rendered and must be validated, not dropped from the scan.
   const visible = normalizeAngleDestinations(contentGuardrails.blankDefinitelyHiddenContent(text));
-  const defs = contentGuardrails.markdownReferenceDefinitions(visible);
+  // Definitions are read from the JSX/MDX-MASKED text: a `[label]: dest`
+  // inside a tag attribute or a `{…}` expression is data Astro never
+  // renders, so it must not resolve an outside `![alt][label]`.
+  const defs = contentGuardrails.markdownReferenceDefinitions(blankJsxAndExpressions(visible));
   const rendered = blankJsxAndExpressions(
     contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),
   );
