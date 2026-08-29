@@ -320,21 +320,31 @@ function ordinaryFollows(w, rest, names, allowed, reviewWords) {
     const adv = /^\s*,\s+(\p{Lu}[\p{Ll}'-]+)\b/u.exec(rest);
     return !!(adv && /ly$/.test(w) && allowed.has(adv[1].toLowerCase()));
   }
-  const coord = /^\s*(?:and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than|[,;:])\s+([\s\S]*)$/u.exec(rest);
+  // A serial comma and its conjunction (", and even Marcus") are ONE coordinator.
+  const COORD_RE = /^\s*(?:[,;:]\s*(?:and|or|but|nor|with|plus|as\s+well\s+as|along\s+with|together\s+with)?|and|or|but|nor|with|as\s+well\s+as|along\s+with|together\s+with|plus|as|than)\s+([\s\S]*)$/u;
+  let coord = COORD_RE.exec(rest);
   if (!coord) return true;
-  // Judge the coordinated word AFTER any modifiers (codex #3580 r4 P1: "and
-  // even Marcus"): a capitalised word there is name shape; a lowercase word
-  // must itself be positively ordinary — a starter, a listed opener, or the
-  // reviewer's own word — and never a name in any case (hook: "and tasha").
+  // Walk the WHOLE coordination chain (hook: "Roaches and ants and tasha") and
+  // judge every item after its modifiers (codex #3580 r4: "and even Marcus"):
+  // a capitalised item is name shape; a lowercase item must itself be
+  // positively ordinary — a starter, a listed opener, or the reviewer's own
+  // word — and never a name in any case (hook: "and tasha").
   let tail = coord[1];
-  let m;
-  while ((m = COORD_MODIFIER_RE.exec(tail)) !== null) tail = tail.slice(m[0].length);
-  const nextM = /^([\p{L}'-]+)/u.exec(tail);
-  if (!nextM) return false;
-  if (/^\p{Lu}/u.test(nextM[1])) return false;
-  const next = nextM[1].toLowerCase();
-  if (names.has(next) || COMMON_FIRST_NAMES.has(next)) return false;
-  return SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next);
+  for (let guard = 0; guard < 8; guard++) {
+    let m;
+    while ((m = COORD_MODIFIER_RE.exec(tail)) !== null) tail = tail.slice(m[0].length);
+    const nextM = /^([\p{L}'-]+)/u.exec(tail);
+    if (!nextM) return false;
+    if (/^\p{Lu}/u.test(nextM[1])) return false;
+    const next = nextM[1].toLowerCase();
+    if (names.has(next) || COMMON_FIRST_NAMES.has(next)) return false;
+    if (!(SENTENCE_STARTERS.has(next) || ORDINARY_OPENERS.has(next) || reviewWords.has(next))) return false;
+    tail = tail.slice(nextM[0].length);
+    coord = COORD_RE.exec(tail);
+    if (!coord) return true;
+    tail = coord[1];
+  }
+  return false;
 }
 
 

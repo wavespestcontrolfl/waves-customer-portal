@@ -479,6 +479,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     // codex #3580 r6/r7: a mass-noun opener with any verb predicate reads as a speaker.
     expect(verify(good('Hi Dana,\n\nTreatment says thanks, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nPrevention shows up on time, and Marcus is glad the ants are gone.'))).toBe('unlisted_name');
+    // hook: every item of a coordination chain is judged, not just the first.
+    expect(verify(good('Hi Dana,\n\nRoaches and ants and tasha appreciate your feedback. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, ants, and even Marcus are glad the kitchen is quiet.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches, ants, and spiders all hate this heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // …while an allowlisted plural stays exempt when nothing name-shaped follows.
     expect(verify(good('Hi Dana,\n\nAnts and roaches hate this treatment, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
