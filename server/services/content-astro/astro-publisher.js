@@ -373,6 +373,7 @@ const REGION_SERVICE_AREAS = Object.freeze({
   'sarasota county': ['Sarasota', 'Venice', 'North Port'],
   'charlotte county': ['Port Charlotte'],
   'southwest florida': DEFAULT_SERVICE_AREAS, 'sw florida': DEFAULT_SERVICE_AREAS, swfl: DEFAULT_SERVICE_AREAS,
+  'southwest fl': DEFAULT_SERVICE_AREAS, 'southwest fla': DEFAULT_SERVICE_AREAS, 'sw fl': DEFAULT_SERVICE_AREAS, 'sw fla': DEFAULT_SERVICE_AREAS,
   'gulf coast': DEFAULT_SERVICE_AREAS, suncoast: DEFAULT_SERVICE_AREAS, 'sun coast': DEFAULT_SERVICE_AREAS,
 });
 function serviceAreasForCity(city) {

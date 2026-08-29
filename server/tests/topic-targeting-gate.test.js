@@ -976,6 +976,16 @@ describe('PR codex r22 (b4db7a542)', () => {
     expect(gate.classifyGeoScope('Texas Phoenix palm decline in Sarasota').scope).toBe('footprint');
     expect(gate.classifyGeoScope('texas phoenix palm decline treatment').out_of_area).toEqual([]);
   });
+  test('out-of-footprint Florida regions are out of area; abbreviated Southwest FL forms anchor the footprint (r30)', () => {
+    for (const t of ['Treasure Coast pest control', 'Space Coast termite control', 'pest control on the First Coast', 'Emerald Coast mosquito control', 'the Panhandle termite season', 'South Florida pest control', 'Central Florida lawn care', 'Florida Keys termite treatment']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+      expect(gate.geoBlockReason(t, { allowStatewide: true })).toBe(gate.CODES.GEO_OUT_OF_AREA);
+    }
+    for (const t of ['Southwest FL pest control', 'SW FL termite treatment', 'SW Fla. lawn care', 'Southwest Fla mosquito control', 'swfl pest control']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('regional');
+      expect(gate.geoBlockReason(t)).toBeNull();
+    }
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

@@ -3639,6 +3639,7 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     expect(AstroPublisher.serviceAreasForCity('Manatee County, FL')).toEqual(['Bradenton', 'Lakewood Ranch', 'Palmetto', 'Parrish']);
     expect(AstroPublisher.serviceAreasForCity('Sarasota County, Florida')).toEqual(['Sarasota', 'Venice', 'North Port']);
     expect(AstroPublisher.serviceAreasForCity('Charlotte County, FL')).toEqual(['Port Charlotte']);
+    for (const c of ['Southwest FL', 'SW FL', 'SW Fla.', 'Southwest Fla']) expect(AstroPublisher.serviceAreasForCity(c)).toHaveLength(8); // codex r30
     expect(AstroPublisher.serviceAreasForCity('Southwest Florida')).toHaveLength(8);
     for (const c of ['Tampa', 'Boise', 'Venice Beach', '']) expect(AstroPublisher.serviceAreasForCity(c)).toEqual([]);
     const { inferServiceAreas } = AstroPublisher._internals;

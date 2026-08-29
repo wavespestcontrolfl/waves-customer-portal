@@ -103,7 +103,7 @@ const CODES = Object.freeze({
 // Regional phrasings that anchor a topic to the footprint without naming a
 // city. County names are the footprint counties only — out-of-area counties
 // live in the guardrails blocklist and classify as out_of_area.
-const REGIONAL_RE = /\b(southwest florida|sw florida|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
+const REGIONAL_RE = /\b(southwest florida|southwest fla?\.?|sw florida|sw fla?\.?|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
 const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
 // Compounds where "Florida"/"fl" is not geography: the Florida room (a
 // lanai-style sunroom), the fluid ounce, and the governed pest / weed names
@@ -280,6 +280,19 @@ const METRO_ALIASES = Object.freeze([
   ['Houston', /\bhtx\b/gi],
   // The dotted district form; bare "DC" is a safe postal abbreviation already.
   ['Washington, D.C.', /\bd\.c\.(?![a-z])/gi],
+  // Florida regions OUTSIDE the footprint (the footprint's own regions —
+  // Gulf Coast, Suncoast, Southwest Florida — are REGIONAL_RE).
+  ['Treasure Coast', /\btreasure\s+coast\b/gi],
+  ['Space Coast', /\bspace\s+coast\b/gi],
+  ['First Coast', /\bfirst\s+coast\b/gi],
+  ['Emerald Coast', /\bemerald\s+coast\b/gi],
+  ['Nature Coast', /\bnature\s+coast\b/gi],
+  ['Forgotten Coast', /\bforgotten\s+coast\b/gi],
+  ['Florida Panhandle', /\b(?:florida\s+|the\s+)panhandle\b/gi],
+  ['South Florida', /\bsouth\s+florida\b/gi],
+  ['Central Florida', /\bcentral\s+florida\b/gi],
+  ['North Florida', /\bnorth\s+florida\b/gi],
+  ['Florida Keys', /\bflorida\s+keys\b/gi],
 ]);
 function metroAliasHits(text) {
   return METRO_ALIASES.filter(([, re]) => { re.lastIndex = 0; return re.test(text); }).map(([name]) => name);

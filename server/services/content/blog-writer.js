@@ -219,7 +219,9 @@ class BlogWriter {
     };
   }
 
-  async generatePost(blogPostId) {
+  // `index`: a live topic index the caller already loaded (bulk generation
+  // loads it once per batch); omitted → the gate loads it itself.
+  async generatePost(blogPostId, { index = null } = {}) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Post not found');
 
@@ -229,7 +231,7 @@ class BlogWriter {
     // throw (fail closed; the caller logs and the row stays queued). A
     // block de-queues the row (status → idea, reason recorded) so the 5 a.m.
     // picker never wedges on it.
-    const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post) });
+    const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post), index });
     if (!topic.ok) {
       const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
       // Same CAS as the generated-content write below (the corpus load was

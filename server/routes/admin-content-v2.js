@@ -811,10 +811,17 @@ router.post('/blog/bulk-generate', aiContentLimiter, async (req, res, next) => {
       .orderBy('publish_date', 'asc')
       .limit(count);
 
+    // The topic gate's live corpus (~255 GitHub file reads) is loaded ONCE for
+    // the batch; if that load fails each generatePost loads (and fails
+    // closed) on its own, exactly as before.
+    let index = null;
+    if (posts.length > 1) {
+      try { index = await require('../services/content/topic-targeting-gate').loadLiveIndex(); } catch (err) { logger.warn(`[content] bulk-generate: live topic index unavailable, per-post loading: ${err.message}`); }
+    }
     const results = [];
     for (const post of posts) {
       try {
-        const result = await BlogWriter.generatePost(post.id);
+        const result = await BlogWriter.generatePost(post.id, { index });
         results.push({ id: post.id, title: post.title, wordCount: result.wordCount, success: true });
       } catch (err) {
         results.push({ id: post.id, title: post.title, error: err.message, success: false });

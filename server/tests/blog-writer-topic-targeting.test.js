@@ -166,7 +166,19 @@ describe('blog-writer generatePost — every persisted row is gated before write
     const gate = require('../services/content/topic-targeting-gate');
     const spy = jest.spyOn(gate, 'evaluateBlogPostRow');
     await writer.generatePost('post_1').catch(() => null);
-    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'post_1' }), { category: 'termite' });
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'post_1' }), expect.objectContaining({ category: 'termite' }));
+  });
+
+  test('a pre-loaded live index (bulk generation) is passed to the gate, so the corpus is not re-fetched per post (codex r30)', async () => {
+    const { writer, dispatch } = load({ post: { ...TAEXX_ROW, keyword: 'palm weevil sarasota', title: 'Palm Weevils in Sarasota', slug: 'palm-weevils-sarasota' }, ideas: null, corpusError: 'github_down' });
+    const gate = require('../services/content/topic-targeting-gate');
+    const index = gate.indexCorpus([{ url: '/lawn-care/sod-webworms/', body: '---\ntitle: Sod Webworms\nslug: /lawn-care/sod-webworms/\nprimary_keyword: sod webworms\ncategory: lawn-care\n---\n\ntext\n' }]);
+    const spy = jest.spyOn(gate, 'evaluateBlogPostRow');
+    dispatch.mockResolvedValue({ ok: false, error: 'stop_here' });
+    await writer.generatePost('post_1', { index }).catch(() => null);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'post_1' }), expect.objectContaining({ index }));
+    // The corpus is DOWN in this rig — with the batch index the gate never needed it.
+    expect(dispatch).toHaveBeenCalled();
   });
 
   test('corpus unavailable → generation throws (fail closed) and the row is left untouched', async () => {
