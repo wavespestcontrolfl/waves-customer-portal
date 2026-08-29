@@ -19,6 +19,15 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import {
+  SERIES_ACK_REQUIRED,
+  apiErrorMessage,
+  fetchSeriesMovePreview,
+  isCollectivePreview,
+  parseSeriesAckError,
+  seriesAckPayload,
+  seriesMoveSummary,
+} from './seriesMove';
 import { useBulkSlotConflicts } from './useSlotConflicts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1145,7 +1154,7 @@ export default function TimeGridDay({
     });
   }, [allServices, technicians]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { svc, toTech, fromMin, toMin, newWindow } = pending;
     const fromTech = svc.technicianId || '__unassigned__';
@@ -1167,6 +1176,9 @@ export default function TimeGridDay({
           reasonText: 'Rescheduled via drag-and-drop on Day grid',
           notifyCustomer,
           scope: pending.technicianChange ? 'this_only' : (scope || 'this_only'),
+          // Collective-move ack (GATE_ADMIN_COLLECTIVE_MOVE): same-day drags never
+          // widen the move, but a refusal still carries the modal's ack back in.
+          ...(seriesAck === true ? { seriesAck: true, seriesAckIds } : {}),
         };
         if (fromTech !== toTech) body.technicianId = techForApi;
         await adminFetch(`/admin/dispatch/${svc.id}/reschedule`, {
@@ -1188,7 +1200,10 @@ export default function TimeGridDay({
       setPending(null);
       onChange?.();
     } catch (err) {
-      alert('Reschedule failed: ' + err.message);
+      // A refused collective-move ack carries a refreshed preview — the modal
+      // re-renders it and stays open; nothing moved, nothing to revert.
+      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
+      alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
     } finally {
@@ -1249,8 +1264,41 @@ export default function TimeGridDay({
     const ids = Array.from(selection);
     const toMove = allServices.filter((s) => ids.includes(s.id));
     if (toMove.length === 0) return;
-    setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
+    // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): a recurring visit
+    // in the selection moves with its later visits. Read every recurring
+    // plan up front, disclose the sets once, and carry each visit's ack —
+    // otherwise the gated server refuses every recurring row while the
+    // one-time rows commit, an avoidable partial batch (hook P1). A plan
+    // that can't be read aborts BEFORE anything moves. `busy` goes up
+    // before the first await so a second Apply click can't start a parallel
+    // batch over the same selection (GH codex P2).
+    const seriesAcks = new Map();
+    const recurring = toMove.filter((s) => s.isRecurring);
     setBusy(true);
+    if (recurring.length > 0) {
+      const previews = await Promise.allSettled(
+        recurring.map((svc) => fetchSeriesMovePreview(svc.id, newDate)),
+      );
+      const unreadable = previews.filter((p) => p.status !== 'fulfilled').length;
+      if (unreadable > 0) {
+        alert(`Couldn't read the recurring plan for ${unreadable} selected visit${unreadable === 1 ? '' : 's'} — nothing was moved. Try again.`);
+        setBusy(false);
+        return;
+      }
+      const lines = [];
+      previews.forEach((p, i) => {
+        if (!isCollectivePreview(p.value)) return;
+        seriesAcks.set(recurring[i].id, seriesAckPayload(p.value));
+        lines.push(`${recurring[i].customerName || 'Unassigned'} — ${seriesMoveSummary(p.value)}`);
+      });
+      if (lines.length > 0 && !window.confirm(
+        `Recurring plans in this selection move with their later visits:\n\n${lines.join('\n')}\n\nMove all ${toMove.length} selected visit${toMove.length === 1 ? '' : 's'} to ${newDate}?`,
+      )) {
+        setBusy(false);
+        return;
+      }
+    }
+    setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
     try {
       const results = await Promise.allSettled(
         toMove.map((svc) => {
@@ -1271,6 +1319,8 @@ export default function TimeGridDay({
               reasonCode: 'dispatch_bulk',
               reasonText: `Bulk reschedule (${toMove.length} items) via Day grid`,
               notifyCustomer: false,
+              // Ack bound to the previewed occurrence set the operator confirmed.
+              ...(seriesAcks.get(svc.id) || {}),
             }),
           });
         }),

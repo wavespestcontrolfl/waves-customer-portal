@@ -16,6 +16,7 @@ import {
 } from '@dnd-kit/core';
 import { cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import { SERIES_ACK_REQUIRED, apiErrorMessage, parseSeriesAckError } from './seriesMove';
 import { serviceColor } from '../../lib/service-colors';
 import { etDateString } from '../../lib/timezone';
 
@@ -584,7 +585,7 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
     });
   }, [data]);
 
-  const commitReschedule = useCallback(async ({ notificationType, scope }) => {
+  const commitReschedule = useCallback(async ({ notificationType, scope, seriesAck, seriesAckIds }) => {
     if (!pending) return;
     const { svc, toDate, newWindow } = pending;
     setBusy(true);
@@ -599,6 +600,9 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
           reasonText: 'Rescheduled via drag-and-drop on mobile week grid',
           notifyCustomer,
           scope: scope || 'this_only',
+          // Collective-move ack (GATE_ADMIN_COLLECTIVE_MOVE): the modal showed the
+          // previewed set; the server binds this move to it.
+          ...(seriesAck === true ? { seriesAck: true, seriesAckIds } : {}),
         }),
       });
       if (notifyCustomer && result?.notificationSent === false) {
@@ -615,7 +619,10 @@ export default function MobileWeekGrid({ date, onEdit, onChange, onNavigate }) {
       setPending(null);
       onChange?.();
     } catch (err) {
-      alert('Reschedule failed: ' + err.message);
+      // A refused collective-move ack carries a refreshed preview — the modal
+      // re-renders it and stays open; nothing moved, nothing to revert.
+      if (parseSeriesAckError(err)?.code === SERIES_ACK_REQUIRED) throw err;
+      alert('Reschedule failed: ' + apiErrorMessage(err));
       setOptimistic(null);
       setPending(null);
     } finally {
