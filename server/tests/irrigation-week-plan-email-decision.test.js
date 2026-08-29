@@ -180,7 +180,8 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
-    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{[^}]*if \(!planWindowOpen\(tick\(\)\)\) \{ windowClosedAtQueue = true; return false; \}[\s\S]*?homeMovedAtQueue = true; return false; \}[\s\S]*?claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
+    // gh-r42: the HOME check runs first — the window-closed fallback rebuilds from loaded inputs, so a committed move must win over the cutoff.
+    expect(sweep).toMatch(/onQueued: snapshotArgs\?\.claimToken\s*\? async \(\) => \{[\s\S]*?homeMovedAtQueue = true; return false; \}[\s\S]*?if \(!planWindowOpen\(tick\(\)\)\) \{ windowClosedAtQueue = true; return false; \}\s*claimRenewal = await renewWeekPlanClaimWithRetry\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return claimRenewal === true;\s*\}/);
     // gh-r40/r41: grass type and the rain-sensor flag are home-bound, each gated by its OWN ledger entry —
     // re-saving the sizing fields (which clears scheduleUnconfirmed) re-enables neither.
     expect(sweep).toMatch(/grassType: grassConfirmedAfterMove\(customer\) \? resolveGrassType\(customer\) : null,/);

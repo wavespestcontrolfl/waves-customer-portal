@@ -1050,17 +1050,18 @@ async function updateCustomer(customerId, updates) {
       // either commits before the sweep's in-lock recheck reads or waits
       // until after the send. Comms lock BEFORE the customers row lock
       // (customer-comms-lock.js contract).
-      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
-        await lockCustomerComms(trx, customerId);
-      }
-      // Prefs advisory lock BEFORE the customer row lock — one global order
-      // with the merge/address/turf paths; this edit reaches the fan-out's
-      // move stamp (advisory) after the row lock otherwise (codex #3565
-      // gh-r38).
+      // Prefs advisory lock FIRST (global order: prefs advisory → comms →
+      // customers row, same as the Customers route and the bulk branch) —
+      // comms-then-prefs here was the AB-BA half of a deadlock with any
+      // path holding prefs and waiting on comms/rows (codex #3565
+      // gh-r38/r42).
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', String(customerId)],
       );
+      if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
+        await lockCustomerComms(trx, customerId);
+      }
       // Row lock serializes overlapping address edits (see the Customers
       // route): before/merged are re-derived from the locked row so a losing
       // concurrent editor still matches the snapshots the winner moved.

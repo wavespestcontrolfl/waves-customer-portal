@@ -2072,14 +2072,14 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // The premise this key describes — resolved here, never trusted from a
     // partial lookup row (see loadServicePremise).
     const premise = await loadServicePremise(service, knex);
-    if (premise.stamped_address_diverges !== true) {
-      // loadCurrentWeekPlan already returns null once the policy it was
-      // decided under is no longer in force, so its identity is the stamp —
-      // and only when the snapshot binds to THIS premise: an address change
-      // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
-      const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
-      weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
-    }
+    // loadCurrentWeekPlan already returns null once the policy it was
+    // decided under is no longer in force, so its identity is the stamp —
+    // and only when the snapshot binds to THIS premise (planBindsToService,
+    // the shared rule; the coarse stamped_address_diverges flag would drop
+    // a same-home postal-city correction — codex gh-r42): an address change
+    // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
+    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
     irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
   }
 
@@ -2659,11 +2659,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // plan-present key (codex gh-r17).
   if (typeof pinnedWeekPlanSentAt === 'string') {
     if (!featureGates.isEnabled('irrigationWeekPlan')) throw new PinnedWeekPlanUnavailable('gate_off');
-    if (service.stamped_address_diverges === true) throw new PinnedWeekPlanUnavailable('premise_diverged');
   }
-  // A stamped service address that diverges from the home (rental): the plan
-  // was decided for the home's parcel and county — never attach it here.
-  if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
+  // Plan visibility is decided by planBindsToService (the shared homesDiffer
+  // premise rule) alone — the coarse stamped_address_diverges flag marks a
+  // same-home postal-city correction (Bradenton → Lakewood Ranch at the
+  // same street + ZIP) as diverged and would drop a plan the fine predicate
+  // accepts; a genuinely stamped-elsewhere service (rental) still fails the
+  // binding below (codex gh-r42).
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
     // Pinned renders are STRICT: a failed lookup must refuse the render
     // rather than cache a plan-less page under a plan-present key.
     const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });

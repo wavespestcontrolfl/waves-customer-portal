@@ -81,7 +81,8 @@ describe('cache-key premise resolution (codex gh-r16: partial lookup rows must n
   test('resolveCanonicalLawnRender resolves the premise before binding the snapshot, and binds against it', () => {
     expect(src).toMatch(/const premise = await loadServicePremise\(service, knex\);/);
     expect(src).toMatch(/planBindsToService\(snapshot, premise\)/);
-    expect(src).toMatch(/premise\.stamped_address_diverges !== true/);
+    // gh-r42: plan visibility never gates on the coarse city-sensitive flag — planBindsToService alone decides.
+    expect(src).not.toMatch(/premise\.stamped_address_diverges !== true/);
   });
   test('loadServicePremise reads the same stamped-else-home columns as the full render row', () => {
     const fn = src.slice(src.indexOf('async function loadServicePremise'), src.indexOf('async function lawnAssessmentPdfSignature'));
@@ -116,14 +117,16 @@ describe('strict plan pin outranks the live gate/premise visibility checks (code
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
-  test('a string pin refuses when the gate is off or the premise now diverges, BEFORE the visibility gate', () => {
+  test('a string pin refuses when the gate is off, BEFORE the visibility gate; premise divergence is decided by planBindsToService alone (gh-r42)', () => {
     const pin = src.indexOf("if (typeof pinnedWeekPlanSentAt === 'string') {");
-    const gate = src.indexOf("if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {", pin);
+    const gate = src.indexOf("if (featureGates.isEnabled('irrigationWeekPlan')) {", pin);
     expect(pin).toBeGreaterThan(0);
     expect(gate).toBeGreaterThan(pin);
     const block = src.slice(pin, gate);
     expect(block).toMatch(/if \(!featureGates\.isEnabled\('irrigationWeekPlan'\)\) throw new PinnedWeekPlanUnavailable\('gate_off'\);/);
-    expect(block).toMatch(/if \(service\.stamped_address_diverges === true\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
+    // The coarse stamped_address_diverges flag no longer drops plans (a same-home postal-city
+    // correction reads as diverged there); the fine servicedElsewhere refusal below covers rentals/moves.
+    expect(block).not.toMatch(/stamped_address_diverges === true\) throw/);
   });
   test('a string pin whose snapshot no longer binds to this premise (mirror moved, no stamp) refuses too (codex gh-r18)', () => {
     expect(src).toMatch(/if \(servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string'\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);

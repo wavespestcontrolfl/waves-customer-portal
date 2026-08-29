@@ -166,6 +166,12 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     const insertRow = { customer_id: customerId, ...fields };
     const countyConfirmed = (req.body || {}).county_confirmed === true
       && typeof fields.county === 'string' && !!fields.county.trim();
+    // Same contract for the grass: an EXPLICIT review flag (the client sets
+    // it only when the grass field was touched this session) — a Bahia →
+    // Bahia move has no value change to observe, and without this signal
+    // the grass could stay on the unknown fallback forever (codex gh-r42).
+    const grassReviewed = (req.body || {}).grass_confirmed === true
+      && typeof fields.grass_type === 'string' && !!fields.grass_type.trim();
     // Customer-lock fence (#3391 GitHub round): FOR UPDATE on the turf row
     // cannot serialize the NO-ROW case, so this upsert could insert the
     // customer's first profile between the click-to-estimate mint's null
@@ -184,8 +190,8 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         .onConflict('customer_id')
         .merge({ ...fields, updated_at: new Date() })
         .returning('*');
-      const grassEdited = typeof fields.grass_type === 'string' && fields.grass_type.trim()
-        && fields.grass_type !== (priorRow ? priorRow.grass_type : null);
+      const grassEdited = (typeof fields.grass_type === 'string' && fields.grass_type.trim()
+        && fields.grass_type !== (priorRow ? priorRow.grass_type : null)) || grassReviewed;
       if (grassEdited) {
         const { GRASS_CONFIRMED_FIELD } = require('../services/irrigation-schedule-confirmation');
         await confirmIrrigationFields(trx, customerId, [GRASS_CONFIRMED_FIELD]);

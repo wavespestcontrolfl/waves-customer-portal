@@ -117,6 +117,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
   // was reviewed for the current address — after a move, that review is
   // what lets the weekly watering plan trust the profile county again.
   const [countyTouched, setCountyTouched] = useState(false);
+  const [grassTouched, setGrassTouched] = useState(false);
   // Tech-confirmed scores. Initialized from the server-adjusted /assess
   // scores; the tech can nudge any tile up/down before confirm.
   // recordTechCalibration on the server uses the AI vs tech delta to
@@ -327,6 +328,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
           : EMPTY_TURF_PROFILE,
       );
       setCountyTouched(false);
+      setGrassTouched(false);
       setStep("profile");
     } catch (e) {
       alert("Failed to load turf profile: " + e.message);
@@ -344,6 +346,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
         Object.entries(turfProfile).filter(([, v]) => v !== "" && v !== null),
       ),
       county_confirmed: countyTouched,
+      grass_confirmed: grassTouched,
     };
     setProfileSaving(true);
     try {
@@ -356,6 +359,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       );
       alert("Turf profile saved");
       setCountyTouched(false);
+      setGrassTouched(false);
       // Reflect the saved row back into form state so the user sees
       // any server-applied normalisation immediately.
       const p = d.profile;
@@ -1278,7 +1282,10 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   </div>{" "}
                   <select
                     value={turfProfile[key] || ""}
-                    onChange={(e) => updateProfileField(key, e.target.value)}
+                    onChange={(e) => {
+                      if (key === "grass_type") setGrassTouched(true);
+                      updateProfileField(key, e.target.value);
+                    }}
                     style={{ ...inputStyle, marginBottom: 0 }}
                   >
                     {" "}

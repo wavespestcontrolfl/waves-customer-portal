@@ -1461,9 +1461,6 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // followed by this worker's older decision).
         onQueued: snapshotArgs?.claimToken
           ? async () => {
-            // Re-read the clock at dispatch: a plan decided inside the
-            // window must not leave after it (codex gh-r33).
-            if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
             // Re-read the move stamp at dispatch UNDER the property-
             // preferences advisory lock: a plain MVCC read would not wait
             // for an address-change transaction that already holds the lock
@@ -1489,6 +1486,12 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
               stampCheckFailedAtQueue = true;
               return false;
             }
+            // Re-read the clock AFTER the home check: the window-closed
+            // fallback rebuilds the pre-plan email from this customer's
+            // loaded inputs, so a move that committed before the cutoff
+            // must win — otherwise the fallback quotes the former home's
+            // rainfall and schedule (codex gh-r33/r42).
+            if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
             claimRenewal = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
             return claimRenewal === true;
           }
