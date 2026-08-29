@@ -171,12 +171,21 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
         auto_dispatch_change_count: db.raw('COALESCE(auto_dispatch_change_count, 0) + 1'),
         updated_at: db.fn.now(),
       };
-      if (sib.previousStatus === 'pending') stamp.status = 'pending';
-      await db('scheduled_services').where({ id: sib.id }).update(stamp);
       if (sib.previousStatus === 'pending') {
-        await db('job_status_history').insert({
-          job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
-        });
+        // Fenced on the post-move 'confirmed' the rebooker wrote (codex r5):
+        // a cancel/complete/start that landed after the unit move must not
+        // be rewound to pending, and the history row only follows a real
+        // restoration.
+        const restored = await db('scheduled_services').where({ id: sib.id, status: 'confirmed' }).update({ ...stamp, status: 'pending' });
+        if (Number(restored) === 1) {
+          await db('job_status_history').insert({
+            job_id: sib.id, from_status: 'confirmed', to_status: 'pending', transitioned_by: null,
+          });
+        } else {
+          await db('scheduled_services').where({ id: sib.id }).update(stamp);
+        }
+      } else {
+        await db('scheduled_services').where({ id: sib.id }).update(stamp);
       }
     } catch (stampErr) {
       logger.error(`[auto-dispatch] post-move bookkeeping stamp failed for grouped sibling ${sib.id} (move already applied): ${stampErr.message}`);

@@ -1587,7 +1587,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         const members = await t('scheduled_services').where({ visit_id: visit.id })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
-          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes');
+          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const primary = members.find((m) => String(m.id) === String(serviceId));
         if (!primary || members.length < 2) return null;
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
@@ -1603,6 +1603,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
         }
         for (const m of members) {
+          // Auto-dispatch honours the operator opt-outs on EVERY grouped
+          // member, with the same guard the tapped row gets (codex r5): a
+          // locked/excluded sibling fails the whole unit move.
+          if (String(initiatedBy) === 'auto_dispatch' && (m.auto_dispatch_locked === true || m.auto_dispatch_excluded === true)) {
+            throw Object.assign(new Error('Cannot auto-move this stop: a grouped service is locked or excluded from auto-dispatch'), { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_OPT_OUT', memberId: m.id, isOperational: true });
+          }
           if (!movable(m.status)) {
             throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${m.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: m.id });
           }
@@ -1697,36 +1703,21 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // concurrent submissions cannot both plan from the old visit and let
     // the second overwrite the first (codex r3).
     const callerFenced = options.expect || options.expectAnchor || options.expectSchedule;
+    // The primary's occupancy probes hide the siblings (excludeServiceIds);
+    // excludeExpect makes the rebooker lock those rows FOR UPDATE inside its
+    // own move transaction and verify they still hold the plan snapshot
+    // (membership + slot) — held through the conflict checks and the write,
+    // so a sibling split and re-booked into the target can never hide
+    // behind the exclusion (codex r4/r5). Mismatch → 409 VISIT_PLAN_STALE.
+    const excludeExpect = plan.targets.filter((x) => !x.isPrimary).map((x) => ({ id: x.id, visit_id: plan.visitId, ...x.expect }));
     const memberOpts = target.isPrimary
-      ? { ...options, ...(callerFenced ? {} : { expect: target.expect }), visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds }
+      ? { ...options, ...(callerFenced ? {} : { expect: target.expect }), visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
       : { ...siblingBase, expect: target.expect, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
     try {
-      if (target.isPrimary) {
-        // The plan's locks were released: a planned sibling split from the
-        // visit and re-booked INTO the primary's target would be hidden
-        // from the primary's occupancy probes by the exclusion set. Verify
-        // every excluded sibling still holds its snapshotted old slot and
-        // membership right before the primary commits (codex r4).
-        const sibs = plan.targets.filter((x) => !x.isPrimary);
-        const now = await db('scheduled_services').whereIn('id', sibs.map((x) => x.id)).select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end');
-        const norm = (v) => (v ? String(v).slice(0, 5) : null);
-        for (const sib of sibs) {
-          const cur = now.find((r) => String(r.id) === String(sib.id));
-          const same = cur && String(cur.visit_id) === String(plan.visitId)
-            && dateOnly(cur.scheduled_date) === sib.expect.scheduled_date
-            && norm(cur.window_start) === norm(sib.expect.window_start)
-            && norm(cur.window_end) === norm(sib.expect.window_end);
-          if (!same) {
-            throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), { statusCode: 409, code: 'VISIT_PLAN_STALE', memberId: sib.id, isOperational: true });
-          }
-        }
-      }
-      // Explicit series scope (a direct rescheduleSeries caller) is
-      // preserved for the primary regardless of the collective gate (r2).
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);

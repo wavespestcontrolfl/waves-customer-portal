@@ -269,12 +269,32 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule.mock.calls[1][2]).toBe('13:30-14:30');
   });
 
-  test('a planned sibling that left the visit or its slot between plan and primary write fails the move closed (VISIT_PLAN_STALE) before the primary commits', async () => {
-    db.__script = script({ members: [member('a'), member('b')], revalidate: [{ id: 'b', visit_id: 'other', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00' }] });
+  test('the primary carries excludeExpect (each hidden sibling\'s membership + snapshotted slot) so the rebooker locks and verifies them INSIDE its move transaction', async () => {
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
-    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_PLAN_STALE', memberId: 'b' });
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
+    expect(rebooker.reschedule.mock.calls[0][5].excludeExpect).toEqual([{ id: 'b', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00' }]);
+    expect(rebooker.reschedule.mock.calls[1][5].excludeExpect).toBeUndefined();
+    // a stale snapshot is the rebooker's 409 (VISIT_PLAN_STALE) — the primary never commits, nothing moved
+    db.__script = script({ members: [member('a'), member('b')] });
+    const stale = { reschedule: jest.fn(async () => { throw Object.assign(new Error('stale'), { statusCode: 409, code: 'VISIT_PLAN_STALE' }); }), rescheduleSeries: jest.fn() };
+    await expect(moveVisitAsUnit({ rebooker: stale, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toMatchObject({ code: 'VISIT_PLAN_STALE' });
+    expect(stale.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('auto-dispatch: a grouped member locked or excluded from auto-dispatch fails the whole unit move before any write', async () => {
+    db.__script = script({ members: [member('a'), member('b', { auto_dispatch_locked: true })] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_OPT_OUT', memberId: 'b' });
+    db.__script = script({ members: [member('a'), member('b', { auto_dispatch_excluded: true })] });
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'auto_dispatch' }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_OPT_OUT' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
+    // staff moves ignore the auto-dispatch flags
+    db.__script = script({ members: [member('a'), member('b', { auto_dispatch_locked: true })] });
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' });
+    expect(rebooker.reschedule).toHaveBeenCalledTimes(2);
   });
 
   test('a row that joined the visit after the plan snapshot is detached at retarget, with a warning — by the full target stop, not the date alone', async () => {

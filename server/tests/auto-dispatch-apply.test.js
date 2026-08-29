@@ -136,3 +136,30 @@ test('a grouped stop moved as a unit: every moved sibling gets the same bookkeep
   expect(updateSib.mock.calls[0][0]).toMatchObject({ status: 'pending', last_auto_dispatch_run_id: 'run1', auto_dispatch_change_count: { raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' } });
   expect(insert).toHaveBeenCalledWith({ job_id: 's2', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
 });
+
+test('a grouped sibling whose status moved on after the unit move (cancel/complete/start) is NOT rewound to pending and gets no false history row', async () => {
+  SmartRebooker.reschedule.mockResolvedValueOnce({
+    success: true,
+    visitMove: { visitId: 'v1', moved: ['s1', 's2'], failed: [], members: [
+      { id: 's1', isPrimary: true, previousStatus: 'confirmed' },
+      { id: 's2', isPrimary: false, previousStatus: 'pending' },
+    ] },
+  });
+  const updateTapped = jest.fn().mockResolvedValue(1);
+  const sibWhere = jest.fn();
+  const updateSibFenced = jest.fn().mockResolvedValue(0); // status is no longer 'confirmed'
+  const updateSibPlain = jest.fn().mockResolvedValue(1);
+  const insert = jest.fn().mockResolvedValue();
+  const queue = [
+    readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
+    { where() { return this; }, update: updateTapped },
+    { where(pred) { sibWhere(pred); return this; }, update: updateSibFenced },
+    { where() { return this; }, update: updateSibPlain },
+  ];
+  db.mockImplementation(() => queue.shift());
+
+  await applyAutoDispatchMove(SERVICE, BEST, 'run1', { notifyCustomers: false });
+  expect(sibWhere).toHaveBeenCalledWith({ id: 's2', status: 'confirmed' });
+  expect(updateSibPlain.mock.calls[0][0].status).toBeUndefined();
+  expect(insert).not.toHaveBeenCalled();
+});

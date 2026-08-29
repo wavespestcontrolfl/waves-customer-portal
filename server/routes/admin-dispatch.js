@@ -15019,6 +15019,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
+    // A grouped stop moved as a unit: every sibling that landed is a
+    // committed change other open boards must see too (codex #3609 r5).
+    for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+      try {
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+      } catch (err) {
+        logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+      }
+    }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary
       // and service contacts, arrival-window copy, terminal/slot recheck at

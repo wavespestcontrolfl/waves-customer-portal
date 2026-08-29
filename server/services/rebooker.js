@@ -1138,6 +1138,32 @@ class SmartRebooker {
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
       }
+      // Unit-move exclusion contract (codex #3609 r5): the rows a batch
+      // mover hides from the occupancy probes (excludeServiceIds) must
+      // still sit at the snapshot the plan was built from. Lock them FOR
+      // UPDATE inside THIS transaction and verify; they stay locked through
+      // the conflict checks and the write, so a sibling split and re-booked
+      // into this target cannot slip between the check and the commit.
+      if (Array.isArray(options.excludeExpect) && options.excludeExpect.length) {
+        const ids = options.excludeExpect.map((x) => String(x.id));
+        const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate()
+          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end');
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
+        for (const exp of options.excludeExpect) {
+          const cur = rows.find((r) => String(r.id) === String(exp.id));
+          const same = cur
+            && (exp.visit_id === undefined || String(cur.visit_id || '') === String(exp.visit_id || ''))
+            && day(cur.scheduled_date) === day(exp.scheduled_date)
+            && norm(cur.window_start) === norm(exp.window_start)
+            && norm(cur.window_end) === norm(exp.window_end);
+          if (!same) {
+            throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_PLAN_STALE', memberId: exp.id,
+            });
+          }
+        }
+      }
       if (keptTechId && updates.window_start && occupancyGateEnd) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
