@@ -1723,9 +1723,14 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // the unit move already carried every member (rows, reminders, series),
   // so later members are recorded as covered — no second move, no second
   // notice, no second count.
-  const coveredVisits = new Set();
+  // Keyed by the member rows that actually MOVED (visitMove.moved) — a
+  // sibling that failed inside the unit move is not covered: it is
+  // reached individually below and recorded as its own failure/retry
+  // (codex #3609 r6).
+  const coveredIds = new Set();
+  const coverMoved = (r) => { for (const id of (r?.visitMove?.moved || [])) coveredIds.add(String(id)); };
   for (const job of orderedJobs) {
-    if (job.visit_id && coveredVisits.has(String(job.visit_id))) {
+    if (coveredIds.has(String(job.id))) {
       results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
       continue;
     }
@@ -1804,7 +1809,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // A grouped recurring anchor's series shift carried its visit
           // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
           // only on the single fallback (codex #3609 r3).
-          if (seriesResult?.visitMove?.visitId) coveredVisits.add(String(seriesResult.visitMove.visitId));
+          coverMoved(seriesResult);
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
@@ -1848,7 +1853,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
-        if (moveResult?.visitMove?.visitId) coveredVisits.add(String(moveResult.visitMove.visitId));
+        coverMoved(moveResult);
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.

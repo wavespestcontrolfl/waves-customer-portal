@@ -15005,6 +15005,16 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         actorId: req.technicianId,
         reasonText,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit are outside the
+      // series effects' broadcast scope — other boards need them too
+      // (codex #3609 r6).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+        try {
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
         ...response,

@@ -602,6 +602,29 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         to_status: 'confirmed',
         transitioned_by: null,
       });
+      // The page presented every live service at this stop as ONE
+      // appointment, so the tap confirms the grouped visit (codex #3609
+      // r6): under the stop lock, every other pending member that is
+      // customer-confirmable (not dispatch-owned/unreviewed) flips with the
+      // same guarded write + history row. Members already confirmed or in
+      // any other state are untouched.
+      if (svc.visit_id) {
+        const { lockStopForRow } = require('../services/visit-groups');
+        await lockStopForRow(trx, svc.id);
+        const siblings = await trx('scheduled_services')
+          .where({ visit_id: svc.visit_id, status: 'pending' })
+          .whereNot('id', svc.id)
+          .forUpdate()
+          .select('id', 'source_action', 'customer_confirmed');
+        for (const sib of siblings) {
+          if (dispatchOwnedUnreviewed(sib)) continue;
+          const n = await trx('scheduled_services')
+            .where({ id: sib.id, status: 'pending' })
+            .update({ status: 'confirmed', customer_confirmed: true, confirmed_at: trx.fn.now(), updated_at: trx.fn.now() });
+          if (n === 0) continue;
+          await trx('job_status_history').insert({ job_id: sib.id, from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
+        }
+      }
     });
     if (updated === 0) {
       // Losing the guarded update is not automatically an error: two taps

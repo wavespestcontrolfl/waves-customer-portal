@@ -1145,18 +1145,27 @@ class SmartRebooker {
       // the conflict checks and the write, so a sibling split and re-booked
       // into this target cannot slip between the check and the commit.
       if (Array.isArray(options.excludeExpect) && options.excludeExpect.length) {
-        const ids = options.excludeExpect.map((x) => String(x.id));
-        const rows = await trx('scheduled_services').whereIn('id', ids).forUpdate()
-          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end');
+        // The moving row is locked TOGETHER with the excluded rows, in id
+        // order (ORDER BY id under FOR UPDATE locks in output order), so two
+        // concurrent unit moves tapping different members of one visit take
+        // the same row locks in the same sequence — no A-then-B / B-then-A
+        // deadlock between their primary transactions (codex r6).
+        const ids = [...new Set([String(serviceId), ...options.excludeExpect.map((x) => String(x.id))])].sort();
+        const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate()
+          .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const norm = (v) => (v ? String(v).slice(0, 5) : null);
         const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
         for (const exp of options.excludeExpect) {
           const cur = rows.find((r) => String(r.id) === String(exp.id));
+          // Any extra key the caller snapshots (status, the auto-dispatch
+          // opt-out flags) is part of the contract too.
+          const extras = Object.keys(exp).filter((k) => !['id', 'visit_id', 'scheduled_date', 'window_start', 'window_end'].includes(k));
           const same = cur
             && (exp.visit_id === undefined || String(cur.visit_id || '') === String(exp.visit_id || ''))
             && day(cur.scheduled_date) === day(exp.scheduled_date)
             && norm(cur.window_start) === norm(exp.window_start)
-            && norm(cur.window_end) === norm(exp.window_end);
+            && norm(cur.window_end) === norm(exp.window_end)
+            && extras.every((k) => (cur[k] === null || cur[k] === undefined ? null : cur[k]) === (exp[k] === undefined ? null : exp[k]));
           if (!same) {
             throw Object.assign(new Error('Cannot move this stop: a grouped service changed while the move was being planned — try again'), {
               statusCode: 409, isOperational: true, code: 'VISIT_PLAN_STALE', memberId: exp.id,
@@ -1379,9 +1388,11 @@ class SmartRebooker {
 
     if (overlapWarned) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
-      return { success: true, originalDate, newDate, warnings: [slotOverlapWarning(newDateStr)] };
+      // previousStatus: the status the CAS matched — the row's real
+      // pre-move state, for callers that restore it (auto-dispatch).
+      return { success: true, originalDate, newDate, previousStatus: service.status, warnings: [slotOverlapWarning(newDateStr)] };
     }
-    return { success: true, originalDate, newDate };
+    return { success: true, originalDate, newDate, previousStatus: service.status };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the

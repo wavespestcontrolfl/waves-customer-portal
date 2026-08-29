@@ -1695,7 +1695,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   const warnings = [];
   let primaryResult = null;
   const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, ...siblingBase } = options;
-  const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...plan.memberIds].map(String))];
+  // Landed state per member (date + window at the target) once its move
+  // committed — the contract later member moves verify the row against.
+  const landedState = {};
+  const targetTuple = (t) => {
+    const [ts, te] = typeof t.window === 'string' ? t.window.split('-') : [t.window && t.window.start, t.window && t.window.end];
+    return { scheduled_date: newDateStr, window_start: ts || t.expect.window_start || null, window_end: (te === undefined ? t.expect.window_end : te) || null };
+  };
+  for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) landedState[t.id] = targetTuple(t);
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
   for (const target of ordered) {
     // The primary keeps the caller's own fence; a caller that supplied none
@@ -1709,17 +1716,33 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // (membership + slot) — held through the conflict checks and the write,
     // so a sibling split and re-booked into the target can never hide
     // behind the exclusion (codex r4/r5). Mismatch → 409 VISIT_PLAN_STALE.
-    const excludeExpect = plan.targets.filter((x) => !x.isPrimary).map((x) => ({ id: x.id, visit_id: plan.visitId, ...x.expect }));
+    // EVERY member move carries the contract for the OTHER participating
+    // rows (codex r6): already-moved members at their landed target,
+    // not-yet-moved members at their planned snapshot; a failed sibling
+    // is dropped from the exclusion (it is real occupancy again). Under
+    // auto-dispatch the operator opt-out flags ride in the contract and in
+    // each sibling's own CAS, so an opt-out committed between plan and
+    // move stops the automatic move instead of being overridden.
+    const autoDispatch = String(initiatedBy) === 'auto_dispatch';
+    const optOutFence = autoDispatch ? { auto_dispatch_locked: false, auto_dispatch_excluded: false } : {};
+    const participating = plan.targets.filter((x) => x.id !== target.id && !failed.some((f) => f.id === x.id));
+    const excludeExpect = participating.map((x) => ({ id: x.id, visit_id: plan.visitId, ...(landedState[x.id] || x.expect), ...optOutFence }));
+    const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...participating.map((x) => x.id)].map(String))];
     const memberOpts = target.isPrimary
       ? { ...options, ...(callerFenced ? {} : { expect: target.expect }), visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, expect: target.expect, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds };
+      : { ...siblingBase, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     try {
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
+      landedState[target.id] = targetTuple(target);
+      // The status the rebooker's CAS actually matched outranks the plan
+      // snapshot (codex r6): an operator confirm between plan and move must
+      // not be rewound by a caller restoring 'pending'.
+      if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
       else {
@@ -1731,10 +1754,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         try {
           // expectSchedule fences this sync against a NEWER move that landed
           // after the row moved (codex r3): a stale pass never overwrites it.
-          await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
+          const rec = await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
             sendNotification: false,
             expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
           });
+          // handleReschedule flips confirmation_sent→true assuming the
+          // caller sends a replacement notice; nobody sends one for a
+          // sibling. If its creation confirmation was still pending, re-arm
+          // it (same as auto-dispatch does for the tapped row) so an
+          // independently messaged sibling gets neither nothing (codex r6).
+          if (rec && rec.id && rec.confirmation_sent === false) {
+            await db('appointment_reminders').where({ id: rec.id }).update({ confirmation_sent: false, confirmation_sent_at: null });
+          }
         } catch (remErr) {
           logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
         }
