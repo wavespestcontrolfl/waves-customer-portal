@@ -16,6 +16,9 @@ const migration = require('../models/migrations/20260829000010_service_cadence_c
 const termiteFix = require('../models/migrations/20260829000011_termite_bait_frequency_quarterly');
 const { cadenceCatalogKeyForProfile, _internals: { canonicalServiceTypeForProfile } } = require('../services/slot-reservation');
 const { resolveSelfBookedRecurringPlan } = require('../services/self-booking-plan-sync');
+const { CADENCE_CONVENTION_RENAMES, counterpartServiceName } = require('../config/service-name-aliases');
+const { serviceNameCandidates } = require('../services/service-completion-profiles');
+const { resolveCallBookingCatalogService } = require('../services/call-booking-catalog');
 
 const STATE_KEY = 'migration.20260829000010.state';
 const ALIAS_MARKER = 'alias added by migration:20260829000010 (cadence convention)';
@@ -403,5 +406,25 @@ describe('20260829000011 termite_bait frequency', () => {
     svc(db, 'termite_bait').frequency = 'semiannual';
     await termiteFix.up(fakeKnex(db));
     expect(svc(db, 'termite_bait').frequency).toBe('semiannual');
+  });
+});
+
+describe('runtime alias bridge (pre-deploy labels keep resolving the renamed rows, and vice versa)', () => {
+  test('the runtime alias list equals the migration RENAMES', () => {
+    expect(CADENCE_CONVENTION_RENAMES).toEqual(migration.RENAMES.map(([, from, to]) => [from, to]));
+  });
+  test.each(migration.RENAMES)('%s: both spellings are candidates of each other', (key, from, to) => {
+    expect(counterpartServiceName(from)).toBe(to);
+    expect(counterpartServiceName(to)).toBe(from);
+    expect(serviceNameCandidates(from).map((c) => c.toLowerCase())).toContain(to.toLowerCase());
+    expect(serviceNameCandidates(to).map((c) => c.toLowerCase())).toContain(from.toLowerCase());
+  });
+  test('a replayed call extraction carrying the OLD label resolves the RENAMED catalog row', () => {
+    const catalog = [{ id: 'svc', name: 'Bi-Monthly Pest Control Service', service_key: 'pest_general_bimonthly' }];
+    expect(resolveCallBookingCatalogService({ extracted: { matched_service: 'General Pest Control Service (Bi-Monthly)' }, services: catalog })).toMatchObject({ id: 'svc' });
+  });
+  test('after down(), a NEW label still resolves the restored catalog row', () => {
+    const catalog = [{ id: 'svc', name: 'Lawn Care Program Service', service_key: 'lawn_care_recurring' }];
+    expect(resolveCallBookingCatalogService({ extracted: { matched_service: 'Bi-Monthly Lawn Care Service' }, services: catalog })).toMatchObject({ id: 'svc' });
   });
 });
