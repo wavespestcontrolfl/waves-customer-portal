@@ -2132,6 +2132,29 @@ function frozenSetupFeeAmount(estimateData = {}) {
     : WAVEGUARD_SETUP_FEE;
 }
 
+// Disclosed rodent bait-station setup (owner 2026-08-29): a non-member's
+// estimate carries a one-time rodent_bait_setup row — every charging path
+// (standard accept AND annual prepay) bills exactly the STORED amount the
+// customer accepted, never a live constant. 0 = no disclosed setup.
+function frozenRodentBaitSetupAmount(estimateData = {}) {
+  const data = normalizeEstimateData(estimateData);
+  const containers = [
+    data?.result?.oneTime?.items,
+    data?.result?.oneTime?.specItems,
+    data?.result?.specItems,
+    data?.oneTime?.items,
+  ];
+  for (const arr of containers) {
+    if (!Array.isArray(arr)) continue;
+    const row = arr.find((it) => String(it?.service || '').toLowerCase() === 'rodent_bait_setup'
+      || String(it?.name || '').toLowerCase() === 'rodent_bait_setup'
+      || /bait station setup/i.test(String(it?.name || '')));
+    const amt = Number(row?.price ?? row?.amount);
+    if (Number.isFinite(amt) && amt > 0) return Math.round(amt * 100) / 100;
+  }
+  return 0;
+}
+
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
   const recurring = Array.isArray(recurringServices) ? recurringServices : [];
   if (recurring.length === 0) return false;
@@ -5414,6 +5437,14 @@ const EstimateConverter = {
             && Number(opts.manualDiscountItemization.annualAmount) > 0
             ? String(opts.manualDiscountItemization.label || '').trim()
             : '';
+          // Disclosed rodent bait-station setup (owner 2026-08-29; codex
+          // #3591 r4 P1): a non-member's prepay accept must collect the
+          // one-time setup the estimate disclosed — the prepay invoice is
+          // the ONLY invoice a prepay estimate ever mints. Rides as its own
+          // line; annual-prepay-renewals' seeded-visit fallback subtracts
+          // setup lines before dividing by visits (setup is not per-visit
+          // coverage money).
+          const prepayRodentSetupAmount = frozenRodentBaitSetupAmount(estimateData);
           const inv = await InvoiceService.create({
             database,
             customerId,
@@ -5424,7 +5455,12 @@ const EstimateConverter = {
                 : prepayLineDescription,
               quantity: 1,
               unit_price: annualAmount,
-            }],
+            },
+            ...(prepayRodentSetupAmount > 0 ? [{
+              description: 'Bait Station Setup — one-time',
+              quantity: 1,
+              unit_price: prepayRodentSetupAmount,
+            }] : [])],
             notes: prepayNotes,
             dueDate: etDateString(),
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),
@@ -6269,6 +6305,7 @@ module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
 // invoices on standard accepts. Never hardcode 99 elsewhere.
 module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 module.exports.frozenSetupFeeAmount = frozenSetupFeeAmount;
+module.exports.frozenRodentBaitSetupAmount = frozenRodentBaitSetupAmount;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary

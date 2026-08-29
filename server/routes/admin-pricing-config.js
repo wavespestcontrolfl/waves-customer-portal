@@ -230,6 +230,39 @@ function validatePricingConfigData(configKey, data, oldConfig) {
         return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
       }
     }
+  } else if (configKey === 'rodent_bait_brackets') {
+    // The ladder that prices every rodent bait quote (owner 2026-08-29).
+    // db-bridge FILTERS invalid entries on sync, so a bad save would report
+    // success while live quotes silently keep a partial/old ladder —
+    // validate completeness here (codex #3591 r4 P1).
+    if (!Array.isArray(data?.brackets) || data.brackets.length === 0) {
+      return fail('rodent_bait_brackets.brackets must be a non-empty array');
+    }
+    let prevMax = 0;
+    for (const [i, b] of data.brackets.entries()) {
+      const maxSf = num(b?.max_sq_ft);
+      if (!Number.isFinite(maxSf) || maxSf <= 0) return fail(`brackets[${i}].max_sq_ft must be a positive number`);
+      if (maxSf <= prevMax) return fail(`brackets[${i}].max_sq_ft (${maxSf}) must be strictly greater than the previous bracket (${prevMax}) — sorted ascending, no duplicates`);
+      prevMax = maxSf;
+      if (!Number.isInteger(num(b?.stations)) || num(b?.stations) < 1) return fail(`brackets[${i}].stations must be a positive integer`);
+      if (!isPositive(b?.per_visit)) return fail(`brackets[${i}].per_visit must be a positive dollar amount`);
+    }
+    const ext = data?.extension;
+    if (!ext || typeof ext !== 'object') return fail('rodent_bait_brackets.extension is required (per_sq_ft, stations_per_step, per_visit_per_step)');
+    if (!isPositive(ext.per_sq_ft)) return fail('extension.per_sq_ft must be a positive number');
+    if (!Number.isInteger(num(ext.stations_per_step)) || num(ext.stations_per_step) < 0) return fail('extension.stations_per_step must be a non-negative integer');
+    if (!isPositive(ext.per_visit_per_step)) return fail('extension.per_visit_per_step must be a positive dollar amount');
+    if (data?.visits_per_year !== undefined
+      && (!Number.isInteger(num(data.visits_per_year)) || num(data.visits_per_year) < 1)) {
+      return fail('visits_per_year must be a positive integer');
+    }
+  } else if (configKey === 'rodent_waveguard') {
+    if (data?.tier_qualifier !== undefined && typeof data.tier_qualifier !== 'boolean') {
+      return fail('rodent_waveguard.tier_qualifier must be a boolean');
+    }
+    if (data?.exclude_from_pct_discount !== undefined && typeof data.exclude_from_pct_discount !== 'boolean') {
+      return fail('rodent_waveguard.exclude_from_pct_discount must be a boolean');
+    }
   } else if (configKey === 'inspection_credit') {
     // Customer-facing money promise: a typo here becomes real account
     // credit against a future invoice. Bounded like the no-show fee —
@@ -1120,6 +1153,36 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
     });
     if (!found) return res.status(404).json({ error: 'Config not found' });
     if (validationError) return res.status(400).json({ error: validationError });
+
+    // rodent_bait policy lives in TWO live stores (codex #3591 r4 P1 — the
+    // reverse direction of the Discount Rules mirror): a rodent_waveguard
+    // edit through this generic card must also land on
+    // service_discount_rules.rodent_bait, or the invoice/schedule discount
+    // paths keep the old policy while generated estimates use the new one.
+    if (req.params.key === 'rodent_waveguard' && normalizedData
+      && (typeof normalizedData.tier_qualifier === 'boolean' || typeof normalizedData.exclude_from_pct_discount === 'boolean')) {
+      try {
+        if (await db.schema.hasTable('service_discount_rules')) {
+          const ruleUpdates = { updated_at: new Date() };
+          if (typeof normalizedData.tier_qualifier === 'boolean') ruleUpdates.tier_qualifier = normalizedData.tier_qualifier;
+          if (typeof normalizedData.exclude_from_pct_discount === 'boolean') ruleUpdates.exclude_from_pct_discount = normalizedData.exclude_from_pct_discount;
+          const mirrored = await db('service_discount_rules')
+            .where({ service_key: 'rodent_bait' })
+            .update(ruleUpdates);
+          if (mirrored) {
+            await insertPricingAudit({
+              configKey: 'discount_rules:rodent_bait',
+              oldValue: null,
+              newValue: ruleUpdates,
+              changedBy: req.technician?.name,
+              reason: 'Mirrored from rodent_waveguard pricing-config edit (shared policy)',
+            });
+          }
+        }
+      } catch (mirrorErr) {
+        logger.warn(`[pricing-config] rodent_waveguard → service_discount_rules mirror failed: ${mirrorErr.message}`);
+      }
+    }
 
     try {
       const modular = require('../services/pricing-engine');

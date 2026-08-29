@@ -773,8 +773,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   let seededVisitPrice = null;
   if (cols.estimated_price && term?.prepay_invoice_id) {
     try {
-      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total');
-      const base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total', 'line_items');
+      let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      // One-time setup lines (rodent bait-station setup, owner 2026-08-29)
+      // ride the prepay invoice but are NOT per-visit coverage money —
+      // subtract them before dividing, or the voided-prepay fallback price
+      // rebills every visit with a slice of the setup fee.
+      try {
+        const lines = typeof inv?.line_items === 'string' ? JSON.parse(inv.line_items) : inv?.line_items;
+        if (Array.isArray(lines)) {
+          const setupTotal = lines
+            .filter((li) => /\bsetup\b/i.test(String(li?.description || '')))
+            .reduce((s, li) => s + (Number(li?.unit_price) || 0) * (Number(li?.quantity) || 1), 0);
+          if (setupTotal > 0 && setupTotal < base) base = Math.round((base - setupTotal) * 100) / 100;
+        }
+      } catch { /* unparseable line_items — keep the subtotal basis */ }
       if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
     } catch (err) {
       logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);

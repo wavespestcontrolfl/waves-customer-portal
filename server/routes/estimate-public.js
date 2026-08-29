@@ -11191,24 +11191,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // #3591 r3 P1): a non-member's accepted estimate carries a
           // one-time rodent_bait_setup row that the standard invoice must
           // bill — frozen-disclosure rule: the amount comes from the STORED
-          // estimate (what the customer accepted), never a live constant.
-          const acceptedRodentSetupAmount = (() => {
-            const containers = [
-              conversionEstData.result?.oneTime?.items,
-              conversionEstData.result?.oneTime?.specItems,
-              conversionEstData.result?.specItems,
-              conversionEstData.oneTime?.items,
-            ];
-            for (const arr of containers) {
-              if (!Array.isArray(arr)) continue;
-              const row = arr.find((it) => String(it?.service || '').toLowerCase() === 'rodent_bait_setup'
-                || String(it?.name || '').toLowerCase() === 'rodent_bait_setup'
-                || /bait station setup/i.test(String(it?.name || '')));
-              const amt = Number(row?.price ?? row?.amount);
-              if (Number.isFinite(amt) && amt > 0) return Math.round(amt * 100) / 100;
-            }
-            return 0;
-          })();
+          // estimate (shared resolver; the annual-prepay branch bills the
+          // same figure), never a live constant.
+          const acceptedRodentSetupAmount = EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
           if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];

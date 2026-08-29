@@ -90,7 +90,7 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTime
 function waveGuardBundleValues() {
   const { generateEstimate } = require('./estimate-engine');
   const FOOTPRINTS_SQFT = footprintsFromBrackets();
-  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [] };
+  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [], rodentBait: [] };
   for (const footprint of FOOTPRINTS_SQFT) {
     for (const lotSqFt of [5000, 8000, 20000]) {
       for (const propertyType of ['single_family', 'condo_upper']) {
@@ -108,7 +108,7 @@ function waveGuardBundleValues() {
         lotSqFt,
         lawnSqFt: optionSet.lawnSqFt,
         features: { shrubs: 'light', complexity: 'simple' },
-        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
+        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, rodentBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
       });
       for (const li of est.lineItems || []) {
         const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
@@ -120,6 +120,9 @@ function waveGuardBundleValues() {
           out.mosquito.push(li.annualAfterDiscount / li.visits);
         }
         if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
+        // Rodent bait takes the tier % since 2026-08-29 — the published low
+        // must include the discounted per-application rate (codex #3591 r4).
+        if (li.service === 'rodent_bait' && Number.isFinite(li.perApp)) out.rodentBait.push(li.perApp * ratio);
         if (li.service === 'palm_injection' && Number.isFinite(li.perVisit) && li.palmCount > 0
           && li.annualBeforeCredits > 0 && Number.isFinite(li.annualAfterCredits)) {
           // perVisit already carries the per-visit minimum; apply the credit
@@ -437,7 +440,9 @@ function buildRows() {
     values: sweepValues(
       [...new Set([...FOOTPRINTS_SQFT, 1750, 2750, 3750, 4750, 5750, 6750, 8000, 12000, 20000])].map((f) => ({ f })),
       ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
-      (r) => r.perVisit),
+      // Tier-discounted customer-paid values (rodent takes the WaveGuard %
+      // since 2026-08-29) widen the low — same pattern as pest/lawn.
+      (r) => r.perVisit).concat(bundle('rodentBait')),
     notes: `Billed per application (quarterly — ${Number(constants.RODENT.baitVisitsPerYear) || 4} applications per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
   }));
 

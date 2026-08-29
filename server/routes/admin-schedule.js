@@ -68,7 +68,7 @@ const {
 const {
   detectWaveGuardPlanKeys,
   isCommercialServiceRow,
-  isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
   syncCustomerWaveGuardPlanFromScheduledServices,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
@@ -1849,7 +1849,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
     service_key: serviceRecord?.service_key,
     service_name: serviceRecord?.name,
   };
-  if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
   return detectWaveGuardPlanKeys(row).length > 0;
 }
 

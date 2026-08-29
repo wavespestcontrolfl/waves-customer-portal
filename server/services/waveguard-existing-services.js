@@ -290,7 +290,10 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   // fields say rodent_general_one_time / "Rodent Pest Control" must be
   // excluded from pricing evidence exactly as tier derivation excludes it —
   // otherwise pricing counts a family the tier does not).
-  const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  // isNonBaitRodentServiceRow since 2026-08-29: bait-station rows ARE
+  // qualifying/pricing evidence now; only trapping/exclusion/one-time
+  // rodent rows stay excluded (mirrors the tier-derivation change).
+  const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('./self-booking-plan-sync');
   // Legacy degrade: a failed join classifies on service_type alone here,
   // exactly the pre-null-return behavior (ownership fails closed instead).
   const catalogById = (catalogFieldsByRowId !== undefined
@@ -307,7 +310,7 @@ async function loadExistingRecurringQualifyingRows(database, customerId, { catal
   for (const r of rows) {
     if (!rowPassesGatedPricingEvidence(r, today)) continue;
     const joined = { ...r, ...(catalogById.get(r.id) || {}) };
-    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) continue;
+    if (isCommercialServiceRow(joined) || isNonBaitRodentServiceRow(joined)) continue;
     // Qualify from the same catalog-authoritative classifier the downstream
     // reducer uses (Codex #3011 r10-r12): a stale 'Tree & Shrub Care'
     // service_type linked to palm_injection resolves no family, and a

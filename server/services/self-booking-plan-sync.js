@@ -22,7 +22,8 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
-const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait'];
+// rodent_bait joined the qualifying families 2026-08-29 (owner directive).
+const WAVEGUARD_SERVICE_FAMILIES = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait'];
 // admin-manual-booking-resend: the admin "resend booking link" for a ONE-TIME
 // accepted estimate (admin-estimates.js — it sends the estimate_accepted_onetime
 // SMS template). It must carry one-time semantics like estimate-accept, or a
@@ -262,6 +263,21 @@ const SELF_BOOKING_RECURRING_PLANS = {
   termite_bait_monitoring: TERMITE_BAIT_RECURRING_PLANS.monitoring,
   termite_bait_active_annual: TERMITE_BAIT_RECURRING_PLANS.active_annual,
   termite_bait_active_quarterly: TERMITE_BAIT_RECURRING_PLANS.active_quarterly,
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive):
+  // tier-counted like the other families. monthlyRate stays 0 ON PURPOSE —
+  // the program bills PER APPLICATION (footprint brackets), so the
+  // rate-backfill lane must never invent a monthly charge for it.
+  rodent_bait: {
+    planKey: 'rodent_bait',
+    serviceKey: 'rodent_bait_quarterly',
+    serviceType: 'Quarterly Rodent Bait Station Service',
+    label: 'Rodent Bait Stations',
+    tier: 'Bronze',
+    monthlyRate: 0,
+    recurringPattern: 'quarterly',
+    visitsPerYear: 4,
+    targetAppointmentCount: 4,
+  },
 };
 
 function normalizeDateString(value) {
@@ -442,6 +458,19 @@ function resolveTermiteBaitRecurringPlan(serviceType) {
   return TERMITE_BAIT_RECURRING_PLANS.quarterly;
 }
 
+// Rodent BAIT STATION rows are the qualifying rodent program (2026-08-29);
+// trapping/exclusion/sanitation and one-time rodent work never resolve.
+function resolveRodentBaitRecurringPlan(serviceType) {
+  const raw = String(serviceType || '').toLowerCase().replace(/[_-]+/g, ' ');
+  if (!/\b(rodent|rats?|mouse|mice)\b/.test(raw)) return null;
+  // Pest-primary combined names ("Pest & Rodent ...") stay pest coverage.
+  if (/\bpest\b.*\brodent\b/.test(raw)) return null;
+  if (!/\b(bait|station|stations|monitor|monitoring)\b/.test(raw)) return null;
+  if (/\b(trap|trapping|exclusion|sanitation|one time|onetime|inspection)\b/.test(raw)) return null;
+  if (isNonPlanRecurringServiceText(serviceType)) return null;
+  return SELF_BOOKING_RECURRING_PLANS.rodent_bait;
+}
+
 function resolveSelfBookedRecurringPlan(serviceType) {
   const raw = String(serviceType || '').toLowerCase();
   const text = normalizeServiceText(serviceType);
@@ -555,6 +584,8 @@ function detectWaveGuardPlanKeys(row = {}) {
 
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
+  const rodentPlan = resolvePlan(resolveRodentBaitRecurringPlan);
+  if (rodentPlan) add(rodentPlan.planKey || 'rodent_bait');
   const mosquitoPlan = resolvePlan(resolveMosquitoRecurringPlan);
   if (mosquitoPlan) add(mosquitoPlan.planKey || 'mosquito');
   const treeShrubPlan = resolvePlan(resolveTreeShrubRecurringPlan);
@@ -573,6 +604,7 @@ function detectWaveGuardPlanKeys(row = {}) {
   if (catalogText) {
     const catalogFamilies = uniqueServiceFamilies([
       resolveTermiteBaitRecurringPlan,
+      resolveRodentBaitRecurringPlan,
       resolveMosquitoRecurringPlan,
       resolveTreeShrubRecurringPlan,
       resolveLawnCareRecurringPlan,
@@ -918,7 +950,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     const rowDate = normalizeDateString(row.scheduled_date);
     if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
     if (upcomingOnly && (!rowDate || rowDate < today)) continue;
-    if (upcomingOnly && (isCommercialServiceRow(row) || isRodentLedServiceRow(row))) continue;
+    if (upcomingOnly && (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row))) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
@@ -1003,6 +1035,10 @@ function textIsRodentLed(value) {
 }
 
 function isRodentLedServiceRow(row = {}) {
+  return rodentRowTextFields(row).some(textIsRodentLed);
+}
+
+function rodentRowTextFields(row = {}) {
   return [
     row.service_type,
     row.serviceType,
@@ -1013,7 +1049,19 @@ function isRodentLedServiceRow(row = {}) {
     row.serviceName,
     row.name,
     row.label,
-  ].some(textIsRodentLed);
+  ];
+}
+
+// Tier-evidence exclusion since 2026-08-29 (owner directive): BAIT STATION
+// rows are qualifying WaveGuard coverage, so only NON-bait rodent-led rows
+// (trapping, exclusion, sanitation, one-time) stay excluded from the
+// reconciliation evidence.
+function isNonBaitRodentServiceRow(row = {}) {
+  if (!isRodentLedServiceRow(row)) return false;
+  return !rodentRowTextFields(row).some((value) => {
+    const s = String(value || '').toLowerCase().replace(/[_-]+/g, ' ');
+    return /\b(bait|station|stations|monitor|monitoring)\b/.test(s);
+  });
 }
 
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
@@ -1024,7 +1072,7 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   const detectedPlanKeys = [];
   for (const row of rows) {
     if (!serviceRowCountsTowardWaveGuard(row)) continue;
-    if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
+    if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) continue;
     const rowDate = normalizeDateString(row.scheduled_date);
     if (!rowDate || rowDate < today) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
@@ -1461,6 +1509,8 @@ module.exports = {
   isCommercialServiceRow,
   isOneTimeBookingSource,
   isRodentLedServiceRow,
+  isNonBaitRodentServiceRow,
+  resolveRodentBaitRecurringPlan,
   normalizeTierName,
   reconcileRecurringTiers,
   representativePlanKeys,
