@@ -1,6 +1,6 @@
 # Visit groups — one stop, two services, one message, one payment
 
-**Date:** 2026-08-29 (rev 3, same day) · **Status:** scope for owner sign-off. **Not approved
+**Date:** 2026-08-29 (rev 3 + live-UI pass, same day) · **Status:** scope for owner sign-off. **Not approved
 to build.** No code changes in this doc.
 **Branch:** `docs/visit-group-scope` (worktree `~/wt-visit-group`, off main `571ed7be8`).
 **Scope page:** https://claude.ai/code/artifact/5c963058-a2ff-469f-be99-96150178b8c2 ·
@@ -27,6 +27,23 @@ collections tasks; the **customer portal billing history groups invoices by visi
 surface, Phase 2); R8 retires the combined routes only after grouped autopay parity
 (Phase 3), not after Phase 2. Rev 3 renders added: the collapsed pre-Finish review and the
 portal history.
+
+**Live-UI pass (08-29, mobile, every completion lane rendered in dev):** the completion sheet
+is already de-pilled (#3516) and collapses optional findings (#3536). Real vocabulary the
+grouped sheet must reuse: uppercase 11px eyebrows; 48px/12px-radius inputs; `Select...`
+dropdowns; `Select one or more...` multi-selects; `− — +` steppers (stations, traps,
+captures); a **More detail (optional) ▸** collapsed block per lane; outline pills only for
+actions (Generate AI report · Trace where we sprayed / Outline the treated lawn · Add photos);
+black pill footer. **Visit Outcome options today:** `Completed · Inspection only · Customer
+declined · Follow-up needed · Customer concern · Incomplete` — the outcome table in §3 maps
+onto these instead of inventing new strings. The sheet already carries per-visit toggles
+**"Send completion SMS to customer"** and **"Review request suppressed"** plus Backdated
+closeout / Time on site / Re-entry countdown / Next scheduled visit; under a group the two
+comms toggles move to the visit level (office-only), the rest stay per service. The
+`lawn_tree_shrub_combo` lane already renders a second **"TREE & SHRUB SERVICE"** section under
+the lawn primary — the companion-section pattern the grouped sheet extends. Project lanes
+(one-time pest, WDO, pre-treat certificate) open a different "Complete Service Report" form
+and are **not groupable** (`services.groupable = false`).
 
 ---
 
@@ -196,10 +213,10 @@ services into different visits*.
 
 | Outcome | Record | Invoice | Report | Follow-up | Visit message | Closes visit |
 |---|---|---|---|---|---|---|
-| `completed` | yes | yes (full) | full | no | "complete" | yes |
-| `partially_completed` — **derived** from section data (8 of 10 stations inspected, 2 marked inaccessible ⇒ partial; the tech never picks the status separately) | yes | yes (full unless office adjusts — R4 open) | full, exceptions listed | yes — inaccessible items → follow-up row via existing incomplete-visit seeding | "completed, but we couldn't access all …" + next steps | yes |
-| `unable_to_complete` (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
-| `customer_declined` | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
+| `completed` → sheet **Completed** | yes | yes (full) | full | no | "complete" | yes |
+| `partially_completed` → sheet **Follow-up needed** — **derived** from section data (8 of 10 stations inspected, 2 marked inaccessible ⇒ partial; the tech never picks the status separately) | yes | yes (full unless office adjusts — R4 open) | full, exceptions listed | yes — inaccessible items → follow-up row via existing incomplete-visit seeding | "completed, but we couldn't access all …" + next steps | yes |
+| `unable_to_complete` → sheet **Incomplete** (reason required) | yes, marked incomplete | **no** (existing incomplete path) | brief, reason | yes — reschedule | "we couldn't perform …, we'll contact you" | yes |
+| `customer_declined` → sheet **Customer declined** | yes, declined note | no | omitted | no (office bell) | omitted from message | yes |
 | `cancelled_by_office` | no | no (void if minted) | none | office decides | omitted | yes (row leaves group) |
 
 ---
