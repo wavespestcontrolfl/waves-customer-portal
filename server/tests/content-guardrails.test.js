@@ -4797,6 +4797,12 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(keep(t)).not.toContain('lead');
     // Void / self-closing elements before the summary never open a child.
     expect(keep('<details><br><img src="/a.webp"/><summary>Peek</summary>body</details>')).toContain('Peek');
+    // A hidden container NESTED in the summary stays blanked — restoring the summary never resurrects it (hook P1).
+    const nested = keep('<details><summary>Peek ![p](/p.webp) <span hidden>![ghost](/g.webp)</span> tail</summary>body</details>');
+    expect(nested).toContain('Peek ![p](/p.webp)');
+    expect(nested).toContain('tail');
+    expect(nested).not.toContain('ghost');
+    expect(nested).not.toContain('body');
   });
 
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {

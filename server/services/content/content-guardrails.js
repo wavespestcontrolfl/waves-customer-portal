@@ -231,7 +231,15 @@ function blankContentWhere(str, opens, { keepSummary = false } = {}) {
         childDepth += 1;
       }
       const close = open ? tags.slice(tags.indexOf(open) + 1, last).find((x) => x.name === 'summary' && x.isClose) : null;
-      if (open && close) for (let k = open.end + 1; k < close.start; k += 1) out[k] = text[k];
+      if (!open || !close) continue;
+      // Restore the summary's own text only — a hidden container NESTED in
+      // the summary (`<summary><span hidden>…`) keeps its pass-one blanks
+      // (hook P1: the whole span copied back resurrected it).
+      const nested = ranges.filter((o) => o !== r && o.start > open.end && o.stop < close.start);
+      for (let k = open.end + 1; k < close.start; k += 1) {
+        if (nested.some((o) => o.start <= k && k <= o.stop)) continue;
+        out[k] = text[k];
+      }
     }
   }
   return out.join('');
