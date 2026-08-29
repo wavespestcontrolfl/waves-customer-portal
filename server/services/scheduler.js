@@ -4631,10 +4631,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY (:26 — own minute; was :30, which shared the pool with ~25 other
-  // ticks and starved the Twilio voice webhooks on 2026-08-29) — Verify CSR follow-up tasks
+  // HOURLY (:33 — own minute, also clear of the daily 10:26 pre-visit card
+  // sweep; was :30, which shared the pool with ~25 other ticks and starved
+  // the Twilio voice webhooks on 2026-08-29) — Verify CSR follow-up tasks
   // =========================================================================
-  cron.schedule('26 * * * *', async () => {
+  cron.schedule('33 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
       // runExclusive: verifyFollowUps expires past-deadline tasks — a

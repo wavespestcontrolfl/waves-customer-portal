@@ -141,9 +141,12 @@ async function alertUnrecordedCalls(rows, { now = new Date() } = {}) {
     const written = await NotificationService.notifyAdmin(
       'alert',
       `Call recording may be DOWN — ${fresh.length} answered calls have no recording`,
+      // Every call rides in the body: the bell renders title/body only, and
+      // these SIDs are settled by this one notification, so the operator
+      // must be able to see each call that needs manual recovery.
       `${fresh.length} answered inbound calls have no Twilio recording, so no transcript, extraction, or lead will follow. ` +
-      `Newest: ${describe(fresh[0])}. ` +
-      'Check for webhook 502s in the Twilio debugger (the number\'s voice fallback bridges without the portal) and recent deploys.',
+      'Check for webhook 502s in the Twilio debugger (the number\'s voice fallback bridges without the portal) and recent deploys. ' +
+      `Calls needing manual recovery: ${fresh.map(describe).join('; ')}.`,
       { link: '/admin/communications', bell: true, dedupeKey, metadata: { unrecorded_call_sids: sids } },
     );
     const result = outcome(written);
@@ -169,7 +172,9 @@ async function alertUnrecordedCalls(rows, { now = new Date() } = {}) {
         ? `${describe(c)} matches an existing customer. ${WHY} Ask whoever took the call and log the request on the customer's record — do not create a new lead.`
         : `${describe(c)} was answered but ${WHY} Ask whoever took the call and create the lead from the call row.`,
       {
-        link: known ? `/admin/customers/${c.customer_id}` : '/admin/communications',
+        // The customers page opens the 360 profile from ?customerId= —
+        // /admin/customers/<id> is not a mounted route.
+        link: known ? `/admin/customers?customerId=${encodeURIComponent(c.customer_id)}` : '/admin/communications',
         bell: true,
         dedupeKey,
         metadata: { call_sid: c.twilio_call_sid, from_phone: c.from_phone, ...(known ? { customer_id: c.customer_id } : {}) },

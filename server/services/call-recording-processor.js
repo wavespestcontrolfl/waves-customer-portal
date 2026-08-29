@@ -14395,7 +14395,7 @@ const CallRecordingProcessor = {
     // off means the original newest-first recovery order, byte-identical.
     const { isEnabled } = require('../config/feature-gates');
     const alertPriority = isEnabled('unrecordedCallWatchdog');
-    const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
+    const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, GRACE_MINUTES: ALERT_GRACE_MINUTES, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
     const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
     let candidates = db('call_log')
       .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
@@ -14409,15 +14409,19 @@ const CallRecordingProcessor = {
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
       .where('duration_seconds', '>', 10);
     if (alertPriority) {
+      // Mirrors isUnrecordedCall exactly, incl. the post-call grace: calls
+      // still inside it can't ring yet, so they must not consume the
+      // window ahead of older calls that already can.
       candidates = candidates.orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
           AND COALESCE(call_log.answered_by, '') NOT IN (${exemptList})
           AND COALESCE(call_log.call_outcome, '') <> 'voicemail'
+          AND call_log.created_at + (call_log.duration_seconds * INTERVAL '1 second') + (? * INTERVAL '1 minute') <= NOW()
           AND NOT EXISTS (
             SELECT 1 FROM notifications n
             WHERE n.recipient_type = 'admin'
               AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
                    OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
-          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS]);
+          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS, ALERT_GRACE_MINUTES]);
     }
     const rows = await candidates
       .orderBy('created_at', 'desc')

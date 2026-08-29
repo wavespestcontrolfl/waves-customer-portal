@@ -148,7 +148,8 @@ describe('alertUnrecordedCalls', () => {
     expect(title).toMatch(/log the customer/i);
     expect(body).toMatch(/do not create a new lead/);
     expect(body).not.toMatch(/create the lead from the call row/);
-    expect(opts.link).toBe('/admin/customers/cus-77');
+    // The customers page opens the 360 from ?customerId= (no /:id route).
+    expect(opts.link).toBe('/admin/customers?customerId=cus-77');
     expect(opts.metadata.customer_id).toBe('cus-77');
   });
 
@@ -178,13 +179,15 @@ describe('alertUnrecordedCalls', () => {
 
   test('more than AGGREGATE_THRESHOLD fresh misses → ONE outage bell keyed on the SID set, carrying every sid', async () => {
     mockGateOn = true;
-    const rows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CA${i}` }));
+    const rows = Array.from({ length: AGGREGATE_THRESHOLD + 1 }, (_, i) => row({ twilio_call_sid: `CA${i}`, from_phone: `+1212555010${i}` }));
     installDb();
     const result = await alertUnrecordedCalls(rows, { now: NOW });
     expect(result).toEqual({ skipped: false, scanned: rows.length, missed: rows.length, alerted: 1, aggregate: true });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    const [, title, body, opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toMatch(/DOWN/);
+    // Every settled call is visible in the body, not only the newest.
+    for (const r of rows) expect(body).toContain(r.from_phone);
     expect(opts.bell).toBe(true);
     expect(opts.dedupeKey).toMatch(/^unrecorded-call-outage:[0-9a-f]{16}$/);
     expect(opts.metadata.unrecorded_call_sids).toEqual(rows.map((r) => r.twilio_call_sid).sort());
