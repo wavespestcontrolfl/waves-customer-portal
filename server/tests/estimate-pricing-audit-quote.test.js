@@ -55,6 +55,8 @@ function fixtureEstimate() {
         },
       },
       engineRequest: {
+        options: { cadence: 'quarterly', termiteOwnership: 'owner' },
+        selectedServices: ['pest_control', 'lawn_care'],
         profile: {
           homeSqFt: 2000,
           lotSqFt: 8000,
@@ -123,6 +125,12 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.pricingBundle).toEqual(fixtureEstimate().estimate_data.sendSnapshot.pricingBundle);
     expect(audit.quote.property.fieldVerifyFlags).toEqual([{ field: 'pool', priority: 'LOW', reason: 'x' }]);
     expect(audit.quote.marginWarnings).toEqual([{ service: 'lawn_care', message: 'thin' }]);
+    // Admin V2 request choices freeze verbatim too.
+    expect(audit.quote.request).toEqual({
+      options: { cadence: 'quarterly', termiteOwnership: 'owner' },
+      selectedServices: ['pest_control', 'lawn_care'],
+      inputs: null,
+    });
   });
 
   test('per-line quoted passthroughs survive on recurring, one-time, and spec lines', async () => {

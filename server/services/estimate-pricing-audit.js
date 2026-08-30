@@ -265,6 +265,15 @@ function quoteProvenanceFrom(estimate, data, result) {
       fieldVerifyFlags: Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null,
     },
     marginWarnings: result?.marginWarnings || recurring.marginWarnings || null,
+    // The price-bearing REQUEST choices, verbatim (codex pre-push P1):
+    // admin V2 rows keep cadence/ownership/add-on selections in
+    // engineRequest.options + selectedServices, and v1 rows in data.inputs
+    // — the property profile alone cannot explain the historical quote.
+    request: {
+      options: data?.engineRequest?.options ?? null,
+      selectedServices: data?.engineRequest?.selectedServices ?? null,
+      inputs: data?.inputs ?? data?.engineInputs ?? null,
+    },
   };
 }
 
