@@ -609,6 +609,11 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
           metadata: JSON.stringify({
             entry_point: 'estimate_deposit_receipt_requeue',
             original_failure_code: result.code || null,
+            // Customer-action provenance survives the retry rail (Codex
+            // #3598 r5 P1): the replay runs as scheduled_sms_cron, which
+            // is not a customer-action entry point, so without this the
+            // worker re-defers a Twilio-hiccup retry to 8:00 AM.
+            customer_initiated: true,
             estimate_id: estimateId,
             // The exact deposit this queued text was receipting — the email
             // fallback must target THIS ledger row on multi-deposit

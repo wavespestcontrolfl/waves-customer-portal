@@ -334,6 +334,12 @@ describe('webhook + invoice credit', () => {
     const leadMeta = JSON.parse(state.smsLogInserts[0].metadata);
     expect(leadMeta.consent_basis).toMatchObject({ status: 'transactional_allowed' });
     expect(leadMeta.refresh_customer_phone).toBeUndefined();
+    // Customer-action provenance rides the retry row (Codex #3598 r5 P1)
+    // and the scheduled-SMS replay forwards it, or a Twilio-hiccup retry
+    // after 8 PM re-defers the only receipt to morning.
+    expect(leadMeta.customer_initiated).toBe(true);
+    const schedulerSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    expect(schedulerSrc).toContain("...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),");
     renderSmsTemplate.mockResolvedValue(null);
     sendCustomerMessage.mockResolvedValue({ sent: true });
   });

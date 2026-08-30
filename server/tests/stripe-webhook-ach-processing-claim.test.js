@@ -237,6 +237,22 @@ describe('legacy unstamped retry PIs resolve provenance from the ledger (Codex #
     await expect(isCustomer({ id: 'pi_unknown', metadata: { type: 'one_time' } })).resolves.toBe(true);
   });
 
+  test('a DECLINED pre-deploy retry (retry row superseded by the failed original) is machine — Codex r5', async () => {
+    mockState.paymentsFirst = [
+      { id: 'pay-retry-failed', superseded_by_payment_id: 'pay-original' },
+      { id: 'pay-original' }, // status:'failed' is in the WHERE — a hit means the original is a failed obligation
+    ];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(false);
+  });
+
+  test('a row superseded by something that is NOT a failed obligation stays customer-initiated', async () => {
+    mockState.paymentsFirst = [{ id: 'pay-x', superseded_by_payment_id: 'pay-other' }, null];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(true);
+    // Self-superseded (parked/ambiguous) rows take the forward path, not the reverse one.
+    mockState.paymentsFirst = [{ id: 'pay-self', superseded_by_payment_id: 'pay-self' }, null];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(true);
+  });
+
   test('a ledger read error fails closed — the notice holds for the send window', async () => {
     mockState.paymentsFirstError = new Error('db down');
     await expect(isCustomer(legacyRetryPi)).resolves.toBe(false);

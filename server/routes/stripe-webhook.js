@@ -97,12 +97,28 @@ async function isCustomerInitiatedPaymentIntent(pi) {
   try {
     const retryRow = await db('payments')
       .where({ stripe_payment_intent_id: pi.id })
-      .first('id');
+      .first('id', 'superseded_by_payment_id');
     if (!retryRow?.id) return true;
+    // Reverse linkage (Codex round-5 P1): a DECLINED retry attempt's own
+    // row is superseded by the ORIGINAL obligation (billing-cron keeps the
+    // original canonical — it carries the ladder), so a delayed
+    // payment_failed event finds no superseded original below. A failed
+    // row pointing at a different failed row only happens on that path;
+    // the customer's own failed pay-page attempts are never superseded
+    // by another failed row.
+    if (retryRow.superseded_by_payment_id && String(retryRow.superseded_by_payment_id) !== String(retryRow.id)) {
+      const original = await db('payments')
+        .where({ id: retryRow.superseded_by_payment_id, status: 'failed' })
+        .first('id');
+      return !original;
+    }
+    // Forward linkage: the original failed row superseded by this retry
+    // row, stamped by the ladder's success path (superseded_by_retry),
+    // its metadata-write fallback (failure_reason), or its 3DS branch.
     const supersededOriginal = await db('payments')
       .where({ superseded_by_payment_id: retryRow.id })
       .whereNot({ id: retryRow.id })
-      .whereRaw("(metadata->>'superseded_by_retry' = 'true' OR failure_reason LIKE 'Collected by retry payment%')")
+      .whereRaw("(metadata->>'superseded_by_retry' = 'true' OR failure_reason LIKE 'Collected by retry payment%' OR failure_reason LIKE 'Customer authentication required (3DS)%')")
       .first('id');
     return !supersededOriginal;
   } catch (err) {
