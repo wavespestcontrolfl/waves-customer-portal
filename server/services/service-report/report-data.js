@@ -4920,26 +4920,46 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // A recommendation is "covered" when nearly all of its content words
-  // (plus numbers, with hr/hrs normalized to hours) appear in the reviewed
-  // narrative — robust to rephrasing ("Do not apply irrigation for at
-  // least 48 hrs" ≈ "hold off on any irrigation for at least 48 hours")
-  // while an instruction the prose never mentions keeps its card row. Bias
-  // runs toward KEEPING the row: a duplicate line is noise, a dropped
-  // instruction is information loss (codex P1 r5 on #3631).
-  const contentTokens = (text) => new Set(String(text || '')
+  // A recommendation is "covered" only when EVERY content word appears in
+  // the reviewed narrative — exact for numbers and short words (negation
+  // and short verbs like "not"/"mow" are content, never dropped; codex P1
+  // r6), shared-prefix (≥4 chars) for longer words so inflection matches
+  // ("apply" ≈ "applied", "mow" stays exact and "Do not mow for 48 hrs"
+  // is NOT covered by an irrigation sentence). Only function words are
+  // discarded. Bias runs toward KEEPING the row: a duplicate line is
+  // noise, a dropped instruction is information loss (codex P1 r5).
+  const RECOMMENDATION_STOPWORDS = new Set([
+    'a', 'an', 'the', 'and', 'or', 'for', 'to', 'of', 'on', 'in', 'at',
+    'is', 'are', 'be', 'as', 'by', 'it', 'this', 'that', 'with', 'any',
+    'so', 'from', 'your', 'our', 'you', 'we', 'do', 'please', 'least',
+  ]);
+  const contentTokens = (text) => String(text || '')
     .toLowerCase()
     .replace(/\bhrs?\b/g, 'hours')
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w && (w.length > 3 || /^\d+$/.test(w))));
+    .filter((w) => w && !RECOMMENDATION_STOPWORDS.has(w));
   const recommendationCoveredByNarrative = (rec, narrative) => {
-    const recTokens = contentTokens(rec);
-    if (!recTokens.size) return false;
-    const narrativeTokens = contentTokens(narrative);
-    let hit = 0;
-    for (const token of recTokens) { if (narrativeTokens.has(token)) hit += 1; }
-    return hit / recTokens.size >= 0.75;
+    const recTokens = [...new Set(contentTokens(rec))];
+    if (!recTokens.length) return false;
+    const narrativeTokens = [...new Set(contentTokens(narrative))];
+    const narrativeSet = new Set(narrativeTokens);
+    return recTokens.every((token) => {
+      if (narrativeSet.has(token)) return true;
+      // Inflection tolerance for real words only — numbers and short
+      // tokens must match exactly. Two words correspond when they share a
+      // prefix of ≥4 chars covering all but the (≤2-char) inflection tail
+      // of the shorter word: apply≈applied, weed≈weeds — but
+      // irrigation≉irritation (shared 4 ≪ length) and mow matches nothing
+      // inexactly (short → exact-only above).
+      if (token.length < 4 || /^\d+$/.test(token)) return false;
+      return narrativeTokens.some((n) => {
+        if (n.length < 4) return false;
+        let shared = 0;
+        while (shared < token.length && shared < n.length && token[shared] === n[shared]) shared += 1;
+        return shared >= 4 && shared >= Math.min(token.length, n.length) - 2;
+      });
+    });
   };
 
   // Lawn callback reports fold the fragmented cards into the narrative
