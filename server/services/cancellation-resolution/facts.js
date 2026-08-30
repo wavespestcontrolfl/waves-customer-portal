@@ -189,6 +189,9 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
         // paid_at is the authoritative paid signal; status can lag it.
         this.whereNotNull('i.paid_at').orWhereIn('i.status', ['paid', 'prepaid']);
       })
+      // A full refund PRESERVES paid_at while flipping status — refunded/
+      // void/cancelled money is not settled money.
+      .whereNotIn('i.status', INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid'))
       .countDistinct({ n: 's.id' }).first(), null),
     // Lawn-scoped completed visits — the two-seasons lawn card must never
     // count pest visits ("You are 8 visits in" with zero lawn visits).
@@ -224,6 +227,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .where(function paidSignal() {
         this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
       })
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid'))
       .where('created_at', '>=', since12mo)
       .where('discount_label', 'ilike', '%WaveGuard%')
       .sum({ n: 'discount_amount' }).first(), null),
@@ -365,8 +369,10 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .where(function paidSignal() {
         this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
       })
+      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES.filter((st) => st !== 'paid' && st !== 'prepaid'))
       .where('title', 'ilike', '%WaveGuard Monthly%')
       .count({ n: '*' }).first(), null),
+    // status='paid' exactly — a refunded payment row is not settled money.
     leg('paidPaymentsCount', () => dbh('payments')
       .where({ customer_id: customerId, status: 'paid' })
       .where(function duesMarker() {

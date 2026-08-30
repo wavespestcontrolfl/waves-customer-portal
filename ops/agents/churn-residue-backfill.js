@@ -299,6 +299,12 @@ async function main() {
           .where({ id: candidate.id })
           .forUpdate()
           .first('active', 'waveguard_tier', 'monthly_rate', 'billing_mode');
+        // Same lock order as the wind-down, and the live-work verdict is
+        // re-established UNDER the locks — the pre-transaction read is
+        // advisory only (a booking cancelled in between must not trigger a
+        // restore of the old billing state).
+        await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
+        if (!(await hasLiveState(trx, candidate.id))) return;
         // Any intervening plan-rate component is a concurrent state change:
         // restoring the old scalar over someone else's fresh ledger rows
         // would let a later reprice disagree with its components.
