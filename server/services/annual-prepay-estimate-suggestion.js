@@ -173,7 +173,6 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   // An annual_prepay_terms row covers ONE service; a bundle's whole-plan
   // prepay total can't map onto a single term, so bundles get the ref only.
   if (recurring.length > 1) return blocked('estimate bundles multiple recurring services');
-  if (!annualPrepayEligibleForEstimateData(estData)) return blocked('estimate is not annual-prepay eligible');
 
   // The stored annual_total/monthly_total reflect the DEFAULT option; the
   // accept path invoices the selected cadence/tier. When the estimate offers
@@ -183,17 +182,15 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   // and overrides a stale stored total. Bundle failures also fail closed:
   // an unverifiable option set must never prefill money.
   let optionAnnuals = [];
-  let singleOptionKey = null;
+  let singleOptionRow = null;
   let singleOptionMonthly = null;
   try {
     const { buildPricingBundle } = require('../routes/estimate-public');
     const bundle = await buildPricingBundle(estimate);
-    // The finalized bundle's own state is authoritative over the raw estData
-    // checks above: finalizePricingBundle can mark an otherwise-eligible mix
-    // quote-required or prepay-ineligible (no sellable incentive, tier
-    // restrictions) — honor it before deriving any money.
+    // The finalized bundle's own state is authoritative — finalizePricingBundle
+    // can mark an otherwise-eligible mix quote-required, and stamps per-tier
+    // eligibility on the rows.
     if (bundle?.quoteRequired === true) return blocked('estimate needs a manual quote');
-    if (bundle?.annualPrepayEligible === false) return blocked('estimate is not annual-prepay eligible');
     if ((bundle?.serviceCadenceCombos || []).length > 0) {
       return blocked('estimate offers multiple pricing combinations');
     }
@@ -210,12 +207,19 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
         : 'estimate offers multiple pricing options');
     }
     const [optionRow] = selectableRows;
-    // Per-option eligibility (e.g. the mosquito ladder's seasonal tier): the
-    // single option must itself allow prepay.
+    // Eligibility resolution mirrors the accept path: the selected option's
+    // OWN annualPrepayEligible flag is authoritative when present (a
+    // monthly12 mosquito tier can prepay even when the stored default row is
+    // seasonal); only a flag-less row falls back to the bundle-level flag
+    // and the raw stored-mix rule.
     if (optionRow?.annualPrepayEligible === false) {
       return blocked('estimate is not annual-prepay eligible');
     }
-    singleOptionKey = optionRow?.key || null;
+    if (typeof optionRow?.annualPrepayEligible !== 'boolean') {
+      if (bundle?.annualPrepayEligible === false) return blocked('estimate is not annual-prepay eligible');
+      if (!annualPrepayEligibleForEstimateData(estData)) return blocked('estimate is not annual-prepay eligible');
+    }
+    singleOptionRow = optionRow;
     singleOptionMonthly = Number(optionRow?.monthly) || null;
     // A priced row's annual is the authoritative figure the accept path
     // would invoice for it; an UNPRICED row (legacy/engine-draft shapes)
@@ -271,20 +275,30 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
 
   const line = recurring[0] || {};
 
-  // The quoted annual is only valid for the quoted schedule. Cadence comes
-  // from the bundle's single priced option key first (what accept would
-  // invoice), else the caller's line-cadence reader (admin-customers'
-  // cadenceFromEstimateLine — the full shared frequency vocabulary). Both
+  // The quoted annual is only valid for the quoted schedule, and the PRICED
+  // OPTION ROW is the schedule authority — never the stored raw line, which
+  // can be stale against the option that priced the amount. The row's key is
+  // a cadence for cadence ladders but a TIER name (light/standard/enhanced)
+  // for lawn/tree-shrub ladders, so fall back to the shared cadence reader
+  // over the ROW itself (frequency fields + visitsPerYear vocabulary). Both
   // normalize through prepayCoverageCadenceForPattern, which rejects
   // unsupported schedules (seasonal mosquito, nth-weekday) — no supported
-  // cadence, no amount.
+  // cadence, no amount — and the row's own visitsPerYear must agree with the
+  // resolved cadence's count.
   const { prepayCoverageCadenceForPattern, visitsPerYearForCadence } = require('./prepay-cadence');
-  const lineCadence = typeof resolveLineCadence === 'function' ? resolveLineCadence(line, null) : null;
-  const coverageCadence = prepayCoverageCadenceForPattern(singleOptionKey)
-    || prepayCoverageCadenceForPattern(lineCadence);
+  const rowCadence = typeof resolveLineCadence === 'function' && singleOptionRow
+    ? resolveLineCadence(singleOptionRow, null)
+    : null;
+  const coverageCadence = prepayCoverageCadenceForPattern(singleOptionRow?.key)
+    || prepayCoverageCadenceForPattern(rowCadence);
   const coverageVisitCount = visitsPerYearForCadence(coverageCadence);
   if (!coverageCadence || !coverageVisitCount) {
     return blocked('estimate cadence is not prepay-supported');
+  }
+  const rowVisits = Number(singleOptionRow?.visitsPerYear
+    ?? singleOptionRow?.visits_per_year ?? singleOptionRow?.visits);
+  if (rowVisits > 0 && rowVisits !== coverageVisitCount) {
+    return blocked('estimate option visit count disagrees with its cadence');
   }
 
   return {
