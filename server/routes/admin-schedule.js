@@ -5335,6 +5335,24 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // A direct rodent-bait series owes its setup AT CREATION (codex #3591
+      // r58/r59 P1): stamp it in the SAME transaction as the series —
+      // financial state never rides a post-response side effect. A resolver
+      // failure rolls the booking back (retryable) rather than committing a
+      // series whose first completion under-bills; the /secure page, if a
+      // link is later sent, freezes/consumes this same stamp.
+      if (isRecurring) {
+        const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
+        const owedSetup = await resolveDirectRodentSetupObligation(trx, { id: svc.id });
+        if (owedSetup > 0) {
+          await trx('scheduled_services')
+            .where({ id: svc.id })
+            .whereNull('pending_setup_fee')
+            .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+          logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on direct booking ${svc.id} — billed at first completion`);
+        }
+      }
+
       // Re-align the customer's WaveGuard tier from the just-created recurring rows
       // INSIDE the transaction, so a sync failure rolls back the appointment series
       // rather than committing recurring rows with a stale tier/monthly_rate/member_since
@@ -5583,27 +5601,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
             }
           }
         } catch (e) { logger.error(`Appointment confirmation SMS failed: ${e.message}`); }
-
-        // A direct rodent-bait booking owes its setup INDEPENDENT of the
-        // optional card-link text (codex #3591 r58 P1): resolve and stamp
-        // pending_setup_fee on the parent now, so the first completion
-        // bills the program the office booked even when no /secure link is
-        // ever sent (staff quoted the program at booking; the completion
-        // invoice itemizes the fee). A later /secure page freezes/consumes
-        // this same stamp. Best-effort with a FIX page — the booking stands.
-        try {
-          const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
-          const owedSetup = await resolveDirectRodentSetupObligation(db, { id: svc.id });
-          if (owedSetup > 0) {
-            const stamped = await db('scheduled_services')
-              .where({ id: svc.id })
-              .whereNull('pending_setup_fee')
-              .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
-            if (stamped === 1) logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on direct booking ${svc.id} — billed at first completion`);
-          }
-        } catch (e) {
-          logger.error(`[schedule] FIX: rodent setup stamp failed for direct booking ${svc.id}: ${e.message} — stamp pending_setup_fee manually or send the /secure link`);
-        }
 
         // Office opted in to the secure-card / Auto Pay setup text (the
         // "Text card-on-file link" checkbox, OFF by default). Parent visit

@@ -5158,11 +5158,11 @@ const InvoiceService = {
           .where("v.notes", "like", `%[prepay-switch-superseded-by:${prepayInvoiceId}]%`);
       })
       .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
-      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
     let voided = 0;
     for (const inv of restored || []) {
       const moneyAttached = inv.paid_at || inv.payment_recorded_at || inv.stripe_payment_intent_id
-        || inv.payer_statement_id
+        || inv.payer_statement_id || Number(inv.credit_applied) > 0
         || ["paid", "prepaid", "processing"].includes(String(inv.status).toLowerCase());
       if (!moneyAttached) {
         voided += await conn("invoices")
@@ -5251,10 +5251,10 @@ const InvoiceService = {
     for (const sc of siblingClaims || []) {
       const sib = await conn("invoices")
         .where({ id: sc.invoice_id })
-        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
       const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
       const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
-        || sib.payer_statement_id
+        || sib.payer_statement_id || Number(sib.credit_applied) > 0
         || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
       if (sib && sibTerminal) {
         await conn("setup_fee_claims").where({ id: sc.id }).delete();
@@ -5312,14 +5312,14 @@ const InvoiceService = {
     const rebills = await conn("invoices")
       .where("notes", "like", `%${rodentSetupRebillMarker(sourceInvoiceId)}%`)
       .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
-      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
     let voided = 0;
     for (const rb of rebills || []) {
       // A payer-statement accrual counts as money attached (codex #3591 r50
       // P1): a direct status flip would leave the statement charging the
       // voided duplicate — that reconciliation is a human's.
       const moneyAttached = rb.paid_at || rb.payment_recorded_at || rb.stripe_payment_intent_id
-        || rb.payer_statement_id
+        || rb.payer_statement_id || Number(rb.credit_applied) > 0
         || ["paid", "prepaid", "processing"].includes(String(rb.status).toLowerCase());
       if (!moneyAttached) {
         voided += await conn("invoices")
@@ -5405,10 +5405,10 @@ const InvoiceService = {
         // only money attached needs a human refund/reconcile.
         const sib = await conn("invoices")
           .where({ id: siblingClaim.invoice_id })
-          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id", "credit_applied");
         const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
         const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
-          || sib.payer_statement_id
+          || sib.payer_statement_id || Number(sib.credit_applied) > 0
           || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
         if (sib && sibTerminal) {
           await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();

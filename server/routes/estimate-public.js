@@ -11326,7 +11326,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // bill — frozen-disclosure rule: the amount comes from the STORED
           // estimate (shared resolver; the annual-prepay branch bills the
           // same figure), never a live constant.
-          const acceptedRodentSetupAmount = EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
+          // A one-time selection schedules NO rodent plan — its setup must
+          // not mint (codex #3591 r59 P1); the recurring conversion path is
+          // the only one that owes it.
+          const acceptedRodentSetupAmount = treatAsOneTime ? 0 : EstimateConverter.frozenRodentBaitSetupAmount(conversionEstData);
           if (shouldCreateStandardDraftInvoice && (setupFeeApplies || includesFirstApplicationLine || acceptedRodentSetupAmount > 0)) {
             const InvoiceService = require('../services/invoice');
             const lineItems = [];
