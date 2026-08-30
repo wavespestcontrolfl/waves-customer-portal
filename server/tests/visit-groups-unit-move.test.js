@@ -14,6 +14,8 @@ jest.mock('../models/db', () => {
       whereNot() { chain._ops.push(['whereNot', ...arguments]); return chain; },
       whereNotIn() { chain._ops.push(['whereNotIn', ...arguments]); return chain; },
       whereNull() { chain._ops.push(['whereNull', ...arguments]); return chain; },
+      whereRaw() { chain._ops.push(['whereRaw', ...arguments]); return chain; },
+      orWhereRaw() { chain._ops.push(['orWhereRaw', ...arguments]); return chain; },
       leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
       orderBy() { chain._ops.push(['orderBy', ...arguments]); return chain; },
@@ -704,6 +706,59 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // a visit that is merely not open (closing/dissolved) is the mover's own null path, not the frozen refusal
     db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
+  });
+
+  test('destination technician occupancy (local codex audit r24): every derived member window is checked against the NEW tech under the plan lock — hard clash refuses the unit (SLOT_TAKEN), advisory warns; alignMember repeats it under the tech slot-reserve lock', async () => {
+    const clashQueries = [];
+    const onTech = (tech) => [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: tech },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '10:00', window_end: '11:00', technician_id: tech },
+    ];
+    const withClash = (hit, landed = null) => ({
+      ...script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed }),
+      scheduled_services: {
+        ...script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed }).scheduled_services,
+        first: (ops, cols) => {
+          if (ops.some((o) => o[0] === 'whereRaw')) { clashQueries.push(ops); return hit ? { id: 'other-job' } : null; }
+          return null;
+        },
+      },
+    });
+    // hard (dispatch / auto-dispatch): refused before any write, the callers' SLOT_TAKEN handling unchanged
+    db.__script = withClash(true);
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'admin', options: { technicianId: 't9' } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', memberId: 'a', conflictId: 'other-job', isOperational: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(assignDispatchJob).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
+    // the probe targets the DESTINATION tech on the new date, the derived window, excluding the visit's own members
+    expect(clashQueries[0]).toEqual(expect.arrayContaining([['where', 'scheduled_date', '2026-09-02'], ['where', 'technician_id', 't9'], ['whereNotIn', 'id', ['a', 'b']]]));
+    expect(clashQueries[0].find((o) => o[0] === 'whereRaw')[2]).toEqual(['14:00', '13:00']);
+    // no destination tech (a plain move / an unassign) ⇒ no probe at all
+    clashQueries.length = 0; jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = withClash(true);
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: null } });
+    expect(clashQueries).toEqual([]);
+    // advisory (rain-out staff surface): warned, moved, and re-pointed — the plan probe, then per-member probes under the tech-day lock
+    clashQueries.length = 0; jest.clearAllMocks(); db.__calls.length = 0; db.__rawCalls.length = 0;
+    db.__script = withClash(true, onTech('t9'));
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9', overlapAdvisory: true } });
+    expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBeGreaterThanOrEqual(2);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(2);
+    expect(db.__rawCalls.filter((c) => c[1] && c[1][0] === 'slot-reserve' && c[1][1] === 't9:2026-09-02').length).toBe(2);
+    // hard clash discovered only at assignment (a booking landed after the plan): the row stays moved on its old tech, reported — never double-booked
+    clashQueries.length = 0; jest.clearAllMocks(); db.__calls.length = 0;
+    let probes = 0;
+    db.__script = withClash(false, onTech('t1')); // both stayed on t1: their re-point was refused
+    db.__script.scheduled_services.first = (ops) => (ops.some((o) => o[0] === 'whereRaw') ? (probes += 1, probes > 2 ? { id: 'late-job' } : null) : null); // plan probes a,b clean; alignment probes clash
+    const late = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(late.visitMove.moved).toEqual(['a', 'b']);
+    expect(late.visitMove.failed).toEqual([
+      expect.objectContaining({ id: 'a', code: 'SLOT_TAKEN' }), expect.objectContaining({ id: 'b', code: 'SLOT_TAKEN' }),
+    ]);
+    expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {

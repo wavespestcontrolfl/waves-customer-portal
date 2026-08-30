@@ -234,6 +234,32 @@ async function openMembers(t, visitId, { forUpdate = false } = {}) {
  * write left dispatch state disagreeing with visit ownership. Runs on the
  * caller's transaction; no-op when the row already carries the tech.
  */
+// Destination-technician occupancy for one member window (local codex audit
+// r24): technicianId never rides the rebooker (its assignment is the
+// canonical writer's, after the move), so the rebooker's authoritative
+// kept-tech overlap check runs against each row's OLD technician. The
+// DESTINATION technician's route is checked here with the rebooker's own
+// predicate (active holds, COALESCEd end, cancelled/completed excluded);
+// the visit's own members are excluded — they move together. Returns the
+// clashing row id or null; unassigning (null tech) never clashes.
+async function destinationTechClash(t, { technicianId, date, windowStart, windowEnd, durationMinutes, excludeIds }) {
+  if (!technicianId || !date || !windowStart) return null;
+  const start = String(windowStart).slice(0, 5);
+  const end = windowEnd ? String(windowEnd).slice(0, 5) : shiftClock(start, Number(durationMinutes) || 60);
+  const clash = await t('scheduled_services')
+    .where('scheduled_date', date)
+    .where('technician_id', technicianId)
+    .whereNotIn('id', [...new Set((excludeIds || []).map(String))])
+    .whereNotIn('status', ['cancelled', 'completed'])
+    .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
+    .whereRaw(
+      "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+      [end, start],
+    )
+    .first('id');
+  return clash ? clash.id : null;
+}
+
 async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
@@ -1758,9 +1784,31 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (typeof options.memberGuard === 'function') {
           await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id, targets });
         }
+        // Destination-technician occupancy for EVERY derived member window
+        // (local codex audit r24), before the first write: a hard clash
+        // refuses the whole unit (SLOT_TAKEN — the callers' existing
+        // handling); on an advisory staff surface (overlapAdvisory) it is a
+        // warning, as the rebooker's own check would be. alignMember repeats
+        // the check under the technician's slot-reserve lock at assignment.
+        const techClashWarnings = [];
+        if (options.technicianId) {
+          for (const tg of targets) {
+            const m = members.find((x) => String(x.id) === String(tg.id));
+            const [ts, te] = typeof tg.window === 'string' ? tg.window.split('-') : [tg.window?.start || m.window_start || null, tg.window ? null : (m.window_end || null)];
+            const clashId = await destinationTechClash(t, {
+              technicianId: options.technicianId, date: newDateStr, windowStart: ts, windowEnd: te,
+              durationMinutes: m.estimated_duration_minutes, excludeIds: members.map((x) => x.id),
+            });
+            if (!clashId) continue;
+            if (options.overlapAdvisory !== true) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: tg.id, conflictId: clashId });
+            }
+            techClashWarnings.push(`service ${tg.id} overlaps another job on the destination technician's route (${clashId})`);
+          }
+        }
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
-          customerId: visit.customer_id, propertyId: visit.property_id,
+          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings,
           targets, memberIds: members.map((m) => m.id),
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primaryRecurring: primary.is_recurring === true,
@@ -1806,7 +1854,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // ---- 2. move members: primary first, then siblings ----
   const moved = [];
   const failed = [];
-  const warnings = [];
+  const warnings = [...(plan.techClashWarnings || [])];
   let primaryResult = null;
   // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
   // rebooker writes technician_id directly, bypassing the canonical
@@ -1932,7 +1980,32 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // from the LOCKED plan is the baseline — an operator reassignment
           // that landed after the sibling's move is newer and wins; this
           // member is then reported failed/stale, never overwritten.
-          await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null }));
+          await db.transaction(async (t) => {
+            // The destination technician's slot-reserve lock (the rebooker's
+            // and slot-reservation's key shape) serializes this check with
+            // every scheduling writer on that tech-day; the tech lock is
+            // taken BEFORE row locks, the rebooker's own order (local codex
+            // audit r24). A clash leaves the row moved on its old technician
+            // — a reported failed member, never a silent double-booking;
+            // advisory staff surfaces warn and assign, as the rebooker would.
+            if (options.technicianId) {
+              const landed = landedState[target.id] || {};
+              await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
+              // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
+              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+              const clashId = await destinationTechClash(t, {
+                technicianId: options.technicianId, date: newDateStr,
+                windowStart: (row && row.window_start) || landed.window_start || target.startHHMM || null,
+                windowEnd: (row && row.window_end) || landed.window_end || null,
+                durationMinutes: row ? row.estimated_duration_minutes : null, excludeIds: plan.memberIds,
+              });
+              if (clashId && options.overlapAdvisory !== true) {
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', conflictId: clashId });
+              }
+              if (clashId) warnings.push(`service ${target.id} overlaps another job on the destination technician's route (${clashId})`);
+            }
+            await alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null });
+          });
           return;
         } catch (err) {
           lastErr = err;
