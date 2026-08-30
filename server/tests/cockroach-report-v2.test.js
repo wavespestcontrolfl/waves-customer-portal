@@ -217,9 +217,11 @@ describe('unknown program position (lineage lookup failed) → no program claims
   it('builder: no number, no badge, no next-visit plan; attach: null position field means unknown, absent field means treatment 1', () => {
     const out = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: null, scheduleResolved: true, nextVisit: { scheduledDate: '2999-01-01' } });
     expect(out.program).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
-    expect(out.whatsNext.title).toBe('Treatment complete');
+    expect(out.whatsNext.title).toBe("Today's treatment");
+    expect(out.whatsNext.title).not.toMatch(/complete/i);
     expect(out.whatsNext.badge).toBeNull();
-    expect(out.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then']);
+    expect(out.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then', 'Your program']);
+    expect(JSON.stringify(out.whatsNext)).not.toMatch(/complete/i);
     expect(out.whatsNext.nextVisitMissing).toBe(false);
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: null })).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
   });

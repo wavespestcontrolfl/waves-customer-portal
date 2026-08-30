@@ -222,7 +222,9 @@ function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachV
 
 function programTitle(program) {
   const { treatmentNumber: n, treatmentsTotal: total } = program;
-  if (n == null) return 'Treatment complete';
+  // Position unknown (lookup failed): no completion claim of any kind
+  // (codex P2 #3613 r2) — the visit is what the customer already knows.
+  if (n == null) return 'Today\'s treatment';
   return total ? `Treatment ${n} of ${total} complete` : `Treatment ${n} complete`;
 }
 
@@ -276,8 +278,10 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
   const lines = [];
   let nextVisitMissing = false;
   if (program.treatmentNumber == null) {
-    // Unknown position: no plan promises, no badge — only what holds either way.
+    // Unknown position: no plan promises, no badge, no completion claim —
+    // only what holds either way, plus an honest note.
     lines.push({ label: 'Between now and then', text: betweenVisitsCopy({ german, large, rw }) });
+    lines.push({ label: 'Your program', text: 'We could not confirm your treatment position while building this report — the office has the full schedule, text us any time.' });
     if (nextStep) lines.push({ label: 'From your technician', text: nextStep });
     return { title: programTitle(program), badge: null, lines, nextVisitMissing: false };
   }

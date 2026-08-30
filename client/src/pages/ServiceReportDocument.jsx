@@ -996,8 +996,11 @@ export default function ServiceReportDocument({ data, token }) {
                 {mowing.status === 'in_range' ? ' (in range)' : ''}
               </Bullet>
             )}
-            {cockroachV2 && cockroachV2.speciesLabel && cockroachV2.activityLevel && (
-              <Bullet><strong>Activity:</strong> {cockroachV2.speciesLabel} — {cockroachV2.activityLevel}</Bullet>
+            {/* Reconciled reading (live evidence beside a "None observed"
+                select): the stale select never prints — the metric carries
+                the reconciled value (codex P2 #3613 r2). */}
+            {cockroachV2 && cockroachV2.speciesLabel && (cockroachV2.statusReconciled || cockroachV2.activityLevel) && (
+              <Bullet><strong>Activity:</strong> {cockroachV2.speciesLabel} — {cockroachV2.statusReconciled ? 'Signs found' : cockroachV2.activityLevel}</Bullet>
             )}
             {cockroachV2 && Array.isArray(cockroachV2.locations) && cockroachV2.locations.length > 0 && (
               <Bullet><strong>{cockroachV2.status?.key === 'clear' ? 'Inspected' : 'Activity noted'}:</strong> {cockroachV2.locations.join(', ')}</Bullet>
@@ -1022,7 +1025,7 @@ export default function ServiceReportDocument({ data, token }) {
             {/* Termite V2 owns the reconciled activity reading (map pins may
                 escalate a frozen "None observed") — the frozen gauge bullet
                 would contradict it (codex P2 #3600 r10). */}
-            {activity && activity.levelWord && !termiteV2Primary && (
+            {activity && activity.levelWord && !termiteV2Primary && !cockroachV2?.statusReconciled && (
               <Bullet>
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>
