@@ -54,22 +54,25 @@ function receiptValues(facts) {
 
 function scopeFamilies(facts, families) {
   const owned = (facts.families || []).filter(Boolean);
-  if (!Array.isArray(families) || !families.length) return owned;
+  if (!Array.isArray(families) || !families.length) return { scope: owned, invalid: false };
   // The requested scope is caller input — only families the account actually
-  // holds count (a customer can't name pest_control into an offer they don't
-  // own). An intersection that comes up empty falls back to account scope.
+  // holds count. A non-empty request that intersects to NOTHING is invalid
+  // (stale or forged): it must not silently widen to account scope and mint
+  // a card for an unrelated plan.
   const requested = families.filter((f) => owned.includes(f));
-  return requested.length ? requested : owned;
+  if (!requested.length) return { scope: [], invalid: true };
+  return { scope: requested, invalid: false };
 }
 
 function resolveCancellation({ facts = {}, reasonCode = null, families = [], context = {}, now = new Date() } = {}) {
+  const normalized = scopeFamilies(facts, families);
+  const scope = normalized.scope;
   const reason = String(reasonCode || '').trim();
-  if (!reason) return { kind: 'none', reasonCode: null, why: 'reason_skipped' };
+  if (!reason) return { kind: 'none', reasonCode: null, scope, why: 'reason_skipped' };
   const meta = reasonCodeMeta(reason);
-  if (!meta) return { kind: 'none', reasonCode: reason, why: 'unknown_reason' };
-  if (meta.hardStop) return { kind: 'hard_stop', reasonCode: reason, reviewType: meta.reviewType };
-
-  const scope = scopeFamilies(facts, families);
+  if (!meta) return { kind: 'none', reasonCode: reason, scope, why: 'unknown_reason' };
+  if (meta.hardStop) return { kind: 'hard_stop', reasonCode: reason, scope, reviewType: meta.reviewType };
+  if (normalized.invalid) return { kind: 'none', reasonCode: reason, scope, why: 'invalid_scope' };
   const ctx = { ...context, reasonCode: reason };
   const hasPest = scope.includes('pest_control');
   const holdable = scope.some((f) => f === 'lawn_care' || f === 'mosquito' || f === 'tree_shrub');
@@ -200,9 +203,9 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
 
   const card = pick(candidates, opts);
   if (!card) {
-    return { kind: 'none', reasonCode: reason, why: candidates.filter(Boolean).length ? 'no_candidate_validated' : 'no_candidate', offerBlockers: offer.blockers };
+    return { kind: 'none', reasonCode: reason, scope, why: candidates.filter(Boolean).length ? 'no_candidate_validated' : 'no_candidate', offerBlockers: offer.blockers };
   }
-  return { kind: 'card', reasonCode: reason, card, offerBlockers: offer.blockers };
+  return { kind: 'card', reasonCode: reason, scope, card, offerBlockers: offer.blockers };
 }
 
 module.exports = { resolveCancellation, ownerTextAudience };

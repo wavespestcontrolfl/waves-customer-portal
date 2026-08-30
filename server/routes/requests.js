@@ -216,7 +216,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: dupe.id,
           value,
-          families: Array.isArray(value.families) ? value.families : [],
+          families: [], // scope unverifiable post-churn — never retry input
           reasonText: dupe.description || null,
           snapshot: { written_on_retry: true, degraded: true },
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
@@ -280,7 +280,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         customerId: req.customer.id,
         requestId: priorCancellation.id,
         value,
-        families: Array.isArray(value.families) ? value.families : [],
+        families: [], // scope unverifiable post-churn — never retry input
         reasonText: priorCancellation.description || null,
         snapshot: { written_on_retry: true, degraded: true },
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
@@ -437,7 +437,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: request.id,
           value,
-          families: Array.isArray(value.families) ? value.families : [],
+          // The SERVER-normalized scope the resolver actually used — never
+          // the caller's raw list (an unowned family must not enter the
+          // durable record).
+          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,
@@ -476,7 +479,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: request.id,
           value,
-          families: Array.isArray(value.families) ? value.families : [],
+          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,
