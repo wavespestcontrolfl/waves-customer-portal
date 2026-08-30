@@ -486,6 +486,17 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('HOA common-area parcel with a lot keeps its parcel-scale basis (association is the customer)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '4 Example Commons, Testville, FL 00000',
+      propertyType: 'HOA Common Area',
+      squareFootage: 0,
+      lotSize: 93940,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
   test('condo WITHOUT a lotSize keeps the quiet missing-lot behavior', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '3 Example Condo Way, Testville, FL 00000',
