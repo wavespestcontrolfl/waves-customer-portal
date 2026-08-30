@@ -119,7 +119,7 @@ describe('never-a-target hosts (plan §4 step 1)', () => {
     for (const h of ['x.com', 'https://twitter.com/waves', 't.co', 'www.google.com', 'maps.google.com', 'bit.ly', 'wavespestcontrol.com', 'www.wavespestcontrol.com', 'blog.wavespestcontrol.com', ...SPOKE_SITE_KEYS]) {
       expect({ h, never: R.isNeverTargetHost(h) }).toEqual({ h, never: true });
     }
-    for (const h of ['example.com', 'notx.com', 'googleplex.example', 'sunrise-irrigation.com']) expect(R.isNeverTargetHost(h)).toBe(false);
+    for (const h of ['example.com', 'notx.com', 'googleplex.example', 'sunny-sprinklers.test']) expect(R.isNeverTargetHost(h)).toBe(false);
     expect(R.isNeverTargetHost('')).toBe(true);
   });
 });
@@ -128,7 +128,7 @@ describe('never-a-target hosts (plan §4 step 1)', () => {
 // knex-shaped double: records inserts/updates; answers lookups from a store
 // ---------------------------------------------------------------------------
 function fakeDb({ domains = [] } = {}) {
-  const store = { domains: [...domains], sources: [], updates: [] };
+  const store = { domains: [...domains], sources: [], items: [], updates: [] };
   const builder = (table) => {
     const st = { table, where: null, whereIn: null, insert: null, conflict: null };
     const q = {
@@ -143,7 +143,7 @@ function fakeDb({ domains = [] } = {}) {
         const r = await q.then();
         return r[0];
       },
-      update(patch) { store.updates.push({ table, where: st.where, patch }); return Promise.resolve(1); },
+      update(patch) { if (table !== 'seo_link_intake_items') store.updates.push({ table, where: st.where, patch }); return Promise.resolve(1); },
       then(resolve, reject) {
         return Promise.resolve().then(() => {
           if (st.insert) {
@@ -157,7 +157,17 @@ function fakeDb({ domains = [] } = {}) {
               const row = { id: `s${store.sources.length + 1}`, ...st.insert };
               store.sources.push(row); return [{ id: row.id }];
             }
+            if (table === 'seo_link_intake_items') { // step 2: durable references, idempotent on item_key
+              if (store.items.some((i) => i.item_key === st.insert.item_key)) return [];
+              const row = { id: `i${store.items.length + 1}`, ...st.insert };
+              store.items.push(row); return [{ id: row.id }];
+            }
             throw new Error(`unexpected insert into ${table}`);
+          }
+          if (table === 'seo_link_intake_items') {
+            let rows = store.items;
+            if (st.where) rows = rows.filter((d) => Object.entries(st.where).every(([k, v]) => d[k] === v));
+            return rows;
           }
           if (table === 'seo_link_domains') {
             let rows = store.domains;
@@ -230,7 +240,7 @@ describe('parseOpportunities (intake normalize, pure)', () => {
   test('domains, URLs (hint kept), CSV rows, emails stripped, X posts unresolved, never-targets dropped, batch-deduped', () => {
     const text = [
       'Example.com, https://www.Example.com/submit-a-listing/',
-      '"Sunrise Irrigation","https://sunrise-irrigation.com/partners", contact: joe@sunrise-irrigation.com',
+      '"Sunny Sprinklers","https://sunny-sprinklers.test/partners", contact: joe@sunny-sprinklers.test',
       'https://x.com/someone/status/1234567890',
       'https://twitter.com/waves',
       'bit.ly/abc  wavespestcontrol.com/blog  https://blog.wavespestcontrol.com/x',
@@ -239,13 +249,16 @@ describe('parseOpportunities (intake normalize, pure)', () => {
     ].join('\n');
     const r = parseOpportunities(text);
     expect(r.candidates).toEqual([
-      { domain: 'example.com', url: 'https://www.Example.com/submit-a-listing/' },
-      { domain: 'sunrise-irrigation.com', url: 'https://sunrise-irrigation.com/partners' },
-      { domain: 'bradentonchamber.org', url: null },
+      expect.objectContaining({ domain: 'example.com', url: 'https://www.Example.com/submit-a-listing/' }),
+      expect.objectContaining({ domain: 'sunny-sprinklers.test', url: 'https://sunny-sprinklers.test/partners' }),
+      expect.objectContaining({ domain: 'bradentonchamber.org', url: null }),
     ]);
-    expect(r.unresolved).toEqual(['https://x.com/someone/status/1234567890']);
-    expect(r.dropped.map((d) => d.token)).toEqual(expect.arrayContaining(['https://twitter.com/waves', 'bit.ly/abc', 'wavespestcontrol.com/blog', 'https://blog.wavespestcontrol.com/x']));
-    expect(r.dropped.every((d) => d.reason === 'never_target')).toBe(true);
+    // step 2: a shortener link is a reference (resolved on the sweep), like an X post
+    expect(r.unresolved).toEqual(['https://x.com/someone/status/1234567890', 'bit.ly/abc']);
+    expect(r.dropped.map((d) => d.token)).toEqual(expect.arrayContaining(['https://twitter.com/waves', 'wavespestcontrol.com/blog', 'https://blog.wavespestcontrol.com/x']));
+    expect(r.dropped.map((d) => [d.token, d.dropReason])).toEqual(expect.arrayContaining([
+      ['https://twitter.com/waves', 'never_a_target'], ['wavespestcontrol.com/blog', 'own_domain'], ['https://blog.wavespestcontrol.com/x', 'own_domain'],
+    ]));
     // the email's host never became a candidate on its own line either
     expect(parseOpportunities('bob@lonely.example').candidates).toEqual([]);
     expect(parseOpportunities('')).toEqual({ candidates: [], unresolved: [], dropped: [] });
@@ -253,8 +266,8 @@ describe('parseOpportunities (intake normalize, pure)', () => {
   });
   test('an upper/mixed-case scheme is recognized and lower-cased in the hint (never https://HTTPS://…)', () => {
     expect(parseOpportunities('HTTPS://Example.com/submit Http://Other.example/add').candidates).toEqual([
-      { domain: 'example.com', url: 'https://Example.com/submit' },
-      { domain: 'other.example', url: 'http://Other.example/add' },
+      expect.objectContaining({ domain: 'example.com', url: 'https://Example.com/submit' }),
+      expect.objectContaining({ domain: 'other.example', url: 'http://Other.example/add' }),
     ]);
   });
   test('an X post is parked as unresolved, never turned into an x.com domain; mobile./www. spellings too', () => {
@@ -271,7 +284,7 @@ describe('intake (dedupe + upsert; dryRun writes nothing)', () => {
     const db = fakeDb({ domains: [{ id: 'd1', domain: 'known.example', source: 'competitor_gap', discovery_priority: 'normal' }] });
     const r = await intake(db, { text: 'known.example new.example https://x.com/u/status/9', source: 'list_import', sourceDetail: 'paste', dryRun: true });
     expect(r).toMatchObject({ dryRun: true, inserted: 1, existing: 1, touched: 0, unresolved: ['https://x.com/u/status/9'] });
-    expect(r.candidates).toEqual([{ domain: 'known.example', url: null, existing: true }, { domain: 'new.example', url: null, existing: false }]);
+    expect(r.candidates).toEqual([expect.objectContaining({ domain: 'known.example', url: null, existing: true }), expect.objectContaining({ domain: 'new.example', url: null, existing: false })]);
     expect(db._store.domains.length).toBe(1);
     expect(db._store.sources).toEqual([]);
     expect(db._store.updates).toEqual([]);
@@ -313,5 +326,33 @@ describe('intake (dedupe + upsert; dryRun writes nothing)', () => {
     expect(await intake(db, { text: 'nothing here' })).toMatchObject({ inserted: 0, existing: 0, candidates: [] });
     expect(db).not.toHaveBeenCalled();
     await expect(intake(db, { text: 'a.example', source: 'bogus' })).rejects.toMatchObject({ code: 'invalid_source' });
+  });
+});
+
+describe('§3.4d intake item identity (step 2)', () => {
+  test('enums are frozen, duplicate-free, and match the plan', () => {
+    expect(R.INTAKE_ITEM_STATES).toEqual(['pending', 'unresolved', 'resolved', 'dropped']);
+    expect(R.INTAKE_DROP_REASONS).toEqual(['never_a_target', 'retry_exhausted', 'invalid_url', 'own_domain']);
+    for (const arr of [R.INTAKE_ITEM_STATES, R.INTAKE_DROP_REASONS]) {
+      expect(Object.isFrozen(arr)).toBe(true);
+      expect(new Set(arr).size).toBe(arr.length);
+    }
+  });
+  test('normalizeRawUrl: trims, lowercases scheme+host, strips fragment + trailing slash, keeps path+query verbatim, prefixes https:// when no scheme', () => {
+    expect(R.normalizeRawUrl('  HTTPS://Example.COM/Path/To?Q=Val#frag  ')).toBe('https://example.com/Path/To?Q=Val');
+    expect(R.normalizeRawUrl('example.com')).toBe('https://example.com');
+    expect(R.normalizeRawUrl('example.com/x/')).toBe('https://example.com/x');
+    expect(R.normalizeRawUrl('https://example.com/')).toBe('https://example.com');
+    expect(R.normalizeRawUrl('http://t.co/AbC')).toBe('http://t.co/AbC'); // http stays http; path case kept
+    expect(R.normalizeRawUrl('https://a.example:8080/p?q=1&r=2')).toBe('https://a.example:8080/p?q=1&r=2');
+    expect(R.normalizeRawUrl('https://x.com/user/status/123#m')).toBe('https://x.com/user/status/123');
+    expect(R.normalizeRawUrl('')).toBe('');
+    expect(R.normalizeRawUrl(null)).toBe('');
+  });
+  test('intakeItemKey = `${source}:${normalized}` — the same reference re-fed in any casing/fragment/slash form maps to one item', () => {
+    const key = R.intakeItemKey('x', 'https://x.com/waves/status/1');
+    expect(key).toBe('x:https://x.com/waves/status/1');
+    expect(R.intakeItemKey('x', '  HTTPS://X.COM/waves/status/1/#top ')).toBe(key);
+    expect(R.intakeItemKey('list_import', 'https://x.com/waves/status/1')).not.toBe(key); // source is part of identity
   });
 });

@@ -1575,6 +1575,34 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :40 — Link intake resolver sweep (§3.4d): pending references
+  // (shortener links, post URLs) → hosts via the SSRF-pinned resolver. Claims
+  // FOR UPDATE SKIP LOCKED, so overlapping ticks/instances are safe without a
+  // cron lock. No credits spent, no communications.
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const r = await require('./seo/link-registry-intake').resolveIntakeItems(db, { limit: 50 });
+      if (r.claimed) logger.info(`[link-intake] resolver sweep: claimed ${r.claimed} resolved ${r.resolved} unresolved ${r.unresolved} dropped ${r.dropped} parked ${r.parked} errors ${r.errors.length}`);
+    } catch (err) { logger.error(`Link intake resolver sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
+  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
+  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
+  // are called directly — never the admin HTTP route.
+  cron.schedule('10 4 * * 0', async () => {
+    try {
+      await runExclusive('link-registry-sunday-feeders', async () => {
+        const b = await require('./seo/link-registry-baseline').importExistingBacklinks(db);
+        logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
+        const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
+        logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+        const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
+        logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
+      });
+    } catch (err) { logger.error(`Link registry Sunday feeders failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 4:30AM — Link prospect verifier (live/follow reconcile + crawl fallback)
   cron.schedule('30 4 * * *', async () => {
     logger.info('Running: Link prospect verifier');

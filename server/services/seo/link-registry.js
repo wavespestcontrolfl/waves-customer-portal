@@ -28,6 +28,10 @@ const LINK_SOURCES = Object.freeze([
   'lost_recovery', 'local_opportunity', 'legacy_unknown',
 ]);
 
+// §3.4d — intake items (step 2): raw references parked before resolution.
+const INTAKE_ITEM_STATES = Object.freeze(['pending', 'unresolved', 'resolved', 'dropped']);
+const INTAKE_DROP_REASONS = Object.freeze(['never_a_target', 'retry_exhausted', 'invalid_url', 'own_domain']);
+
 // §3.1 — aggregate over the domain's placements; step 1 only ever writes `new`
 // (intake) and leaves the rest to the investigator / bridge (steps 3–4).
 const AGENT_STATES = Object.freeze([
@@ -158,6 +162,31 @@ function normalizeSubmissionUrl(url) {
     if (u.pathname === '/' && !u.search) s = s.replace(/\/$/, '');
     return s.replace(/\/+$/, '');
   } catch { return raw.toLowerCase().replace(/#.*$/, '').replace(/\/+$/, ''); }
+}
+
+/**
+ * §3.4d item identity: trim; lowercase scheme + host; strip fragment and the
+ * trailing slash; keep path + query verbatim (case-significant); prefix
+ * https:// when no scheme. Pure — no DNS, no fetch.
+ */
+function normalizeRawUrl(url) {
+  const raw = String(url == null ? '' : url).trim();
+  if (!raw) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const u = new URL(withScheme);
+    u.hash = '';
+    u.protocol = u.protocol.toLowerCase();
+    u.hostname = u.hostname.toLowerCase();
+    return u.toString().replace(/#$/, '').replace(/\/+$/, '');
+  } catch {
+    return withScheme.replace(/#.*$/, '').replace(/\/+$/, '');
+  }
+}
+
+/** `${source}:${normalizeRawUrl(rawUrl)}` — the UNIQUE seo_link_intake_items.item_key. */
+function intakeItemKey(source, rawUrl) {
+  return `${source}:${normalizeRawUrl(rawUrl)}`;
 }
 
 function pathKey(acquisitionType, submissionUrl) {
@@ -304,6 +333,7 @@ module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
+  INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,

@@ -221,9 +221,12 @@ const PARKED_STATUSES = Object.freeze(['awaiting_owner', 'watching']);
 // the owner typed to be investigated first is owner_seed (§3.5).
 const INTAKE_SOURCES = Object.freeze(['list_import', 'owner_seed']);
 
-// POST /api/admin/backlink-agent/opportunities/bulk — intake skeleton (plan v2 §4, step 1):
-// normalize → dedupe → upsert registry domains + touches. No resolvers, no
-// enrichment, no investigation queueing yet (steps 2–3). dryRun reports only.
+// POST /api/admin/backlink-agent/opportunities/bulk — intake (plan v2 §4, step 2):
+// normalize → persist every reference as an intake item → dedupe → upsert
+// registry domains + touches. Accepts a pasted list, free text, or a CSV with a
+// website/domain/url column (CSV upload = same endpoint, §11). References
+// (X posts, shortener links) stay pending for the resolver sweep. dryRun
+// reports only. Investigation queueing is the investigator's (step 3).
 router.post('/opportunities/bulk', async (req, res, next) => {
   try {
     const { text, source = 'list_import', source_detail, dryRun } = req.body || {};
@@ -233,6 +236,48 @@ router.post('/opportunities/bulk', async (req, res, next) => {
     const detail = typeof source_detail === 'string' && source_detail.trim() ? source_detail.trim().slice(0, 200) : `paste:${etDateString()}`; // ET calendar day (Railway runs UTC)
     const result = await linkIntake.intake(db, { text, source, sourceDetail: detail, dryRun: dryRun === true || dryRun === 'true' });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/intake-items — durable references (§3.4d): what
+// was fed, what resolved, what is waiting or dropped and why.
+const INTAKE_ITEM_STATES = Object.freeze(['pending', 'unresolved', 'resolved', 'dropped']);
+router.get('/intake-items', async (req, res, next) => {
+  try {
+    const { state, source, q, page = 1, limit = 100 } = req.query;
+    if (state && !INTAKE_ITEM_STATES.includes(state)) return res.status(400).json({ error: `invalid state; must be one of ${INTAKE_ITEM_STATES.join(', ')}` });
+    let query = db('seo_link_intake_items');
+    if (state) query = query.where({ state });
+    if (source) query = query.where({ source });
+    if (q) query = query.where((b) => b.whereILike('raw_url', `%${q}%`).orWhereILike('resolved_host', `%${q}%`));
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * lim;
+    const [items, counts] = await Promise.all([
+      query.clone().orderBy('last_seen_at', 'desc').limit(lim).offset(offset),
+      db('seo_link_intake_items').select('state').count('* as c').groupBy('state'),
+    ]);
+    res.json({ items, counts: Object.fromEntries(counts.map((r) => [r.state, Number(r.c)])) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/registry/jobs/:job — run one step-2 job now
+// (the scheduler runs the same services on its own cadence). Bounded per call;
+// dryRun supported everywhere. `enrich` spends DataForSEO credits and is gated
+// by GATE_SEO_INTELLIGENCE inside the service (reports `gated: true` when off).
+const REGISTRY_JOBS = Object.freeze({
+  resolve: (opts) => require('../services/seo/link-registry-intake').resolveIntakeItems(db, { limit: opts.limit || 50 }),
+  baseline: (opts) => require('../services/seo/link-registry-baseline').importExistingBacklinks(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
+  gap: (opts) => require('../services/seo/link-registry-gap-ingest').ingestCompetitorGap(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
+  enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),
+});
+router.post('/registry/jobs/:job', async (req, res, next) => {
+  try {
+    const run = REGISTRY_JOBS[req.params.job];
+    if (!run) return res.status(404).json({ error: `unknown job; must be one of ${Object.keys(REGISTRY_JOBS).join(', ')}` });
+    const { dryRun, limit, force } = req.body || {};
+    const lim = limit == null ? null : Math.min(Math.max(parseInt(limit, 10) || 0, 1), 1000);
+    const result = await run({ dryRun: dryRun === true || dryRun === 'true', limit: lim, force });
+    res.json({ job: req.params.job, ...result });
   } catch (err) { next(err); }
 });
 

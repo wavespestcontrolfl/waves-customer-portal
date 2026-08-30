@@ -117,3 +117,88 @@ describe('contact-finder', () => {
     expect(p('fec0::1')).toBe(false); // outside link-local
   });
 });
+
+describe('fetchPage finalUrl / resolveOnly (step-2 resolver contract)', () => {
+  const { fetchPage } = _internals;
+  const okRes = (html, extra = {}) => ({ ok: true, status: 200, headers: { get: (k) => (k === 'content-type' ? 'text/html' : null) }, text: async () => html, ...extra });
+  const redirectTo = (loc) => ({ ok: false, status: 301, headers: { get: (k) => (k === 'location' ? loc : null) }, text: async () => '' });
+
+  test('direct 200 → finalUrl is the request URL, redirectHops 0', async () => {
+    const fetchFn = async () => okRes('<p>hi</p>');
+    const r = await fetchPage('https://news.com/page', { fetchFn, resolveHostFn: async () => true });
+    expect(r).toEqual({ status: 200, finalUrl: 'https://news.com/page', redirectHops: 0, html: '<p>hi</p>', blocked: false, truncated: false, contentType: 'text/html', error: null });
+  });
+
+  test('two redirects → finalUrl is the LAST hop, redirectHops 2, body from the last hop', async () => {
+    const seen = [];
+    const fetchFn = async (url) => {
+      seen.push(url);
+      if (url === 'https://t.co/abc') return redirectTo('https://short.io/x');
+      if (url === 'https://short.io/x') return redirectTo('/final?ok=1'); // relative → resolved against the hop
+      return okRes('<p>final</p>');
+    };
+    const r = await fetchPage('https://t.co/abc', { fetchFn, resolveHostFn: async () => true });
+    expect(seen).toEqual(['https://t.co/abc', 'https://short.io/x', 'https://short.io/final?ok=1']);
+    expect(r.finalUrl).toBe('https://short.io/final?ok=1');
+    expect(r.redirectHops).toBe(2);
+    expect(r.status).toBe(200);
+    expect(r.html).toBe('<p>final</p>');
+  });
+
+  test('blocked hop mid-chain → finalUrl null, blocked true, the private host is never fetched', async () => {
+    const seen = [];
+    const fetchFn = async (url) => { seen.push(url); return redirectTo('http://169.254.169.254/latest/meta-data'); };
+    const r = await fetchPage('https://news.com/', { fetchFn, resolveHostFn: async (h) => h === 'news.com' });
+    expect(seen).toEqual(['https://news.com/']);
+    expect(r.finalUrl).toBeNull();
+    expect(r.blocked).toBe(true);
+    expect(r.error).toBe('blocked_host');
+    expect(r.redirectHops).toBe(1);
+  });
+
+  test('resolveOnly: returns status + finalUrl with html null and never calls res.text()', async () => {
+    let textCalls = 0;
+    let cancelled = false;
+    const fetchFn = async (url, opts) => {
+      expect(opts.resolveOnly).toBe(true);
+      if (url === 'https://t.co/abc') return redirectTo('https://blog.example.com/post');
+      return okRes('<p>never read</p>', { text: async () => { textCalls++; return '<p>never read</p>'; }, body: { cancel: async () => { cancelled = true; } } });
+    };
+    const r = await fetchPage('https://t.co/abc', { fetchFn, resolveHostFn: async () => true, resolveOnly: true });
+    expect(r).toEqual({ status: 200, finalUrl: 'https://blog.example.com/post', redirectHops: 1, html: null, blocked: false, truncated: false, contentType: 'text/html', error: null });
+    expect(textCalls).toBe(0);
+    expect(cancelled).toBe(true);
+  });
+
+  test('resolveOnly: a 404 at the final URL still resolves (finalUrl set, status 404)', async () => {
+    const fetchFn = async () => ({ ok: false, status: 404, headers: { get: () => null }, text: async () => { throw new Error('must not read body'); } });
+    const r = await fetchPage('https://gone.example.com/old', { fetchFn, resolveHostFn: async () => true, resolveOnly: true });
+    expect(r.status).toBe(404);
+    expect(r.finalUrl).toBe('https://gone.example.com/old');
+    expect(r.html).toBeNull();
+    expect(r.error).toBeNull();
+  });
+
+  test('resolveOnly: a fetcher whose body cancel throws still resolves cleanly', async () => {
+    const fetchFn = async () => okRes('', { body: { cancel: async () => { throw new Error('stream already closed'); } } });
+    const r = await fetchPage('https://news.com/', { fetchFn, resolveHostFn: async () => true, resolveOnly: true });
+    expect(r.finalUrl).toBe('https://news.com/');
+    expect(r.error).toBeNull();
+  });
+
+  test('redirect_budget_exhausted → finalUrl null, redirectHops = maxRedirects + 1', async () => {
+    let n = 0;
+    const fetchFn = async () => redirectTo(`https://loop.example.com/${++n}`);
+    const r = await fetchPage('https://loop.example.com/0', { fetchFn, resolveHostFn: async () => true, maxRedirects: 2 });
+    expect(r.error).toBe('redirect_budget_exhausted');
+    expect(r.finalUrl).toBeNull();
+    expect(r.redirectHops).toBe(3);
+    expect(r.status).toBe(0);
+  });
+
+  test('network error → finalUrl null, existing status-0 shape kept', async () => {
+    const fetchFn = async () => { throw new Error('ECONNRESET'); };
+    const r = await fetchPage('https://flaky.com/', { fetchFn, resolveHostFn: async () => true });
+    expect(r).toEqual({ status: 0, finalUrl: null, redirectHops: 0, html: null, blocked: false, truncated: false, contentType: null, error: 'ECONNRESET' });
+  });
+});

@@ -99,7 +99,7 @@ function rejectingLookup(hostname, options, callback) {
 // check to the connection via `lookup`. redirect:'manual' shape so the caller's
 // per-hop revalidation still runs. Returns a fetch-like object (ok/status/
 // headers.get/text) so tests can inject a plain mock instead. Never throws.
-function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS, resolveOnly = false } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
@@ -115,6 +115,7 @@ function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
         // that something is absent from it.
         const wrap = (body, complete = true) => ({ ok: status >= 200 && status < 300, status, complete, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: async () => body });
         if (status < 200 || status >= 300) { res.resume(); return done(wrap('')); } // incl. 3xx (caller follows)
+        if (resolveOnly) { res.destroy(); return done(wrap('')); }                 // headers captured; never read the body
         let data = '';
         let ended = false;
         res.setEncoding('utf8');
@@ -195,17 +196,31 @@ function extractEmails(html, domain) {
 // fetchPage keeps the HTTP status so callers that need to tell "page gone"
 // from "page fine, link missing" (the backlink loss verifier) can; fetchText is
 // the html-or-null convenience the contact paths use.
-//   → { status, html, blocked, truncated, error }  — blocked: a hop targeted a
-//     private/internal host (never fetched); truncated: the 2xx body was cut
-//     short (size cap / early close) so absence-of-X in it proves nothing;
-//     status 0 on network failure.
-async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2 } = {}) {
+//   → { status, finalUrl, redirectHops, html, blocked, truncated, contentType, error }
+//     blocked: a hop targeted a private/internal host (never fetched);
+//     truncated: the 2xx body was cut short (size cap / early close) so
+//     absence-of-X in it proves nothing; status 0 on network failure.
+//     finalUrl: the fully validated URL of the LAST hop that produced a
+//     non-redirect response (2xx/4xx/5xx) — null on every early-return failure
+//     (invalid_url, unsupported_protocol, blocked_host, no_response,
+//     redirect_without_location, redirect_budget_exhausted, network error).
+//     redirectHops: redirects followed before that response (or before failing).
+//   opts.resolveOnly: true → same per-hop validation, redirect handling,
+//     headers/timeout/abort, but return as soon as a non-redirect response
+//     arrives WITHOUT reading the body: html null, truncated false, status +
+//     finalUrl + contentType kept (a 404 at the final URL is still a resolved
+//     host). Still a GET (many hosts reject HEAD); the body stream is
+//     cancelled/aborted, never consumed.
+async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2, resolveOnly = false } = {}) {
   let current = url;
+  let redirectHops = 0;
+  const fail = (status, blocked, error) => ({ status, finalUrl: null, redirectHops, html: null, blocked, truncated: false, contentType: null, error });
+  const headerOf = (res, name) => (res.headers && typeof res.headers.get === 'function' && res.headers.get(name)) || null;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     let u;
-    try { u = new URL(current); } catch { return { status: 0, html: null, blocked: false, truncated: false, error: 'invalid_url' }; }
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return { status: 0, html: null, blocked: true, truncated: false, error: 'unsupported_protocol' };
-    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return { status: 0, html: null, blocked: true, truncated: false, error: 'blocked_host' };
+    try { u = new URL(current); } catch { return fail(0, false, 'invalid_url'); }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return fail(0, true, 'unsupported_protocol');
+    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return fail(0, true, 'blocked_host');
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -214,29 +229,42 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
         redirect: 'manual',
         signal: controller.signal,
         headers: { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' },
+        resolveOnly, // default fetcher drops the socket at headers; injected fetchers may ignore it
       });
-      if (!res) return { status: 0, html: null, blocked: false, truncated: false, error: 'no_response' };
+      if (!res) return fail(0, false, 'no_response');
       if (res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
         const loc = res.headers.get('location');
-        if (!loc) return { status: res.status, html: null, blocked: false, truncated: false, error: 'redirect_without_location' };
+        if (!loc) return fail(res.status, false, 'redirect_without_location');
         current = new URL(loc, current).toString(); // re-validated on next loop
+        redirectHops++;
         continue;
       }
-      if (!res.ok) return { status: res.status || 0, html: null, blocked: false, truncated: false, error: null };
+      const finalUrl = u.toString();
+      const contentType = headerOf(res, 'content-type');
+      if (resolveOnly) {
+        // Status + headers are all we need: drop the body without reading it.
+        // Wrapped because some fetchers surface the cancel as a stream error.
+        try {
+          if (res.body && typeof res.body.cancel === 'function') await res.body.cancel();
+          else if (res.body && typeof res.body.destroy === 'function') res.body.destroy();
+          else controller.abort();
+        } catch { /* body drop is best-effort; headers already captured */ }
+        return { status: res.status || 0, finalUrl, redirectHops, html: null, blocked: false, truncated: false, contentType, error: null };
+      }
+      if (!res.ok) return { status: res.status || 0, finalUrl, redirectHops, html: null, blocked: false, truncated: false, contentType, error: null };
       const raw = await res.text();
       const html = typeof raw === 'string' ? raw : '';
       // Injected fetchers (tests, global fetch) don't report `complete`; only an
       // explicit false — or our own size cap — marks the body as partial.
       const truncated = res.complete === false || html.length > 600000;
-      const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || null;
-      return { status: res.status, html: html.slice(0, 600000), blocked: false, truncated, contentType, error: null }; // cap pathological pages
+      return { status: res.status, finalUrl, redirectHops, html: html.slice(0, 600000), blocked: false, truncated, contentType, error: null }; // cap pathological pages
     } catch (err) {
-      return { status: 0, html: null, blocked: false, truncated: false, error: (err && err.message) || 'fetch_failed' }; // timeout / DNS / TLS / abort
+      return fail(0, false, (err && err.message) || 'fetch_failed'); // timeout / DNS / TLS / abort
     } finally {
       clearTimeout(timer);
     }
   }
-  return { status: 0, html: null, blocked: false, truncated: false, error: 'redirect_budget_exhausted' };
+  return fail(0, false, 'redirect_budget_exhausted');
 }
 
 async function fetchText(url, opts) {
