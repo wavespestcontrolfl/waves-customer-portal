@@ -2264,7 +2264,7 @@ const FL_COMMERCIAL_TAX_RATE = 0.07;
 // discount hits only discountable lines (a non-discountable line like
 // foam_recurring stays full price), so a pre-discount ratio would mis-tax a
 // mixed plan that includes one.
-function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscountApplied = false, baseRate = FL_COMMERCIAL_TAX_RATE } = {}) {
+function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscountApplied = false, baseRate = FL_COMMERCIAL_TAX_RATE, taxableOneTimeAmount = 0 } = {}) {
   const rows = Array.isArray(recurringServices) ? recurringServices : [];
   const effectiveBaseRate = Number.isFinite(baseRate) ? baseRate : FL_COMMERCIAL_TAX_RATE;
   if (!(effectiveBaseRate > 0)) return 0;
@@ -2285,9 +2285,13 @@ function resolveCommercialPrepayTaxRate(recurringServices = [], { prepayDiscount
     const annual = recurringLineAnnualAmount(svc);
     return isNonDiscountableRecurringLine(svc) ? annual : annual * (1 - discountRate);
   };
-  const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0);
+  // A taxable ONE-TIME line riding the same invoice (the rodent bait-station
+  // setup — codex #3591 r55 P1) joins BOTH sides of the blend, or
+  // InvoiceService's whole-subtotal multiplication under-taxes it.
+  const oneTime = Number(taxableOneTimeAmount) > 0 ? Number(taxableOneTimeAmount) : 0;
+  const invoiceTotal = rows.reduce((sum, svc) => sum + postDiscount(svc), 0) + oneTime;
   if (!(invoiceTotal > 0)) return 0;
-  const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0);
+  const taxableTotal = rows.filter(isTaxableCommercial).reduce((sum, svc) => sum + postDiscount(svc), 0) + oneTime;
   // FULL precision — InvoiceService multiplies invoiceTotal by this rate and
   // rounds the resulting tax DOLLARS to cents. Rounding the rate here (e.g. to 4
   // dp) would drop the tax to $0 or drift by dollars when the taxable pest share
@@ -5538,10 +5542,14 @@ const EstimateConverter = {
           // county) on the SAME connection so the just-written
           // property_type='commercial' is visible — then blend by the taxable
           // pest share. Never hardcode 7%.
+          const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
           const prepayTaxRate = hasCommercialRecurring
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
               prepayDiscountApplied,
               baseRate: await resolveCommercialPrepayBaseRate(customerId, { database }),
+              // The taxable bait-station setup rides this same invoice —
+              // it must sit in the blend or it is under-taxed (r55 P1).
+              taxableOneTimeAmount: prepayRodentSetupForTax,
             })
             : undefined;
           // Acceptance deposit credits against this prepay invoice through

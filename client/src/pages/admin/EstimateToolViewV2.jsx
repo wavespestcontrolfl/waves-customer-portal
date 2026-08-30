@@ -3497,11 +3497,18 @@ export default function EstimateToolViewV2({
         fetchRow("rodent_waveguard"),
       ]);
       if (!active) return;
-      if (bracketsRow.ok) applyServerRodentBaitBracketsPricingConfig(bracketsRow.data);
-      if (setupRow.ok) applyServerRodentSetupFeePricingConfig(setupRow.data);
-      if (waveguardRow.ok) applyServerRodentWaveguardPricingConfig(waveguardRow.data);
-      if (bracketsRow.ok || setupRow.ok || waveguardRow.ok) {
+      // ALL THREE rows or nothing (codex #3591 r55 local P1): applying a
+      // partial set leaves module defaults beside live values — the sidebar
+      // could advertise a Silver/discounted posture the server's disabled
+      // policy won't give. A failed load keeps the fail-closed posture
+      // (tierQualifier false ⇒ rodent stays out of the member-key preview).
+      if (bracketsRow.ok && setupRow.ok && waveguardRow.ok) {
+        applyServerRodentBaitBracketsPricingConfig(bracketsRow.data);
+        applyServerRodentSetupFeePricingConfig(setupRow.data);
+        applyServerRodentWaveguardPricingConfig(waveguardRow.data);
         setRodentWaveguardPosture(rodentBaitWaveguardFlags());
+      } else {
+        setRodentWaveguardPosture({ tierQualifier: false, excludeFromPctDiscount: true, unavailable: true });
       }
     })();
     return () => {

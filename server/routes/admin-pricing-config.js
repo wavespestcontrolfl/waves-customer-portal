@@ -1198,6 +1198,24 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
       if (!oldConfig) return false;
       const updates = { updated_at: new Date() };
       normalizedData = data !== undefined ? normalizeIncomingConfigData(req.params.key, data) : undefined;
+      // rodent_waveguard persists a COMPLETE resolved policy (codex #3591
+      // r55 local P0): the bridge only mutates present fields, so a saved
+      // partial would leave this pod on the old value while a restarted pod
+      // uses the code default — pod-dependent pricing. Absent booleans
+      // inherit the CURRENT row's value (code defaults as last resort).
+      if (req.params.key === 'rodent_waveguard' && normalizedData !== undefined) {
+        let currentPolicy = {};
+        try { currentPolicy = typeof oldConfig.data === 'string' ? JSON.parse(oldConfig.data) : (oldConfig.data || {}); } catch { currentPolicy = {}; }
+        normalizedData = {
+          ...normalizedData,
+          tier_qualifier: typeof normalizedData.tier_qualifier === 'boolean'
+            ? normalizedData.tier_qualifier
+            : (typeof currentPolicy.tier_qualifier === 'boolean' ? currentPolicy.tier_qualifier : true),
+          exclude_from_pct_discount: typeof normalizedData.exclude_from_pct_discount === 'boolean'
+            ? normalizedData.exclude_from_pct_discount
+            : (typeof currentPolicy.exclude_from_pct_discount === 'boolean' ? currentPolicy.exclude_from_pct_discount : false),
+        };
+      }
       // Validate BEFORE the write — syncConstantsFromDB() below loads this
       // row over the in-code constants, so a bad commit immediately poisons
       // live pricing rather than waiting for someone to notice.

@@ -4281,6 +4281,11 @@ const InvoiceService = {
     }
     if (current.status === "void") {
       await stopInvoiceFollowupSequence(id, "invoice_voided");
+      // RE-ENTRY HEALS (codex #3591 r55 local P0): a prior void whose
+      // annual-prepay sync failed post-commit left the term/claim state
+      // behind — re-running the idempotent sync here makes "retry the
+      // void" the repair path instead of a permanent stranding.
+      await require("./annual-prepay-renewals").syncTermForInvoicePayment(current);
       return current;
     }
     // 'prepaid' passes assertInvoiceVoidable so a credit-covered invoice can be
@@ -4419,8 +4424,15 @@ const InvoiceService = {
         invoice,
       );
     } catch (err) {
-      logger.warn(
-        `[invoice] annual prepay sync skipped after void ${invoice.invoice_number}: ${err.message}`,
+      // The void is COMMITTED but the term/claim restorations did not run
+      // (codex #3591 r55 local P0) — surfacing the failure makes the retry
+      // path real: re-voiding an already-void invoice re-runs the
+      // idempotent sync above.
+      logger.error(
+        `[invoice] annual prepay sync FAILED after void ${invoice.invoice_number}: ${err.message} — the invoice IS void; retry the void to rerun the sync`,
+      );
+      throw new Error(
+        `Invoice ${invoice.invoice_number} was voided, but its annual-prepay/setup restorations failed (${err.message}). Retry the void — it reruns the restorations.`,
       );
     }
     logger.info(`[invoice] Voided: ${invoice.invoice_number}`);
@@ -5021,13 +5033,20 @@ const InvoiceService = {
    */
   async restoreRodentSetupObligationForReversedInvoice(conn, invoiceRow) {
     if (!invoiceRow || !invoiceRow.customer_id) return null;
+    // Durable claim FIRST (codex #3591 r55 P1): the claims-ledger row is
+    // immutable provenance — a staff-renamed line must not hide the setup
+    // from its own reversal. The editable description only decides for
+    // claim-less invoices (unsent accept drafts).
+    let completionClaimToConsume = null;
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id", "amount");
     let lines = invoiceRow.line_items;
     if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
-    const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
-    if (!setupLine || !(amount > 0)) return null;
-    let completionClaimToConsume = null;
-    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
+    const lineAmount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    const claimAmount = claimRecord ? Math.round(Number(claimRecord.amount) * 100) / 100 : NaN;
+    const amount = Number.isFinite(claimAmount) && claimAmount > 0 ? claimAmount : lineAmount;
+    if (!(amount > 0)) return null;
+    if (!setupLine && !claimRecord) return null;
     if (claimRecord) {
       // Only TERM-BACKED prepay claims restore through the claims-ledger
       // sync (codex #3591 r48 P1) — a COMPLETION invoice writes a claim

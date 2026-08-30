@@ -21,6 +21,7 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
   baitBrackets: constants.RODENT.baitBrackets,
   baitBracketExtension: constants.RODENT.baitBracketExtension,
   baitVisitsPerYear: constants.RODENT.baitVisitsPerYear,
+  baitSetupFee: constants.RODENT.baitSetupFee,
 }));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
@@ -1251,6 +1252,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     constants.RODENT.baitBrackets = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBrackets));
     constants.RODENT.baitBracketExtension = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBracketExtension));
     constants.RODENT.baitVisitsPerYear = RODENT_BRACKET_DEFAULTS.baitVisitsPerYear;
+    constants.RODENT.baitSetupFee = RODENT_BRACKET_DEFAULTS.baitSetupFee;
     if (config.rodent_bait_brackets) {
       const rb = config.rodent_bait_brackets;
       if (Array.isArray(rb.brackets) && rb.brackets.length > 0) {
