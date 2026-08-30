@@ -116,7 +116,7 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
       if (existing) return existing;
       const caseRow = await trx('cancellation_cases')
         .where({ id: cancellationCaseId })
-        .first('customer_id', 'reason_code', 'resolution_action');
+        .first('customer_id', 'reason_code', 'resolution_action', 'resolution_outcome', 'status');
       if (caseRow && caseRow.customer_id !== customerId) {
         const err = new Error('retention_offer_case_mismatch');
         err.code = 'retention_offer_case_mismatch';
@@ -142,6 +142,14 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
       if (!action || typeof action !== 'object' || action.type !== 'retention_offer' || action.familyKey !== familyKey) {
         const err = new Error('retention_offer_case_action_mismatch');
         err.code = 'retention_offer_case_action_mismatch';
+        throw err;
+      }
+      // Only a COMMITTED case whose card the customer explicitly ACCEPTED
+      // authorizes money — declined, merely shown, open, or abandoned
+      // cases mint nothing.
+      if (caseRow.status !== 'committed' || caseRow.resolution_outcome !== 'accepted') {
+        const err = new Error('retention_offer_case_not_accepted');
+        err.code = 'retention_offer_case_not_accepted';
         throw err;
       }
     }

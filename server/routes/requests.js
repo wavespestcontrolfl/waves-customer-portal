@@ -376,40 +376,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     let preChurnFacts = null;
     let serverResolution = null;
 
-    const [request] = await db('service_requests')
-      .insert({
-        customer_id: req.customer.id,
-        category,
-        subject: cleanSubject,
-        description: cleanDescription,
-        urgency: validUrgency,
-        location_on_property: validLocation,
-        photos: JSON.stringify(photoData),
-        status: 'new',
-      })
-      .returning('*');
-
-    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
-
-    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
-    const categoryLabel = category.replace(/_/g, ' ');
-    const photoCount = photoData.length;
-    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
-
-    // A cancellation request is auto-processed: pull the customer's upcoming
-    // visits off the calendar, stop any recurring series, and mark the account
-    // churned. Best-effort — run it before the admin alert so the notification
-    // can report what happened. The durable service_requests row and the alert
-    // itself remain even if this fails.
-    let cancellationResult = null;
-    let cancellationProcessed = false;
-    let caseOpened = false;
-    // Cancellation ordering invariant (codex rounds 27, 30, 38): the
-    // durable acceptance persists FIRST (a crash mid-preload must not lose
-    // the submitted cancellation); then the pre-churn snapshot/facts load +
-    // the PURE resolve run — local DB reads only, no external I/O between
-    // the acceptance and the billing wind-down; the paid Google address
-    // validation runs AFTER the wind-down and only refines the verdict.
+    // Cancellation ordering — FINAL form (codex rounds 27, 30, 38, 46):
+    // MONEY OUTRANKS DURABILITY. The pre-churn snapshot/facts load and the
+    // PURE resolve run BEFORE the acceptance persists (a crash here just
+    // means the customer resubmits); the instant the acceptance persists,
+    // the processor's billing wind-down runs with NOTHING between them —
+    // no facts legs, no case writes, and certainly no external I/O. The
+    // case write and the paid address validation both run after the
+    // wind-down; retries reconstruct a lost case.
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
       try {
         caseSnapshot = await db('customers')
@@ -450,42 +424,34 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
     }
 
-    if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
-      // Open the durable case NOW, with the pre-churn snapshot and the
-      // server resolution, so a crash mid-processing can never lose them —
-      // the post-processor call below only promotes open→committed.
-      {
-        const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
-        // Outcome honesty: only an EXPLICIT claim matching the server card
-        // counts, and never 'accepted' on this path — the commit performs no
-        // card action, so an accepted-offer claim would record money state
-        // that does not exist (acceptance ships atomically with its action
-        // in C1). Omission records 'none', never an inferred impression.
-        const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
-          && ['shown', 'declined'].includes(value.resolutionOutcome)
-          ? value.resolutionOutcome
-          : null;
-        await recordCancellationCase({
-          customerId: req.customer.id,
-          requestId: request.id,
-          value,
-          // The SERVER-normalized scope the resolver actually used — never
-          // the caller's raw list (an unowned family must not enter the
-          // durable record).
-          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
-          reasonText: cleanDescription || null,
-          resolution: serverResolution,
-          resolutionOutcome: outcome,
-          snapshot: {
-            tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
-            monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
-            billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
-          },
-          processed: false,
-        });
-        caseOpened = true;
-      }
-    }
+
+    const [request] = await db('service_requests')
+      .insert({
+        customer_id: req.customer.id,
+        category,
+        subject: cleanSubject,
+        description: cleanDescription,
+        urgency: validUrgency,
+        location_on_property: validLocation,
+        photos: JSON.stringify(photoData),
+        status: 'new',
+      })
+      .returning('*');
+
+    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
+
+    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
+    const categoryLabel = category.replace(/_/g, ' ');
+    const photoCount = photoData.length;
+    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+
+    // A cancellation request is auto-processed: pull the customer's upcoming
+    // visits off the calendar, stop any recurring series, and mark the account
+    // churned. Best-effort — run it before the admin alert so the notification
+    // can report what happened. The durable service_requests row and the alert
+    // itself remain even if this fails.
+    let cancellationResult = null;
+    let cancellationProcessed = false;
     if (isCancellation) {
       try {
         cancellationResult = await processCancellationRequest({
@@ -532,11 +498,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         }
       }
 
-      // Finalize the case opened pre-churn: an idempotent second call that
-      // only promotes open→committed (and re-supplies the resolution in case
-      // the pre-write itself failed). Caller input can never forge the card
-      // — the resolution is the server's, recomputed before churn.
-      if (caseOpened || CancellationResolution.cancelFlowV2Enabled()) {
+      // The SOLE case write, after the billing wind-down (codex r46: no
+      // writes between acceptance and wind-down). Idempotent per request;
+      // retries reconstruct a lost case. Caller input can never forge the
+      // card — the resolution is the server's, computed pre-churn.
+      if (CancellationResolution.cancelFlowV2Enabled()) {
         const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
         // Same outcome rule as the pre-write above: explicit, matching,
         // never 'accepted' on this path.
