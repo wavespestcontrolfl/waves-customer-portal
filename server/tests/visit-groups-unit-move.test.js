@@ -541,12 +541,36 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow({ scheduled_date: '2026-08-30' }) } });
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
     expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
-    // landed on the date but a different window / another tech / another visit ⇒ not landed either
-    for (const over of [{ window_start: '11:00:00' }, { technician_id: 't2' }, { visit_id: 'v2' }]) {
+    // landed on the date but a different window / another visit ⇒ not landed either
+    for (const over of [{ window_start: '11:00:00' }, { visit_id: 'v2' }]) {
       db.__calls.length = 0;
       db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow(over) } });
       await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't1' } })).rejects.toThrow('member a boom');
     }
+    // the technician is NOT part of the landing (local codex audit P1): on a
+    // tech-changing move (t1 → t9) a correctly landed primary still carries
+    // t1 — alignMember re-points it AFTER the verdict; treating it as "not
+    // moved" would rethrow and skip the siblings, the retarget and the seams
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow({ technician_id: 't1' }) }, landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    const techMove = await moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(techMove.visitMove).toMatchObject({ moved: ['a', 'b'], failed: [] });
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'a', technicianId: 't9', expectTechnicianId: 't1' }));
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'b', technicianId: 't9', expectTechnicianId: 't1' }));
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(true);
+    // a row reassigned concurrently (t2) is still LANDED by placement; alignMember's own fence is the technician verdict
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landedRows: { a: landedRow({ technician_id: 't2' }) }, landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' }, // a: newer operator reassignment wins
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Job was reassigned concurrently - the planned technician is stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    const staleTech = await moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    expect(staleTech.visitMove.moved).toEqual(['a', 'b']);
+    expect(staleTech.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE' })]);
     jest.clearAllMocks(); db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landedRows: { b: landedRow() } });
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
@@ -680,6 +704,33 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // a visit that is merely not open (closing/dissolved) is the mover's own null path, not the frozen refusal
     db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
+  });
+
+  test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {
+    const { LIVE_COMPLETION_CLAIM_STATUSES } = require('../services/visit-groups');
+    expect(LIVE_COMPLETION_CLAIM_STATUSES).toEqual(['pending', 'side_effects_pending', 'side_effects_running', 'succeeded']);
+    let claimQuery = null;
+    db.__script = {
+      ...script({ members: [member('a'), member('b')] }),
+      service_completion_attempts: { first: (ops) => { claimQuery = ops; return { id: 'att1', service_id: 'b' }; } },
+    };
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'completion_in_flight', memberId: 'b', isOperational: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
+    // the ledger read spans EVERY locked member and exactly the live statuses
+    expect(claimQuery).toEqual(expect.arrayContaining([['whereIn', 'service_id', ['a', 'b']], ['whereIn', 'status', LIVE_COMPLETION_CLAIM_STATUSES]]));
+    // an unreadable ledger fails the move (never opens it)
+    db.__script = { ...script({ members: [member('a'), member('b')] }), service_completion_attempts: { first: () => { throw new Error('ledger down'); } } };
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' })).rejects.toThrow('ledger down');
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    // the rebooker repeats the check under each member's own row locks (a claim that lands after the plan): source contract
+    const src = require('fs').readFileSync(require.resolve('../services/rebooker'), 'utf8');
+    const block = src.slice(src.indexOf("options.excludeExpect) && options.excludeExpect.length"), src.indexOf("code: 'VISIT_PLAN_STALE'"));
+    expect(block).toMatch(/service_completion_attempts'\)\.whereIn\('service_id', ids\)/);
+    expect(block).toMatch(/LIVE_COMPLETION_CLAIM_STATUSES/);
+    expect(block).toMatch(/code: 'VISIT_COMPLETION_IN_FLIGHT'/);
   });
 
   test('same-day window move: a failed sibling still on the date at its OLD window never feeds the parent retarget (local audit)', async () => {

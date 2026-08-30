@@ -33,6 +33,10 @@ const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // never JOINS a visit; it is not terminal for member counting.
 const JOIN_INELIGIBLE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
+// service_completion_attempts statuses that mean a legacy /complete owns the
+// row: pending (claimed), side effects queued/running, or already succeeded.
+// Stamping and the unit mover both refuse members carrying one.
+const LIVE_COMPLETION_CLAIM_STATUSES = ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'];
 
 /**
  * pg returns `date` columns as JS Date instances (UTC midnight); strings
@@ -538,7 +542,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           qb.orWhereIn('service_id', t('scheduled_services').select('id').where({ visit_id: visit.id }));
         }
       })
-      .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'])
+      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
       .first('id')
       .catch(() => null);
     if (liveAttempt) {
@@ -1619,6 +1623,23 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (!split.ok && split.reason !== 'visit_not_open') {
           throw Object.assign(new Error('Cannot move this stop: the visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: split.reason });
         }
+        // Durable completion claims (local codex audit P0): the legacy
+        // /complete handler claims service_completion_attempts under the
+        // row's stop lock and then lets an open, packet-less grouped row
+        // complete where it sits (dissolving the visit at commit) — state
+        // canSplit cannot see. Mirror createOrJoinVisit's guard under the
+        // same stop lock + member row locks: a member with a live or
+        // succeeded claim freezes the move before anything is written. The
+        // rebooker repeats this under each member's own row locks
+        // (VISIT_COMPLETION_IN_FLIGHT) for a claim that lands after the plan.
+        // No catch: an unreadable ledger fails the move, never opens it.
+        const liveClaim = await t('service_completion_attempts')
+          .whereIn('service_id', members.map((m) => m.id))
+          .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
+          .first('id', 'service_id');
+        if (liveClaim) {
+          throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
+        }
         // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
         // its per-run change budget from an unlocked pre-read; the member
         // count that actually moves is decided here, under the stop lock,
@@ -1820,7 +1841,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const norm = (v) => (v ? String(v).slice(0, 5) : null);
       if (want.window_start !== undefined && norm(row.window_start) !== norm(want.window_start)) return false;
       if (want.window_end !== undefined && norm(row.window_end) !== norm(want.window_end)) return false;
-      if (options.technicianId !== undefined && String(row.technician_id || '') !== String(options.technicianId || '')) return false;
+      // The technician is NOT part of the landing (local codex audit P1):
+      // technicianId never rides the rebooker, so a correctly landed row
+      // still carries its pre-move technician until alignMember re-points
+      // it AFTER this verdict — and alignMember's own fence
+      // (expectTechnicianId ⇒ ASSIGNMENT_STALE) is the technician verdict.
       return true;
     } catch (readErr) {
       logger.warn(`[visit-groups] unit move landed-check for ${t.id} failed: ${readErr.message}`);
@@ -2126,6 +2151,7 @@ module.exports = {
   lockStopForRow,
   openMembers,
   visitActivity,
+  LIVE_COMPLETION_CLAIM_STATUSES,
   fanOutLiveTransition,
   moveVisitAsUnit,
   claimVisitNotification,

@@ -1212,6 +1212,22 @@ class SmartRebooker {
         const ids = [...new Set([String(serviceId), ...options.excludeExpect.map((x) => String(x.id))])].sort();
         const rows = await trx('scheduled_services').whereIn('id', ids).orderBy('id').forUpdate()
           .select('id', 'visit_id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+        // A durable completion claim on ANY member (local codex audit P0):
+        // the legacy /complete handler claims service_completion_attempts
+        // under the row's stop lock and then completes the row where it
+        // sits — this move must not commit underneath its side effects.
+        // The unit mover refused live claims when it planned; this repeats
+        // it under THIS member's row locks for a claim that landed since:
+        // the primary ⇒ nothing moved; a sibling ⇒ a reported failed member
+        // the detach seam separates. No catch — an unreadable ledger fails
+        // the move, never opens it.
+        const liveClaim = await trx('service_completion_attempts').whereIn('service_id', ids)
+          .whereIn('status', require('./visit-groups').LIVE_COMPLETION_CLAIM_STATUSES).first('id', 'service_id');
+        if (liveClaim) {
+          throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes'), {
+            statusCode: 409, isOperational: true, code: 'VISIT_COMPLETION_IN_FLIGHT', memberId: liveClaim.service_id,
+          });
+        }
         const norm = (v) => (v ? String(v).slice(0, 5) : null);
         const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
         for (const exp of options.excludeExpect) {
