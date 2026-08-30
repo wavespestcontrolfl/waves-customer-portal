@@ -1144,4 +1144,30 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     }, 'static');
     expect(status.heading).toBe('we found activity that needs attention!');
   });
+
+  it('a non-performed callback never claims treatment, even in the high-priority branch', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        completedFallback: 'Reported activity areas were inspected today.',
+      },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we found activity that needs attention!');
+    expect(status.detail).not.toMatch(/We treated/);
+    expect(status.detail).toContain('No application was made on this visit');
+    expect(status.completedLine).toBe('Reported activity areas were inspected today.');
+  });
+
+  it('isCallback: false on the payload suppresses the legacy name regex', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Pest Control Re-Service',
+      isCallback: false,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('Routine service completed. No high-priority issues were noted.');
+  });
 });

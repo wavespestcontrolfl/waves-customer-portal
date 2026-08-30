@@ -795,6 +795,12 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   });
   const importantFindings = highPriorityFindings(data);
   const primaryFinding = importantFindings[0];
+  // Callback (re-service) block from the server — declared before EVERY
+  // branch because the earlier summaries must also honor a non-performed
+  // outcome: an inspection_only / customer_declined callback performed no
+  // application, so no branch may claim "we treated" (codex r2 P1).
+  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  const reserviceNotPerformed = Boolean(reservice && reservice.outcome && reservice.outcome !== 'treated');
 
   if (primaryFinding) {
     return {
@@ -804,10 +810,14 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       result: pendingReadyText
         ? `${pendingTarget.label || 'Treated'} areas are still drying. ${primaryFinding.title || 'Activity was noted'} still needs attention.`
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
-      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas completed today.',
+      completedLine: completedAreas
+        ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
+        : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
       detail: pendingReadyText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
-        : 'We treated the documented area today and included the recommended next step below.',
+        : (reserviceNotPerformed
+          ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+          : 'We treated the documented area today and included the recommended next step below.'),
     };
   }
 
@@ -860,8 +870,11 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // `reserviceReport` block (GATE_RESERVICE_REPORT_COPY dark, or an older
   // cached payload). With the block present the callback branch moves
   // BELOW the honest V2 status branches — see `reservice` further down.
-  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
-  if (!reservice && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // `data.isCallback === false` is the authoritative record saying this is
+  // NOT a callback — an editable display name containing "Re-Service" must
+  // not override it (codex r2 P1). Only a payload without the field at all
+  // (gate-dark/legacy cache) still trusts the name.
+  if (!reservice && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',

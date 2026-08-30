@@ -181,6 +181,14 @@ describe('reservice-report (gate on)', () => {
     // Pre-render signature path reads the outcome frozen in service_data.
     const frozen = { ...member, service_data: JSON.stringify({ protocol: { visitOutcome: 'inspection_only' } }) };
     expect(await reserviceReportPdfSignature(frozen, { knex })).toBe('-rs1mi');
+    // Same fallback chain as buildProtocolPayload: a repaired record with
+    // ONLY structured_notes.visitOutcome keys identically to what the
+    // render stored — never the treated suffix (codex r2 P2).
+    const structuredOnly = { ...member, structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }) };
+    expect(await reserviceReportPdfSignature(structuredOnly, { knex })).toBe('-rs1md');
+    // protocol may itself be a JSON string inside service_data.
+    const doubleEncoded = { ...member, service_data: JSON.stringify({ protocol: JSON.stringify({ visitOutcome: 'inspection_only' }) }) };
+    expect(await reserviceReportPdfSignature(doubleEncoded, { knex })).toBe('-rs1mi');
   });
 
   test('ONLY the tier frozen on the record qualifies — the customer\'s current tier never rewrites an old callback as free', async () => {

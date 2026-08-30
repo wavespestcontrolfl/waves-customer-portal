@@ -124,13 +124,23 @@ const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined'])
 // pre-render signature paths fall back to the protocol frozen in
 // service_data. Anything unrecognized renders the treated copy — the same
 // default the completion billing rule applies.
+function parseMaybeJson(value) {
+  if (!value) return null;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function outcomeOf(service, visitOutcome) {
   let outcome = visitOutcome;
   if (!outcome) {
-    try {
-      const raw = typeof service?.service_data === 'string' ? JSON.parse(service.service_data) : service?.service_data;
-      outcome = raw?.protocol?.visitOutcome || service?.visit_outcome || null;
-    } catch { outcome = service?.visit_outcome || null; }
+    // SAME fallback chain as buildProtocolPayload (report-data.js):
+    // protocol.visitOutcome, then structured_notes.visitOutcome — a repaired
+    // record with only the structured field must key the PDF under the same
+    // suffix the render stored (codex r2 P2), then the raw column.
+    const serviceData = parseMaybeJson(service?.service_data) || {};
+    const protocol = parseMaybeJson(serviceData.protocol) || {};
+    const structured = parseMaybeJson(service?.structured_notes) || {};
+    outcome = protocol.visitOutcome || structured.visitOutcome || service?.visit_outcome || null;
   }
   const key = String(outcome || '').toLowerCase();
   return NON_PERFORMED_OUTCOMES.has(key) ? key : 'treated';
