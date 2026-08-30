@@ -599,6 +599,9 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       // stop, not just the anchor — omitting it silently routed recurring
       // siblings down the single-visit path (codex P1).
       'is_recurring',
+      // Visit group: a route batch moves a grouped stop ONCE, through its
+      // first member; later members of the same visit are skipped.
+      'visit_id',
     );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
@@ -1413,6 +1416,20 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     audience: 'customer',
     purpose: 'appointment',
     customerId: customer.id,
+    // Move-hold coverage at the canonical handoffs (codex r37): the notice
+    // quotes the new date/window, and another grouped mover can stamp a
+    // hold while this body renders or awaits Twilio.
+    appointmentId: String(serviceId),
+    enforceMoveHold: true,
+    // ABA guard (codex r39): the body quotes chosen.date/window — a
+    // complete later move that stamped AND cleared its hold mid-render is
+    // caught by the live-slot comparison at the canonical checkpoints.
+    ...(chosen?.date ? (() => {
+      const { parseETDateTime } = require('../utils/datetime-et');
+      const start = chosen.window?.start ? String(chosen.window.start).slice(0, 5) : '08:00';
+      const at = parseETDateTime(`${String(chosen.date)}T${start}`);
+      return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+    })() : {}),
     identityTrustLevel: 'phone_matches_customer',
     // Send-window operator marker (validators/send-window.js): a quick-move
     // notice is the direct consequence of an operator's commit click with an
@@ -1650,7 +1667,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // old slot before the next, earlier-shifted stop claims it. Day moves land on
   // a different (empty) date — order doesn't matter, and keeping anchor-first
   // there fires its reply-alt SMS first.
-  const orderedJobs = (isSameDay && siblingDelta > 0) ? [...jobs].reverse() : jobs;
+  // The anchor's OWN visit siblings are moved by the anchor's unit move
+  // and must not represent the visit ahead of it (codex #3609 r4): under a
+  // tail-first reversal a sibling would move the whole visit first and the
+  // anchor — the only row that carries the operator's customerNote — would
+  // be skipped as covered, dropping the note. They go last: covered by
+  // then, or moved individually only if the anchor itself failed.
+  const anchorVisitSiblings = service.visit_id
+    ? jobs.filter((j) => j.id !== serviceId && String(j.visit_id || '') === String(service.visit_id))
+    : [];
+  const mainJobs = anchorVisitSiblings.length ? jobs.filter((j) => !anchorVisitSiblings.includes(j)) : jobs;
+  const orderedJobs = [...((isSameDay && siblingDelta > 0) ? [...mainJobs].reverse() : mainJobs), ...anchorVisitSiblings];
 
   // Exclusion = ONLY the row being moved, per move. Its own pre-move
   // position must not clash against its own target (the rebooker also
@@ -1706,7 +1733,30 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // Shared across the whole rain-out: the first slow NWS pair degrades
   // forecast decoration for every remaining stop's SMS.
   const forecastHealth = { degraded: false };
+  // Visit groups moved by an earlier member of this batch (codex #3609 r2):
+  // the unit move already carried every member (rows, reminders, series),
+  // so later members are recorded as covered — no second move, no second
+  // notice, no second count.
+  // Keyed by the member rows that actually MOVED (visitMove.moved) — a
+  // sibling that failed inside the unit move is not covered: it is
+  // reached individually below and recorded as its own failure/retry
+  // (codex #3609 r6).
+  const coveredIds = new Set();
+  const partialStragglers = new Set();
+  const coveredVisitOf = new Map();
+  const coverMoved = (r, job) => {
+    const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
+    for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
+  };
   for (const job of orderedJobs) {
+    // A straggler of a PARTIAL unit move earlier in this batch: skipped
+    // entirely — not moved, not texted, not recorded as covered. The
+    // anchor's needsAttention names it for staff repair (codex r27 P1).
+    if (partialStragglers.has(String(job.id))) continue;
+    if (coveredIds.has(String(job.id))) {
+      results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
+      continue;
+    }
     let newWindow;
     if (job.id === serviceId) {
       newWindow = target.window;
@@ -1758,6 +1808,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // overlaps another job". The expect/expectAnchor CAS still 409s on a
     // stale row — that is a concurrency guard, not a schedule conflict.
     const memberWarnings = [];
+    // A grouped stop that moved only PARTLY (owner ruling 2026-08-30): the
+    // customer is NOT texted — "your visit moved" would be wrong for the
+    // sibling still at the old stop — and the result carries the straggler
+    // ids as a hard needsAttention for the sheet.
+    let unitMovePartial = null;
+    // The grouped stop's landed arrival start (visitMove.visitStart): the
+    // ONE moved-SMS quotes the STOP's window, not the tapped member's
+    // requested slot (codex #3609 r27 P1).
+    let unitVisitStart = null;
     try {
       if (wantsSeriesShift) {
         try {
@@ -1779,6 +1838,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             ? seriesResult.rescheduledOccurrences
             : null;
           seriesResultForEffects = seriesResult;
+          // A grouped recurring anchor's series shift carried its visit
+          // siblings (moveVisitAsUnit) — mark the visit covered HERE too, not
+          // only on the single fallback (codex #3609 r3).
+          coverMoved(seriesResult);
           seriesReplayed = seriesResult?.replayed === true;
           if (seriesReplayed) logger.info(`[rain-out] series shift for ${job.id} replayed committed move ${seriesResult.seriesMoveId} — effects belong to the original request`);
           if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
@@ -1822,6 +1885,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
+        coverMoved(moveResult, job);
+        if (moveResult?.visitMove?.visitStart) unitVisitStart = String(moveResult.visitMove.visitStart);
+        if ((Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) || moveResult?.visitMove?.parentRetargetFailed === true) {
+          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id), failedMembers: moveResult.visitMove.failed || [], parentRetargetFailed: moveResult.visitMove.parentRetargetFailed === true };
+          // Stragglers stay OUT of the rest of this batch (codex #3609 r27
+          // P1): a queued sibling job retried individually could succeed and
+          // text the customer even though this stop's result says nobody was
+          // notified and staff repair is required. needsAttention carries
+          // the ids; nothing else in this run touches them.
+          for (const sid of unitMovePartial.memberIds) partialStragglers.add(String(sid));
+          logger.error(`[rain-out] grouped move of visit ${unitMovePartial.visitId} for ${job.id} is INCOMPLETE — ${unitMovePartial.memberIds.length ? `${unitMovePartial.memberIds.length} member(s) still at the old stop (${unitMovePartial.memberIds.join(', ')})` : 'the visit record could not be retargeted'}; customer NOT texted`);
+        }
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.
@@ -1910,7 +1985,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
     }
 
-    const chosen = { date: target.date, window: newWindow };
+    const chosen = { date: target.date, window: unitVisitStart ? { start: unitVisitStart, end: null } : newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     // Quick Move's own moved-SMS for a SERIES move is tracked on the
     // series_moves row with an EXPIRING claim: notified_at is the claim
@@ -1942,7 +2017,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
       }
     }
-    if (notifyCustomer && ownsSeriesText) {
+    if (unitMovePartial) sms = { sent: false, reason: 'grouped_move_incomplete' };
+    if (notifyCustomer && ownsSeriesText && !unitMovePartial) {
       try {
         const customer = job.id === serviceId
           ? {
@@ -2009,22 +2085,75 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
+      // The repair the alert names must match the actual failure (codex
+      // #3609 r34): a parent-retarget failure has ZERO stragglers — every
+      // service moved but the visit record still describes the old stop —
+      // so "fix the stragglers" would send staff hunting rows that are
+      // fine. Re-saving the stop rewrites the visit record (and a full
+      // success releases the retained reminder hold).
+      ...(unitMovePartial ? {
+        needsAttention: {
+          code: 'VISIT_MOVE_INCOMPLETE',
+          // Shared builder (codex r44) — same guidance rules as the
+          // dispatch response, one mechanism.
+          message: require('./visit-groups').incompleteMoveMessage(unitMovePartial.failedMembers || [], unitMovePartial.parentRetargetFailed === true),
+          memberIds: unitMovePartial.memberIds,
+        },
+      } : {}),
     });
   }
 
-  const moved = results.filter((r) => r.ok);
+  // Carried siblings that were NOT in this batch (a single-stop rain-out of
+  // a grouped service, codex #3609 r22 P2): the unit move moved them, but
+  // the loop had no job row of theirs to record — and the endpoint
+  // broadcasts result.results only, so other open boards would keep them
+  // stale until a full refresh. Record them as covered members.
+  const recorded = new Set(results.map((r) => String(r.id)));
+  for (const id of coveredIds) {
+    if (recorded.has(id)) continue;
+    results.push({ id, ok: true, coveredByVisit: coveredVisitOf.get(id) || 'visit', newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
+  }
+
+  return summarizeCommitResults(results);
+}
+
+// Members a unit move REPRESENTED: the rows it moved plus the rows the plan
+// found already at the target (visitMove.unchanged — e.g. a windowless
+// sibling on a same-day window move). Both are covered by that visit's
+// move: never re-moved, never texted again as a second stop (codex #3609
+// r19). Members the mover reported failed are not covered — the loop
+// reaches them individually.
+function coveredIdsFrom(r) {
+  const vm = r && r.visitMove;
+  if (!vm) return [];
+  return [...(vm.moved || []), ...(vm.unchanged || [])].map(String);
+}
+
+// The commit summary the sheets render. A member already carried by its
+// visit's unit move (coveredByVisit) is not a second physical stop (local
+// codex audit): the tech sheet compares movedCount with texts sent, so
+// covered rows never inflate it ("1/2 texted") — they are counted apart.
+function summarizeCommitResults(results) {
+  const moved = results.filter((r) => r.ok && !r.coveredByVisit);
+  const covered = results.filter((r) => r.ok && r.coveredByVisit);
   // Every advisory overlap warning from every moved stop, flattened: a
   // series shift returns one dated warning per clashing occurrence, so the
   // count is per WARNING (per clashing date), never per stop, and the sheets
   // render the dated text rather than a bare count.
   const overlapWarnings = moved.flatMap((r) => (Array.isArray(r.warnings) ? r.warnings : []));
+  // Hard attention items (a grouped stop that moved only partly — the
+  // customer was NOT texted): surfaced top-level so the sheets render them
+  // as repairs, never buried as a soft warning (owner ruling 2026-08-30).
+  const needsAttention = moved.filter((r) => r.needsAttention).map((r) => ({ id: r.id, ...r.needsAttention }));
   return {
     ok: moved.length > 0,
     reason: moved.length === 0 ? (results[0]?.error || 'nothing_moved') : undefined,
     movedCount: moved.length,
-    failedCount: results.length - moved.length,
+    coveredCount: covered.length,
+    failedCount: results.length - moved.length - covered.length,
     overlapCount: overlapWarnings.length,
     overlapWarnings,
+    ...(needsAttention.length ? { needsAttention } : {}),
     results,
   };
 }
@@ -2041,6 +2170,8 @@ module.exports = {
   loadOccupancy,
   conflictsForTarget,
   _test: {
+    summarizeCommitResults,
+    coveredIdsFrom,
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
     EXTRA_REASON_LEADS, GATE_ACCESS_CLAUSE, isValidReason, sanitizeCustomerNote,

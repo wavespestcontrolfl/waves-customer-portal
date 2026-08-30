@@ -54,6 +54,32 @@ const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+// Grouped unit-move hold for appointment notices (codex #3609 r30/r31).
+// A visit mid-move (or stranded partial) stamps move_hold_until on its
+// members' reminder rows; a notice rendered for the OLD slot must not
+// reach the customer. Checked twice: at step 6.4 (early, audited block)
+// and again inside the provider preSendCheck at the actual Twilio
+// handoff — the provider's own internal awaits (redirect check, template
+// lookup, customer/location query) are exactly the gap a mover can stamp
+// into. Fail closed: callers treat MOVE_HOLD as a deferral (flags left
+// unmarked, the sweep retries), so a held-on-blip notice is delayed,
+// never lost.
+const MOVE_HOLD_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
+function appointmentMoveHoldApplies(input) {
+  // enforceMoveHold: explicit opt-in for appointment-describing sends whose
+  // purpose is outside the reminder set (the rain-out Quick Move notice —
+  // codex r37): the text quotes a date/window, so a hold stamped mid-render
+  // must block it exactly like a reminder.
+  return !!input.appointmentId && (MOVE_HOLD_PURPOSES.includes(input.purpose) || input.enforceMoveHold === true);
+}
+async function appointmentMoveHeld(input) {
+  // Delegates to THE shared guard (visit-groups.appointmentSendHeld — one
+  // implementation with the appointment-email path, codex r47): live hold,
+  // rendered-slot ABA comparison, and a hold RE-READ after the slot/visit
+  // awaits. Fail closed inside the helper.
+  return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
+}
+
 function nextProviderRetryAt(providerOutcome, now = new Date()) {
   if (!providerOutcome || !providerOutcome.retryable) return null;
   if (providerOutcome.nextAllowedAt) {
@@ -252,6 +278,41 @@ async function sendCustomerMessage(input) {
     };
   }
 
+  // 6.4 Grouped unit-move hold (codex #3609 r30 P1) — an appointment
+  //     notice for a visit whose reminder row carries a live
+  //     move_hold_until must not reach the provider: the visit is
+  //     mid-move (or stranded partial) and the rendered body describes
+  //     the OLD slot. Enforced HERE, in the canonical path every SMS leg
+  //     passes — safeSend closures AND direct sendCustomerMessage callers
+  //     (estimate accept, call pipeline) alike — so a hold stamped during
+  //     any earlier await still blocks. Fail closed on a read error: the
+  //     callers treat MOVE_HOLD as a deferral (flags left unmarked, the
+  //     sweep retries), so a held-on-blip notice is delayed, never lost.
+  if (appointmentMoveHoldApplies(sendInput)) {
+    if (await appointmentMoveHeld(sendInput)) {
+      const blocked = { code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held' };
+      const audit = await persistAudit({
+        input: sendInput,
+        policy,
+        segmentMeta,
+        validatorsPassed,
+        validatorsFailed: ['move_hold'],
+        blockedBy: blocked,
+        identityTrust: resolvedTrust,
+        providerOutcome: null,
+      });
+      return {
+        sent: false,
+        blocked: true,
+        code: blocked.code,
+        reason: blocked.reason,
+        auditLogId: audit.id,
+        segmentCount: segmentMeta.segmentCount,
+        encoding: segmentMeta.encoding,
+      };
+    }
+  }
+
   // 6.5 Caller-supplied final recheck — the last caller-visible abort point
   //     before dispatch (only the provider-internal send-window boundary
   //     re-check runs later), so callers with race-sensitive sends (clarify
@@ -303,7 +364,18 @@ async function sendCustomerMessage(input) {
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
   const providerOutcome = await dispatchToProvider(sendInput, {
-    preSendCheck: () => checkSendWindow(sendInput, policy, contactState),
+    preSendCheck: async () => {
+      const windowVerdict = checkSendWindow(sendInput, policy, contactState);
+      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
+      // Move-hold boundary re-check at the ACTUAL Twilio handoff (uncapped
+      // codex audit P1): the step-6.4 check runs before the provider's own
+      // internal awaits — a unit move stamping during them must still hold
+      // the send. Same deferral contract as the window hold.
+      if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
+        return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true };
+      }
+      return { ok: true };
+    },
   });
 
   // 7.5 Provider-handoff block (preSendCheck said no): map back onto the

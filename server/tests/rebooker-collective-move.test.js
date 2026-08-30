@@ -1091,7 +1091,7 @@ describe('caller wiring (source)', () => {
     // Quick Move's own moved-SMS is claimed on the series_moves row before it is sent (a replay recovers a lost text, never duplicates a sent one).
     expect(rainOut).toContain("stale.where({ customer_notified: false }).where('notified_at', '<', new Date(Date.now() - SERIES_TEXT_CLAIM_MS))");
     expect(rainOut).toContain('const SERIES_TEXT_CLAIM_MS = 5 * 60 * 1000;');
-    expect(rainOut).toContain('if (notifyCustomer && ownsSeriesText) {');
+    expect(rainOut).toContain('if (notifyCustomer && ownsSeriesText && !unitMovePartial) {');
     const pub = read('../routes/reschedule-public.js');
     expect(pub).toContain("const { applySeriesMoveEffects } = require('./admin-dispatch');");
     expect(pub).toContain('seriesNoticeSent = effects.notificationSent === true;');

@@ -13760,7 +13760,7 @@ function rescheduleExpectPredicate(observed) {
 async function ensureObservedAnchor(serviceId, observed) {
   if (!observed || observed.read) return observed;
   const row = await db('scheduled_services').where({ id: serviceId })
-    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring');
+    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring', 'visit_id');
   if (row) Object.assign(observed, row, { read: true });
   return observed;
 }
@@ -13826,7 +13826,7 @@ function rescheduleReminderTime(date, window) {
 // paths) — callers that record completion (applySeriesMoveEffects) stamp
 // only on true/'stale'; single-visit callers keep their fire-and-forget
 // contract.
-async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null, preserveMoveHold = false } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
     const synced = await AppointmentReminders.handleReschedule(
@@ -13838,7 +13838,11 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
       // cron can't fire a duplicate reminder in the gap. A non-notifying move
       // leaves the 24h reminder pending so the cron still reminds the customer.
-      { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      { sendNotification: false,
+      // A partial/unverifiable unit move deliberately retains the cohort
+      // hold — this unconditional post-move sync must not release it
+      // (codex #3609 r37).
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -14283,9 +14287,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // reminds the customer on the new slot.
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
-      await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
-      if (moved.smsSent === true) {
-        await markRescheduleReminderNotified(moved.id);
+      // A member carried by its visit's unit move (coveredByVisit) had its
+      // reminder synced by moveVisitAsUnit with its OWN landed window; the
+      // covered result carries no window, and re-syncing here would fall
+      // back to 08:00 (local codex audit). Board refresh only.
+      if (!moved.coveredByVisit) {
+        await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true, preserveMoveHold: moved.needsAttention?.code === 'VISIT_MOVE_INCOMPLETE' });
+        if (moved.smsSent === true) {
+          await markRescheduleReminderNotified(moved.id);
+        }
       }
       try {
         await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
@@ -15000,11 +15010,41 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     if (collectiveMoveGateOn()) {
       // The observed anchor (read above, or by the resolution) answers the
       // recurrence + date questions — one read, one snapshot.
-      const job = observedForMove.is_recurring !== undefined
+      const job = observedForMove.is_recurring !== undefined && observedForMove.visit_id !== undefined
         ? observedForMove
-        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date', 'visit_id');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
-      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+      // Grouped = at least two LIVE members (the unit mover's own rule —
+      // local audit r30): a visit_id whose other member is terminal is an
+      // ungrouped anchor and keeps the disclosure contract below. A member
+      // joining after this count re-enters the unit mover without a series
+      // policy and is refused there (VISIT_SERIES_MOVE_UNSUPPORTED); a
+      // detach is caught by the visit_id pinned in the CAS.
+      const groupedLive = job?.visit_id
+        ? (await require('../services/visit-groups').openMembers(db, job.visit_id)).length >= 2
+        : false;
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0] && groupedLive) {
+        // A GROUPED recurring anchor is never widened to its series from
+        // this surface (scope ruling, codex #3609 r3; local audit r26): the
+        // unit mover refuses the widening (VISIT_SERIES_MOVE_UNSUPPORTED)
+        // and points at "move this visit only" — this is that path. The
+        // whole stop moves as one visit, the series stays where it is, so
+        // no series acknowledgement is owed. "Reschedule series" (scope
+        // 'series') keeps its own refusal for grouped anchors.
+        rescheduleOptions.seriesPolicy = 'single';
+        // The grouped assumption itself is fenced (local gate r44): if the
+        // unit mover's locked plan finds the visit solo (a sibling went
+        // terminal since this count), the rebooker surfaces CHANGED instead
+        // of moving the occurrence single-row without the acknowledgement.
+        rescheduleOptions.expectGroupedVisit = true;
+        // The observed membership rides in the rebooker's CAS (codex r24 P1):
+        // an anchor detached from its visit between this read and the move
+        // would otherwise reach the rebooker ungrouped WITH seriesPolicy
+        // 'single' and move alone without the acknowledgement this route
+        // still requires for ungrouped anchors — it now misses the CAS
+        // (409, re-submit) instead.
+        rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: job.visit_id };
+      } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
@@ -15043,6 +15083,16 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         actorId: req.technicianId,
         reasonText,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit are outside the
+      // series effects' broadcast scope — other boards need them too
+      // (codex #3609 r6).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+        try {
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
         ...response,
@@ -15051,11 +15101,46 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         unassignedConflicts: effects.conflicts,
       });
     }
-    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
+    // A grouped stop that moved only PARTLY (owner ruling 2026-08-30): the
+    // customer is NOT texted — a "your visit moved" notice would be wrong
+    // for the sibling still at the old stop — and the response carries a
+    // hard needsAttention so the board surfaces it for repair, not a
+    // soft warning. Reminder sync runs with willNotify=false so the
+    // stranded sweep owns the (corrected) text once the stop is whole.
+    const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
+      || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
+    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
+    }
+    // A grouped stop moved as a unit: every sibling that landed is a
+    // committed change other open boards must see too (codex #3609 r5).
+    for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
+      try {
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+      } catch (err) {
+        logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
+      }
+    }
+    if (partialVisitMove) {
+      const stuck = (result.visitMove.failed || []).map((f) => f.id);
+      logger.error(`[dispatch] grouped move of visit ${result.visitMove.visitId} for ${req.params.serviceId} is INCOMPLETE — ${stuck.length} member(s) still at the old stop (${stuck.join(', ')}); customer NOT notified`);
+      return res.json({
+        ...result,
+        notificationSent: false,
+        notificationError: 'grouped move incomplete — customer NOT notified',
+        needsAttention: {
+          code: 'VISIT_MOVE_INCOMPLETE',
+          // Shared builder (codex r44): a member that MOVED but could not
+          // be reassigned needs assignment guidance, never "still on the
+          // old day/time" — following that would move it AGAIN.
+          message: require('../services/visit-groups').incompleteMoveMessage(result.visitMove.failed || [], result.visitMove.parentRetargetFailed === true),
+          memberIds: stuck,
+        },
+      });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary
@@ -15067,10 +15152,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // admin-schedule lazily requires this module too; neither runs at load.
       const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
       const win = parseRescheduleWindow(effectiveWindow);
+      // A grouped stop moved as a unit: the one notice quotes the STOP's
+      // landed arrival start (visitMove.visitStart — the earliest member),
+      // not the tapped member's requested start (codex #3609 r25 P1).
+      const noticeStart = result.visitMove?.visitStart || win.start;
       const notice = await sendRescheduleNoticeForVisit(
         req.params.serviceId,
         String(newDate).split('T')[0],
-        win.start,
+        noticeStart,
       );
       return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }

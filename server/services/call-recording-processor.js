@@ -13075,6 +13075,12 @@ const CallRecordingProcessor = {
                       purpose: 'appointment_confirmation',
                       customerId,
                       appointmentId: scheduledServiceId,
+                      // ABA guard input (codex #3609 r45): the booked slot
+                      // the body quotes, derived like the canonical check.
+                      ...(scheduledDateForLog ? (() => {
+                        const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
+                        return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                      })() : {}),
                       identityTrustLevel: 'phone_matches_customer',
                       metadata: {
                         original_message_type: 'confirmation',
@@ -13090,11 +13096,15 @@ const CallRecordingProcessor = {
                     // 15-minute stranded-confirmation sweep delivers the
                     // standard confirmation at the 8:00 AM window open —
                     // same handoff as the estimate-accept flow.
-                    if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
+                    // MOVE_HOLD (grouped unit move in flight, codex #3609
+                    // r31 P1) defers the same way: re-arm so the sweep
+                    // delivers once the move completes and the hold clears.
+                    if (((sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred) || sendResult.code === 'MOVE_HOLD') && scheduledServiceId) {
                       try {
                         const rearmed = await db('appointment_reminders')
                           .where({ scheduled_service_id: scheduledServiceId })
-                          .where({ cancelled: false })
+                          // never re-open a sibling-suppressed row (codex)
+                          .where({ cancelled: false, suppressed_by_sibling: false })
                           .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
                         if (rearmed > 0) {
                           // The sweep's canonical confirmation fans out to
@@ -13162,6 +13172,16 @@ const CallRecordingProcessor = {
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
+                        // Re-armed sweep owns the WHOLE phone fan-out
+                        // (codex r47): once the primary's MOVE_HOLD re-armed
+                        // confirmation_sent, the canonical sweep send fans
+                        // out to every appointment contact — a direct
+                        // secondary here (even after the hold cleared)
+                        // would be duplicated by that send.
+                        if (confirmationRearmed) {
+                          logger.info(`[call-proc] secondary confirmation to ${contact.role || 'contact'} skipped — re-armed sweep owns delivery to all contacts`);
+                          continue;
+                        }
                         // Same ladder as the primary send; the schedule row
                         // exists by this point, so the factory mints the
                         // same appointment-page link.
@@ -13214,6 +13234,12 @@ const CallRecordingProcessor = {
                           purpose: 'appointment_confirmation',
                           customerId,
                           appointmentId: scheduledServiceId,
+                          // ABA guard input (codex #3609 r45): the booked slot
+                          // the body quotes, derived like the canonical check.
+                          ...(scheduledDateForLog ? (() => {
+                            const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
+                            return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                          })() : {}),
                           identityTrustLevel: isServiceContactRole(contact.role)
                             ? 'service_contact_authorized'
                             : 'phone_matches_customer',
@@ -13266,6 +13292,24 @@ const CallRecordingProcessor = {
                           } catch (queueErr) {
                             logger.error(`[call-proc] held contact-confirmation requeue failed for ${contact.role} (customer ${customerId}): ${queueErr.message}`);
                           }
+                        } else if (!contactResult.sent && contactResult.code === 'MOVE_HOLD' && confirmationRearmed) {
+                          // Primary held by the same move and the sweep was
+                          // re-armed — its canonical send fans out to every
+                          // appointment contact once the hold clears.
+                          logger.info(`[call-proc] held ${contact.role} confirmation NOT queued — re-armed sweep owns delivery to all contacts (grouped move)`);
+                        } else if (!contactResult.sent && contactResult.code === 'MOVE_HOLD') {
+                          // Grouped move stamped the hold AFTER the primary
+                          // delivered (local gate P1): re-arming the whole
+                          // confirmation would double-text the primary, and
+                          // a frozen queued body could carry the pre-move
+                          // time — hand THIS contact durably to the office
+                          // lane instead (same exception rail as the held
+                          // email-only leg).
+                          const contactHandedOff = await require('./appointment-reminders').handOffToOffice(
+                            'Held confirmation text needs a manual send',
+                            `The appointment confirmation text to the ${contact.role || 'service'} contact was held by an in-progress visit move after the primary was already delivered — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                          );
+                          if (contactHandedOff) logger.info(`[call-proc] held ${contact.role} confirmation handed to the office lane (grouped move)`);
                         } else if (!contactResult.sent) {
                           logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
                         } else {
@@ -13293,14 +13337,78 @@ const CallRecordingProcessor = {
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
                         const AppointmentEmail = require('./appointment-email');
-                        await AppointmentEmail.sendAppointmentConfirmationEmail({
+                        const emailRes = await AppointmentEmail.sendAppointmentConfirmationEmail({
                           customerId,
                           scheduledServiceId,
                           appointmentTime: parseETDateTime(extracted.preferred_date_time),
                           serviceLabel: serviceType,
                           recipientFilter: emailOnlySlots.map((s) => s.email),
                         });
-                        logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
+                        if (emailRes?.held) {
+                          // Grouped move stamped the hold while this email
+                          // was being prepared (codex #3609 r33/r34): the
+                          // primary SMS already delivered, so re-arming the
+                          // whole confirmation would double-text them (a
+                          // tech-only move never changes the time). Retry
+                          // ONLY the held email leg — a unit move completes
+                          // in seconds, the send is idempotent per
+                          // occurrence, and this is a background processor,
+                          // so a short bounded wait is fine. Exhaustion
+                          // hands the obligation to the office lane as a
+                          // durable admin notification (the same exception
+                          // rail the held-contact requeue uses).
+                          let emailRetried = null;
+                          for (let attempt = 1; attempt <= 3; attempt += 1) {
+                            await new Promise((r) => setTimeout(r, attempt * 15000));
+                            // The hold existed because a move was changing
+                            // the slot — re-read the CURRENT one before each
+                            // retry (local gate P1: replaying the extracted
+                            // pre-move time would email the old slot). No
+                            // live slot ⇒ stop retrying and hand off below.
+                            let currentSlot = null;
+                            try {
+                              const liveRow = await db('scheduled_services')
+                                .where({ id: scheduledServiceId })
+                                .whereIn('status', ['pending', 'confirmed'])
+                                .first('scheduled_date', 'window_start');
+                              if (liveRow && liveRow.scheduled_date) {
+                                const d = liveRow.scheduled_date instanceof Date
+                                  ? liveRow.scheduled_date.toISOString().slice(0, 10)
+                                  : String(liveRow.scheduled_date).slice(0, 10);
+                                currentSlot = parseETDateTime(`${d}T${liveRow.window_start ? String(liveRow.window_start).slice(0, 5) : '08:00'}`);
+                              }
+                            } catch { /* fail to the hand-off below */ }
+                            if (!currentSlot || Number.isNaN(currentSlot.getTime())) { emailRetried = { held: true }; break; }
+                            emailRetried = await AppointmentEmail.sendAppointmentConfirmationEmail({
+                              customerId,
+                              scheduledServiceId,
+                              appointmentTime: currentSlot,
+                              serviceLabel: serviceType,
+                              recipientFilter: emailOnlySlots.map((s) => s.email),
+                            });
+                            if (!emailRetried?.held) break;
+                          }
+                          // Only ok === true is delivery (codex r35): a
+                          // retry can come back blocked/skipped/errored —
+                          // merely "not held" must not read as sent, or the
+                          // email-only contact silently misses the
+                          // confirmation with no hand-off.
+                          if (emailRetried?.ok === true) {
+                            logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId} (after move-hold retry)`);
+                          } else {
+                            const why = emailRetried?.held ? 'still held by an in-progress visit move' : `not delivered (${emailRetried?.reason || emailRetried?.error || 'unknown'})`;
+                            logger.warn(`[call-proc] email-only confirmation for ${scheduledServiceId} ${why} after retries — handing to the office lane`);
+                            // Verified hand-off (codex): notifyAdmin can
+                            // resolve null on persistence failure — the
+                            // shared helper retries and logs a loud loss.
+                            await require('./appointment-reminders').handOffToOffice(
+                              'Held confirmation email needs a manual send',
+                              `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was ${why} — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                            );
+                          }
+                        } else {
+                          logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
+                        }
                       }
                     } catch (fanErr) {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);

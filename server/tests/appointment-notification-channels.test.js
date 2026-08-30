@@ -390,6 +390,10 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
       notification_prefs: [firstChain({ appointment_confirmation_channel: 'email' })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
       scheduled_services: [firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' })],
+      appointment_reminders: [
+        firstChain(null), // deliverAppointmentNotice unit-move hold check → no hold
+        firstChain(null), // email-handoff hold recheck (sendAppointmentNoticeEmail) → no hold
+      ],
     });
     const smsAttempt = jest.fn(async () => true);
     const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt });
@@ -426,6 +430,9 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
         firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
         // ...then buildRescheduleLink reads the row (no token → no CTA link).
         firstChain({ id: 'ss1', customer_id: 'c1', reschedule_token: null }),
+      ],
+      appointment_reminders: [
+        firstChain(null), // email-handoff hold recheck (sendAppointmentNoticeEmail) → no hold
       ],
     });
     const smsAttempt = jest.fn(async () => false);
@@ -601,5 +608,16 @@ describe('alertNoReachableChannel — text-reachable false-positive guard', () =
     }));
     await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+});
+
+describe('deliverConfirmation marks sent only for the appointment time it formatted (local codex audit)', () => {
+  test('both post-send marks are fenced on appointment_time so a silent grouped-sibling move under the send never suppresses the corrected confirmation', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async function deliverConfirmation('), src.indexOf('// A reminder-registration failure used to be logger.error-only'));
+    const fenced = fn.match(/\.where\(\{ id: record\.id, appointment_time: apptTime \}\)\s*\.update\(\{ confirmation_sent: true/g) || [];
+    expect(fenced.length).toBe(2); // success path + catch path
+    // the pre-send skips (past appointment / preference off) legitimately mark by id — nothing was sent for a stale time there
+    expect(fn.indexOf('.where({ id: record.id, appointment_time: apptTime })')).toBeGreaterThan(fn.indexOf('recheckBeforeSend'));
   });
 });

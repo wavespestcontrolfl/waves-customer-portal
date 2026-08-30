@@ -12775,6 +12775,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   purpose: 'appointment_confirmation',
                   customerId: customerId || undefined,
                   appointmentId: confirmedAppointmentRow?.id,
+                  // ABA guard input (codex #3609 r45): the slot the body
+                  // quotes, derived the same way the canonical check derives
+                  // the live one. Omitted when the row carries no slot.
+                  ...(confirmedAppointmentRow?.scheduled_date ? (() => {
+                    const { parseETDateTime } = require('../utils/datetime-et');
+                    const d = confirmedAppointmentRow.scheduled_date instanceof Date
+                      ? confirmedAppointmentRow.scheduled_date.toISOString().slice(0, 10)
+                      : String(confirmedAppointmentRow.scheduled_date).slice(0, 10);
+                    const at = parseETDateTime(`${d}T${confirmedAppointmentRow.window_start ? String(confirmedAppointmentRow.window_start).slice(0, 5) : '08:00'}`);
+                    return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                  })() : {}),
                   estimateId: estimate.id,
                   identityTrustLevel: 'service_contact_authorized',
                   entryPoint: 'estimate_accept_onetime_confirmed',
@@ -12784,7 +12795,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 // is a customer-action entry point (owner ruling
                 // 2026-08-29) — the appointment confirmation answers the
                 // customer's own web acceptance immediately, at any hour,
-                // so QUIET_HOURS_HOLD cannot surface here.
+                // so QUIET_HOURS_HOLD cannot surface here. A grouped-move
+                // MOVE_HOLD still can (the hold gate has no entry-point
+                // exemption; codex #3609 r31): this flow owns the
+                // confirmation (registered sendConfirmation:false), so
+                // re-arm for the stranded-confirmation sweep, which sends
+                // the post-move slot once the hold clears.
+                if (sendResult.code === 'MOVE_HOLD' && confirmedAppointmentRow?.id) {
+                  try {
+                    await db('appointment_reminders')
+                      .where({ scheduled_service_id: confirmedAppointmentRow.id })
+                      // never re-open a sibling-suppressed row (codex): the
+                      // slot owner carries the messaging.
+                      .where({ cancelled: false, suppressed_by_sibling: false })
+                      .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                    logger.info(`[estimate-accept] Confirmation SMS held (grouped move) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
+                  } catch (rearmErr) {
+                    logger.error(`[estimate-accept] confirmation re-arm failed for ${confirmedAppointmentRow.id}: ${rearmErr.message}`);
+                  }
+                  return false;
+                }
                 if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
                 logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${confirmedServiceLabel}`);
                 return sendResult.sent === true;

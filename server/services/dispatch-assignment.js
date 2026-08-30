@@ -115,7 +115,7 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -128,6 +128,14 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   if (!job) throw httpError(404, 'Job not found');
   if (TERMINAL_STATUSES.includes(job.status)) {
     throw httpError(409, `Cannot reassign a ${job.status} job`);
+  }
+  // Planned-baseline fence (codex #3609 local audit): a caller that planned
+  // this reassignment from an earlier read (the unit mover's locked plan)
+  // passes the technician it expected to find; a newer operator assignment
+  // must not be overwritten with the older plan. The in-trx CAS below then
+  // pins that same baseline through the locks.
+  if (expectTechnicianId !== undefined && (job.technician_id || null) !== (expectTechnicianId || null)) {
+    throw Object.assign(httpError(409, 'Job was reassigned concurrently - the planned technician is stale'), { code: 'ASSIGNMENT_STALE' });
   }
 
   let tech = null;
@@ -240,15 +248,30 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // through this writer on commit paths that matter.
   const runVisitSeam = () => require('./visit-groups').handleChildStopChanged(jobId)
     .catch((vgErr) => logger.warn(`[dispatch-assignment] visit-group seam failed for ${jobId}: ${vgErr.message}`));
-  const seamCommitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
-  if (seamCommitPromise) {
+  // skipVisitSeam (codex #3609 r16): the unit mover re-points EVERY member
+  // and the parent itself, then runs the seam once per member after the
+  // retarget — a per-row seam here would observe a half-reassigned visit
+  // (mixed technicians) and detach the first sibling for good.
+  // Assignment-only cohort repair (codex #3609 on-merge r2): fixing a
+  // straggler's technician changes no slot, so no handleReschedule
+  // finalizer runs — without this, a repaired stop's retained reminder
+  // hold outlived the fix until the 24h TTL. The shared verified release
+  // (one-stop + parent-tuple checks inside) is a no-op when no hold or an
+  // unrepaired cohort exists. Best-effort, post-commit.
+  const runHoldRepair = () => require('./appointment-reminders').releaseMoveHoldIfRepaired(jobId)
+    .catch((hrErr) => logger.warn(`[dispatch-assignment] move-hold repair check failed for ${jobId}: ${hrErr.message}`));
+  const seamCommitPromise = skipVisitSeam ? null : require('../utils/trx-commit-promise').commitPromiseOf(trx);
+  if (skipVisitSeam) {
+    // no seam — the caller owns it (the unit mover's own finalizers run)
+  } else if (seamCommitPromise) {
     // Transactional callers (admin-schedule assign) — run after THEIR
     // outermost commit, same pattern as the broadcast above (codex #3590
     // r4: the canonical schedule-assignment route always passes a trx;
     // r14: savepoint callers hook the enclosing transaction).
-    seamCommitPromise.then(runVisitSeam).catch(() => {});
+    seamCommitPromise.then(runVisitSeam).then(runHoldRepair).catch(() => {});
   } else {
     await runVisitSeam();
+    await runHoldRepair();
   }
 
   return {

@@ -1175,18 +1175,35 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: serviceId }, {
+      }, 'appointment_rescheduled', 'appointment_confirmation', {
+        scheduled_service_id: serviceId,
+        // ABA guard input (codex #3609 r48): the slot this notice quotes —
+        // the shared guard accepts either the row's own start or the
+        // grouped stop's canonical start, so visitMove.visitStart works.
+        rendered_slot_ms: (() => {
+          const at = parseETDateTime(`${dateStr}T${start || '08:00'}`);
+          return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
+        })(),
+      }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
         preDispatchCheck: async () => {
-          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
           if (TERMINAL_FOR_NOTICE.includes(String(row.status))) {
             return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
           }
           const stillDate = normalizeDateOnly(row.scheduled_date) === dateStr;
-          const stillStart = normalizeHHMM(row.window_start) === start;
+          // Grouped move from a LATER chained member (codex r40): the
+          // dispatch route passes visitMove.visitStart — the STOP's
+          // earliest start — which legitimately differs from this row's
+          // own start; accept either (a stale write matches neither).
+          let stillStart = normalizeHHMM(row.window_start) === start;
+          if (!stillStart && row.visit_id) {
+            const stopStart = await require('../services/visit-groups').liveStopStartHHMM(db, row.visit_id).catch(() => null);
+            stillStart = !!stopStart && normalizeHHMM(stopStart) === start;
+          }
           return stillDate && stillStart
             ? { ok: true }
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
@@ -5987,6 +6004,56 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // Grouped visit (visit-group-scope.md §2; codex #3609 r23 P1):
+              // this bulk mover writes ONE row directly, so moving a member
+              // here would strand its siblings at the old stop and detach
+              // the visit — and a selection holding several members would
+              // move and text them as separate stops. Same rule as
+              // update-details: refuse before the first write; the schedule's
+              // move (the unit mover) carries the whole visit.
+              // ANY effective slot change (codex #3609 r25 P1) — a same-day
+              // window move detaches a member just as a date move does.
+              const bulkSlotChanges = dateOnly(svc.scheduled_date) !== bulkTargetDate
+                || (payload?.windowStart !== undefined && payload?.windowStart !== null && payload?.windowStart !== '')
+                || (payload?.windowEnd !== undefined && payload?.windowEnd !== null && payload?.windowEnd !== '');
+              if (svc.visit_id && bulkSlotChanges) {
+                // Lock order = the rebooker's (local gate r33): rung 1 (taken
+                // above) → tech-day fence → visit stop lock → row locks. The
+                // tech-day fence below is reentrant, so taking the pairs here
+                // first costs nothing and keeps stop→tech from ever inverting
+                // against a rebooker holding tech→stop.
+                if (normalizeDateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+                  await lockTechDays(trx, [
+                    { techId: svc.technician_id, date: normalizeDateOnly(svc.scheduled_date) },
+                    { techId: svc.technician_id, date: bulkTargetDate },
+                  ]);
+                }
+                // Under the row's STOP lock (the visit writers' own key), so a
+                // createOrJoinVisit that would add a sibling serializes BEFORE
+                // this count or after the write; the write below also pins
+                // the observed visit_id (local gate r27).
+                const { openMembers, lockStopForRow, frozenVisitVerdict } = require('../services/visit-groups');
+                await lockStopForRow(trx, id);
+                const members = await openMembers(trx, svc.visit_id);
+                if (members.length >= 2) {
+                  throw Object.assign(
+                    new Error('grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first'),
+                    { isValidation: true, code: 'VISIT_BULK_MOVE_UNSUPPORTED' },
+                  );
+                }
+                // One live member on a FROZEN / claimed visit (codex #3609 r26
+                // P1): this direct writer neither retargets the parent nor
+                // detaches frozen membership — the unit mover refuses the
+                // same case before its lone-member exit. Refuse.
+                const verdict = await frozenVisitVerdict(trx, svc.visit_id);
+                if (verdict.frozen) {
+                  throw Object.assign(
+                    new Error('this visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it'),
+                    { isValidation: true, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
+                  );
+                }
+              }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
               const updates = {
@@ -6208,13 +6275,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     scheduled_date: prevDate,
                     window_start: svc.window_start ?? null,
                     window_end: svc.window_end ?? null,
+                    // Observed membership is part of the CAS (local gate r27):
+                    // a row grouped since the read misses instead of moving
+                    // alone (knex renders null as IS NULL).
+                    visit_id: svc.visit_id ?? null,
                   }),
                 svc,
               )
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
-                  new Error('the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry'),
+                  new Error('the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
               }
@@ -6599,10 +6670,40 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes');
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
   if (!row || row.is_recurring !== true) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
+  // Grouped row (local gate r28): the handler's own grouped slot guard runs
+  // AFTER this planner strips the slot keys from the body, so it would see
+  // a same-slot edit, save the other fields, and only then have the unit
+  // mover refuse the implicit series move — a partial save. Refuse HERE,
+  // before the body is touched and before any write (same message as the
+  // handler's guard).
+  if (row.visit_id) {
+    const vg = require('../services/visit-groups');
+    const members = await vg.openMembers(db, row.visit_id);
+    if (members.length >= 2) {
+      throw Object.assign(
+        httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+    // FROZEN visit (codex r30 P2): a lone-live-member anchor of a
+    // frozen/claimed/finalizing visit passes the count above, but the
+    // rebooker's frozenVisitVerdict deterministically refuses its date
+    // move AFTER this planner has stripped the slot keys and the handler
+    // has committed the other field edits — exactly the partial save this
+    // preflight exists to prevent. Refuse here, before anything is
+    // written (fail closed: an unreadable verdict is frozen).
+    const verdict = await vg.frozenVisitVerdict(db, row.visit_id);
+    if (verdict.frozen) {
+      throw Object.assign(
+        httpError(409, 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was changed.'),
+        { code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
+      );
+    }
+  }
   // Canonical window intake — the same presence/clear/malformed semantics
   // the handler applies: a half-cleared window is left for the handler's own
   // 422 (nothing moves); an explicit clear of BOTH bounds stays the
@@ -6712,6 +6813,13 @@ async function planCollectiveEditDateMove(req) {
         actorId: req.technicianId,
         reasonText: null,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit sit outside the
+      // series effects' broadcast — other boards need them (codex #3609 r10).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+          logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       return {
         seriesMoveId: result.seriesMoveId || null,
         occurrencesRescheduled: result.occurrencesRescheduled || 0,
@@ -7058,10 +7166,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // occupies (start + new duration), so it validates too: 19:00 + 60→120
     // is 19:00-21:00 and refused.
     let preReadWindowRow = null;
-    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
+    // Observed visit membership at the slot-change pre-read; CAS'd on the
+    // locked row inside the transaction (codex #3609 r10).
+    let preReadVisitId;
+    // `!== undefined`, never truthiness (codex #3609 r28 P1): an explicit
+    // clear of both bounds is represented as window_start/window_end = null
+    // and must enter the same effective-slot comparison — and therefore the
+    // grouped/frozen membership guards and CAS — as any other slot change.
+    if (updates.window_start !== undefined || updates.window_end !== undefined || updates.scheduled_date !== undefined
       || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
       // Presence is not change (same ruling the in-trx occupancy probe below
       // already applies): BOTH schedule editors echo the current date, window
@@ -7089,6 +7204,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         && effectiveSlotStart === storedSlotStart
         && effectiveSlotEnd === storedSlotEnd
         && effectiveSlotDuration === storedSlotDuration;
+      // Grouped visit (visit-group-scope.md §2; codex #3609 r9): this
+      // endpoint writes the row directly, so a slot change here would
+      // leave the stop's other services behind and detach the visit. Slot
+      // changes on a grouped row go through the schedule's move (the unit
+      // mover) or after separating the services; every other field edits
+      // normally. Same-slot echoes from the editors pass untouched.
+      if (!effectiveSlotUnchanged) preReadVisitId = currentRow.visit_id || null;
+      if (!effectiveSlotUnchanged && currentRow.visit_id) {
+        const { openMembers } = require('../services/visit-groups');
+        const members = await openMembers(db, currentRow.visit_id);
+        if (members.length >= 2) {
+          return res.status(409).json({
+            error: 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here.',
+            code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED',
+            visitId: currentRow.visit_id,
+          });
+        }
+      }
       if (!effectiveSlotUnchanged && (updates.window_start || updates.window_end)) {
         // The CAS below is armed only when this pre-read actually fed a
         // derivation/validation (here and in the stored-window branch).
@@ -7725,6 +7858,62 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // Visit stop lock for a slot change on a row that sat in a ONE-member
+      // visit at the unlocked pre-read (local codex audit): a sibling can
+      // join that visit between the pre-read's member count and this
+      // transaction while the row's own visit_id stays unchanged, so the
+      // membership CAS below cannot see it. Taken right after rung 1 and
+      // BEFORE every row lock — the same relative position the rebooker's
+      // single-row path uses, so the two writers never invert — and the
+      // open member set is re-counted under it before any slot write.
+      if (preReadVisitId) {
+        // Lock order = the rebooker's (local gate r33): rung 1 → tech-day
+        // fence → visit stop lock → row locks. The fences this save takes
+        // later (assignment set, date-move pair) are pre-acquired here as a
+        // sorted union — reentrant, so the later calls never wait — so the
+        // stop lock can never be held while waiting on a tech-day key a
+        // rebooker holds in the opposite order.
+        {
+          const preFence = [];
+          if (assignmentShouldRun) {
+            const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+            const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
+              .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            for (const row of preRows) {
+              preFence.push({ techId: row.technician_id, date: row.day });
+              preFence.push({ techId: requestedTechnicianId, date: row.day });
+              if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+                preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+                preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
+              }
+            }
+          }
+          if (updates.scheduled_date !== undefined) {
+            const prov = await trx('scheduled_services').where({ id: req.params.id })
+              .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            if (prov) {
+              preFence.push({ techId: prov.technician_id, date: prov.day });
+              preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+            }
+          }
+          if (preFence.length) {
+            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+            await lockTechDays(trx, preFence);
+          }
+        }
+        try {
+          await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
+        } catch (lockErr) {
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') {
+            throw Object.assign(new Error('This appointment moved while saving — reload and save again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          throw lockErr;
+        }
+      }
       // The plan's ongoing flag BEFORE this save applies its updates — the
       // ongoing top-up must fire on a real fixed→ongoing transition, never on
       // the value merely being present in the payload (Codex #3337 r4 P1).
@@ -7945,6 +8134,45 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // estimated_duration_minutes is part of the compare: a start-only
             // edit derives its end from it, so a concurrent duration-only
             // edit must not be overwritten with a block built on the old one.
+            // Grouped-membership CAS (codex #3609 r10): the unlocked
+            // grouped-row refusal above read visit_id; a row grouped (or
+            // split) since must not have its slot written alone.
+            if (preReadVisitId !== undefined && String(occRow.visit_id || '') !== String(preReadVisitId || '')) {
+              throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
+            // Same visit_id is not the same membership: under the stop lock
+            // taken above, a one-member visit that gained another live
+            // member since the pre-read is a grouped stop this editor must
+            // not move alone (local codex audit).
+            if (preReadVisitId && occRow.visit_id) {
+              const vg = require('../services/visit-groups');
+              const liveMembers = await vg.openMembers(trx, occRow.visit_id);
+              if (liveMembers.length >= 2) {
+                throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_CHANGED_RETRY',
+                });
+              }
+              // One live member on a FROZEN / claimed / finalizing visit
+              // (codex #3609 r27 P1): a direct slot write would strand the
+              // parent and its issued link / records / payment at the old
+              // stop — the unit mover refuses the same case. Same verdict,
+              // under this stop lock, before the write.
+              const verdict = await vg.frozenVisitVerdict(trx, occRow.visit_id);
+              if (verdict.frozen) {
+                throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
+                  reason: verdict.reason,
+                });
+              }
+            }
             if (preReadWindowRow && (
               dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
               || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)

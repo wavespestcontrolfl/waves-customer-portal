@@ -285,9 +285,11 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(res.sent).toBe(true);
     const hooks = sendViaTwilio.mock.calls[0][1];
     expect(typeof hooks.preSendCheck).toBe('function');
-    expect(hooks.preSendCheck()).toEqual({ ok: true });
+    // async since the move-hold boundary re-check joined the hook (codex
+    // #3609 r31) — the provider awaits it either way.
+    await expect(hooks.preSendCheck()).resolves.toEqual({ ok: true });
     jest.setSystemTime(WINDOW_CLOSE);
-    const lateVerdict = hooks.preSendCheck();
+    const lateVerdict = await hooks.preSendCheck();
     expect(lateVerdict.ok).toBe(false);
     expect(lateVerdict.code).toBe('QUIET_HOURS_HOLD');
     expect(lateVerdict.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');

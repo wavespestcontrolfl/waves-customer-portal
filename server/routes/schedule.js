@@ -7,7 +7,7 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
+const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
 // NOT re-derived here — services/appointment-ics-eligibility.js owns it and
@@ -27,6 +27,36 @@ function calendarUrlFor(row, now = new Date()) {
   if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
   if (!row?.reschedule_token) return null;
   if (!calendarIcsAvailable(row, now)) return null;
+  return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
+}
+
+// The grouped calendar verdict is NOT derived here (codex #3609 uncapped
+// audit P1): services/appointment-ics-eligibility.groupedIcsVerdict is the
+// one definition shared with the public ICS route, so the portal never
+// advertises a link that route rejects. This wrapper only loads the live
+// members and fails closed on an unreadable membership.
+async function groupedCalendarVerdict(visitId) {
+  try {
+    const members = await require('../services/visit-groups').openMembers(db, visitId);
+    // Fewer than two live members is NOT a grouped stop for calendar
+    // purposes (codex #3609 r34): groupedVisit() answers true for a FROZEN
+    // singleton too (that verdict blocks rescheduling), but the public ICS
+    // route serves that row's own file — so the link must come from the
+    // row path (null), never a blocked grouped verdict that hides it.
+    if (!Array.isArray(members) || members.length < 2) return null;
+    return groupedIcsVerdict(members);
+  } catch {
+    return { blocked: true, endsAt: null };
+  }
+}
+
+// Grouped rows: same gate/token posture as calendarUrlFor, but eligibility
+// and expiry come from the STOP's verdict, never the row's own window.
+function groupedCalendarUrl(row, verdict, now = new Date()) {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
+  if (!row?.reschedule_token) return null;
+  if (!UPCOMING_STATUSES.has(String(row.status || '').toLowerCase())) return null;
+  if (verdict.blocked || !verdict.endsAt || verdict.endsAt < now) return null;
   return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
 }
 
@@ -110,6 +140,25 @@ router.get('/', async (req, res, next) => {
       logger.warn(`[schedule] reservice tie-in lookup failed for ${req.customerId}: ${err.message}`);
     }
 
+    // Grouped visits (codex #3609 r25 P2): the self-serve reschedule page
+    // refuses a grouped stop (reason 'grouped'), so the payload must not
+    // advertise the link. Same verdict as that page (groupedVisit), per
+    // grouped row only; an unreadable membership fails closed (no link).
+    const { groupedVisit } = require('./reschedule-public');
+    const groupedById = new Map();
+    // Calendar links are group-aware too (local audit r32): the ICS route
+    // 404s a grouped stop whose membership cannot be read, that has a member
+    // awaiting rebook, or that is underway — a row-only calendarUrlFor would
+    // hand out a link that deterministically 404s.
+    const calendarVerdictById = new Map();
+    for (const s of upcoming) {
+      if (!s.visit_id) continue;
+      const g = await groupedVisit(s);
+      groupedById.set(String(s.id), g === true || g === 'unknown');
+      calendarVerdictById.set(String(s.id), g === 'unknown' ? { blocked: true, endsAt: null }
+        : g === true ? await groupedCalendarVerdict(s.visit_id) : null);
+    }
+
     res.json({
       hasCancellableWork: cancellable,
       reservice,
@@ -148,13 +197,17 @@ router.get('/', async (req, res, next) => {
         // to the office. Same-customer row, so exposing the token here adds
         // no reach beyond what the customer's own texts already carry.
         // Null for legacy pre-backfill rows → the button falls back to SMS.
-        rescheduleUrl: s.reschedule_token ? `/reschedule/${s.reschedule_token}` : null,
+        rescheduleUrl: s.reschedule_token && !groupedById.get(String(s.id)) ? `/reschedule/${s.reschedule_token}` : null,
         // Add-to-calendar deep link — the tokenized public appointment page's
         // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
         // window). Same-customer token, same posture as rescheduleUrl above;
         // calendarUrlFor nulls every case that route would 404.
-        calendarUrl: calendarUrlFor(s),
-        calendarExpiresAt: calendarExpiresAtFor(s),
+        calendarUrl: calendarVerdictById.get(String(s.id))
+          ? groupedCalendarUrl(s, calendarVerdictById.get(String(s.id)))
+          : calendarUrlFor(s),
+        calendarExpiresAt: calendarVerdictById.get(String(s.id))
+          ? (groupedCalendarUrl(s, calendarVerdictById.get(String(s.id))) ? calendarVerdictById.get(String(s.id)).endsAt.toISOString() : null)
+          : calendarExpiresAtFor(s),
       })),
     });
   } catch (err) {
@@ -189,11 +242,22 @@ router.post('/:id/confirm', async (req, res, next) => {
     // on the customer and status we actually observed so a stale portal click
     // cannot revive a cancelled/completed visit (or overwrite an in-progress
     // transition).
+    // DELIBERATELY single-row (codex #3609 r28 P1): the portal lists a
+    // grouped stop's members as SEPARATE rows, so this confirm applies to
+    // exactly the row the customer clicked. A silent sibling fan-out here
+    // would act on membership the customer was never shown and that this
+    // route cannot prove (no membership key); the token appointment page —
+    // which presents the stop as one appointment and proves the shown set
+    // under the stop lock — is the grouped-confirm surface.
     const updatedCount = await db('scheduled_services')
       .where({
         id: req.params.id,
         customer_id: req.customerId,
         status: service.status,
+        // The observed membership is part of the CAS: a row grouped or split
+        // since the read misses (knex renders null as IS NULL) and the
+        // customer refreshes, instead of a stale confirm landing.
+        visit_id: service.visit_id || null,
       })
       .update({
         status: 'confirmed',
@@ -448,6 +512,11 @@ router.get('/next', async (req, res, next) => {
     if (!nextService) {
       return res.json({ next: null });
     }
+    // Same group-aware posture as the list payload (codex #3609 r25 P2).
+    const nextGroupedVerdict = nextService.visit_id ? await require('./reschedule-public').groupedVisit(nextService) : false;
+    const nextGrouped = nextGroupedVerdict !== false;
+    const nextCalVerdict = nextGroupedVerdict === 'unknown' ? { blocked: true, endsAt: null }
+      : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
     res.json({
       next: {
@@ -464,10 +533,12 @@ router.get('/next', async (req, res, next) => {
         isRecurring: nextService.is_recurring === true,
         isCallback: nextService.is_callback === true,
         // Self-serve deep link — see the list route's note above.
-        rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
+        rescheduleUrl: nextService.reschedule_token && !nextGrouped ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
-        calendarUrl: calendarUrlFor(nextService),
-        calendarExpiresAt: calendarExpiresAtFor(nextService),
+        calendarUrl: nextCalVerdict ? groupedCalendarUrl(nextService, nextCalVerdict) : calendarUrlFor(nextService),
+        calendarExpiresAt: nextCalVerdict
+          ? (groupedCalendarUrl(nextService, nextCalVerdict) ? nextCalVerdict.endsAt.toISOString() : null)
+          : calendarExpiresAtFor(nextService),
       },
     });
   } catch (err) {

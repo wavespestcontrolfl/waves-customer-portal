@@ -66,7 +66,7 @@ describe('customer appointment confirmation race guard', () => {
       });
     });
 
-    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending' });
+    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending', visit_id: null }); // membership pinned (codex #3609 r28)
     expect(logger.info).not.toHaveBeenCalled();
   });
 

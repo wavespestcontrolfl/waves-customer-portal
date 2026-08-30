@@ -1931,6 +1931,12 @@ async function rescheduleAppointment(input) {
   let updatedRows = 0;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
+      // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
+      // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
+      // occupancy lock before any narrower lock, and the other IB date
+      // mover (schedule-tools) acquires occupancy and then waits on this
+      // same stop lock — taking them in the opposite order here could
+      // form an occupancy↔stop deadlock between two staff actions.
       if (probeWindowStart && probeWindowEnd) {
         const overlap = await probeSlotOverlap({
           trx,
@@ -1941,6 +1947,11 @@ async function rescheduleAppointment(input) {
         });
         if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
       }
+      // Grouped/frozen refusal under the stop lock (codex #3609 r29 P1):
+      // this tool writes the row directly — a grouped member moved alone
+      // would strand its siblings and parent at the old stop. Throws an
+      // operational 409 the executor surfaces as the tool error.
+      await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
       updatedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -1949,6 +1960,9 @@ async function rescheduleAppointment(input) {
             scheduled_date: observedDate,
             window_start: appt.window_start ?? null,
             window_end: appt.window_end ?? null,
+            // Observed membership is part of the CAS (codex r29): a row
+            // grouped since the read misses instead of moving alone.
+            visit_id: appt.visit_id ?? null,
             // Duration pin, only when this move's window math DEPENDED on the
             // column: on a row with a start and NO end, apptDuration is the
             // estimated_duration_minutes fallback, and it sets both the

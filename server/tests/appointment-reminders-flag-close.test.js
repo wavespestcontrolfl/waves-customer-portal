@@ -54,6 +54,7 @@ function chain(overrides = {}) {
       return builder;
     }),
     orWhere: jest.fn().mockReturnThis(),
+    whereNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     whereNotNull: jest.fn().mockReturnThis(),
     whereNotExists: jest.fn().mockReturnThis(),
@@ -242,11 +243,13 @@ describe('preference-skip closes the window', () => {
 });
 
 describe('appointment_time-guarded flag updates', () => {
-  function wireSendPath(reminderRow, flagUpdate) {
+  function wireSendPath(reminderRow, flagUpdate, holdRow = null) {
     wireDb({
       appointment_reminders: [
         chain(), // stranded sweep
         chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
+        chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // deliverAppointmentNotice unit-move hold check
+        chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // email-handoff hold recheck (sendAppointmentNoticeEmail)
         flagUpdate,
       ],
       scheduled_services: [
@@ -286,4 +289,27 @@ describe('appointment_time-guarded flag updates', () => {
     expect(flagUpdate.where).toHaveBeenCalledWith('appointment_time', reminderRow.appointment_time);
     expect(results.sent24h).toBe(1);
   });
+});
+
+test('a row under an active move_hold_until leaves its sent flags UNMARKED — MOVE_HOLD is a hold, never a completed send (codex #3609 r30 P1)', async () => {
+  const reminderRow = row72();
+  const flagUpdate = chain();
+  // reuse the send-path wiring but answer the last-moment hold check with a live hold
+  wireDb({
+    appointment_reminders: [
+      chain(), // stranded sweep
+      chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
+      chain({ first: jest.fn().mockResolvedValue({ move_hold_until: new Date(Date.now() + 3600000) }) }), // held
+      flagUpdate,
+    ],
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ status: 'confirmed' }) }),
+      chain({ first: jest.fn().mockResolvedValue({ tech_name: null }) }),
+    ],
+    notification_prefs: [chain({ first: jest.fn().mockResolvedValue(null) })],
+    customers: [chain(), chain({ first: jest.fn().mockResolvedValue(CUSTOMER) }), chain({ first: jest.fn().mockResolvedValue(CUSTOMER) })],
+  });
+  const results = await AppointmentReminders.checkAndSendReminders();
+  expect(results.sent72h).toBe(0);
+  expect(flagUpdate.update).not.toHaveBeenCalled(); // the flags stay armed; the sweep retries after the hold clears/expires
 });

@@ -108,7 +108,7 @@ describe('track token expiry on reschedule paths', () => {
       { start: '10:00:00', end: '12:30:00' },
       'weather',
       'admin',
-    )).resolves.toEqual({
+    )).resolves.toMatchObject({
       success: true,
       originalDate: '2026-05-20',
       newDate: '2027-06-03',

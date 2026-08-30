@@ -33,6 +33,10 @@ const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // never JOINS a visit; it is not terminal for member counting.
 const JOIN_INELIGIBLE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
 const ACTIVE_PACKET_STATUSES = ['accepted', 'processing'];
+// service_completion_attempts statuses that mean a legacy /complete owns the
+// row: pending (claimed), side effects queued/running, or already succeeded.
+// Stamping and the unit mover both refuse members carrying one.
+const LIVE_COMPLETION_CLAIM_STATUSES = ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'];
 
 /**
  * pg returns `date` columns as JS Date instances (UTC midnight); strings
@@ -215,10 +219,11 @@ async function lockStopForRow(trx, serviceId) {
 }
 
 /** Non-terminal members of a visit with the fields join/chain checks need. */
-async function openMembers(t, visitId) {
-  return t('scheduled_services').where({ visit_id: visitId })
-    .whereNotIn('status', TERMINAL_ROW_STATUSES)
-    .select('id', 'window_start', 'window_end', 'technician_id', 'status');
+async function openMembers(t, visitId, { forUpdate = false } = {}) {
+  const q = t('scheduled_services').where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES);
+  if (forUpdate) q.forUpdate();
+  return q.select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
 }
 
 /**
@@ -229,9 +234,93 @@ async function openMembers(t, visitId) {
  * write left dispatch state disagreeing with visit ownership. Runs on the
  * caller's transaction; no-op when the row already carries the tech.
  */
-async function alignMemberTechnician(t, rowId, technicianId) {
+// Destination-technician occupancy for one member window (local codex audit
+// r24): technicianId never rides the rebooker (its assignment is the
+// canonical writer's, after the move), so the rebooker's authoritative
+// kept-tech overlap check runs against each row's OLD technician. The
+// DESTINATION technician's route is checked here with the rebooker's own
+// predicate (active holds, COALESCEd end, cancelled/completed excluded);
+// the visit's own members are excluded — they move together. Returns the
+// clashing row id or null; unassigning (null tech) never clashes.
+async function destinationTechClash(t, { technicianId, date, windowStart, windowEnd, durationMinutes, excludeIds }) {
+  if (!technicianId || !date || !windowStart) return null;
+  const start = String(windowStart).slice(0, 5);
+  const end = windowEnd ? String(windowEnd).slice(0, 5) : shiftClock(start, Number(durationMinutes) || 60);
+  const clash = await t('scheduled_services')
+    .where('scheduled_date', date)
+    .where('technician_id', technicianId)
+    .whereNotIn('id', [...new Set((excludeIds || []).map(String))])
+    .whereNotIn('status', ['cancelled', 'completed'])
+    .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
+    .whereRaw(
+      "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+      [end, start],
+    )
+    .first('id');
+  return clash ? clash.id : null;
+}
+
+// Is this visit's membership frozen for a direct slot writer (issued link,
+// packet, artifacts, payment attempt — canSplit) or owned by a live
+// completion claim on any member? The unit mover refuses such visits
+// before its lone-member exit; a direct writer (bulk board move,
+// update-details) or a self-serve surface must apply the SAME verdict
+// (codex #3609 r26 P1/P2), or a frozen visit that kept one live member
+// beside a terminal one would be moved under a parent — and artifacts —
+// describing the old stop. Returns { frozen, reason } — an unreadable
+// state reads as frozen (fail closed).
+async function frozenVisitVerdict(t, visitId) {
+  if (!visitId) return { frozen: false, reason: null };
+  try {
+    const activity = await visitActivity(visitId, t);
+    if (!activity) return { frozen: false, reason: null }; // no such visit: the row is effectively ungrouped
+    // Not open and not dissolved (closing, …) = being finalized: frozen for
+    // every direct writer, exactly as the unit mover refuses it (P0 r36).
+    if (String(activity.status) !== 'open' && String(activity.status) !== 'dissolved') return { frozen: true, reason: 'visit_not_open' };
+    if (String(activity.status) === 'dissolved') return { frozen: false, reason: null };
+    const split = canSplit(activity);
+    if (!split.ok && split.reason !== 'visit_not_open') return { frozen: true, reason: split.reason };
+    const memberIds = (await t('scheduled_services').where({ visit_id: visitId }).select('id')).map((m) => m.id);
+    const claim = memberIds.length
+      ? await t('service_completion_attempts').whereIn('service_id', memberIds).whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).first('id')
+      : null;
+    if (claim) return { frozen: true, reason: 'completion_in_flight' };
+    return { frozen: false, reason: null };
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] frozenVisitVerdict(${visitId}) unreadable — treated as frozen: ${err.message}`);
+    return { frozen: true, reason: 'unreadable' };
+  }
+}
+
+// Shared guard for DIRECT slot writers (IB tools, board movers): under the
+// row's stop lock, a grouped row (≥2 live members) or a member of a
+// frozen/claimed/finalizing visit must not be moved alone (codex #3609
+// r29 P1 — the IB tools wrote the row directly and stranded the parent).
+// Throws the same operational 409s the bulk mover uses; callers surface
+// or per-row-skip them.
+// `observedVisitId` = the caller's own read of the row's visit_id; an
+// ungrouped observation returns immediately (the caller's CAS pins
+// visit_id, so a row grouped SINCE that read misses the write instead) —
+// the locked verification below runs only for rows observed grouped.
+async function assertRowMovableAlone(t, rowId, observedVisitId) {
+  if (!observedVisitId) return;
+  await lockStopForRow(t, rowId);
+  const fresh = await t('scheduled_services').where({ id: rowId }).first('visit_id');
+  const vid = fresh ? fresh.visit_id : observedVisitId;
+  if (!vid) return;
+  const members = await openMembers(t, vid);
+  if (members.length >= 2) {
+    throw Object.assign(new Error('This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first.'), { statusCode: 409, code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED', isOperational: true });
+  }
+  const verdict = await frozenVisitVerdict(t, vid);
+  if (verdict.frozen) {
+    throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
+  }
+}
+
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t });
+  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
 }
 
 /**
@@ -537,7 +626,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           qb.orWhereIn('service_id', t('scheduled_services').select('id').where({ visit_id: visit.id }));
         }
       })
-      .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running', 'succeeded'])
+      .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
       .first('id')
       .catch(() => null);
     if (liveAttempt) {
@@ -563,6 +652,46 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       : 0;
     if (Number(stamped) !== unattachedIds.length) {
       throw new Error('visit membership conflict: a row is attached to another visit');
+    }
+    // A joiner INHERITS an active unit-move hold (codex #3609 r34 P1):
+    // when this join lands between a running move's phases (the mover's
+    // lease is claimed in its own trx, not under this stop lock for the
+    // whole move), an existing member's live move_hold_until must cover
+    // the new member too — otherwise a partial move leaves every planned
+    // member suppressed while the late joiner texts freely. Same inherit
+    // shape the registration self-heal uses; best-effort (the mover's
+    // per-member re-stamp and the senders' checks stay authoritative).
+    if (unattachedIds.length) {
+      try {
+        const heldSibling = await t('appointment_reminders as ar')
+          .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+          .where('ss.visit_id', visit.id)
+          .where('ar.move_hold_until', '>', new Date())
+          .orderBy('ar.move_hold_until', 'desc')
+          .first('ar.move_hold_until', 'ar.move_hold_token');
+        if (heldSibling) {
+          // A joiner with NO reminder row gets one CREATED held (codex r35):
+          // booking/seeding can group rows before registerAppointment runs,
+          // and that later registration would arrive unheld mid-move.
+          const existing = (await t('appointment_reminders')
+            .whereIn('scheduled_service_id', unattachedIds)
+            .select('scheduled_service_id')).map((r) => String(r.scheduled_service_id));
+          for (const missingId of unattachedIds.map(String).filter((id) => !existing.includes(id))) {
+            await ensureMemberReminderRowInTx(t, missingId);
+          }
+          await t('appointment_reminders')
+            .whereIn('scheduled_service_id', unattachedIds)
+            .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', heldSibling.move_hold_until); })
+            .update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
+        }
+      } catch (holdErr) {
+        // FAIL CLOSED (uncapped r36 P1): this inherit is the ONLY thing
+        // keeping a mid-move joiner quiet — a swallowed failure commits an
+        // unheld member that can text stale details while the move runs.
+        // Aborting rolls the join back; createOrJoinVisit's retry loop (or
+        // the caller's) re-attempts.
+        throw Object.assign(new Error(`visit join aborted — the member hold could not be inherited: ${holdErr.message}`), { code: holdErr.code || 'VISIT_JOIN_HOLD_FAILED' });
+      }
     }
     if (visit.technician_id) {
       for (const r of fresh) {
@@ -1519,7 +1648,1211 @@ function visitSummariesForRows(rows, {
   return byVisit;
 }
 
+// ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// THE shared last-moment send guard for appointment notices (codex r47 —
+// one implementation for the SMS canonical path and the appointment-email
+// path, never two drifting copies). True = do not send:
+//   1. a LIVE move_hold_until on the row's reminder record;
+//   2. renderedSlotMs (the epoch of the slot the body quotes) matching
+//      neither the row's own start nor the grouped stop's canonical start;
+//   3. the hold RE-READ after the slot/visit awaits — a mover can claim
+//      between the first hold read and those queries, with the row still
+//      showing the pre-move slot.
+// Fail closed on any read error.
+async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
+  if (!scheduledServiceId) return false;
+  const logger = require('./logger');
+  try {
+    const holdLive = async () => {
+      const row = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('move_hold_until');
+      return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+    };
+    if (await holdLive()) return true;
+    if (Number.isFinite(renderedSlotMs)) {
+      const live = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('scheduled_date', 'window_start', 'visit_id');
+      if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
+      const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
+      const day = etCalendarDayOf(live.scheduled_date);
+      const toMs = (hhmm) => {
+        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
+        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
+      };
+      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      if (live.visit_id) {
+        const stopStart = await liveStopStartHHMM(db, live.visit_id);
+        if (stopStart) candidates.push(toMs(stopStart));
+      }
+      if (!candidates.some((ms) => ms !== null && ms === renderedSlotMs)) return true;
+      // The slot/visit reads above are awaits a mover can slip behind while
+      // the row still shows the pre-move slot — the hold is checked LAST.
+      if (await holdLive()) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[visit-groups] appointment send-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
+// The staff repair message for an INCOMPLETE unit move (codex r44): a
+// straggler still at the old slot, a member that MOVED but could not be
+// reassigned (fixing its assignment, not re-moving it), and a failed
+// parent retarget each need different guidance — one builder so the
+// dispatch and rain-out responses never drift.
+function incompleteMoveMessage(failedEntries = [], parentRetargetFailed = false) {
+  const stragglers = failedEntries.filter((f) => f.movedButUnassigned !== true);
+  const unassigned = failedEntries.filter((f) => f.movedButUnassigned === true);
+  const parts = [];
+  if (stragglers.length) parts.push(`${stragglers.length} grouped service(s) are still on the old day/time — fix the stragglers on the board`);
+  if (unassigned.length) parts.push(`${unassigned.length} service(s) moved to the new time but could not be reassigned to the technician — fix their assignment on the board (they are NOT at the old time)`);
+  if (!parts.length || parentRetargetFailed) parts.push('the visit record still describes the old stop — re-save the stop from the board');
+  return `Only part of this stop finished moving: ${parts.join('; ')}. Then text the customer.`;
+}
+
+// The grouped stop's canonical start (earliest live member's HH:MM) — the
+// value grouped customer copy quotes (rain-out, the appointment page).
+// Shared by the last-moment notice checks so a LATER chained member's own
+// start never fails a comparison against the stop start (codex r40).
+async function liveStopStartHHMM(conn, visitId) {
+  if (!visitId) return null;
+  const members = await conn('scheduled_services')
+    .where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('window_start');
+  const starts = members.map((m) => (m.window_start ? String(m.window_start).slice(0, 5) : null)).filter(Boolean).sort();
+  return starts[0] || null;
+}
+
+// Ensure a member has a reminder row a hold can live on (shared by the
+// unit-move claim and createOrJoinVisit's join-inherit — codex r35): a
+// WINDOWED member gets an ARMED registration (normal 72h/24h once any hold
+// clears), a windowless one the pre-closed 08:00 placeholder. Returns the
+// row (or null when the member has no usable schedule).
+async function ensureMemberReminderRowInTx(t, memberId) {
+  const row = await t('scheduled_services').where({ id: memberId })
+    .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at');
+  if (!row || !row.customer_id || !row.scheduled_date) return null;
+  const AppointmentReminders = require('./appointment-reminders');
+  if (row.window_start) {
+    return AppointmentReminders.registerVisitReminderInTx(t, {
+      scheduledServiceId: memberId,
+      customerId: row.customer_id,
+      appointmentTime: `${dateOnly(row.scheduled_date)}T${String(row.window_start).slice(0, 5)}`,
+      serviceType: row.service_type || 'service',
+      source: 'unit_move_hold',
+      createdAt: row.created_at,
+    });
+  }
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
+  if (!stubTime || Number.isNaN(stubTime.getTime())) return null;
+  return AppointmentReminders.insertPreClosedPlaceholderRowInTx(t, {
+    scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
+    serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
+  });
+}
+
+// Durable reminder send hold for grouped unit moves. TTL is the
+// self-expiry (a forgotten repair can never silence a customer forever);
+// the takeover grace is the lease window inside which an ACTIVE stamp is
+// presumed to belong to a live concurrent mover (a move completes in
+// seconds) — older active stamps are retained partial-move holds a repair
+// move may take over (codex r30 P1). Stamp time is until − TTL, so the
+// TTL must never change without considering in-flight stamps.
+const MOVE_HOLD_TTL_MS = 24 * 60 * 60 * 1000;
+const MOVE_HOLD_TAKEOVER_AFTER_MS = 5 * 60 * 1000;
+
+const UNIT_MOVE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+const UNIT_MOVE_LIVE_STATUSES = new Set(['en_route', 'on_site']);
+
+function shiftClock(hhmm, deltaMin) {
+  const m = toMinutes(hhmm);
+  if (m == null || !Number.isFinite(deltaMin)) return hhmm || null;
+  const v = ((m + deltaMin) % 1440 + 1440) % 1440;
+  return `${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`;
+}
+
+/**
+ * Move a grouped row's WHOLE visit as one unit (R3): called by
+ * SmartRebooker.reschedule / rescheduleSeries before their own work for a
+ * row that carries a visit_id and no visitPolicy:'single'. "Just this
+ * service" is the explicit split action (splitChild), never a flag here.
+ *
+ * Order (codex #3609 r1 — nothing is committed for the visit before the
+ * tapped row itself has moved):
+ * 1. PLAN, read-only, peek → stop lock → verify key → retry: re-read the
+ *    open visit and its live members, refuse if ANY member is not movable
+ *    or no longer at the stop (409), compute every member's target (same
+ *    date; windows shifted by the primary's start delta; a member already
+ *    at the target is skipped — a route-wide batch that reaches the visit
+ *    through a second member is a no-op, not a second move) and a
+ *    per-member concurrency fence from the LOCKED row (the caller's pins
+ *    describe only the primary).
+ * 2. MOVE the primary with the caller's own options, then each sibling with
+ *    its own fence, visitPolicy:'single' (no recursion), skipVisitSeam
+ *    (the detach seam runs once at the end — per member it would detach
+ *    the first mover from siblings still on the old stop) and the member
+ *    ids excluded from both occupancy probes. Each member keeps its own
+ *    series semantics. The primary failing rethrows — nothing has moved.
+ * 3. RETARGET the parent from the members' ACTUAL rows under BOTH stop
+ *    locks taken in sorted key order: date, window union of the rows that
+ *    landed, new stop key + seq, the caller's technician (incl. an explicit
+ *    null = whole-visit unassignment), and — on a date change or a live
+ *    move — a lifecycle reset (en_route_at / arrived_at cleared, tracker
+ *    effects removed so the new day's notices re-arm).
+ * 4. Detach seam for every member (a sibling that failed stays behind,
+ *    detached), then the union is recomputed.
+ * Warnings from every member are aggregated; a failed sibling is reported
+ * in visitMove.failed and as a warning for the operator.
+ */
+// Does a live row satisfy a rebooker-style `expect` predicate? Same
+// semantics as the rebooker's `.where(options.expect)` CAS, evaluated in JS:
+// dates by day, clocks by HH:MM, everything else by null-safe string
+// equality; a key the row does not carry fails (closed).
+function expectMatchesRow(row, expect) {
+  if (!row) return false;
+  const norm = (v) => (v == null || v === '' ? null : String(v).slice(0, 5));
+  for (const [key, want] of Object.entries(expect || {})) {
+    if (!Object.prototype.hasOwnProperty.call(row, key)) return false;
+    const have = row[key];
+    if (key === 'scheduled_date') { if (dateOnly(have) !== dateOnly(want)) return false; continue; }
+    if (key === 'window_start' || key === 'window_end') { if (norm(have) !== norm(want)) return false; continue; }
+    if ((have == null) !== (want == null)) return false;
+    if (have != null && String(have) !== String(want)) return false;
+  }
+  return true;
+}
+
+async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
+  if (!rebooker || !service || !service.visit_id) return null;
+  const logger = require('./logger');
+  const allowLive = options.allowLive === true;
+  const movable = (st) => UNIT_MOVE_STATUSES.has(String(st)) || (allowLive && UNIT_MOVE_LIVE_STATUSES.has(String(st)));
+  const win = typeof newWindow === 'object' && newWindow ? { start: newWindow.start || null, end: newWindow.end || null }
+    : (() => { const m = String(newWindow || '').match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/); return m ? { start: m[1], end: m[2] } : { start: null, end: null }; })();
+  const newDateStr = dateOnly(newDate);
+
+  // ---- 1. plan (read-only) ----
+  let plan = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // A visit that is not open and not dissolved (closing, or any future
+      // state) is REFUSED, never declined to the rebooker's single-row path
+      // (local gate P0 r36): its packet / issued link / records / payment
+      // still describe this stop, and the detach seam ignores non-open
+      // visits — a child moved alone would leave those artifacts behind.
+      // Dissolved = the rows are free (the dissolver nulls visit_id; a stale
+      // pointer is effectively ungrouped) ⇒ null, the single path.
+      const refuseNotOpen = (status) => {
+        throw Object.assign(new Error('Cannot move this stop: the visit is being finalized — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open', visitStatus: String(status) });
+      };
+      plan = await db.transaction(async (t) => {
+        const peek = await t('service_visits').where({ id: service.visit_id }).first();
+        if (!peek) return null;
+        if (String(peek.status) !== 'open') return String(peek.status) === 'dissolved' ? null : refuseNotOpen(peek.status);
+        await lockStop(t, peek.stop_base_key);
+        const visit = await t('service_visits').where({ id: service.visit_id }).first();
+        if (!visit) return null;
+        if (String(visit.status) !== 'open') return String(visit.status) === 'dissolved' ? null : refuseNotOpen(visit.status);
+        if (visit.stop_base_key !== peek.stop_base_key) {
+          throw Object.assign(new Error('visit stop moved concurrently — retry'), { code: 'VISIT_STOP_MOVED' });
+        }
+        const members = await t('scheduled_services').where({ visit_id: visit.id })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
+          .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
+        const primary = members.find((m) => String(m.id) === String(serviceId));
+        if (!primary) return null;
+        // Frozen membership (issued link, packet, artifacts, payment attempt —
+        // completion-stage state; the detach seam deliberately preserves it):
+        // members are moved in separate transactions, so no compensation can
+        // make a grouped move of such a visit atomic across a crash or deploy
+        // between member commits (local codex audit P0). Refused up front —
+        // nothing is written; finish the visit or contact the office.
+        // Checked BEFORE the lone-member decline (local audit r30): a frozen
+        // visit that kept one live member beside a terminal one would
+        // otherwise fall to the rebooker's single-row path, whose seam
+        // preserves the frozen membership — the child at the new stop, the
+        // visit and its issued/payment artifacts at the old one.
+        const split = canSplit(await visitActivity(visit.id, t));
+        if (!split.ok && split.reason !== 'visit_not_open') {
+          throw Object.assign(new Error('Cannot move this stop: the visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: split.reason });
+        }
+        // Durable completion claims (local codex audit P0): the legacy
+        // /complete handler claims service_completion_attempts under the
+        // row's stop lock and then lets an open, packet-less grouped row
+        // complete where it sits (dissolving the visit at commit) — state
+        // canSplit cannot see. Mirror createOrJoinVisit's guard under the
+        // same stop lock + member row locks: a member with a live or
+        // succeeded claim freezes the move before anything is written. The
+        // rebooker repeats this under each member's own row locks
+        // (VISIT_COMPLETION_IN_FLIGHT) for a claim that lands after the plan.
+        // No catch: an unreadable ledger fails the move, never opens it.
+        const liveClaim = await t('service_completion_attempts')
+          .whereIn('service_id', members.map((m) => m.id))
+          .whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES)
+          .first('id', 'service_id');
+        if (liveClaim) {
+          throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
+        }
+        // One live member is not a grouped stop: the rebooker's ordinary
+        // single-row path moves it (its seam detaches an unfrozen visit).
+        if (members.length < 2) return null;
+        // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
+        // moved as a unit by STAFF, on the direct (non-series) path only —
+        // the surfaces whose callers handle partial results. A customer
+        // self-serve move of a grouped visit and an explicit series-scoped
+        // move of a grouped anchor are refused with guidance until the
+        // series_moves-backed visit operation ships; nothing is written.
+        if (/^customer/i.test(String(initiatedBy || ''))) {
+          throw Object.assign(new Error('This appointment includes more than one service — please call or text us to move it and we will take care of it.'), { statusCode: 409, code: 'VISIT_CUSTOMER_MOVE_UNSUPPORTED', isOperational: true });
+        }
+        if (options.primaryViaSeries) {
+          throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+        }
+        // The same refusal for IMPLICIT widening (local codex audit): with the
+        // collective gate on, a date move of a cadence primary would enter the
+        // series path, which moves future occurrences one row at a time and
+        // detaches them from their own grouped siblings. Staff move this visit
+        // only (seriesPolicy 'single') until the series-aware visit operation
+        // ships.
+        if (primary.is_recurring === true && options.seriesPolicy !== 'single'
+          && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true' && newDateStr !== dateOnly(primary.scheduled_date)) {
+          throw Object.assign(new Error('This service is grouped with another at the same stop — move this visit only (not the series), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+        }
+        for (const m of members) {
+          // Auto-dispatch honours the operator opt-outs on EVERY grouped
+          // member, with the same guard the tapped row gets (codex r5): a
+          // locked/excluded sibling fails the whole unit move.
+          if (String(initiatedBy) === 'auto_dispatch' && (m.auto_dispatch_locked === true || m.auto_dispatch_excluded === true)) {
+            throw Object.assign(new Error('Cannot auto-move this stop: a grouped service is locked or excluded from auto-dispatch'), { statusCode: 409, code: 'VISIT_MEMBER_AUTO_DISPATCH_OPT_OUT', memberId: m.id, isOperational: true });
+          }
+          if (!movable(m.status)) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service is ${m.status} — separate it first`), { statusCode: 409, code: 'VISIT_MEMBER_NOT_MOVABLE', memberId: m.id });
+          }
+          if (!rowStillAtVisitStop(m, visit, members.filter((o) => o.id !== m.id))) {
+            throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
+          }
+        }
+        // Sibling offset anchor: the tapped row's own start, else the VISIT's
+        // canonical start (a windowless tapped row is still a member of a
+        // windowed stop — local codex audit). No anchor at all with windowed
+        // siblings is ambiguous: refuse rather than leave siblings at the old
+        // time behind a moved anchor.
+        const anchorStart = primary.window_start || visit.window_start || null;
+        if (win.start && !anchorStart && members.some((m) => m.id !== primary.id && m.window_start)) {
+          throw Object.assign(new Error('Cannot move this stop to a new time from a service without a time window — move it from a grouped service that has one, or set this service\'s window first'), { statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED', isOperational: true });
+        }
+        const delta = win.start && anchorStart ? (toMinutes(win.start) - toMinutes(anchorStart)) : 0;
+        const validateSibling = (m, start, end) => {
+          try {
+            require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: m.estimated_duration_minutes });
+          } catch (e) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time is not allowed on the new slot — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
+          }
+        };
+        // A shifted bound must stay inside the target day (codex r24 P2):
+        // shiftClock wraps modulo 24h, so a positive offset pushing a late
+        // sibling past midnight would derive an "early-morning" window the
+        // admin rules accept — on the same date, no longer one physical stop.
+        const shiftInDay = (row, bound) => {
+          const base = toMinutes(bound);
+          if (base == null || !Number.isFinite(delta)) return bound || null;
+          const total = base + delta;
+          if (total < 0 || total >= 1440) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time would cross midnight on the new slot (${bound} shifted by ${delta > 0 ? '+' : ''}${delta} min) — move it separately`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: row.id, isOperational: true });
+          }
+          return shiftClock(bound, delta);
+        };
+        const targets = members.map((m) => {
+          const isPrimary = m.id === primary.id;
+          let window = null;
+          let targetStart = m.window_start || null;
+          let targetEnd = m.window_end || null;
+          if (win.start && (m.window_start || isPrimary)) {
+            // The tapped row takes the requested slot even when it was
+            // windowless (codex r3); a windowless sibling stays windowless.
+            targetStart = isPrimary ? win.start : shiftInDay(m, m.window_start);
+            targetEnd = isPrimary ? (win.end || (m.window_end ? shiftInDay(m, m.window_end) : null)) : shiftInDay(m, m.window_end);
+            window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
+            // A DERIVED sibling window must pass the admin window rules (on
+            // the hour, ends by the day cutoff) BEFORE the first member
+            // write, for EVERY caller (codex r4/r9): dispatch validates only
+            // the tapped window; rain-out and auto-dispatch validate none —
+            // a legacy :30 sibling must not ride its offset onto a new slot.
+            if (!isPrimary) validateSibling(m, targetStart, targetEnd);
+          } else if (!isPrimary && m.window_start && dateOnly(m.scheduled_date) !== newDateStr) {
+            // Date-only move: the sibling keeps its own window, which now
+            // lands on a NEW date — a legacy off-hour window cannot ride
+            // onto it either (codex r11; same ruling update-details applies).
+            validateSibling(m, targetStart, targetEnd);
+          }
+          const norm = (v) => (v ? String(v).slice(0, 5) : null);
+          const techMatches = options.technicianId === undefined || String(m.technician_id || '') === String(options.technicianId || '');
+          // No-op only when EVERY requested field already holds (codex r2):
+          // date, start AND end (normalized), and the explicit technician.
+          const alreadyAtTarget = dateOnly(m.scheduled_date) === newDateStr
+            && (!win.start || (!m.window_start && !isPrimary) || (norm(m.window_start) === norm(targetStart) && norm(m.window_end) === norm(targetEnd)))
+            && techMatches;
+          return {
+            id: m.id, isPrimary, window, alreadyAtTarget, previousStatus: String(m.status),
+            startHHMM: norm(targetStart) || norm(m.window_start) || null,
+            // Original bounds kept SEPARATELY (local audit): a null end must
+            // roll back as { start, end: null }, never as a zero-length
+            // "09:00-09:00" window.
+            original: { date: dateOnly(m.scheduled_date), start: norm(m.window_start) || null, end: norm(m.window_end) || null,
+              window: m.window_start ? (m.window_end ? `${norm(m.window_start)}-${norm(m.window_end)}` : { start: norm(m.window_start), end: null }) : null },
+            // Per-member fence from the LOCKED row (codex r1): the caller's
+            // expect / expectAnchor / expectOccurrenceIds pin the primary only.
+            // visit_id + technician_id fence the member's own move to the
+            // planned unit (codex r7): a row split from the visit or
+            // reassigned after the plan fails ITS CAS instead of moving.
+            // status too (local audit): a sibling that went en_route / on_site
+            // / terminal after the plan released its locks fails ITS CAS and
+            // the primary's excludeExpect contract before the first write.
+            expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null, status: String(m.status) },
+          };
+        });
+        // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
+        // its per-run change budget from an unlocked pre-read; the member
+        // count that actually CHANGES is decided here, under the stop lock —
+        // members already at the requested placement (a windowless sibling
+        // on a same-day window move, codex r22 P2) are not changes — and
+        // must fit the budget the caller still has, or nothing moves.
+        const changingCount = targets.filter((x) => !x.alreadyAtTarget).length;
+        if (Number.isFinite(options.maxUnitSize) && changingCount > options.maxUnitSize) {
+          throw Object.assign(new Error(`Cannot move this stop as a unit: ${changingCount} grouped services would change, exceeding the caller's remaining change budget (${options.maxUnitSize})`), { statusCode: 409, code: 'VISIT_UNIT_OVER_CAP', isOperational: true, memberCount: changingCount });
+        }
+        // Caller-supplied member guard (codex r13 P1): auto-dispatch's
+        // apply-time HARD guards (72h reminder freeze, technician capability,
+        // live status, preferences) are evaluated for the tapped row only;
+        // the caller re-validates EVERY locked member here — under the stop
+        // lock, with each member's DERIVED target window (codex r16 P1),
+        // before the first write — or the grouped automatic move is refused.
+        if (typeof options.memberGuard === 'function') {
+          await options.memberGuard({ trx: t, members, primaryId: primary.id, visitId: visit.id, targets });
+        }
+        // Destination-technician occupancy for EVERY derived member window
+        // (local codex audit r24), before the first write: a hard clash
+        // refuses the whole unit (SLOT_TAKEN — the callers' existing
+        // handling); on an advisory staff surface (overlapAdvisory) it is a
+        // warning, as the rebooker's own check would be. alignMember repeats
+        // the check under the technician's slot-reserve lock at assignment.
+        const techClashWarnings = [];
+        if (options.technicianId) {
+          for (const tg of targets) {
+            const m = members.find((x) => String(x.id) === String(tg.id));
+            const [ts, te] = typeof tg.window === 'string' ? tg.window.split('-') : [tg.window?.start || m.window_start || null, tg.window ? null : (m.window_end || null)];
+            const clashId = await destinationTechClash(t, {
+              technicianId: options.technicianId, date: newDateStr, windowStart: ts, windowEnd: te,
+              durationMinutes: m.estimated_duration_minutes, excludeIds: members.map((x) => x.id),
+            });
+            if (!clashId) continue;
+            if (options.overlapAdvisory !== true) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', memberId: tg.id, conflictId: clashId });
+            }
+            techClashWarnings.push(`service ${tg.id} overlaps another job on the destination technician's route (${clashId})`);
+          }
+        }
+        return {
+          visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
+          customerId: visit.customer_id, propertyId: visit.property_id, techClashWarnings,
+          targets, memberIds: members.map((m) => m.id),
+          anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
+          primaryRecurring: primary.is_recurring === true,
+        };
+      });
+      break;
+    } catch (err) {
+      if (err && err.code === 'VISIT_STOP_MOVED' && attempt < 2) continue;
+      throw err;
+    }
+  }
+  if (!plan) return null;
+  const pending = plan.targets.filter((x) => !x.alreadyAtTarget);
+  if (!pending.length) {
+    // Exact retry after a committed move: a recurring primary re-enters the
+    // rebooker so a committed series move REPLAYS with its own contract
+    // (seriesMoveId, occurrences, cleanup) instead of a generic no-op
+    // (codex r3); the members are already at the target, nothing moves.
+    // Only a request that could actually have created a series_moves
+    // operation re-enters (codex r4): an explicit seriesPolicy 'single'
+    // (Quick Move's fallback, auto-dispatch) or a dark collective gate
+    // keeps the plain no-op — re-entering would insert a second log row
+    // and repeat the caller's effects, or 409 a fenced retry.
+    if (plan.primaryRecurring && options.seriesPolicy !== 'single' && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true') {
+      const replay = await rebooker.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, visitPolicy: 'single', skipVisitSeam: true });
+      return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
+    }
+    // The caller's `expect` fence still applies to a no-op (local codex
+    // audit): every member already sits at the target, so the rebooker —
+    // and its CAS on options.expect — never runs. Auto-dispatch pins the
+    // ORIGINAL placement; a staff move that landed here first must surface
+    // as stale, not as this run's success (stamps/notice from a stale
+    // snapshot). Fail closed on an unreadable row.
+    if (options.expect && Object.keys(options.expect).length) {
+      const live = await db('scheduled_services').where({ id: serviceId }).first();
+      if (!expectMatchesRow(live, options.expect)) {
+        throw Object.assign(new Error('Cannot move this stop — it changed since it was read (another writer already placed it here)'), { statusCode: 409, code: 'VISIT_EXPECT_STALE', isOperational: true });
+      }
+    }
+    // Repair pass (codex r37): after a parentRetargetFailed partial, every
+    // child can already sit at the requested slot — the staff re-save the
+    // needsAttention response prescribes lands HERE, and a plain no-op
+    // would leave the stale parent and the retained 24h hold unchanged. A
+    // parent that no longer matches the target is retargeted under the
+    // stop locks and the retained cohort hold on these members released;
+    // a healthy parent keeps the plain no-op. Best-effort — a failed
+    // repair leaves the hold to its TTL, the safe direction.
+    // Explicit outcome (codex r39): a silent early-return or swallowed error
+    // would report a plain success and staff would lose the
+    // VISIT_MOVE_INCOMPLETE signal while the parent stays stale.
+    // 'not_needed' (parent healthy) · 'repaired' · 'failed' (parent
+    // missing/non-open, members drifted, or the update threw).
+    let repairOutcome = 'not_needed';
+    try {
+      await db.transaction(async (t) => {
+        const repairKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
+        for (const key of [...new Set([plan.oldKey, repairKey])].sort()) await lockStop(t, key);
+        const visit = await t('service_visits').where({ id: plan.visitId }).first();
+        if (!visit || String(visit.status) !== 'open') { repairOutcome = 'failed'; return; }
+        const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES).orderBy('id').forUpdate()
+          .select('id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id');
+        if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) { repairOutcome = 'failed'; return; }
+        // ONE-STOP invariant before any repair (codex r48): a same-day
+        // partial window move can leave the moved primary and the stranded
+        // sibling on DISCONNECTED windows that both read as at-target by
+        // date alone — spanning them into one parent window would report a
+        // broken stop repaired. Same technician + connected windows, the
+        // grouping invariant everywhere else.
+        if (rows.length >= 2 && (
+          new Set(rows.map((r) => String(r.technician_id || ''))).size > 1
+          || !windowedMembersConnected(rows)
+        )) { repairOutcome = 'failed'; return; }
+        // Live residue is derived from the STALE PARENT, not the plan
+        // (codex r44): a same-day allowLive partial rewound the children
+        // to 'confirmed' before this re-save, so plan.anyLive is false and
+        // the dates match — but the parent still carries live stamps and
+        // its tracker one-shots stay consumed. Cleared only when no member
+        // is CURRENTLY live (a genuinely underway stop keeps its state).
+        const anyLiveNow = rows.some((r) => ['en_route', 'on_site'].includes(String(r.status || '').toLowerCase()));
+        const staleLiveResidue = !anyLiveNow && !!(visit.en_route_at || visit.arrived_at);
+        const starts = rows.map((r) => r.window_start).filter(Boolean).sort();
+        const ends = rows.map((r) => r.window_end).filter(Boolean).sort();
+        const hhmm5 = (v) => (v ? String(v).slice(0, 5) : null);
+        const stale = dateOnly(visit.scheduled_date) !== newDateStr
+          || hhmm5(visit.window_start) !== hhmm5(starts[0] || null)
+          || hhmm5(visit.window_end) !== hhmm5(ends.length ? ends[ends.length - 1] : null)
+          || visit.stop_base_key !== repairKey
+          // Tech-only moves (codex r39): a re-save after a failed retarget
+          // of a reassignment finds date/window/key healthy — the parent's
+          // technician is part of the tuple, mirroring the normal
+          // retarget's options.technicianId patch.
+          || (options.technicianId !== undefined && String(visit.technician_id || '') !== String(options.technicianId || ''))
+          || staleLiveResidue;
+        if (!stale) {
+          // Healthy stop, but a RETAINED hold can still be parked on the
+          // members (codex on-merge round: a full success whose release —
+          // now the caller's sync — transiently failed). Clear stamps
+          // older than the takeover grace; a live mover's stamp survives.
+          const parked = await t('appointment_reminders')
+            .whereIn('scheduled_service_id', rows.map((r) => r.id))
+            .whereNotNull('move_hold_until')
+            .forUpdate()
+            .select('id', 'move_hold_until');
+          const releasableParked = parked.filter((r) => {
+            const until = new Date(r.move_hold_until).getTime();
+            if (until <= Date.now()) return true;
+            return Date.now() - (until - MOVE_HOLD_TTL_MS) >= MOVE_HOLD_TAKEOVER_AFTER_MS;
+          });
+          if (releasableParked.length) {
+            await t('appointment_reminders').whereIn('id', releasableParked.map((r) => r.id))
+              .update({ move_hold_until: null, move_hold_token: null });
+            logger.info(`[visit-groups] no-op re-save of healthy visit ${plan.visitId} released ${releasableParked.length} retained hold row(s)`);
+          }
+          return;
+        }
+        const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
+        if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
+        if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+        // Mirror the normal retarget's lifecycle reset (codex r43): a
+        // repaired LIVE move (allowLive) or date change must not leave the
+        // parent marked underway with its tracker one-shots consumed at
+        // the new stop.
+        if (plan.anyLive || newDateStr !== plan.oldDate || staleLiveResidue) {
+          patch.en_route_at = null;
+          patch.arrived_at = null;
+          await t('visit_effects').where({ visit_id: plan.visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
+        }
+        await t('service_visits').where({ id: plan.visitId }).update(patch);
+        // The stop is whole again — release the RETAINED cohort hold on
+        // these members. Same lease semantics as the claim (codex r38): a
+        // stamp inside the takeover grace belongs to a LIVE concurrent
+        // mover (its claim trx released the stop lock before its member
+        // writes, so the stop locks here do NOT serialize against it) and
+        // must survive; only retained (older) or expired stamps clear.
+        const heldRows = await t('appointment_reminders')
+          // The CURRENT locked membership, not the plan snapshot (codex
+          // r43): a joiner that inherited the retained token in the gap
+          // between plan and repair must release with the repaired stop.
+          .whereIn('scheduled_service_id', rows.map((r) => r.id))
+          .whereNotNull('move_hold_until')
+          .forUpdate()
+          .select('id', 'move_hold_until');
+        const releasable = heldRows.filter((r) => {
+          const until = new Date(r.move_hold_until).getTime();
+          if (until <= Date.now()) return true; // expired residue
+          const stampedAt = until - MOVE_HOLD_TTL_MS;
+          return Date.now() - stampedAt >= MOVE_HOLD_TAKEOVER_AFTER_MS; // retained, not live
+        });
+        if (releasable.length) {
+          await t('appointment_reminders').whereIn('id', releasable.map((r) => r.id))
+            .update({ move_hold_until: null, move_hold_token: null });
+        }
+        repairOutcome = 'repaired';
+        logger.info(`[visit-groups] no-op unit move repaired the stale parent of visit ${plan.visitId} and released its retained hold`);
+      });
+    } catch (repairErr) {
+      repairOutcome = 'failed';
+      logger.warn(`[visit-groups] no-op parent repair for visit ${plan.visitId} failed: ${repairErr.message} — a retained hold (if any) expires on its own`);
+    }
+    return {
+      success: true,
+      newDate,
+      visitMove: {
+        visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String),
+        // A stale-but-unrepaired parent keeps the incomplete-move signal
+        // (codex r39): callers preserve needsAttention, suppress the
+        // customer text and pass preserveMoveHold on their reminder sync.
+        ...(repairOutcome === 'failed' ? { parentRetargetFailed: true } : {}),
+      },
+    };
+  }
+
+  // ---- 2. move members: primary first, then siblings ----
+  // A durable SEND HOLD is stamped on every member's reminder row before
+  // the first member write (owner ruling 2026-08-30; codex r28/r29 P1):
+  // the sent flags cannot carry this hold — the DB sync trigger
+  // (sync_appointment_reminder_on_service_change) and the per-member
+  // reminder sync recalculate them for the new slot as the move itself
+  // writes — so the hold is its own column (move_hold_until), untouched by
+  // the trigger and honored by every sender (deliverConfirmation's
+  // rechecks, the 72h/24h sweep). Full success clears it (fenced on our
+  // own stamp); a PARTIAL move leaves it, so nobody is auto-texted until
+  // staff repair the stop — and it expires on its own in 24h so a
+  // forgotten repair can never silence a customer forever. The stamp
+  // itself failing ABORTS the move before anything is written.
+  // COHORT IDENTITY is a cryptographically unique token written with the
+  // stamp (codex r35 — a jittered expiry is NOT unique: two same-customer
+  // moves inside one second can collide): the repair-release keys on the
+  // token; the senders' hold checks and the lease/takeover math keep
+  // reading move_hold_until alone.
+  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS);
+  const reminderHoldToken = require('crypto').randomBytes(16).toString('hex');
+  let reminderHoldIds = [];
+  let reminderHoldMemberIds = [];
+  try {
+    await db.transaction(async (t) => {
+      // The claim runs under the STOP LOCK with a fresh membership read
+      // (local codex gate P1): the plan's own trx (and its stop lock)
+      // committed before this one, so a row can JOIN the visit in the gap
+      // — it is missing from plan.memberIds, no held sibling existed for
+      // the join-inherit to copy, and a partial move would leave it
+      // texting while the planned cohort is held. The hold covers the
+      // UNION of the plan and the live membership: the late joiner stays
+      // quiet with the cohort (the retarget detaches it with a warning —
+      // that established contract is unchanged) and members that left are
+      // fenced by the plan's own per-member checks.
+      await lockStopForRow(t, serviceId);
+      const membershipNow = (await openMembers(t, plan.visitId)).map((m) => String(m.id));
+      const holdMemberIds = [...new Set([...plan.memberIds.map(String), ...membershipNow])];
+      reminderHoldMemberIds = holdMemberIds;
+      // EVERY represented member's row is held — including members already
+      // at the target (codex r30 P1): they stay part of the whole-visit
+      // quiet invariant while another member is mid-move or stranded.
+      // FOR UPDATE + an active-hold refusal make this a LEASE (codex r30
+      // P1): a concurrent mover's live stamp is never overwritten (its
+      // partial outcome would otherwise lose its hold when our fenced
+      // release ran), it is refused — that visit is mid-move elsewhere.
+      // Cancelled rows are held too (codex r28): the schedule-change
+      // trigger can reactivate one mid-move and it must inherit the quiet.
+      const holdRows = await t('appointment_reminders')
+        .whereIn('scheduled_service_id', holdMemberIds)
+        .forUpdate()
+        .select('id', 'scheduled_service_id', 'move_hold_until');
+      // Foreign-hold refusal is a LEASE with a takeover grace (codex r30
+      // P1): a stamp inside the grace belongs to a LIVE concurrent mover
+      // (a move completes in seconds) and is refused. An OLDER active
+      // stamp is a RETAINED hold — a partial move / failed retarget kept
+      // it so nobody texts until staff repair the stop — and the repair
+      // move the needsAttention alert asks for IS such a new mover: it
+      // takes the lease over (FOR UPDATE above serializes rival repairs;
+      // the re-stamp below replaces the old stamp, so the finished
+      // repair's fenced release clears it). Without the takeover every
+      // repair 503'd until the 24h expiry. Stamp time is derivable:
+      // every stamp is written as now + MOVE_HOLD_TTL_MS.
+      const foreign = holdRows.find((r) => {
+        if (!r.move_hold_until) return false;
+        const until = new Date(r.move_hold_until).getTime();
+        if (until <= Date.now()) return false; // expired
+        const stampedAt = until - MOVE_HOLD_TTL_MS;
+        return Date.now() - stampedAt < MOVE_HOLD_TAKEOVER_AFTER_MS; // live mover
+      });
+      if (foreign) {
+        throw Object.assign(new Error('another move of this stop is still in progress — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
+      }
+      // A member with NO reminder row gets a HELD pre-closed placeholder
+      // (codex r29 P1): the lease must exist durably for every member —
+      // a self-heal or inline registration mid-move would otherwise create
+      // an unheld row with no held sibling to inherit from. The placeholder
+      // mechanism is the repo's own (all send legs closed in one INSERT;
+      // the sync trigger re-arms it when a real slot lands — carrying our
+      // stamp, so the re-armed row stays quiet until release/expiry), and
+      // its per-service idempotency means a racing registration finds the
+      // row instead of inserting a rival.
+      const coveredMemberIds = new Set(holdRows.map((r) => String(r.scheduled_service_id)));
+      const stubIds = [];
+      for (const memberId of holdMemberIds.filter((id) => !coveredMemberIds.has(id))) {
+        const rec = await ensureMemberReminderRowInTx(t, memberId);
+        if (rec && rec.id) stubIds.push(rec.id);
+      }
+      const allIds = [...holdRows.map((r) => r.id), ...stubIds];
+      if (!allIds.length) return;
+      await t('appointment_reminders').whereIn('id', allIds)
+        .update({ move_hold_until: reminderHoldUntil, move_hold_token: reminderHoldToken });
+      reminderHoldIds = allIds;
+    });
+  } catch (err) {
+    reminderHoldIds = [];
+    reminderHoldMemberIds = [];
+    // A membership change (or the stop moving) during the claim is a
+    // PLAN-STALE abort, not a hold failure — surface it unwrapped so the
+    // caller replans instead of retrying a 503 (local gate P1).
+    if (err && (err.code === 'VISIT_MEMBERSHIP_CHANGED' || err.code === 'VISIT_STOP_MOVED')) {
+      throw err.code === 'VISIT_STOP_MOVED'
+        ? Object.assign(new Error('Cannot move this stop — it changed while the move was being prepared; reload and try again'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true })
+        : err;
+    }
+    throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true, ...(err.code === 'VISIT_MOVE_HOLD_ACTIVE' ? { reason: 'hold_active' } : {}) });
+  }
+  // Release the hold (fenced on our own stamp so a newer mover's hold is
+  // never cleared). Runs on full success AND on an abort where nothing
+  // committed; a failed release leaves the rows quiet until the stamp
+  // expires (the safe direction) and reports.
+  const releaseReminderHold = async (onFailure) => {
+    try {
+      // Keyed on the MEMBERS + our stamp (codex r28): a reminder row
+      // created or re-stamped mid-move carries the same stamp and is
+      // released with the rest; a newer mover's stamp is never touched.
+      // Keyed on the TOKEN ALONE (uncapped r36 P1): the member-id snapshot
+      // predates late joins that inherited this token — the crypto-unique
+      // token IS the cohort, so every row carrying it releases together.
+      await db('appointment_reminders')
+        .where({ move_hold_token: reminderHoldToken })
+        .update({ move_hold_until: null, move_hold_token: null });
+    } catch (err) {
+      onFailure(err);
+    }
+  };
+  // A reminder row can appear (self-heal, trigger reactivation, the
+  // member's own sync) AFTER the up-front claim (codex r28 P1): re-stamp
+  // the member's row after its move so a late row inherits the quiet.
+  // Best-effort — the senders' own hold checks are the authority.
+  const restampMemberHold = async (memberId) => {
+    try {
+      await db('appointment_reminders').where({ scheduled_service_id: memberId })
+        .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', reminderHoldUntil); })
+        .update({ move_hold_until: reminderHoldUntil, move_hold_token: reminderHoldToken });
+    } catch (err) {
+      logger.warn(`[visit-groups] reminder hold re-stamp for ${memberId} failed: ${err.message}`);
+    }
+  };
+  const moved = [];
+  const failed = [];
+  const warnings = [...(plan.techClashWarnings || [])];
+  let primaryResult = null;
+  // technicianId is NOT forwarded to sibling moves (codex r15 P1): the
+  // rebooker writes technician_id directly, bypassing the canonical
+  // assignment writer (tech-day fences, unassigned_overdue resolution,
+  // dispatch broadcast). Each moved sibling is re-pointed AFTER its move
+  // through alignMemberTechnician → assignDispatchJob instead.
+  const { expect: _expect, expectAnchor: _expectAnchor, expectOccurrenceIds: _expectOcc, expectSchedule: _expectSched, primaryViaSeries: _pvs, memberGuard: _guard, technicianId: _tech, ...siblingBase } = options;
+  // Landed state per member (date + window at the target) once its move
+  // committed — the contract later member moves verify the row against.
+  const landedState = {};
+  // Landed tuple = what the rebooker actually writes (codex r11): a
+  // date-only move keeps BOTH bounds; a start-only window leaves the end
+  // to the rebooker's derivation, so window_end is left OUT of the contract
+  // (an undefined key is not compared) rather than asserted null.
+  const targetTuple = (t) => {
+    if (!t.window) return { scheduled_date: newDateStr, window_start: t.expect.window_start || null, window_end: t.expect.window_end || null };
+    if (typeof t.window === 'string') { const [ts, te] = t.window.split('-'); return { scheduled_date: newDateStr, window_start: ts, window_end: te }; }
+    return { scheduled_date: newDateStr, window_start: t.window.start || null };
+  };
+  for (const t of plan.targets.filter((x) => x.alreadyAtTarget)) landedState[t.id] = targetTuple(t);
+  // Did this member's row land at its planned target (same visit, target
+  // date, planned window bounds where the plan asserts them, planned tech)?
+  // Read fresh from the root connection; a read failure reports NOT landed
+  // (the caller then treats the move as failed — the conservative answer).
+  const memberLandedAt = async (t) => {
+    try {
+      const row = await db('scheduled_services').where({ id: t.id })
+        .first('scheduled_date', 'window_start', 'window_end', 'visit_id', 'technician_id');
+      if (!row || String(row.visit_id || '') !== String(plan.visitId)) return false;
+      if (dateOnly(row.scheduled_date) !== newDateStr) return false;
+      const want = targetTuple(t);
+      const norm = (v) => (v ? String(v).slice(0, 5) : null);
+      if (want.window_start !== undefined && norm(row.window_start) !== norm(want.window_start)) return false;
+      if (want.window_end !== undefined && norm(row.window_end) !== norm(want.window_end)) return false;
+      // The technician is NOT part of the landing (local codex audit P1):
+      // technicianId never rides the rebooker, so a correctly landed row
+      // still carries its pre-move technician until alignMember re-points
+      // it AFTER this verdict — and alignMember's own fence
+      // (expectTechnicianId ⇒ ASSIGNMENT_STALE) is the technician verdict.
+      return true;
+    } catch (readErr) {
+      // INDETERMINATE, never "not landed" (uncapped r36 P1): the move may
+      // have committed with only the verification read failing — treating
+      // it as false would take the primary's nothing-moved abort branch
+      // and release the cohort hold over a possibly-moved stop.
+      logger.warn(`[visit-groups] unit move landed-check for ${t.id} failed: ${readErr.message}`);
+      throw Object.assign(new Error(`could not verify whether ${t.id} landed: ${readErr.message}`), { code: 'VISIT_LANDED_UNVERIFIABLE' });
+    }
+  };
+  const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
+  // A sibling that did not land (or could not be re-pointed): partial +
+  // warning — the staff contract (r3); the detach seam separates the row
+  // that stayed behind. (Frozen visits are refused before the first write.)
+  const failSibling = async (target, err, reason, extra = {}) => {
+    failed.push({ id: target.id, reason, code: err.code || null, ...extra });
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${reason}`);
+  };
+  for (const target of ordered) {
+    // The primary keeps the caller's own fence; a caller that supplied none
+    // (the public self-reschedule path) gets the LOCKED plan's fence, so two
+    // concurrent submissions cannot both plan from the old visit and let
+    // the second overwrite the first (codex r3).
+    const callerFenced = options.expect || options.expectAnchor || options.expectSchedule;
+    // The primary's occupancy probes hide the siblings (excludeServiceIds);
+    // excludeExpect makes the rebooker lock those rows FOR UPDATE inside its
+    // own move transaction and verify they still hold the plan snapshot
+    // (membership + slot) — held through the conflict checks and the write,
+    // so a sibling split and re-booked into the target can never hide
+    // behind the exclusion (codex r4/r5). Mismatch → 409 VISIT_PLAN_STALE.
+    // EVERY member move carries the contract for the OTHER participating
+    // rows (codex r6): already-moved members at their landed target,
+    // not-yet-moved members at their planned snapshot; a failed sibling
+    // is dropped from the exclusion (it is real occupancy again). Under
+    // auto-dispatch the operator opt-out flags ride in the contract and in
+    // each sibling's own CAS, so an opt-out committed between plan and
+    // move stops the automatic move instead of being overridden.
+    const autoDispatch = String(initiatedBy) === 'auto_dispatch';
+    const optOutFence = autoDispatch ? { auto_dispatch_locked: false, auto_dispatch_excluded: false } : {};
+    const participating = plan.targets.filter((x) => x.id !== target.id && !failed.some((f) => f.id === x.id));
+    const excludeExpect = participating.map((x) => ({ id: x.id, visit_id: plan.visitId, ...(landedState[x.id] || x.expect), ...optOutFence }));
+    const excludeServiceIds = [...new Set([...(options.excludeServiceIds || []), ...participating.map((x) => x.id)].map(String))];
+    // The primary's CAS always carries the unit fence (locked membership +
+    // planned technician); a caller's own expect fields are MERGED on top,
+    // never replace it (codex r8). A caller fencing via expectAnchor /
+    // expectSchedule keeps those and still gets the unit keys.
+    const primaryExpect = {
+      ...(callerFenced ? {} : target.expect),
+      visit_id: plan.visitId,
+      technician_id: target.expect.technician_id,
+      ...(options.expect || {}),
+    };
+    // technicianId never rides ANY member's rebooker call (local codex audit):
+    // the primary too is re-pointed after its move through the canonical
+    // assignment writer (tech-day fences, unassigned_overdue resolution,
+    // dispatch broadcast). The rebooker's occupancy probe therefore runs on
+    // the row's CURRENT technician; staff surfaces are advisory anyway.
+    const { technicianId: _primaryTech, ...primaryBase } = options;
+    const memberOpts = target.isPrimary
+      ? { ...primaryBase, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      // A sibling is ALWAYS a single-row move (codex r4): the dispatch
+      // surface previewed/acknowledged series scope for the tapped row
+      // only, so a recurring sibling must never shift its own future
+      // series undisclosed.
+      : { ...siblingBase, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+    // Callers sync reminders for the tapped row only (r2): every moved
+    // sibling gets its reminder row synced here, notice suppressed — the
+    // visit's one reminder text is the primary's. A sibling's own series
+    // move (seriesMoveId) is finished by the series-effects reconciler like
+    // any other committed series_moves row.
+    // Re-point a moved MEMBER (primary included) at the requested technician through the
+    // canonical writer (codex r15 P1). Its own transaction after the move
+    // committed; 40P01 (tech-day fence vs a scheduling writer waiting on
+    // our stop lock) retries. A failure leaves the row moved but on its old
+    // technician — reported as a failed member (the detach seam separates
+    // it from the re-pointed parent), never silently split-tech.
+    const alignMember = async () => {
+      if (options.technicianId === undefined) return;
+      if (String(target.expect.technician_id || '') === String(options.technicianId || '')) return;
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          // skipVisitSeam: the per-row seam would see a half-reassigned visit
+          // (later siblings + the parent still on the old tech) and detach
+          // this row for good (codex r16 P1); step 4 runs the seam for every
+          // member AFTER the parent retarget carries the new technician.
+          // expectTechnicianId (local audit): the planned pre-move technician
+          // from the LOCKED plan is the baseline — an operator reassignment
+          // that landed after the sibling's move is newer and wins; this
+          // member is then reported failed/stale, never overwritten.
+          await db.transaction(async (t) => {
+            // The destination technician's slot-reserve lock (the rebooker's
+            // and slot-reservation's key shape) serializes this check with
+            // every scheduling writer on that tech-day; the tech lock is
+            // taken BEFORE row locks, the rebooker's own order (local codex
+            // audit r24). A clash leaves the row moved on its old technician
+            // — a reported failed member, never a silent double-booking;
+            // advisory staff surfaces warn and assign, as the rebooker would.
+            if (options.technicianId) {
+              const landed = landedState[target.id] || {};
+              // Rung 1 first (occupancy.js ORDERING CONTRACT, codex r23 P1):
+              // the date-wide occupancy lock guards the tech-blind global
+              // predicate below — an unassigned or other-tech row committed
+              // after the member's move would otherwise pass the tech-scoped
+              // probe (AGENTS.md booking conflict-check class). Then the
+              // destination tech's slot-reserve lock, then row locks — the
+              // rebooker's own order.
+              const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+              await acquireOccupancyLock(t, newDateStr);
+              await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
+              // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
+              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+              const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
+              const windowEnd = (row && row.window_end) || landed.window_end || null;
+              const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
+              // Only members this move still REPRESENTS are hidden from the
+              // probes (local audit r32): a member reported failed (or one
+              // that diverged) is real occupancy again and may have moved
+              // into this target since — hiding it would allow a
+              // double-booking. Failed ids are removed from the exclusion.
+              const failedIds = new Set(failed.map((f) => String(f.id)));
+              const probeExclude = plan.memberIds.map(String).filter((mid) => !failedIds.has(mid));
+              const globalClash = windowStart && probeEnd ? await findConflictingVisits({
+                db: t, date: newDateStr, windowStart: String(windowStart).slice(0, 5), windowEnd: probeEnd,
+                excludeServiceIds: probeExclude, excludeStatuses: ['cancelled', 'completed'],
+              }) : [];
+              const clashId = (globalClash && globalClash.length ? globalClash[0].id : null) || await destinationTechClash(t, {
+                technicianId: options.technicianId, date: newDateStr, windowStart, windowEnd,
+                durationMinutes: row ? row.estimated_duration_minutes : null, excludeIds: probeExclude,
+              });
+              if (clashId && options.overlapAdvisory !== true) {
+                throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', conflictId: clashId });
+              }
+              if (clashId) warnings.push(`service ${target.id} overlaps another job on the destination technician's route (${clashId})`);
+            }
+            await alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null });
+          });
+          return;
+        } catch (err) {
+          lastErr = err;
+          if (err && err.code === '40P01') continue;
+          break;
+        }
+      }
+      await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
+    };
+    const syncSiblingReminder = async () => {
+      try {
+        // expectSchedule fences this sync against a NEWER move that landed
+        // after the row moved (codex r3): a stale pass never overwrites it.
+        // keepPendingConfirmation: nobody sends a replacement notice for a
+        // sibling, so a still-pending creation confirmation stays pending
+        // (delivered by the deferred sendConfirmation) instead of being
+        // superseded and re-armed after the fact (codex r6/r7).
+        await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
+          sendNotification: false,
+          keepPendingConfirmation: true,
+          // This sync runs INSIDE the unit move — the repair-release must
+          // not fire off it and un-hold the cohort mid-move (codex r34).
+          preserveMoveHold: true,
+          expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
+        });
+      } catch (remErr) {
+        logger.warn(`[visit-groups] unit move reminder sync for ${target.id} failed: ${remErr.message}`);
+      }
+    };
+    try {
+      const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
+      moved.push(target.id);
+      landedState[target.id] = targetTuple(target);
+      // The status the rebooker's CAS actually matched outranks the plan
+      // snapshot (codex r6): an operator confirm between plan and move must
+      // not be rewound by a caller restoring 'pending'.
+      if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
+      if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
+      if (target.isPrimary) primaryResult = r;
+      await alignMember();
+      if (!target.isPrimary) await syncSiblingReminder();
+      await restampMemberHold(target.id);
+    } catch (err) {
+      // The rebooker COMMITS its move transaction and then runs post-commit
+      // work (tech_status clear, follow-up shift, escalation, legacy
+      // activation) that can reject after the row landed (codex r13 P1).
+      // "Threw" therefore does not mean "did not move": re-read the row and
+      // reconcile — a member that sits at its planned target is a committed
+      // move (parent retarget + seams must still run for it); only a row
+      // still at its old placement is a real failure.
+      let landedVerdict;
+      try {
+        landedVerdict = await memberLandedAt(target);
+      } catch (verifyErr) {
+        // INDETERMINATE landing (uncapped r36 P1): the move may have
+        // committed with only the verification read failing. Never take
+        // the nothing-moved branch (which releases the cohort hold) —
+        // report the member as failed/partial so the hold is RETAINED and
+        // staff repair the stop; the reconciler/TTL are the backstops.
+        if (target.isPrimary) {
+          // The primary's outcome is unknowable right now: abort WITHOUT
+          // the nothing-moved release — the hold stays until the board is
+          // re-saved (or the TTL expires), so no stale text can go out
+          // either way.
+          throw Object.assign(new Error('Could not verify whether this stop moved — reload the board and re-save it; no automated texts will go out until the stop is verified.'), { statusCode: 503, code: 'VISIT_MOVE_UNVERIFIED', isOperational: true });
+        }
+        await failSibling(target, verifyErr, verifyErr.message);
+        continue;
+      }
+      if (landedVerdict) {
+        moved.push(target.id);
+        landedState[target.id] = targetTuple(target);
+        warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
+        logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
+        if (target.isPrimary) primaryResult = { success: true, newDate };
+        await alignMember();
+        if (!target.isPrimary) await syncSiblingReminder();
+        await restampMemberHold(target.id);
+        continue;
+      }
+      if (target.isPrimary) {
+        // The tapped row itself could not move — NOTHING has moved: the
+        // hold must not outlive this abort (codex r28 P1); a failed release
+        // self-heals when the stamp expires.
+        await releaseReminderHold((rerr) => logger.warn(`[visit-groups] reminder-hold release after aborted move of visit ${plan.visitId} failed: ${rerr.message} — rows stay quiet until the hold expires`));
+        throw err;
+      }
+      await failSibling(target, err, err.message);
+    }
+  }
+
+  // ---- 3. retarget the parent from the rows that actually landed ----
+  let parentRetargetFailed = false;
+  const newKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
+  try {
+    await db.transaction(async (t) => {
+      for (const key of [...new Set([plan.oldKey, newKey])].sort()) await lockStop(t, key);
+      const visit = await t('service_visits').where({ id: plan.visitId }).first();
+      if (!visit || String(visit.status) !== 'open') {
+        // The members moved but their parent is gone / no longer open: the
+        // rows now hang off a parent that names another stop and the seams
+        // below no-op on a non-open visit — a retarget FAILURE the caller
+        // must see (parentRetargetFailed), never a silent success (local audit).
+        throw Object.assign(new Error(`visit ${plan.visitId} is ${visit ? visit.status : 'missing'} — members moved but the visit record could not be retargeted`), { code: 'VISIT_PARENT_NOT_OPEN' });
+      }
+      // FOR UPDATE (codex r19): assignDispatchJob row-locks without the stop
+      // lock, so the verified members stay locked through the parent write
+      // and a reassignment linearizes AFTER this move (its seam then sees the
+      // retargeted parent) instead of slipping between verify and update.
+      const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
+        .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .orderBy('id').forUpdate()
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+      // Every member reported MOVED must still be a member of this visit
+      // sitting at its landed target under these locks (codex r17): a
+      // newer assignment/move between a member's move and this retarget can
+      // detach it (its own seam) or move it again — the parent must not be
+      // retargeted from whichever rows remain while `moved` claims a whole
+      // visit. Divergent members become failed (partial), never silent.
+      {
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        for (const id of [...moved]) {
+          if (failed.some((f) => String(f.id) === String(id))) continue; // already reported (e.g. re-point failed)
+          const r = rows.find((x) => String(x.id) === String(id));
+          const want = landedState[id] || {};
+          const ok = !!r && dateOnly(r.scheduled_date) === newDateStr
+            && (want.window_start === undefined || norm(r.window_start) === norm(want.window_start))
+            && (want.window_end === undefined || norm(r.window_end) === norm(want.window_end))
+            && (options.technicianId === undefined || String(r.technician_id || '') === String(options.technicianId || ''));
+          if (!ok) {
+            moved.splice(moved.indexOf(id), 1);
+            const reason = r ? 'moved again before the visit record was retargeted' : 'left the visit before the visit record was retargeted';
+            failed.push({ id, reason, code: 'VISIT_MEMBER_DIVERGED' });
+            logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${id} ${reason}`);
+          }
+        }
+      }
+      // A row that joined the visit AFTER the plan snapshot (the old stop
+      // lock was released between plan and move — codex r2) is not part of
+      // this move: detach it in place so it never trails a parent that
+      // points at the new stop.
+      const atTargetStop = (r) => {
+        if (dateOnly(r.scheduled_date) !== newDateStr) return false;
+        // A reassignment moved the planned members to options.technicianId;
+        // a late joiner still on another tech is not at this stop (codex
+        // r9) — detached below rather than left as a split-tech visit.
+        if (options.technicianId !== undefined && String(r.technician_id || '') !== String(options.technicianId || '')) return false;
+        if (!win.start) return true;
+        // Same-day window move (codex r3): a late row still at the OLD window
+        // never landed — compare against the moved primary's target window.
+        const primaryTarget = plan.targets.find((x) => x.isPrimary);
+        const [ts, te] = typeof primaryTarget.window === 'string' ? primaryTarget.window.split('-') : [primaryTarget.window && primaryTarget.window.start, null];
+        return windowsOverlap(r.window_start, r.window_end, ts, te || ts);
+      };
+      const late = rows.filter((r) => !plan.memberIds.map(String).includes(String(r.id)) && !atTargetStop(r));
+      if (late.length) {
+        await t('scheduled_services').whereIn('id', late.map((r) => r.id)).update({ visit_id: null });
+        // The detached row leaves THIS move's cohort too (codex on-merge
+        // r2): it inherited the token at join, and a token still on a row
+        // at the OLD stop would fail the finalizer's one-stop test and
+        // strand the whole successful cohort held for 24h. Its own
+        // reminders resume normally (it kept its old slot).
+        await t('appointment_reminders')
+          .whereIn('scheduled_service_id', late.map((r) => r.id))
+          .where({ move_hold_token: reminderHoldToken })
+          .update({ move_hold_until: null, move_hold_token: null });
+        warnings.push(`${late.length} service(s) joined this stop during the move and were left at the old time — check the schedule`);
+        logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detached late joiner(s) ${late.map((r) => r.id).join(',')}`);
+      }
+      // A planned member counts as landed only when its ACTUAL placement is
+      // the one this move wrote for it (landedState: moved or already at
+      // target) and it is not a failed member (local audit): on a same-day
+      // window move a failed sibling still sits on the date at its OLD
+      // window, and retargeting the parent from it would span both stops.
+      const normHHMM = (v) => (v ? String(v).slice(0, 5) : null);
+      const landedFor = (r) => {
+        const want = landedState[r.id];
+        if (!want) return false;
+        if (failed.some((f) => String(f.id) === String(r.id))) return false;
+        if (dateOnly(r.scheduled_date) !== newDateStr) return false;
+        if (want.window_start !== undefined && normHHMM(r.window_start) !== normHHMM(want.window_start)) return false;
+        if (want.window_end !== undefined && normHHMM(r.window_end) !== normHHMM(want.window_end)) return false;
+        if (options.technicianId !== undefined && String(r.technician_id || '') !== String(options.technicianId || '')) return false;
+        return true;
+      };
+      const landed = rows.filter((r) => (plan.memberIds.map(String).includes(String(r.id)) ? landedFor(r) : atTargetStop(r)));
+      // ZERO landed rows is a retarget FAILURE, never a silent skip (codex
+      // r43): e.g. every date move committed but every post-move alignment
+      // failed — returning here left parentRetargetFailed false and the
+      // "successful" seam then detached the moved children from the stale
+      // parent and could dissolve the visit.
+      if (!landed.length) {
+        throw Object.assign(new Error(`no member of visit ${plan.visitId} could be verified at the target — the visit record was not retargeted`), { code: 'VISIT_PARENT_NO_LANDED' });
+      }
+      const starts = landed.map((r) => r.window_start).filter(Boolean).sort();
+      const ends = landed.map((r) => r.window_end).filter(Boolean).sort();
+      const patch = {
+        scheduled_date: newDateStr,
+        window_start: starts[0] || null,
+        window_end: ends[ends.length - 1] || null,
+      };
+      if (newKey !== visit.stop_base_key) {
+        patch.stop_base_key = newKey;
+        patch.stop_seq = await nextStopSeq(t, newKey);
+      }
+      if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+      if (plan.anyLive || newDateStr !== plan.oldDate) {
+        // The members' lifecycle was rewound by the rebooker; the visit's
+        // must follow, and the day's tracker one-shots re-arm.
+        patch.en_route_at = null;
+        patch.arrived_at = null;
+        await t('visit_effects').where({ visit_id: plan.visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
+      }
+      await t('service_visits').where({ id: plan.visitId }).update(patch);
+    });
+  } catch (err) {
+    // Staff surface: the members moved; the office is told the visit
+    // record lagged (warning + dispatch alert via the caller's warnings).
+    parentRetargetFailed = true;
+    warnings.push(`visit parent retarget failed: ${err.message}`);
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: parent retarget failed: ${err.message}`);
+  }
+
+  // ---- 4. detach seam once for every member, then the union ----
+  // ONLY after a successful parent retarget (codex r40 uncapped): with the
+  // parent still describing the OLD stop, every moved child mismatches it
+  // and the seam would detach them all — dissolving the visit and clearing
+  // visit_id, so the prescribed re-save enters the UNGROUPED path and can
+  // never retarget/reassemble the stop. Skipping the seam preserves the
+  // cohort (the page/confirm/calendar/senders all fail closed on the
+  // mismatched membership meanwhile), and the re-save's repair pass — or
+  // the takeover unit move for stragglers — runs it after a retarget that
+  // succeeded. When the retarget DID succeed, the seam keeps its r3
+  // contract: landed members match the new parent and stay; a straggler
+  // mismatches and is separated.
+  if (!parentRetargetFailed) {
+    for (const id of plan.memberIds) {
+      try { await handleChildStopChanged(id); } catch (err) { logger.warn(`[visit-groups] unit move seam for ${id} failed: ${err.message}`); }
+    }
+    try {
+      await db.transaction(async (t) => {
+        const v = await t('service_visits').where({ id: plan.visitId }).first();
+        if (v && String(v.status) === 'open') { await lockStop(t, v.stop_base_key); await recomputeVisitWindow(t, v.id); }
+      });
+    } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
+  } else {
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detach seam SKIPPED — the parent retarget failed and the cohort must stay intact for the re-save repair`);
+  }
+
+  if (failed.length) {
+    warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
+    // Partial: the up-front confirmation claims STAY — nobody is auto-texted
+    // (owner ruling 2026-08-30); the dispatcher owns the message after the
+    // repair (needsAttention carries the straggler ids).
+  } else if (parentRetargetFailed) {
+    // Every member landed but the visit record still describes the old stop
+    // (codex r29 P1): callers classify this as an incomplete move and hold
+    // their notices — the reminder sweep must stay quiet too. The hold is
+    // KEPT; the staff re-save that repairs the parent runs its own unit
+    // move, whose full success releases (or the stamp expires in 24h).
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: parent retarget failed — reminder hold kept`);
+  } else {
+    // Full success: the hold is NOT released here (codex on-merge round) —
+    // releasing before the caller's own reminder bookkeeping (dispatch's
+    // syncRescheduleReminder + reschedule notice) opens a gap the 15-min
+    // sweep can text into, duplicating the route's notice. The caller's
+    // post-move handleReschedule sync is the fenced finalizer: its
+    // token-keyed repair-release verifies the one-stop + parent tuple and
+    // clears the cohort; the healthy no-op repair and the 24h TTL are the
+    // backstops if the sync never runs.
+    logger.info(`[visit-groups] unit move of visit ${plan.visitId} complete — hold retained for the caller's reminder sync to release`);
+  }
+  // members: per-row pre-move state so a caller with its own post-move
+  // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
+  // to EVERY row this move touched, not just the tapped one (codex r4).
+  // `landed` = the slot the move wrote (date + window bounds the plan asserts)
+  // so a caller's post-move bookkeeping can fence its writes on it (a newer
+  // move/confirm after the unit move must never be rewound — local audit).
+  const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus, landed: landedState[x.id] || null }));
+  // unchanged: members the plan found already at the target (e.g. a
+  // windowless sibling on a same-day window move) — represented by this
+  // visit's move without a write, so batch callers treat them as covered
+  // (codex r19): never re-moved or re-texted as a second stop.
+  const unchanged = plan.targets.filter((x) => x.alreadyAtTarget).map((x) => String(x.id));
+  // visitStart: the STOP's landed arrival start — the earliest start among
+  // the members this move represents (moved + already-at-target) — so a
+  // caller's ONE customer notice quotes the stop's window, not the tapped
+  // member's (a later chained member moved to 11:00 can shift its 09:00
+  // sibling to 10:00: the customer is told 10:00, codex #3609 r25 P1).
+  const representedStarts = plan.targets
+    .filter((x) => moved.includes(x.id) || x.alreadyAtTarget)
+    .map((x) => (landedState[x.id] && landedState[x.id].window_start) || x.startHHMM || null)
+    .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
+  const visitStart = representedStarts[0] || null;
+  const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
+  return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
+}
+
 module.exports = {
+  windowedMembersConnected,
+  liveStopStartHHMM,
+  incompleteMoveMessage,
+  appointmentSendHeld,
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,
@@ -1531,13 +2864,19 @@ module.exports = {
   lockStopForRow,
   openMembers,
   visitActivity,
+  LIVE_COMPLETION_CLAIM_STATUSES,
+  frozenVisitVerdict,
+  assertRowMovableAlone,
   fanOutLiveTransition,
+  moveVisitAsUnit,
   claimVisitNotification,
   notificationLeaseLive,
   renewNotificationLease,
   finalizeVisitNotification,
   visitSummariesForRows,
   _test: {
+    shiftClock,
+    expectMatchesRow,
     siblingEligibleFor,
     visitSummariesForRows,
     windowedMembersConnected,

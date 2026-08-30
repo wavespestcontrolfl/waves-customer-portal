@@ -315,7 +315,7 @@ test('a stop moved concurrently (stale date/window snapshot) lands in skipped_co
   // schedule triple (date + start + END).
   expect(staleUpdate.where).toHaveBeenCalledWith('status', 'confirmed');
   expect(staleUpdate.where).toHaveBeenCalledWith({
-    scheduled_date: '2026-05-20', window_start: '09:00:00', window_end: '10:00:00',
+    scheduled_date: '2026-05-20', window_start: '09:00:00', window_end: '10:00:00', visit_id: null,
   });
   // Exactly one audit row — the skipped stop logged nothing.
   expect(logChain.insert).toHaveBeenCalledTimes(1);

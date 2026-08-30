@@ -895,7 +895,8 @@ describe('appointment reminder cron delivery windows', () => {
     const strandedConfirmations = chain({
       select: jest.fn().mockResolvedValue([]),
     });
-    const appointmentReminderQueries = [strandedConfirmations, reminderList, markSent];
+    const holdCheck = chain(); // deliverAppointmentNotice unit-move hold check → no hold
+    const appointmentReminderQueries = [strandedConfirmations, reminderList, holdCheck, markSent];
     const customerQueries = [customerQuery, landlineQuery];
 
     db.mockImplementation((table) => {

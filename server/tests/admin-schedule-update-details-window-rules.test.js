@@ -184,6 +184,24 @@ describe('date-only moves + the scheduling-field CAS', () => {
     expect(status).toBe(418);
   });
 
+  test('collective gate on: a GROUPED recurring row\'s date move is refused inside the planner — before the body is stripped, before any write (local gate r28 / codex #3609)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      db.mockImplementation(() => {
+        const c = chain({ ...STORED, is_recurring: true, status: 'confirmed', visit_id: 'visit-1' });
+        c.whereNotIn = jest.fn().mockReturnThis();
+        c.select = jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'confirmed' }, { id: 'svc-2', status: 'pending' }]); // openMembers
+        return c;
+      });
+      const { status, body } = await put({ scheduledDate: '2099-02-01', notes: 'gate check', seriesAck: true, seriesAckIds: ['x'] });
+      expect(status).toBe(409);
+      expect(body.code).toBe('VISIT_EDIT_SCHEDULE_UNSUPPORTED');
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    }
+  });
+
   test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {
     db.mockImplementation(() => chain({ ...STORED, window_start: null, window_end: null }));
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
@@ -267,9 +285,24 @@ describe('start-only edit derives its end from the stored span, else estimated_d
     expect(windowDurationMinutes(null, null, 0)).toBe(60);
   });
 
+  test('a one-member visit at the pre-read takes the stop lock right after rung 1 and re-counts open members under it before the slot write (local codex audit)', () => {
+    const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
+    const rung1 = ud.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);');
+    const stopLock = ud.indexOf("lockStopForRow(trx, req.params.id)");
+    const firstRowLock = ud.indexOf('.forUpdate()', rung1);
+    const recount = ud.indexOf("openMembers(trx, occRow.visit_id)");
+    const slotCas = ud.indexOf("String(occRow.visit_id || '') !== String(preReadVisitId || '')");
+    expect(rung1).toBeGreaterThan(-1);
+    expect(stopLock).toBeGreaterThan(rung1);          // after rung 1 ...
+    expect(stopLock).toBeLessThan(firstRowLock);      // ... and before every row lock
+    expect(recount).toBeGreaterThan(slotCas);         // membership re-count sits with the CAS, before the slot write
+    expect(ud.slice(stopLock, stopLock + 400)).toMatch(/VISIT_STOP_MOVED[\s\S]*VISIT_CHANGED_RETRY/);
+    expect(ud.slice(recount, recount + 700)).toMatch(/liveMembers\.length >= 2[\s\S]*VISIT_CHANGED_RETRY/);
+  });
+
   test('the pre-read selects estimated_duration_minutes and passes it as the fallback', () => {
     const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
-    expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'\)/);
+    expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id'\)/);
     expect(ud).toMatch(/windowDurationMinutes\(currentRow\.window_start, currentRow\.window_end, currentRow\.estimated_duration_minutes\)/);
   });
 

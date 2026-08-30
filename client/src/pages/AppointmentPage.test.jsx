@@ -31,6 +31,9 @@ function upcomingPayload(overrides = {}) {
     plan: { isRecurring: true, collectiveAnchor: true },
     weather: { rainChance: 15, stormy: false },
     rescheduleToken: 'deadbeef',
+    // Server-computed ICS servability (codex r33 P2) — the page renders the
+    // Add-to-calendar action only when the .ics route would serve it.
+    calendarEligible: true,
     ...overrides,
   };
 }
@@ -149,7 +152,19 @@ describe('AppointmentPage upcoming visit', () => {
     expect(String(posted[0])).toContain('/confirm');
     // The POST carries the slot on screen so the server can refuse to
     // confirm a visit an office bulk reschedule moved underneath it.
-    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00' });
+    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00', membershipKey: null });
+  });
+
+  it('a grouped visit (no reschedule token) lists its services and offers the call/text path instead of a slot picker', async () => {
+    stubFetch({ get: jsonResponse(upcomingPayload({
+      service: { type: 'Quarterly Pest Control', visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'] } },
+      rescheduleToken: null,
+    })) });
+    renderPage();
+    expect(await screen.findByTestId('visit-services')).toHaveTextContent('This visit includes Quarterly Pest Control · Lawn Fertilization.');
+    expect(screen.getByTestId('visit-grouped-reschedule')).toHaveTextContent("we'll move the whole visit together");
+    expect(screen.queryByText('See open times')).toBeNull();
+    expect(screen.getByText("Time doesn't work? Text or call us and we'll sort it out.")).toBeTruthy();
   });
 
   it('an already-confirmed visit shows no Confirm CTA', async () => {
@@ -217,6 +232,35 @@ describe('AppointmentPage non-upcoming states', () => {
       expect(screen.getByText('Text Waves')).toBeInTheDocument();
       cleanup();
     }
+  });
+
+  it('a confirm answer of confirmed:false (a sibling stayed pending) does not flip the pill to Confirmed', async () => {
+    stubFetch({ post: jsonResponse({ success: true, confirmed: false }) });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm this appointment' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('Confirmed')).not.toBeInTheDocument();
+  });
+
+  it('a past grouped visit gets the call/text guidance, never a "Pick a new time" link that /reschedule refuses', async () => {
+    stubFetch({ get: jsonResponse({ state: 'past', service: { type: 'Pest Control' }, appointment: {} }) });
+    renderPage();
+    expect(await screen.findByText(/time has passed/)).toBeInTheDocument();
+    expect(screen.getByText('Pick a new time')).toHaveAttribute('href', '/reschedule/deadbeef');
+    cleanup();
+
+    stubFetch({ get: jsonResponse({
+      state: 'past',
+      service: { type: 'Pest Control', visit: { serviceCount: 2, services: ['Pest Control', 'Lawn Fertilization'], windowStart: '09:00' } },
+      appointment: {},
+    }) });
+    renderPage();
+    expect(await screen.findByText(/time has passed/)).toBeInTheDocument();
+    expect(screen.getByText(/move the whole visit together/)).toBeInTheDocument();
+    expect(screen.queryByText('Pick a new time')).not.toBeInTheDocument();
+    expect(screen.getByText('Text Waves')).toBeInTheDocument();
   });
 
   it('a 404 token shows the friendly not-found card', async () => {

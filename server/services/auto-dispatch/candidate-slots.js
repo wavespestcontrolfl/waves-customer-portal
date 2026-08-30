@@ -295,5 +295,5 @@ module.exports = {
   inBlackout,
   violatesPreferredDay,
   violatesPreferredTime,
-  _internals: { hhmmToMin, weekdayOf },
+  _internals: { hhmmToMin, weekdayOf, isSaturday },
 };
