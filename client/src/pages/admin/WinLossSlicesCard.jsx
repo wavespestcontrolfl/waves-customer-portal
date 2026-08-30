@@ -81,10 +81,14 @@ export default function WinLossSlicesCard() {
   // The audit sections carry their own populations (archived outcomes, open
   // offers, shifted cohort windows) — they must render even when the active
   // resolved-rate denominator is zero (codex pre-push P1).
+  // A cohort bucket can be populated purely by its SHIFTED window (sends
+  // 30-60d back) while the recent window is empty — gate on the buckets,
+  // not the recent-send total (GH codex P2).
+  const hasCohorts = (cohorts?.cohorts || []).some((c) => c.sent > 0);
   const hasAuditData = dispositions.length > 0
     || serviceLines.length > 0
     || leadSources.length > 0
-    || (cohorts?.sentTotal ?? 0) > 0;
+    || hasCohorts;
   // Headline counts REAL losses only — dead leads / converted-elsewhere
   // rows stay listed below with a null percentage (mirrors the server).
   const lossTotal = dispositions
@@ -285,7 +289,7 @@ export default function WinLossSlicesCard() {
             </div>
           )}
 
-          {cohorts && cohorts.sentTotal > 0 && (
+          {hasCohorts && (
             <div>
               <div className="text-13 text-zinc-500 mb-1">
                 Sent cohorts — outcome as of N days after send
@@ -316,6 +320,7 @@ export default function WinLossSlicesCard() {
                     ))}
                 </tbody>
               </table>
+              {cohorts.sentTotal > 0 && (
               <div className="text-13 text-zinc-500 mt-2">
                 Opened {cohorts.viewRatePct ?? 0}% of {cohorts.sentTotal} sent
                 {cohorts.medianHoursToFirstView != null
@@ -325,6 +330,7 @@ export default function WinLossSlicesCard() {
                   ? ` · median ${cohorts.medianDaysToDecision} d to decision`
                   : ""}
               </div>
+              )}
             </div>
           )}
         </div>
