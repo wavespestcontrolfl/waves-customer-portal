@@ -2642,15 +2642,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   }
 
   // ---- 4. detach seam once for every member, then the union ----
-  for (const id of plan.memberIds) {
-    try { await handleChildStopChanged(id); } catch (err) { logger.warn(`[visit-groups] unit move seam for ${id} failed: ${err.message}`); }
+  // ONLY after a successful parent retarget (codex r40 uncapped): with the
+  // parent still describing the OLD stop, every moved child mismatches it
+  // and the seam would detach them all — dissolving the visit and clearing
+  // visit_id, so the prescribed re-save enters the UNGROUPED path and can
+  // never retarget/reassemble the stop. Skipping the seam preserves the
+  // cohort (the page/confirm/calendar/senders all fail closed on the
+  // mismatched membership meanwhile), and the re-save's repair pass — or
+  // the takeover unit move for stragglers — runs it after a retarget that
+  // succeeded. When the retarget DID succeed, the seam keeps its r3
+  // contract: landed members match the new parent and stay; a straggler
+  // mismatches and is separated.
+  if (!parentRetargetFailed) {
+    for (const id of plan.memberIds) {
+      try { await handleChildStopChanged(id); } catch (err) { logger.warn(`[visit-groups] unit move seam for ${id} failed: ${err.message}`); }
+    }
+    try {
+      await db.transaction(async (t) => {
+        const v = await t('service_visits').where({ id: plan.visitId }).first();
+        if (v && String(v.status) === 'open') { await lockStop(t, v.stop_base_key); await recomputeVisitWindow(t, v.id); }
+      });
+    } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
+  } else {
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detach seam SKIPPED — the parent retarget failed and the cohort must stay intact for the re-save repair`);
   }
-  try {
-    await db.transaction(async (t) => {
-      const v = await t('service_visits').where({ id: plan.visitId }).first();
-      if (v && String(v.status) === 'open') { await lockStop(t, v.stop_base_key); await recomputeVisitWindow(t, v.id); }
-    });
-  } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
 
   if (failed.length) {
     warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
