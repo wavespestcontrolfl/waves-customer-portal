@@ -536,7 +536,10 @@ async function seedLedgerComponents(database, customerId, components = {}, { sou
 // current state (rows are deleted/replaced by later syncs), so the
 // cancellation engine's manual-override cooldown reads audit_log, not this
 // table (PR E, codex 2026-08-30).
-const MANUAL_RATE_SOURCES = new Set(['admin_edit', 'admin_create', 'ib_update', 'ib_bulk_update']);
+// admin_create is deliberately NOT here: an account's INITIAL pricing is
+// not a price override, and stamping it would block a brand-new customer
+// from the retention offer until month 18 despite the 12-month tenure rule.
+const MANUAL_RATE_SOURCES = new Set(['admin_edit', 'ib_update', 'ib_bulk_update']);
 const MANUAL_RATE_AUDIT_ACTION = 'customer.rate_manual_override';
 
 async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {

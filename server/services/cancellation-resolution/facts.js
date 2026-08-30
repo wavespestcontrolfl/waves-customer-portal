@@ -270,7 +270,8 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // (customer_plan_rates is mutable current state — later syncs delete or
     // replace its rows, which would erase the cooldown evidence). Events are
     // written by plan-rate-ledger for the human-driven sources only
-    // (admin_edit, admin_create, ib_update, ib_bulk_update); system
+    // (admin_edit, ib_update, ib_bulk_update — admin_create is initial
+    // pricing, not an override); system
     // provenance never trips the cooldown.
     leg('manualOverride', async () => {
       const { MANUAL_RATE_AUDIT_ACTION, MANUAL_RATE_SOURCES } = require('../plan-rate-ledger');
