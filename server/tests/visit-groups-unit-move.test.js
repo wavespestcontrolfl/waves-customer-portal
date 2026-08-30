@@ -88,9 +88,9 @@ describe('moveVisitAsUnit', () => {
         : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
   });
 
-  test('ungrouped row / not open visit / single live member ⇒ null (plain move)', async () => {
+  test('ungrouped row / dissolved visit / single live member ⇒ null (plain move); a non-open non-dissolved visit REFUSES (P0 r36)', async () => {
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: { id: 'a', visit_id: null }, newDate: '2026-09-02' })).toBe(null);
-    db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
+    db.__script = script({ visit: { ...VISIT, status: 'dissolved' }, members: [] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
     db.__script = script({ members: [member('a')] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
@@ -703,8 +703,12 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
       expect(rebooker.reschedule).not.toHaveBeenCalled();
       expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
     }
-    // a visit that is merely not open (closing/dissolved) is the mover's own null path, not the frozen refusal
+    // a CLOSING visit is REFUSED (local gate P0 r36): its packet/link/records still describe this stop and the seam ignores non-open visits
     db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'visit_not_open', visitStatus: 'closing' });
+    // a DISSOLVED visit (rows freed; a stale pointer) is the mover's own null path — the single row moves alone
+    db.__script = script({ visit: { ...VISIT, status: 'dissolved' }, members: [] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
     // ONE live member beside a terminal one on a FROZEN visit is refused too (local audit r30): the single-row path's seam
     // would preserve the frozen membership — the child at the new stop, the visit and its artifacts at the old one
@@ -778,21 +782,28 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
-  test('a PARTLY-moved stop claims every moved member\'s pending creation confirmation (owner ruling 2026-08-30; local audit r35) — nobody is auto-texted; the dispatcher owns the message', async () => {
-    db.__script = script({ members: [member('a'), member('b')], landed: [
+  test('pending creation confirmations are CLAIMED before the first member write and restored only on full success (owner ruling 2026-08-30; local gate r36) — a partly-moved stop texts NOBODY', async () => {
+    const reminders = { select: () => [{ id: 'rem-a' }, { id: 'rem-b' }] };
+    db.__script = { ...script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
       { id: 'b', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' }, // b failed: still on the old date
-    ] });
+    ] }), appointment_reminders: reminders };
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b' })]);
-    const burns = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values && c.values.confirmation_sent === true);
-    expect(burns.length).toBe(1); // the MOVED member a — never the failed b (its reminder still names its real, unmoved slot)
-    expect(burns[0].ops).toEqual(expect.arrayContaining([['where', { scheduled_service_id: 'a', confirmation_sent: false }]]));
-    // a fully-moved stop burns nothing
+    const remUpdates = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(remUpdates.length).toBe(1); // the up-front CLAIM only — no restore on a partial
+    expect(remUpdates[0].values).toMatchObject({ confirmation_sent: true });
+    expect(remUpdates[0].ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['rem-a', 'rem-b']]]));
+    // full success: the claim is RESTORED, fenced on the claim stamp
     db.__calls.length = 0; jest.clearAllMocks();
-    db.__script = script({ members: [member('a'), member('b')] });
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update').length).toBe(0);
+    const afterUpdates = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(afterUpdates.length).toBe(2);
+    expect(afterUpdates[0].values).toMatchObject({ confirmation_sent: true });   // claim
+    expect(afterUpdates[1].values).toMatchObject({ confirmation_sent: false, confirmation_sent_at: null }); // restore
+    const restoreFence = afterUpdates[1].ops.find((o) => o[0] === 'where' && o[1] && o[1].confirmation_sent === true);
+    expect(restoreFence[1].confirmation_sent_at).toEqual(afterUpdates[0].values.confirmation_sent_at); // fenced on OUR stamp
   });
 
   test('visitMove.visitStart is the STOP\'s landed arrival start (earliest represented member), for the caller\'s one notice (codex #3609 r25 P1)', async () => {

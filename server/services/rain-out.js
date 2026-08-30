@@ -1728,12 +1728,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // reached individually below and recorded as its own failure/retry
   // (codex #3609 r6).
   const coveredIds = new Set();
+  const partialStragglers = new Set();
   const coveredVisitOf = new Map();
   const coverMoved = (r, job) => {
     const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
     for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
   };
   for (const job of orderedJobs) {
+    // A straggler of a PARTIAL unit move earlier in this batch: skipped
+    // entirely — not moved, not texted, not recorded as covered. The
+    // anchor's needsAttention names it for staff repair (codex r27 P1).
+    if (partialStragglers.has(String(job.id))) continue;
     if (coveredIds.has(String(job.id))) {
       results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
       continue;
@@ -1794,6 +1799,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // sibling still at the old stop — and the result carries the straggler
     // ids as a hard needsAttention for the sheet.
     let unitMovePartial = null;
+    // The grouped stop's landed arrival start (visitMove.visitStart): the
+    // ONE moved-SMS quotes the STOP's window, not the tapped member's
+    // requested slot (codex #3609 r27 P1).
+    let unitVisitStart = null;
     try {
       if (wantsSeriesShift) {
         try {
@@ -1863,8 +1872,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
         coverMoved(moveResult, job);
+        if (moveResult?.visitMove?.visitStart) unitVisitStart = String(moveResult.visitMove.visitStart);
         if (Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) {
           unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: moveResult.visitMove.failed.map((f) => f.id) };
+          // Stragglers stay OUT of the rest of this batch (codex #3609 r27
+          // P1): a queued sibling job retried individually could succeed and
+          // text the customer even though this stop's result says nobody was
+          // notified and staff repair is required. needsAttention carries
+          // the ids; nothing else in this run touches them.
+          for (const sid of unitMovePartial.memberIds) partialStragglers.add(String(sid));
           logger.error(`[rain-out] grouped move of visit ${unitMovePartial.visitId} for ${job.id} is INCOMPLETE — ${unitMovePartial.memberIds.length} member(s) still at the old stop (${unitMovePartial.memberIds.join(', ')}); customer NOT texted`);
         }
         if (wantsSeriesShift) {
@@ -1955,7 +1971,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
     }
 
-    const chosen = { date: target.date, window: newWindow };
+    const chosen = { date: target.date, window: unitVisitStart ? { start: unitVisitStart, end: null } : newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     // Quick Move's own moved-SMS for a SERIES move is tracked on the
     // series_moves row with an EXPIRING claim: notified_at is the claim

@@ -274,6 +274,10 @@ async function frozenVisitVerdict(t, visitId) {
   try {
     const activity = await visitActivity(visitId, t);
     if (!activity) return { frozen: false, reason: null }; // no such visit: the row is effectively ungrouped
+    // Not open and not dissolved (closing, …) = being finalized: frozen for
+    // every direct writer, exactly as the unit mover refuses it (P0 r36).
+    if (String(activity.status) !== 'open' && String(activity.status) !== 'dissolved') return { frozen: true, reason: 'visit_not_open' };
+    if (String(activity.status) === 'dissolved') return { frozen: false, reason: null };
     const split = canSplit(activity);
     if (!split.ok && split.reason !== 'visit_not_open') return { frozen: true, reason: split.reason };
     const memberIds = (await t('scheduled_services').where({ visit_id: visitId }).select('id')).map((m) => m.id);
@@ -1653,12 +1657,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   let plan = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      // A visit that is not open and not dissolved (closing, or any future
+      // state) is REFUSED, never declined to the rebooker's single-row path
+      // (local gate P0 r36): its packet / issued link / records / payment
+      // still describe this stop, and the detach seam ignores non-open
+      // visits — a child moved alone would leave those artifacts behind.
+      // Dissolved = the rows are free (the dissolver nulls visit_id; a stale
+      // pointer is effectively ungrouped) ⇒ null, the single path.
+      const refuseNotOpen = (status) => {
+        throw Object.assign(new Error('Cannot move this stop: the visit is being finalized — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open', visitStatus: String(status) });
+      };
       plan = await db.transaction(async (t) => {
         const peek = await t('service_visits').where({ id: service.visit_id }).first();
-        if (!peek || String(peek.status) !== 'open') return null;
+        if (!peek) return null;
+        if (String(peek.status) !== 'open') return String(peek.status) === 'dissolved' ? null : refuseNotOpen(peek.status);
         await lockStop(t, peek.stop_base_key);
         const visit = await t('service_visits').where({ id: service.visit_id }).first();
-        if (!visit || String(visit.status) !== 'open') return null;
+        if (!visit) return null;
+        if (String(visit.status) !== 'open') return String(visit.status) === 'dissolved' ? null : refuseNotOpen(visit.status);
         if (visit.stop_base_key !== peek.stop_base_key) {
           throw Object.assign(new Error('visit stop moved concurrently — retry'), { code: 'VISIT_STOP_MOVED' });
         }
@@ -1904,6 +1920,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   }
 
   // ---- 2. move members: primary first, then siblings ----
+  // Pending creation confirmations are CLAIMED before the first member
+  // write (local gate r36; owner ruling 2026-08-30): the per-member reminder
+  // sync keeps confirmations armed (keepPendingConfirmation), so the
+  // deferred sender could otherwise text a moved sibling's NEW time while a
+  // later member still fails — a partly-moved stop must text NOBODY. On a
+  // fully successful move the claims are restored (fenced on our own claim
+  // stamp) and delivery proceeds as before; on a partial they stay claimed
+  // and the dispatcher owns the message after the repair.
+  const confirmationClaimStamp = new Date();
+  let confirmationHoldIds = [];
+  try {
+    const holdRows = await db('appointment_reminders')
+      .whereIn('scheduled_service_id', pending.map((x) => x.id))
+      .where({ confirmation_sent: false })
+      .select('id');
+    if (holdRows.length) {
+      await db('appointment_reminders').whereIn('id', holdRows.map((r) => r.id))
+        .where({ confirmation_sent: false })
+        .update({ confirmation_sent: true, confirmation_sent_at: confirmationClaimStamp });
+      confirmationHoldIds = holdRows.map((r) => r.id);
+    }
+  } catch (err) {
+    logger.warn(`[visit-groups] unit move confirmation claim failed for visit ${plan.visitId}: ${err.message}`);
+  }
   const moved = [];
   const failed = [];
   const warnings = [...(plan.techClashWarnings || [])];
@@ -2269,20 +2309,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
   if (failed.length) {
     warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
-    // A partly-moved stop texts NOBODY (owner ruling 2026-08-30; local audit
-    // r35): a moved sibling's still-armed creation confirmation
-    // (keepPendingConfirmation) would otherwise be delivered by the deferred
-    // sender / stranded sweep with the NEW time while a member sits at the
-    // old stop. Claim those confirmations sent — the dispatcher owns the
-    // customer message after the repair (needsAttention carries the ids).
-    for (const movedId of moved) {
-      try {
-        await db('appointment_reminders')
-          .where({ scheduled_service_id: movedId, confirmation_sent: false })
-          .update({ confirmation_sent: true, confirmation_sent_at: db.fn.now() });
-      } catch (err) {
-        logger.warn(`[visit-groups] partial-move confirmation hold for ${movedId} failed: ${err.message}`);
-      }
+    // Partial: the up-front confirmation claims STAY — nobody is auto-texted
+    // (owner ruling 2026-08-30); the dispatcher owns the message after the
+    // repair (needsAttention carries the straggler ids).
+  } else if (confirmationHoldIds.length) {
+    // Full success: restore the claims, fenced on our own stamp so a
+    // confirmation genuinely delivered (or claimed by a newer writer) in
+    // the meantime is never re-armed.
+    try {
+      await db('appointment_reminders').whereIn('id', confirmationHoldIds)
+        .where({ confirmation_sent: true, confirmation_sent_at: confirmationClaimStamp })
+        .update({ confirmation_sent: false, confirmation_sent_at: null });
+    } catch (err) {
+      logger.warn(`[visit-groups] unit move confirmation restore failed for visit ${plan.visitId}: ${err.message}`);
     }
   }
   // members: per-row pre-move state so a caller with its own post-move

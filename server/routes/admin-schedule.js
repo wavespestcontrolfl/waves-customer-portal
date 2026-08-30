@@ -8113,12 +8113,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // member since the pre-read is a grouped stop this editor must
             // not move alone (local codex audit).
             if (preReadVisitId && occRow.visit_id) {
-              const liveMembers = await require('../services/visit-groups').openMembers(trx, occRow.visit_id);
+              const vg = require('../services/visit-groups');
+              const liveMembers = await vg.openMembers(trx, occRow.visit_id);
               if (liveMembers.length >= 2) {
                 throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
                   statusCode: 409,
                   isOperational: true,
                   code: 'VISIT_CHANGED_RETRY',
+                });
+              }
+              // One live member on a FROZEN / claimed / finalizing visit
+              // (codex #3609 r27 P1): a direct slot write would strand the
+              // parent and its issued link / records / payment at the old
+              // stop — the unit mover refuses the same case. Same verdict,
+              // under this stop lock, before the write.
+              const verdict = await vg.frozenVisitVerdict(trx, occRow.visit_id);
+              if (verdict.frozen) {
+                throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), {
+                  statusCode: 409,
+                  isOperational: true,
+                  code: 'VISIT_FROZEN_MOVE_UNSUPPORTED',
+                  reason: verdict.reason,
                 });
               }
             }
