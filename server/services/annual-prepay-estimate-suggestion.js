@@ -133,6 +133,23 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     }
   }
 
+  // The canonical one-step prepay guard (same one the prepay-on-book flow
+  // runs): status window, expiry, manager approval, commercial risk review,
+  // bill-by-invoice and one-time-option modes, recurring-row/mix rules,
+  // multi-service unit count — and, critically, BILLABLE ONE-TIME CHARGES:
+  // claiming an estimate closed by this cash recording must never silently
+  // drop one-time work the quote still owes (that estimate needs its own
+  // accept flow, which invoices every line).
+  try {
+    const { prepayBookingEligibility } = require('./estimate-manual-acceptance');
+    const bookingEligibility = await prepayBookingEligibility(estimate);
+    if (!bookingEligibility?.eligible) {
+      return blocked(`estimate is not one-step prepay eligible (${bookingEligibility?.reason || 'unknown'})`);
+    }
+  } catch {
+    return blocked('estimate prepay eligibility could not be verified');
+  }
+
   // Review-lane pricing never auto-applies (estimator-authority rule): the
   // same quote-requirement guard the public accept path enforces — manager
   // approval, commercial proposal/risk review, low-confidence site quote,

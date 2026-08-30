@@ -178,6 +178,23 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.shortRef).toBe(shortEstimateRef(bundle.id));
   });
 
+  test('recurring estimates carrying a BILLABLE one-time charge never suggest', async () => {
+    // Claiming the estimate would close the quote while this path invoices
+    // only the recurring year — the one-time charge would be silently lost.
+    const withOneTime = pestEstimate({
+      onetime_total: 368,
+      estimate_data: {
+        result: {
+          recurring: { services: [PEST_LINE] },
+          oneTime: { items: [{ service: 'cockroach', name: 'German Roach Cleanout', price: 368 }] },
+        },
+      },
+    });
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([withOneTime], { resolveLineCadence: (line) => line?.frequency || null });
+    expect(suggestion.blocked).toBe(true);
+    expect(suggestion.amount).toBeUndefined();
+  });
+
   test('one-time-only estimates return the ref with no amount', async () => {
     const oneTime = pestEstimate({
       monthly_total: null,
