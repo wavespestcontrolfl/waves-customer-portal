@@ -4920,6 +4920,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // A recommendation is "covered" when nearly all of its content words
+  // (plus numbers, with hr/hrs normalized to hours) appear in the reviewed
+  // narrative — robust to rephrasing ("Do not apply irrigation for at
+  // least 48 hrs" ≈ "hold off on any irrigation for at least 48 hours")
+  // while an instruction the prose never mentions keeps its card row. Bias
+  // runs toward KEEPING the row: a duplicate line is noise, a dropped
+  // instruction is information loss (codex P1 r5 on #3631).
+  const contentTokens = (text) => new Set(String(text || '')
+    .toLowerCase()
+    .replace(/\bhrs?\b/g, 'hours')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w && (w.length > 3 || /^\d+$/.test(w))));
+  const recommendationCoveredByNarrative = (rec, narrative) => {
+    const recTokens = contentTokens(rec);
+    if (!recTokens.size) return false;
+    const narrativeTokens = contentTokens(narrative);
+    let hit = 0;
+    for (const token of recTokens) { if (narrativeTokens.has(token)) hit += 1; }
+    return hit / recTokens.size >= 0.75;
+  };
+
   // Lawn callback reports fold the fragmented cards into the narrative
   // (owner 2026-08-30, first-callback eyeball): the tech-reviewed AI report
   // already tells the found/did/recommend story in prose — the "What we
@@ -5160,7 +5182,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       ...parseJsonObject(service.weather_data),
     },
     findings,
-    recommendations: lawnCallbackNarrativeOwns ? [] : recommendations,
+    // Folded ONLY where the narrative actually covers the instruction
+    // (codex P1 r5 on #3631): summarySource proves the notes parsed, not
+    // that every recommendation made it into the prose — one the narrative
+    // omits stays on the card rather than vanishing from web + PDF.
+    recommendations: lawnCallbackNarrativeOwns
+      ? recommendations.filter((rec) => !recommendationCoveredByNarrative(rec, visitSummary))
+      : recommendations,
     protocol,
     advisory,
     lawnAssessment,

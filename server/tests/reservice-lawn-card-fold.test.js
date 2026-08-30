@@ -119,6 +119,23 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 
+  test('a recommendation the narrative does NOT cover survives the fold (codex P1 r5)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      structured_notes: JSON.stringify({
+        formRecommendations: [
+          'Do not apply irrigation for at least 48 hrs',
+          'Trim shrubs back from the exterior walls before the next visit',
+        ],
+      }),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-5', makeKnex());
+    // Covered by the narrative's own wording → folded away.
+    expect(data.recommendations).not.toContain('Do not apply irrigation for at least 48 hrs');
+    // Never mentioned in the prose → stays on the card.
+    expect(data.recommendations).toContain('Trim shrubs back from the exterior walls before the next visit');
+  });
+
   test('callback with NO reviewed narrative keeps every card — removal never loses the sole record', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const svc = lawnCallbackService({ technician_notes: '' });
