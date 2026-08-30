@@ -3234,9 +3234,9 @@ router.get('/:id', async (req, res, next) => {
       // estimate this prepay most credibly comes from and the amount its own
       // accept-as-prepay lane would invoice. Suggestion-only; never blocks
       // the 360 payload.
-      annualPrepayEstimateSuggestion: (() => {
+      annualPrepayEstimateSuggestion: await (async () => {
         try {
-          return require('../services/annual-prepay-estimate-suggestion')
+          return await require('../services/annual-prepay-estimate-suggestion')
             .buildAnnualPrepayEstimateSuggestion(estimates, {
               // Estimates already consumed by a term priced a PRIOR year.
               excludeEstimateIds: (annualPrepayTerms || [])
@@ -4872,19 +4872,35 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const note = cleanOptionalText(req.body?.note);
 
     // Estimate provenance (best-effort, never blocks the money recording):
-    // link the term to the estimate the prefill came from. Skip the link —
-    // don't fail — when the id is malformed, isn't this customer's, or is
-    // already referenced by ANY existing term: createTermForAnnualPrepay
-    // upserts by source_estimate_id, so re-linking a used estimate would
-    // UPDATE the prior term (e.g. last year's) instead of creating this one.
+    // link the term to the estimate the prefill came from. The client's claim
+    // is not trusted — the link is persisted only when the server's OWN
+    // suggestion (rebuilt here: ownership, status, expiry, eligibility,
+    // single-option pricing, consumed-term exclusion) picks the same estimate
+    // AND its service matches the coverage being recorded. Anything else
+    // skips the link rather than failing: createTermForAnnualPrepay upserts
+    // by source_estimate_id, so re-linking a used estimate would UPDATE the
+    // prior term (e.g. last year's) instead of creating this one.
     let sourceEstimateId = null;
     const sourceEstimateIdRaw = cleanOptionalText(req.body?.sourceEstimateId);
     if (sourceEstimateIdRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceEstimateIdRaw)) {
-      const [estimateRow, linkedTerm] = await Promise.all([
-        db('estimates').where({ id: sourceEstimateIdRaw, customer_id: customer.id }).first('id'),
-        db('annual_prepay_terms').where({ source_estimate_id: sourceEstimateIdRaw }).first('id'),
-      ]);
-      if (estimateRow && !linkedTerm) sourceEstimateId = estimateRow.id;
+      try {
+        const [estimateRows, linkedTermRows] = await Promise.all([
+          db('estimates').where({ customer_id: customer.id }),
+          db('annual_prepay_terms').where({ customer_id: customer.id })
+            .whereNotNull('source_estimate_id').select('source_estimate_id'),
+        ]);
+        const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
+        const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion(estimateRows, {
+          excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
+        });
+        if (suggestion && !suggestion.blocked
+          && String(suggestion.estimateId).toLowerCase() === sourceEstimateIdRaw.toLowerCase()
+          && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)) {
+          sourceEstimateId = suggestion.estimateId;
+        }
+      } catch (e) {
+        logger.warn(`[customers:${customer.id}] annual-prepay provenance skipped: ${e.message}`);
+      }
     }
 
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';

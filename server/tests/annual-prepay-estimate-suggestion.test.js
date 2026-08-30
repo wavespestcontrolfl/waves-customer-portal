@@ -6,6 +6,7 @@ const {
   buildAnnualPrepayEstimateSuggestion,
   pickAnnualPrepayEstimate,
   shortEstimateRef,
+  suggestionServiceMatches,
 } = require('../services/annual-prepay-estimate-suggestion');
 const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
@@ -72,9 +73,9 @@ describe('pickAnnualPrepayEstimate', () => {
 });
 
 describe('buildAnnualPrepayEstimateSuggestion', () => {
-  test('single-recurring-line pest estimate suggests the resolver amount off monthly × 12', () => {
+  test('single-recurring-line pest estimate suggests the resolver amount off monthly × 12', async () => {
     const estimate = pestEstimate();
-    const suggestion = buildAnnualPrepayEstimateSuggestion([estimate]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([estimate]);
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.estimateId).toBe(estimate.id);
     expect(suggestion.baseAnnual).toBe(384);
@@ -91,12 +92,12 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.amount).toBeGreaterThan(0);
   });
 
-  test('stored annual_total wins over monthly × 12', () => {
-    const suggestion = buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })]);
+  test('stored annual_total wins over monthly × 12', async () => {
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })]);
     expect(suggestion.baseAnnual).toBe(400);
   });
 
-  test('bundled recurring lines return the ref with no amount', () => {
+  test('bundled recurring lines return the ref with no amount', async () => {
     const bundle = pestEstimate({
       estimate_data: {
         result: {
@@ -106,24 +107,24 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = buildAnnualPrepayEstimateSuggestion([bundle]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([bundle]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
     expect(suggestion.shortRef).toBe(shortEstimateRef(bundle.id));
   });
 
-  test('one-time-only estimates return the ref with no amount', () => {
+  test('one-time-only estimates return the ref with no amount', async () => {
     const oneTime = pestEstimate({
       monthly_total: null,
       onetime_total: 368,
       estimate_data: { result: { oneTime: { items: [{ service: 'cockroach', name: 'German Roach Cleanout', price: 368 }] } } },
     });
-    const suggestion = buildAnnualPrepayEstimateSuggestion([oneTime]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([oneTime]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
 
-  test('quote-required estimates never auto-price (review-lane guard)', () => {
+  test('quote-required estimates never auto-price (review-lane guard)', async () => {
     const managerApproval = pestEstimate({
       estimate_data: {
         result: {
@@ -132,26 +133,39 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = buildAnnualPrepayEstimateSuggestion([managerApproval]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([managerApproval]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
 
-  test('existing-customer estimates are prepay-ineligible and never auto-price', () => {
+  test('existing-customer estimates are prepay-ineligible and never auto-price', async () => {
     const existing = pestEstimate({
       estimate_data: {
         membershipSnapshot: { isExistingCustomer: true },
         result: { recurring: { services: [PEST_LINE] } },
       },
     });
-    const suggestion = buildAnnualPrepayEstimateSuggestion([existing]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([existing]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
 
-  test('no credible estimate → null (modal renders exactly as before)', () => {
-    expect(buildAnnualPrepayEstimateSuggestion([])).toBeNull();
-    expect(buildAnnualPrepayEstimateSuggestion([pestEstimate({ status: 'draft' })])).toBeNull();
+  test('no credible estimate → null (modal renders exactly as before)', async () => {
+    expect(await buildAnnualPrepayEstimateSuggestion([])).toBeNull();
+    expect(await buildAnnualPrepayEstimateSuggestion([pestEstimate({ status: 'draft' })])).toBeNull();
+  });
+});
+
+describe('suggestionServiceMatches', () => {
+  test('exact identity after cadence/filler stripping — never substring', () => {
+    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Quarterly Pest Control')).toBe(true);
+    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Monthly Pest Control Plan')).toBe(true);
+    // "Pest Control" must NOT match "Commercial Pest Control" on money.
+    expect(suggestionServiceMatches('Quarterly Pest Control', 'Commercial Pest Control')).toBe(false);
+    expect(suggestionServiceMatches('Quarterly Pest Control', 'Quarterly Mosquito Service')).toBe(false);
+    // Empty keys fail closed.
+    expect(suggestionServiceMatches('', 'Quarterly Pest Control')).toBe(false);
+    expect(suggestionServiceMatches('Quarterly Pest Control', '')).toBe(false);
   });
 });
 

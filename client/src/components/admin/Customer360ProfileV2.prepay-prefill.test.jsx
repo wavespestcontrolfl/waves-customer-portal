@@ -43,10 +43,14 @@ function renderModal(props = {}) {
 }
 
 describe('estimateSuggestionMatchesService', () => {
-  it('matches across cadence and service/plan filler words', () => {
+  it('matches on exact identity across cadence and filler words — never substring', () => {
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control')).toBe(true);
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Monthly Pest Control Plan')).toBe(true);
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Mosquito Service')).toBe(false);
+    // "Pest Control" must NOT match "Commercial Pest Control" on money.
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Commercial Pest Control')).toBe(false);
+    // Unlabeled suggestions fail closed.
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, serviceLabel: '' }, 'Quarterly Pest Control')).toBe(false);
   });
 
   it('never matches blocked or zero-amount suggestions', () => {

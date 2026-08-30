@@ -3634,23 +3634,21 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
 }
 
 // Does the server's estimate-derived prefill apply to the service the
-// operator is recording? Label match strips cadence words (via
-// normalizeAnnualPrepayLabelKey) plus service/plan/program filler so
+// operator is recording? EXACT identity after stripping cadence words (via
+// normalizeAnnualPrepayLabelKey) plus service/plan/program filler, so
 // "Quarterly Pest Control Service" (estimate line) matches "Quarterly Pest
-// Control" (modal default). An unlabeled single-line estimate is accepted —
-// the hint always names the estimate ref, so the operator sees the source.
+// Control" (modal default) but "Commercial Pest Control" does NOT — never
+// substring-match a money prefill. Empty keys fail closed. The server runs
+// the same exact-identity check before persisting provenance.
 function annualPrepaySuggestionLabelKey(value) {
-  return normalizeAnnualPrepayLabelKey(value).replace(/service|plan|program/g, "");
+  return normalizeAnnualPrepayLabelKey(value).replace(/service|plan|program/g, "").trim();
 }
 
 export function estimateSuggestionMatchesService(suggestion, serviceType) {
   if (!suggestion || suggestion.blocked || !(Number(suggestion.amount) > 0)) return false;
   const suggestionKey = annualPrepaySuggestionLabelKey(suggestion.serviceLabel);
   const serviceKey = annualPrepaySuggestionLabelKey(serviceType);
-  if (!suggestionKey || !serviceKey) return true;
-  return suggestionKey === serviceKey
-    || suggestionKey.includes(serviceKey)
-    || serviceKey.includes(suggestionKey);
+  return !!suggestionKey && !!serviceKey && suggestionKey === serviceKey;
 }
 
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {

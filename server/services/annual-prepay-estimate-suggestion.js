@@ -59,7 +59,25 @@ function parseEstimateData(raw) {
   return {};
 }
 
-function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [] } = {}) {
+// Exact-identity service matching for the prefill and the provenance link:
+// cadence words and service/plan/program filler drop out, everything else
+// must be identical. NEVER substring — "Pest Control" must not match
+// "Commercial Pest Control" on a money prefill. Empty keys fail closed.
+function suggestionLabelKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\b(every|monthly|bimonthly|bi-monthly|quarterly|triannual|semiannual|semi-annual|annual|yearly|six|weeks?|days?|service|plan|program)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, '')
+    .trim();
+}
+
+function suggestionServiceMatches(serviceLabel, serviceType) {
+  const labelKey = suggestionLabelKey(serviceLabel);
+  const typeKey = suggestionLabelKey(serviceType);
+  return !!labelKey && !!typeKey && labelKey === typeKey;
+}
+
+async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [] } = {}) {
   const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
   const base = {
@@ -95,11 +113,39 @@ function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateId
   if (recurring.length > 1) return blocked('estimate bundles multiple recurring services');
   if (!annualPrepayEligibleForEstimateData(estData)) return blocked('estimate is not annual-prepay eligible');
 
+  // The stored annual_total/monthly_total reflect the DEFAULT option; the
+  // accept path invoices the selected cadence/tier. When the estimate offers
+  // more than one distinct annual price (a cadence ladder or service-cadence
+  // combos), a verbal accept may have chosen a non-default option — fail
+  // closed to the ref with no amount. A single priced option is authoritative
+  // and overrides a stale stored total. Bundle failures also fail closed:
+  // an unverifiable option set must never prefill money.
+  let optionAnnuals = [];
+  try {
+    const { buildPricingBundle } = require('../routes/estimate-public');
+    const bundle = await buildPricingBundle(estimate);
+    if ((bundle?.serviceCadenceCombos || []).length > 0) {
+      return blocked('estimate offers multiple pricing combinations');
+    }
+    const frequencyRows = [
+      ...(Array.isArray(bundle?.frequencies) ? bundle.frequencies : []),
+      ...(Array.isArray(bundle?.hiddenLawnFrequencies) ? bundle.hiddenLawnFrequencies : []),
+    ];
+    optionAnnuals = [...new Set(frequencyRows
+      .map((row) => Math.round((Number(row?.annual) || (Number(row?.monthly) || 0) * 12) * 100))
+      .filter((cents) => cents > 0))];
+    if (optionAnnuals.length > 1) return blocked('estimate offers multiple pricing options');
+  } catch {
+    return blocked('estimate pricing options could not be verified');
+  }
+
   const annualTotal = Number(estimate.annual_total || 0);
   const monthlyTotal = Number(estimate.monthly_total || 0);
-  const baseAnnual = annualTotal > 0
-    ? annualTotal
-    : (monthlyTotal > 0 ? Math.round(monthlyTotal * 12 * 100) / 100 : 0);
+  const baseAnnual = optionAnnuals.length === 1
+    ? optionAnnuals[0] / 100
+    : (annualTotal > 0
+      ? annualTotal
+      : (monthlyTotal > 0 ? Math.round(monthlyTotal * 12 * 100) / 100 : 0));
   if (!(baseAnnual > 0)) return blocked('estimate has no recurring total');
 
   const { resolveAnnualPrepayInvoiceTotal } = require('./estimate-converter');
@@ -124,4 +170,5 @@ module.exports = {
   buildAnnualPrepayEstimateSuggestion,
   pickAnnualPrepayEstimate,
   shortEstimateRef,
+  suggestionServiceMatches,
 };
