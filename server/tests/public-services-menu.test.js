@@ -111,7 +111,12 @@ describe('instant-quote set stays in step with the public quote engine', () => {
   test('CONTRACT: every advertised instant key prices to a positive, non-manual line on a plain property', () => {
     process.env.GATE_TERMITE_STATION_RENTAL = 'true';
     for (const key of PUBLIC_INSTANT_QUOTE_KEYS) {
-      const estimate = generateEstimate({ ...BASE, services: quoteServicesForKey(key) });
+      // A plain PUBLIC property carries the lookup's vision turf estimate
+      // (MEDIUM confidence). A lot-only property now deliberately routes
+      // turf-priced keys to review instead of instant-pricing a lot-derived
+      // guess (estimator-engine audit 2026-08-30) — that fail-closed path is
+      // covered in lawn-review-gates.test.js, not part of this contract.
+      const estimate = generateEstimate({ ...BASE, estimatedTurfSf: 4500, services: quoteServicesForKey(key) });
       const priced = (estimate.lineItems || []).filter((l) => !l.quoteRequired && !l.requiresCustomQuote
         && Number(l.price ?? l.total ?? l.monthly ?? l.annual ?? 0) > 0);
       expect({ key, priced: priced.length > 0 }).toEqual({ key, priced: true });
