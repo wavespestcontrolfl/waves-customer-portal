@@ -195,6 +195,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             // Unpriced manual-quote rows never become $0 lines.
             { service: 'commercial_pest', name: 'Commercial Pest', quoteRequired: true, monthly: null, price: null },
             { service: 'ghost_row', name: 'Ghost', monthly: null, annual: null, price: null, total: null },
+            // Per-application-only pricing is a real witness (perApp × visits).
+            { service: 'stinging_insect', name: 'Wasp Program', perApp: 95, visitsPerYear: 3, monthly: null, annual: null, price: null },
             // Commercial rows: authoritative annual COGS rides costs.total.
             { service: 'commercial_lawn', name: 'Commercial Turf Program', monthly: 400, annual: 4800, costs: { total: 1900 } },
             // MAPPED residential rows also expose costs.total — inventory
@@ -213,7 +215,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
-    expect(audit.lines).toHaveLength(10); // quote-required + witness-less rows excluded
+    expect(audit.lines).toHaveLength(11); // quote-required + witness-less rows excluded
+    expect(audit.lines.find((l) => l.serviceKey === 'stinging')).toMatchObject({ cadence: 'recurring', price: 285, visitsPerYear: 3 });
     expect(audit.lines.some((l) => /commercial_pest|ghost/.test(l.serviceKey))).toBe(false);
     expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
     const adj = audit.lines.find((l) => l.serviceKey === 'rodent_bundle_discount');

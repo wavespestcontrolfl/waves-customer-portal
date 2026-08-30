@@ -578,9 +578,15 @@ function normalizeEngineLineItems(result) {
     // so a $0 line would mint phantom zero-revenue/COGS entries (codex
     // pre-push P1). No priced witness at all = same skip.
     if (item.quoteRequired === true) continue;
-    if (pickNum(item.monthlyAfterDiscount, item.monthly, item.manualFinalAnnual, item.annualAfterDiscount, item.annual,
-      item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) === undefined
-      && !Number.isFinite(numOrNaN(item.installation?.price))) continue;
+    // Priced witnesses include per-application-only rows (perApp/perVisit
+    // × a real visit count) — codex pre-push P1.
+    const perUnitWitness = pickNum(item.perTreatment, item.perApp, item.perVisit);
+    const perUnitVisits = pickNum(item.visitsPerYear, item.visits, item.appsPerYear, item.frequency);
+    const hasPerUnitWitness = perUnitWitness !== undefined && Number.isFinite(perUnitVisits) && perUnitVisits > 0;
+    const hasBaseWitness = pickNum(item.monthlyAfterDiscount, item.monthly, item.manualFinalAnnual, item.annualAfterDiscount, item.annual,
+      item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) !== undefined
+      || hasPerUnitWitness;
+    if (!hasBaseWitness && !Number.isFinite(numOrNaN(item.installation?.price))) continue;
     // Engine service IDs are not all SERVICE_MAP keys. VERIFIED aliases
     // map to their COGS family; everything else keeps its RAW id — an
     // honest unmapped warning beats keyFromName's broad label patterns,
@@ -608,7 +614,11 @@ function normalizeEngineLineItems(result) {
     //   amounts live in manualFinal*/​*AfterDiscount.
     // Net = first customer-paid witness; gross = first pre-discount witness.
     const monthly = pickNum(item.monthlyAfterDiscount, item.monthly);
-    const netAnnual = pickNum(item.manualFinalAnnual, item.annualAfterDiscount, item.annual);
+    const netAnnual = pickNum(item.manualFinalAnnual, item.annualAfterDiscount, item.annual)
+      // Per-application-only rows annualize from their unit price × visits.
+      ?? (hasPerUnitWitness && pickNum(item.price, item.total) === undefined
+        ? money(perUnitWitness * perUnitVisits)
+        : undefined);
     // ANY recurring-money witness makes the row recurring — an annual-only
     // or fully-discounted zero-monthly line is still a program, not a
     // one-time job (GH codex P1).
@@ -694,6 +704,7 @@ function normalizeEngineLineItems(result) {
     const useExplicitCost = !isAdjustment
       && !SERVICE_MAP[serviceKey]
       && Number.isFinite(explicitAnnualCost) && explicitAnnualCost > 0;
+    if (!hasBaseWitness) continue; // installation-only row: no phantom $0 base line
     lines.push({
       ...(isAdjustment ? { skipCogs: true } : {}),
       ...(useExplicitCost ? { explicitCogsCost: money(explicitAnnualCost) } : {}),
