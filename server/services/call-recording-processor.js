@@ -9443,6 +9443,10 @@ const CallRecordingProcessor = {
           // Declared at loop scope (like raceRecovered): set inside the
           // locked enrichment write, consumed by the recovery mint below it.
           let phoneNameConflictUnderLock = false;
+          // The former-lead id THIS pass's pre-stamp settle persisted as a
+          // breadcrumb — arms the maintenance reconcile gate even when the
+          // pass exits through a recovery mint without restamping.
+          let thisPassSettledFormerLeadId = null;
           for (;;) {
             leadUpdates = {};
             // A retry can RECOVER a callback number and still reuse the
@@ -9773,6 +9777,15 @@ const CallRecordingProcessor = {
               let preSettleStampedLeadId = null;
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
                 preSettleStampedLeadId = currentStampedLeadId;
+                // Loop-scope copy (GH codex P1 on 6a91e83f3): the settle
+                // below persists the breadcrumb into call metadata AFTER
+                // claim time, so the maintenance reconcile's cheap
+                // claim-time pre-check cannot see it. If this pass then
+                // exits through a recovery mint (name conflict / claim
+                // race) without restamping, the gate must still open —
+                // the reconcile re-reads the authoritative breadcrumb
+                // under its own lock, so arming it is idempotent.
+                thisPassSettledFormerLeadId = preSettleStampedLeadId;
                 let priorSettled;
                 try {
                   // preserveFormerLeadId: the settle's clear persists the
@@ -10497,7 +10510,7 @@ const CallRecordingProcessor = {
               return cmd.attribution_former_lead_id ? String(cmd.attribution_former_lead_id) : null;
             } catch { return null; }
           })();
-          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb)) {
+          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb || thisPassSettledFormerLeadId)) {
             try {
               const recon = await reconcileFormerLeadLinkage({
                 call,
