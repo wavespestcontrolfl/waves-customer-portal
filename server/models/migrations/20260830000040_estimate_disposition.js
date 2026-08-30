@@ -81,10 +81,16 @@ exports.up = async function up(knex) {
     UPDATE estimates e SET
       disposition = CASE WHEN e.customer_id IS NOT NULL
         AND (
+          -- Evidence must exist by the time the row was ARCHIVED — the live
+          -- sweep classifies at archive time; a customer who independently
+          -- bought months after an archived-unresolved courtship is not a
+          -- conversion of it (codex pre-push P1).
           EXISTS (SELECT 1 FROM invoices i
-            WHERE i.customer_id = e.customer_id AND i.status = 'paid')
+            WHERE i.customer_id = e.customer_id AND i.status = 'paid'
+              AND LEAST(i.created_at, COALESCE(i.paid_at, i.created_at)) <= e.archived_at)
           OR EXISTS (SELECT 1 FROM scheduled_services ss
-            WHERE ss.customer_id = e.customer_id AND ss.status = 'completed')
+            WHERE ss.customer_id = e.customer_id AND ss.status = 'completed'
+              AND COALESCE(ss.completed_at, ss.scheduled_date::timestamp AT TIME ZONE 'America/New_York', ss.created_at) <= e.archived_at)
         )
         AND NOT EXISTS (SELECT 1 FROM invoices i
           WHERE i.customer_id = e.customer_id AND i.status = 'paid'
