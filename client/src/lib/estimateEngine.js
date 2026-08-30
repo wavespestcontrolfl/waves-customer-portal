@@ -798,7 +798,10 @@ function hasNonNegativeNumber(value) {
     Number(value) >= 0;
 }
 
-function normalizeGrassType(grassType) {
+// Alias match only — null for a value no track claims (server mirror:
+// matchGrassTrack in service-pricing.js). An unsupported type must never be
+// silently priced off the St. Augustine table.
+function matchGrassTrack(grassType) {
   const raw = String(grassType || '').trim();
   const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const aliases = {
@@ -811,7 +814,11 @@ function normalizeGrassType(grassType) {
   for (const [track, values] of Object.entries(aliases)) {
     if (values.includes(compact)) return track;
   }
-  return 'st_augustine';
+  return null;
+}
+
+function normalizeGrassType(grassType) {
+  return matchGrassTrack(grassType) || 'st_augustine';
 }
 
 const DETHATCHING_CONFIG = {
@@ -1710,7 +1717,11 @@ export function calculateEstimate(inputs) {
   const trenchingConcretePct = trenchingConcretePctRaw > 1
     ? trenchingConcretePctRaw / 100
     : trenchingConcretePctRaw;
+  const requestedGrassType = String(_grassType || '').trim();
   const grassType = normalizeGrassType(_grassType);
+  // Explicit unmatched grass (paspalum etc.) — same defaulted-loudly contract
+  // as the server engine; an empty track is the ordinary default, not unknown.
+  const grassTypeWasDefaulted = matchGrassTrack(_grassType) === null && requestedGrassType !== '';
   const lawnFreq = resolveLawnFreq(_lawnFreq);
   const mosquitoStationCount = Math.max(0, Math.round(Number(_mosquitoStationCount) || 0));
   const mosquitoDunkCount = Math.max(0, Math.round(Number(_mosquitoDunkCount) || 0));
@@ -2229,8 +2240,17 @@ export function calculateEstimate(inputs) {
     if (customQuoteFlag) {
       addLawnCustomQuoteNote();
     }
+    if (grassTypeWasDefaulted && !notes.some(n => n.type === 'LAWN_UNKNOWN_GRASS')) {
+      notes.push({
+        type: 'LAWN_UNKNOWN_GRASS',
+        text: `Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`,
+        priority: 'HIGH',
+      });
+    }
     R.lawnMeta = {
       lsf, sc, tf, oa, grassType, grassCode: lp.code, grassName: lp.name, hardscape,
+      requestedGrassType: requestedGrassType || null,
+      grassTypeWasDefaulted,
       turfEstimated: turfArea.turfEstimated,
       turfConfidence: turfArea.turfConfidence,
       turfBasis: turfArea.turfBasis,

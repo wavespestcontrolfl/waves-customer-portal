@@ -1796,7 +1796,10 @@ function pricePestInitialRoach(property, options = {}) {
 // ============================================================
 // LAWN CARE
 // ============================================================
-function normalizeGrassType(grassType) {
+// Alias match only — null for a value no track claims, so callers can tell
+// "recognized" apart from "defaulted". An unsupported type (paspalum, seashore
+// varieties) must never be silently priced off the St. Augustine table.
+function matchGrassTrack(grassType) {
   const raw = String(grassType || '').trim();
   const upper = raw.toUpperCase();
   const compact = upper.replace(/[^A-Z0-9]/g, '');
@@ -1808,7 +1811,11 @@ function normalizeGrassType(grassType) {
       if (upper === aliasRaw.toUpperCase() || compact === aliasCompact) return track;
     }
   }
-  return 'st_augustine';
+  return null;
+}
+
+function normalizeGrassType(grassType) {
+  return matchGrassTrack(grassType) || 'st_augustine';
 }
 
 function resolveLawnTier(tier, lawnFreq) {
@@ -2077,7 +2084,14 @@ function priceLawnCare(property, options = {}) {
     bermudaSuppression = false,
   } = options;
 
-  const normalizedTrack = normalizeGrassType(track);
+  const requestedGrassType = String(track || '').trim();
+  const matchedTrack = matchGrassTrack(track);
+  // An EXPLICIT unmatched grass type (paspalum etc.) prices off the
+  // St. Augustine table as before but must say so and park for review —
+  // never a silent substitution. An empty/absent track is the ordinary
+  // default, not an unknown.
+  const grassTypeWasDefaulted = !matchedTrack && requestedGrassType !== '';
+  const normalizedTrack = matchedTrack || 'st_augustine';
   const selectedTier = resolveLawnTier(tier, lawnFreq);
   const tierConfig = LAWN_TIERS[selectedTier];
   if (!tierConfig) throw new Error(`Unknown lawn tier: ${selectedTier}`);
@@ -2290,12 +2304,27 @@ function priceLawnCare(property, options = {}) {
   const margin = annual > 0 ? (annual - selectedAnnualCost) / annual : 0;
   const customQuoteFlag = lawnSqFt > LAWN_TABLE_MAX_SQFT;
   const display = LAWN_TRACK_DISPLAY[normalizedTrack] || LAWN_TRACK_DISPLAY.st_augustine;
+  // Review gate (mirrors the pest confidence gate's contract): LOW-graded turf
+  // is a provenance guess (county prior / lot fallback / implausible vision),
+  // not a measurement — it may not produce a customer-ready price unreviewed.
+  // MEDIUM (the ordinary vision measurement) stays unparked by design; whether
+  // it should carry a softer signal is an open owner ruling.
+  const lowConfidenceTurf = String(property.turfConfidence || '').toUpperCase() === 'LOW';
+  const manualReviewReasons = [
+    ...(grassTypeWasDefaulted ? ['unknown_grass_type_priced_st_augustine'] : []),
+    ...(lowConfidenceTurf ? ['low_confidence_turf_requires_field_verification'] : []),
+  ];
+  const requiresManualReview = manualReviewReasons.length > 0;
 
   return {
     service: 'lawn_care',
     track: normalizedTrack,
     grassCode: display.code,
     grassType: display.label,
+    requestedGrassType: requestedGrassType || null,
+    grassTypeWasDefaulted,
+    requiresManualReview,
+    manualReviewReasons,
     tier: selected.tier,
     lawnSqFt,
     turfSf: lawnSqFt,
@@ -2320,6 +2349,12 @@ function priceLawnCare(property, options = {}) {
     notes: [
       ...(customQuoteFlag
         ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
+        : []),
+      ...(grassTypeWasDefaulted
+        ? [`Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`]
+        : []),
+      ...(lowConfidenceTurf
+        ? ['Turf area is a low-confidence estimate and requires field verification before this price is customer-ready.']
         : []),
       ...(bermudaSuppression === true && !bermudaSuppressionEligible
         ? ['Bermudagrass suppression applies to St. Augustine lawns only — not included in this price.']

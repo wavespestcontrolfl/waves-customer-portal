@@ -424,11 +424,21 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
     // status/generated flags park.
     const typeUnresolved = unitScopeGuardrailsEnabled()
       && automation.review.includes('property_type_unresolved');
-    automation.status = (quoteRequired || typeUnresolved) ? 'manual_review_required' : 'generated';
-    automation.generated = !quoteRequired && !typeUnresolved;
+    // Estimate-level field-verify flags (FIELD_VERIFY_TURF_SQFT — a LOW-graded
+    // turf basis) park the draft too: the line items carry no review marker on
+    // that path, so a lot-fallback turf price could auto-send unreviewed
+    // (estimator-engine audit 2026-08-30). Totals stay visible as provisional,
+    // matching the typeUnresolved contract above.
+    const fieldVerifyFlags = Array.isArray(estimate?.fieldVerify) ? estimate.fieldVerify : [];
+    const fieldVerifyRequired = fieldVerifyFlags.length > 0;
+    const parked = quoteRequired || typeUnresolved || fieldVerifyRequired;
+    automation.status = parked ? 'manual_review_required' : 'generated';
+    automation.generated = !parked;
     automation.quoteRequired = quoteRequired;
+    automation.fieldVerify = fieldVerifyFlags;
     automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
-      || (typeUnresolved ? 'property_type_unresolved' : null);
+      || (typeUnresolved ? 'property_type_unresolved' : null)
+      || (fieldVerifyRequired ? fieldVerifyFlags[0] : null);
 
     return {
       automation,
