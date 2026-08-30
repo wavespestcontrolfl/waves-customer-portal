@@ -124,16 +124,32 @@ exports.up = async function up(knex) {
     // rewrites these fields concurrently.)
     if (wound && (await hasLiveState(knex, customer.id))) {
       await knex.transaction(async (trx) => {
-        await trx('customers').where({ id: customer.id }).update({
-          active: wound.prior.active,
-          waveguard_tier: wound.prior.waveguard_tier,
-          monthly_rate: wound.prior.monthly_rate,
-          billing_mode: wound.prior.billing_mode,
-          ...(hasPerAppFee ? { per_application_fee: wound.prior.per_application_fee } : {}),
-          updated_at: trx.fn.now(),
-        });
-        if (hasLedger && wound.planRates.length) {
-          await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
+        // Lock and VERIFY the row still carries the exact wound-down state
+        // before restoring: a reactivation flow may itself have repriced
+        // the account after our commit — that newer state wins, and this
+        // compensation then only leaves the review note.
+        const current = await trx('customers')
+          .where({ id: customer.id })
+          .forUpdate()
+          .first('active', 'waveguard_tier', 'monthly_rate', 'billing_mode');
+        const stillWoundDown = current
+          && current.active === false
+          && current.waveguard_tier == null
+          && (current.monthly_rate == null || Number(current.monthly_rate) === 0)
+          && current.billing_mode == null;
+        if (stillWoundDown) {
+          await trx('customers').where({ id: customer.id }).update({
+            active: wound.prior.active,
+            waveguard_tier: wound.prior.waveguard_tier,
+            monthly_rate: wound.prior.monthly_rate,
+            billing_mode: wound.prior.billing_mode,
+            ...(hasPerAppFee ? { per_application_fee: wound.prior.per_application_fee } : {}),
+            updated_at: trx.fn.now(),
+          });
+          if (hasLedger && wound.planRates.length) {
+            const ledgerNow = await trx('customer_plan_rates').where({ customer_id: customer.id }).first('id');
+            if (!ledgerNow) await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
+          }
         }
         await trx('customer_interactions').insert({
           customer_id: customer.id,

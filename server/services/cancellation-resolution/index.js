@@ -80,7 +80,11 @@ async function openCancellationCase({
         repair.resolution_template_id = retryCard.templateId;
         repair.resolution_slots = JSON.stringify(retryCard.slots || {});
         repair.resolution_action = JSON.stringify(retryCard.action || {});
-        repair.resolution_outcome = resolutionOutcome || 'shown';
+        // Same rule as the insert path: only an explicit, validated claim
+        // counts as an impression — a repaired-in card the customer may
+        // never have seen records 'none' and must not burn the 12-month
+        // suppression slot.
+        repair.resolution_outcome = ['shown', 'accepted', 'declined'].includes(resolutionOutcome) ? resolutionOutcome : 'none';
       }
       if (Object.keys(repair).length) {
         repair.updated_at = new Date();
