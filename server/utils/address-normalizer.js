@@ -532,8 +532,16 @@ function parseRawAddress(raw) {
     city = cleanString(cityTail.replace(/,/g, ''));
   } else {
     let remainder = withoutCountry;
-    zip = normalizeZip(remainder);
-    if (zip) remainder = cleanString(remainder.replace(zip, ''));
+    // Comma-free input has no segment boundaries, so only a TRAILING 5-digit
+    // token can be the ZIP — a leading one is the house number ("12345 Gulf
+    // Drive Bradenton"; SWFL house numbers share the 5-digit range with 34xxx
+    // ZIPs). Strip the matched trailing occurrence specifically so a house
+    // number that equals the ZIP is never removed from the street line.
+    const trailingZip = remainder.match(/(^|[\s,])(\d{5}(?:-\d{4})?)$/);
+    if (trailingZip) {
+      zip = trailingZip[2];
+      remainder = cleanString(remainder.slice(0, trailingZip.index));
+    }
     const stateMatch = findTrailingState(remainder);
     if (stateMatch.state) {
       state = stateMatch.state;
