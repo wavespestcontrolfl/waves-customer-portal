@@ -454,6 +454,50 @@ describe('buildEnrichedProfile end-to-end', () => {
   });
 });
 
+// Unit-type property carrying the association's parcel-scale lotSize —
+// lot-priced services (mosquito treatable area, rodent scoping) would quote
+// the whole development for one door (estimator-engine audit 2026-08-30 #3).
+describe('unit-type parcel-scale lot verify flag', () => {
+  const { buildFieldVerifyFlags } = routePrivate;
+
+  test('condo record WITH a lotSize → HIGH lotSize verify flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '1 Example Condo Way Unit 4, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      _source: 'county',
+    }, null, null);
+    const flag = flags.find((f) => f.field === 'lotSize');
+    expect(flag).toBeDefined();
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/association/i);
+    expect(flag.reason).toMatch(/mosquito/i);
+  });
+
+  test('single-family with a lotSize → no lotSize flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '2 Example St, Testville, FL 00000',
+      propertyType: 'Single Family',
+      squareFootage: 1800,
+      lotSize: 9000,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('condo WITHOUT a lotSize keeps the quiet missing-lot behavior', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '3 Example Condo Way, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: null,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+});
+
 // Condo/townhome resident misclassification: county rolls file these
 // communities as building-level "Multifamily" master parcels, so a unit-less
 // address resolves to the association's whole building and a resident's

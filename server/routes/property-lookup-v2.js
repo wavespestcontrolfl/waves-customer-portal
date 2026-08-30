@@ -3199,6 +3199,21 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
+  // The INVERSE hazard: a unit-type property (condo/apartment/multifamily)
+  // whose record DOES carry a lotSize is usually carrying the development's
+  // whole parcel — lot-priced services (mosquito's treatable area, rodent
+  // scoping) would quote the entire grounds for one door (estimator-engine
+  // audit 2026-08-30 #3). Lawn self-defends (lot-derived turf grades LOW
+  // and parks), so this surfaces the parcel-scale lot for verification.
+  if (rc && rc.lotSize
+    && /condo|apartment|multifamily|hoa common/i.test(String(rc.propertyType || ''))) {
+    flags.push({
+      field: 'lotSize',
+      reason: 'Unit-type property carries a parcel-scale lot size (likely the association’s whole parcel) — verify the unit’s own treatable area before mosquito, rodent, or other lot-priced quoting',
+      priority: 'HIGH',
+    });
+  }
+
   // Satellite AI pool signal without record confirmation — fires both when
   // the county roll says no pool (new pool vs neighbor's) and when there is
   // no county signal at all (hasPool null). Suppressed when a tech already
