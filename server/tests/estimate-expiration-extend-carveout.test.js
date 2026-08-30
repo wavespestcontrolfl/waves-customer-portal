@@ -12,7 +12,11 @@
  * expires_at IS NULL, or expires_at has already passed (Rule 2 owns those
  * rows anyway). A future expires_at always wins over the inactivity rule.
  */
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const fn = jest.fn();
+  fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  return fn;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),

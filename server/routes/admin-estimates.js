@@ -1789,8 +1789,10 @@ router.get('/actuals-variance', async (req, res, next) => {
 // GET /api/admin/estimates/win-loss-slices — resolved-only win/loss rates
 // sliced by the property-lookup profile's fieldVerifyFlags (clean vs
 // flagged, per flag field, per priority) and by price band, plus the
-// recurring-band × flag cross. Won = accepted; lost = declined/expired —
-// same semantics as the client's PipelineAnalytics. Read-only analytics.
+// recurring-band × flag cross, plus (estimator audit 2026-08-29) loss
+// dispositions, service-line / lead-source / WaveGuard-tier win rates and
+// the sent-cohort funnel. Won = accepted; lost = declined/expired — same
+// semantics as the client's PipelineAnalytics. Read-only analytics.
 router.get('/win-loss-slices', async (req, res, next) => {
   try {
     const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 90));
@@ -2098,6 +2100,11 @@ router.get('/', async (req, res, next) => {
           followUpCount: e.follow_up_count || 0,
           lastFollowUpAt: e.last_follow_up_at,
           declineReason: e.decline_reason,
+          disposition: e.disposition || null,
+          dispositionSource: e.disposition_source || null,
+          dispositionNote: e.disposition_note || null,
+          competitorName: e.competitor_name || null,
+          competitorPrice: e.competitor_price != null ? parseFloat(e.competitor_price) : null,
           token: e.token,
           archivedAt: e.archived_at,
           showOneTimeOption: e.show_one_time_option,
@@ -2781,10 +2788,86 @@ router.post('/:id/archive', async (req, res, next) => {
         });
       }
     }
+    const archiveUpdates = { archived_at: db.fn.now(), updated_at: db.fn.now() };
+    // Parking a LIVE courtship is a loss outcome too (estimator audit
+    // 2026-08-29 P0): an optional staff disposition in the body wins;
+    // otherwise the row is classified archived_unresolved so it never
+    // vanishes from the loss picture. Terminal rows already carry theirs.
+    if (['sent', 'viewed'].includes(estimate.status) && !estimate.disposition) {
+      const { staffDispositionUpdates } = require('../services/estimate-disposition');
+      const given = req.body?.disposition !== undefined || req.body?.declineReason !== undefined
+        ? staffDispositionUpdates(req.body)
+        : null;
+      if (given?.error) return res.status(400).json({ error: given.error });
+      let systemUpdates = null;
+      if (!given) {
+        // Before defaulting to a LOSS, apply the conversion sweep's own
+        // criteria (GH codex P1): evidence can land between sweep runs, and
+        // this write sets archived_at — the sweep only scans unarchived
+        // rows, so a false archived_unresolved here would be permanent.
+        // customerConvertedSince fails toward converted on lookup errors
+        // (guard-error), which must NOT mint a phantom conversion here.
+        let disposition = 'archived_unresolved';
+        try {
+          const { whereConversionEligibilitySignal, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
+          // EXACTLY the sweep's predicates (narrow paid-invoice/completed-
+          // service evidence + none-before disqualifiers) — a pending
+          // booking or customer stage must not mint a conversion here.
+          const convertedRow = await db('estimates')
+            .where({ id: estimate.id })
+            .whereNotNull('customer_id')
+            .modify(whereConversionEligibilitySignal)
+            .modify(whereNoConversionBeforeEstimate)
+            .first('id');
+          if (convertedRow) disposition = 'converted_other_path';
+        } catch { /* classification stays archived_unresolved */ }
+        systemUpdates = {
+          disposition,
+          disposition_source: 'system',
+          disposition_at: db.fn.now(),
+        };
+      }
+      Object.assign(archiveUpdates, given?.updates || systemUpdates);
+    }
+    // Predicate on the OBSERVED state, not just id (codex pre-push P1
+    // TOCTOU): a public decline / accept / conversion sweep committing
+    // after the pre-read must not be overwritten by this stale archive
+    // classification — the racing writer owns the row's story.
     const [updated] = await db('estimates')
-      .where({ id: req.params.id })
-      .update({ archived_at: db.fn.now(), updated_at: db.fn.now() })
+      .where({ id: req.params.id, status: estimate.status })
+      .whereNull('archived_at')
+      .modify((q) => (estimate.disposition
+        ? q.where({ disposition: estimate.disposition })
+        : q.whereNull('disposition')))
+      .update(archiveUpdates)
       .returning('*');
+    if (!updated) {
+      return res.status(409).json({ error: 'Estimate changed while you were archiving it. Refresh and retry.' });
+    }
+    // Post-write verification (GH codex P2): conversion evidence can commit
+    // between the classification SELECT and the archive UPDATE, and the
+    // sweep never rescans archived rows — so after a SYSTEM
+    // archived_unresolved stamp, re-run the same predicates once. Evidence
+    // seen now committed before this check and therefore effectively at
+    // archive time; evidence landing later genuinely postdates archival.
+    if (updated.disposition === 'archived_unresolved' && updated.disposition_source === 'system') {
+      try {
+        const { whereConversionEligibilitySignal, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
+        const convertedNow = await db('estimates')
+          .where({ id: updated.id })
+          .whereNotNull('customer_id')
+          .modify(whereConversionEligibilitySignal)
+          .modify(whereNoConversionBeforeEstimate)
+          .first('id');
+        if (convertedNow) {
+          const [upgraded] = await db('estimates')
+            .where({ id: updated.id, disposition: 'archived_unresolved' })
+            .update({ disposition: 'converted_other_path' })
+            .returning('*');
+          if (upgraded) return res.json(upgraded);
+        }
+      } catch { /* the unresolved stamp stands */ }
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -2823,12 +2906,45 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
     const [updated] = await db('estimates')
-      .where({ id: req.params.id })
+      .where({ id: req.params.id, status: estimate.status })
+      // Observed-state guard, mirroring the archive route (codex pre-push
+      // P1 TOCTOU): a concurrent decline/accept that resolved the archived
+      // row owns its disposition — unarchiving from a stale pre-read must
+      // not erase it.
+      .whereNotNull('archived_at')
+      .modify((q) => (estimate.disposition
+        ? q.where({ disposition: estimate.disposition })
+        : q.whereNull('disposition')))
       .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
-      .update({ archived_at: null, updated_at: db.fn.now() })
+      .update({
+        archived_at: null,
+        updated_at: db.fn.now(),
+        // A LIVE (sent/viewed) row can only have gotten its disposition from
+        // the archive action — reviving the courtship un-classifies it, or a
+        // later expiry would COALESCE-preserve a stale "archived" loss
+        // (codex pre-push P1). Terminal rows (declined/expired/accepted)
+        // keep theirs: those were stamped by their own resolution.
+        ...(['sent', 'viewed'].includes(estimate.status) ? {
+          disposition: null,
+          disposition_source: null,
+          disposition_at: null,
+          disposition_note: null,
+          competitor_name: null,
+          competitor_price: null,
+          // The archive path also wrote the legacy badge label — a revived
+          // live row must not keep displaying a stale loss (codex P1).
+          decline_reason: null,
+        } : {}),
+      })
       .returning('*');
-    if (!updated) return res.status(409).json({ error: invalidatedMessage });
+    if (!updated) {
+      // Zero rows: either a linkage marker (permanent) or a concurrent
+      // writer moved the row. Re-read once to say which.
+      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition');
+      const changed = fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null));
+      return res.status(409).json({ error: changed ? 'Estimate changed while you were unarchiving it. Refresh and retry.' : invalidatedMessage });
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -3173,7 +3289,27 @@ router.patch('/:id', async (req, res, next) => {
 
     const updates = {};
     if (req.body.isPriority !== undefined) updates.is_priority = req.body.isPriority;
-    if (req.body.declineReason !== undefined) updates.decline_reason = req.body.declineReason;
+    // Decline reason is now a NORMALIZED disposition (estimator audit
+    // 2026-08-29 P0). Clients send `disposition` (a staff code from
+    // estimate-disposition.js, plus competitorName/competitorPrice/
+    // dispositionNote) — a legacy `declineReason` label alone still maps to
+    // a code so the pipeline's free-text action and older tabs keep working.
+    // The human label is preserved in decline_reason for existing badges.
+    const wantsDisposition = req.body.disposition !== undefined || req.body.declineReason !== undefined;
+    if (wantsDisposition) {
+      // Loss fields land ONLY on a decline transition in this same request
+      // or a reason edit on an already-declined row (codex pre-push P1): a
+      // live estimate stamped here would carry the stale staff loss through
+      // expiry/conversion via their COALESCEs. Archive reasons belong to
+      // the archive endpoint.
+      if (req.body.status !== 'declined' && estimate.status !== 'declined') {
+        return res.status(400).json({ error: 'A decline reason can only be set while declining the estimate (or editing an already-declined one).' });
+      }
+      const { staffDispositionUpdates } = require('../services/estimate-disposition');
+      const verdict = staffDispositionUpdates(req.body);
+      if (verdict.error) return res.status(400).json({ error: verdict.error });
+      Object.assign(updates, verdict.updates);
+    }
     if (req.body.showOneTimeOption !== undefined) {
       const nextShowOneTimeOption = !!req.body.showOneTimeOption;
       const deliveryError = nextShowOneTimeOption ? validateEstimateDeliveryOptions({
@@ -3224,7 +3360,15 @@ router.patch('/:id', async (req, res, next) => {
       // re-stamp); other fields in the same request still persist below.
       if (!verdict.noop) {
         updates.status = req.body.status;
-        if (req.body.status === 'declined') updates.declined_at = db.fn.now();
+        if (req.body.status === 'declined') {
+          updates.declined_at = db.fn.now();
+          // A decline without a reason is exactly the unexplained loss the
+          // disposition layer exists to end — the modals always send one;
+          // this closes the API path.
+          if (!updates.disposition) {
+            return res.status(400).json({ error: 'A decline reason (disposition) is required to mark an estimate declined.' });
+          }
+        }
       }
     }
 

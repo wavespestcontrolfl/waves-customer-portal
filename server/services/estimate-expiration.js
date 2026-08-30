@@ -14,6 +14,22 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
+const { EXPIRED_DISPOSITION_SQL } = require('./estimate-disposition');
+
+// Every expiry flip also stamps WHY (estimator audit 2026-08-29 P0): the
+// 130-of-161 losses that expire silently were the whole learning gap. The
+// CASE reads the PRE-update row (Postgres SET semantics) so an opened-then-
+// abandoned estimate classifies as expired_viewed, never-opened as
+// expired_unviewed; a disposition staff already stamped is kept (COALESCE).
+function expiredUpdate(now) {
+  return {
+    status: 'expired',
+    updated_at: now,
+    disposition: db.raw(EXPIRED_DISPOSITION_SQL),
+    disposition_source: db.raw("COALESCE(disposition_source, 'system')"),
+    disposition_at: db.raw('COALESCE(disposition_at, ?)', [now]),
+  };
+}
 
 function getThresholdDays() {
   const raw = parseInt(process.env.ESTIMATE_EXPIRATION_DAYS, 10);
@@ -63,7 +79,7 @@ async function runEstimateExpiration() {
     // RETURNING the flipped rows so the admin bell can name who walked away
     // (owner ruling 2026-07-30: a bell that says "Customer expired without a
     // decision" is not actionable).
-    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
+    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
   // passed. Accepted/declined estimates are left alone.
@@ -82,11 +98,12 @@ async function runEstimateExpiration() {
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.
     .modify(excludePendingFirstBookings)
-    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
+    .update(expiredUpdate(now), ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total', 'disposition']);
 
   const agedRows = Array.isArray(agedResult) ? agedResult : [];
   const dateRows = Array.isArray(dateResult) ? dateResult : [];
-  logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedRows.length} dateExpired=${dateRows.length}`);
+  const unviewed = [...agedRows, ...dateRows].filter((r) => r.disposition === 'expired_unviewed').length;
+  logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedRows.length} dateExpired=${dateRows.length} unviewed=${unviewed}`);
 
   // Refund acceptance deposits stranded on terminal estimates — money
   // received while the estimate was live (paid then abandoned, or paid then
