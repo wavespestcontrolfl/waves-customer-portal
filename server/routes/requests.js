@@ -100,6 +100,19 @@ function stripHtml(s) {
   return String(s || '').replace(/[<>]/g, '');
 }
 
+// Cancellation moving-branch address verdict (PR E): the TRANSFER card only
+// appears on a fully accepted in-area validation (validated_accept /
+// corrected); an accepted OUT-of-area address is the clean-cancel hard stop;
+// anything partial (ambiguous, missing component, confirm-needed,
+// API-unavailable) resolves to null → no card, no hard stop.
+function cancelMoveAddressVerdict(verdict, STATUSES) {
+  if (!verdict) return null;
+  if (verdict.status === STATUSES.OUT_OF_SERVICE_AREA) return false;
+  const accepted = verdict.status === STATUSES.VALIDATED_ACCEPT || verdict.status === STATUSES.CORRECTED;
+  if (!accepted || verdict.inServiceArea !== true) return null;
+  return true;
+}
+
 // Durable cancellation case (PR E) — idempotent per request id, best-effort:
 // a case failure never blocks or un-reports a cancel. Called from the fresh
 // create AND both retry branches, so a transient insert failure on the first
@@ -392,9 +405,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         try {
           let newAddressInServiceArea = null;
           if (value.newAddress) {
-            const { validateAddress } = require('../services/address-validation');
+            const { validateAddress, STATUSES } = require('../services/address-validation');
             const verdict = await validateAddress({ addressLines: [value.newAddress] });
-            newAddressInServiceArea = verdict && typeof verdict.inServiceArea === 'boolean' ? verdict.inServiceArea : null;
+            newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
           }
           const preview = await CancellationResolution.previewCancellationResolution({
             customerId: req.customer.id,
@@ -707,9 +720,9 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
     // clean-cancel hard stop; anything unverifiable resolves to no card.
     let newAddressInServiceArea = null;
     if (value.new_address) {
-      const { validateAddress } = require('../services/address-validation');
+      const { validateAddress, STATUSES } = require('../services/address-validation');
       const verdict = await validateAddress({ addressLines: [value.new_address] });
-      newAddressInServiceArea = verdict && typeof verdict.inServiceArea === 'boolean' ? verdict.inServiceArea : null;
+      newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
     }
 
     const preview = await CancellationResolution.previewCancellationResolution({

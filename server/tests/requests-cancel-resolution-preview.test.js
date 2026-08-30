@@ -35,7 +35,10 @@ jest.mock('../services/cancellation-resolution', () => ({
 }));
 
 const mockValidateAddress = jest.fn();
-jest.mock('../services/address-validation', () => ({ validateAddress: (...args) => mockValidateAddress(...args) }));
+jest.mock('../services/address-validation', () => ({
+  validateAddress: (...args) => mockValidateAddress(...args),
+  STATUSES: { VALIDATED_ACCEPT: 'validated_accept', CORRECTED: 'corrected', OUT_OF_SERVICE_AREA: 'out_of_service_area' },
+}));
 
 const express = require('express');
 const router = require('../routes/requests');
@@ -113,12 +116,22 @@ test('new_address verdicts map to the resolver context', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockPreview.mockResolvedValue({ facts: {}, resolution: { kind: 'none', reasonCode: 'moving_or_property_change' } });
 
-  mockValidateAddress.mockResolvedValueOnce({ inServiceArea: true });
+  mockValidateAddress.mockResolvedValueOnce({ status: 'validated_accept', inServiceArea: true });
   await post({ reason: 'moving_or_property_change', new_address: '123 Main St Parrish FL' });
   expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: true }) }));
 
   mockValidateAddress.mockResolvedValueOnce({ inServiceArea: null, status: 'api_unavailable' });
   await post({ reason: 'moving_or_property_change', new_address: 'somewhere' });
+  expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: null }) }));
+
+  // A resolved OUT-of-area address is a reliable false (clean-cancel hard stop).
+  mockValidateAddress.mockResolvedValueOnce({ inServiceArea: false, status: 'out_of_service_area' });
+  await post({ reason: 'moving_or_property_change', new_address: 'far away' });
+  expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: false }) }));
+
+  // A partially validated in-area address (confirm_needed) must NOT verify.
+  mockValidateAddress.mockResolvedValueOnce({ inServiceArea: true, status: 'confirm_needed' });
+  await post({ reason: 'moving_or_property_change', new_address: 'partial addr' });
   expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: null }) }));
 });
 
