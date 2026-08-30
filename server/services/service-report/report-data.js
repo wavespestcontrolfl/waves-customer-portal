@@ -4932,13 +4932,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // other recommendation keeps its card row unconditionally. Bias runs
   // toward KEEPING: a duplicate line is noise, a dropped instruction is
   // information loss.
-  const IRRIGATION_WORD_RE = /\b(?:irrigat\w*|water\w*)\b/i;
-  const HOLD_WORD_RE = /\b(?:do\s+not|don['’]?t|hold(?:\s+off)?|avoid|wait|skip|withhold|no)\b/i;
+  // The hold verb must be grammatically TIED to the irrigation word — a
+  // hold/negation phrase followed by irrigation/watering within at most
+  // three intervening words ("do not apply irrigation", "hold off on any
+  // irrigation", "avoid watering", "wait 48 hours before watering") —
+  // never independently pooled tokens: "Irrigation caused no runoff for
+  // 48 hours" carries all three tokens but no hold instruction and must
+  // cover nothing (codex P1 r9).
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?|no)\s+(?:['’\w]+\s+){0,3}?(?:irrigat|water)/i;
   // An irrigation-hold instruction's duration in hours, or null when the
-  // text is not one (no irrigation word, no hold word, or no duration).
+  // text is not one (no tied hold phrase, or no duration).
   const irrigationHoldHours = (text) => {
     const s = String(text || '');
-    if (!IRRIGATION_WORD_RE.test(s) || !HOLD_WORD_RE.test(s)) return null;
+    if (!IRRIGATION_HOLD_PHRASE_RE.test(s)) return null;
     const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
     return m ? Number(m[1]) : null;
   };

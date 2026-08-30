@@ -171,6 +171,24 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 
+  test('opposite/non-hold irrigation sentences cover nothing: "Irrigation caused no runoff for 48 hours" (codex P1 r9)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      technician_notes: [
+        'WHAT WE DID',
+        '',
+        'Weed control was applied across the turf today.',
+        '',
+        'WHAT WE FOUND',
+        '',
+        'Irrigation caused no runoff for 48 hours after the treatment.',
+      ].join('\n'),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-8', makeKnex());
+    expect(data.summarySource).toBe('technician_report');
+    expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
+  });
+
   test('callback with NO reviewed narrative keeps every card — removal never loses the sole record', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const svc = lawnCallbackService({ technician_notes: '' });
