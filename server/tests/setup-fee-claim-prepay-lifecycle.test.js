@@ -49,6 +49,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = w; return q; };
     q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
+    q.forUpdate = () => q;
     q.first = async () => {
       if (table === 'scheduled_services') return scheduledService;
       if (table === 'setup_fee_claims') return claim;
@@ -96,10 +97,22 @@ describe('retireDirectSetupClaimForPrepay — the mint side', () => {
     expect(trx.writes).toEqual([]);
   });
 
-  test('no fee / no anchor / no invoice → no-op', async () => {
+  test('amount 0 (waived WaveGuard class): nothing ledgered, but a positive claim is still CAS-cleared and a negative one still refuses (codex #3591 r40 P1)', async () => {
     const trx = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '99.00' } });
-    expect(await retireDirectSetupClaimForPrepay(trx, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 0 })).toEqual({ recorded: false, retired: false });
+    expect(await retireDirectSetupClaimForPrepay(trx, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 0 })).toEqual({ recorded: false, retired: true });
+    expect(trx.writes).toEqual([
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'svc-parent', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
+    ]);
+    const busy = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '-99.00' } });
+    await expect(retireDirectSetupClaimForPrepay(busy, { anchorId: 'svc-parent', invoiceId: 'inv-prepay', amount: 0 }))
+      .rejects.toMatchObject({ switchConflict: true });
+    expect(busy.writes).toEqual([]);
+  });
+
+  test('no anchor / no invoice → no-op', async () => {
+    const trx = conn({ scheduledService: { id: 'svc-parent', pending_setup_fee: '99.00' } });
     expect(await retireDirectSetupClaimForPrepay(trx, { anchorId: null, invoiceId: 'inv-prepay', amount: 99 })).toEqual({ recorded: false, retired: false });
+    expect(await retireDirectSetupClaimForPrepay(trx, { anchorId: 'svc-parent', invoiceId: null, amount: 99 })).toEqual({ recorded: false, retired: false });
     expect(await recordSetupFeeClaimForInvoice(trx, { invoiceId: null, anchorId: 'svc-parent', amount: 99 })).toBe(false);
     expect(trx.writes).toEqual([]);
   });
@@ -194,6 +207,21 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     const noEstimate = conn({ claim: anchorless });
     expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', noEstimate)).toBeNull();
     expect(noEstimate.writes).toEqual([]);
+  });
+
+  test('re-stamp and record consume run inside ONE transaction on a plain connection, with the record locked (codex #3591 r40 P1)', async () => {
+    const inner = conn({ claim, scheduledService: { id: 'svc-parent', source_estimate_id: null, pending_setup_fee: null } });
+    const outer = () => { throw new Error('the plain connection must not be used for the writes'); };
+    outer.transaction = jest.fn(async (cb) => cb(inner));
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', outer)).toEqual({ scheduledServiceId: 'svc-parent', amount: 99 });
+    expect(outer.transaction).toHaveBeenCalledTimes(1);
+    expect(inner.writes.map((w) => w.op)).toEqual(['update', 'delete']);
+    // An existing transaction is reused, never nested.
+    const trx = conn({ claim, scheduledService: { id: 'svc-parent', source_estimate_id: null, pending_setup_fee: null } });
+    trx.isTransaction = true;
+    trx.transaction = jest.fn();
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', trx)).toEqual({ scheduledServiceId: 'svc-parent', amount: 99 });
+    expect(trx.transaction).not.toHaveBeenCalled();
   });
 
   test('no record for the prepay (nothing was billed) / no prepay id → nothing happens', async () => {

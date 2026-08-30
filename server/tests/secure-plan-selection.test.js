@@ -248,6 +248,34 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     ]);
   });
 
+  test('prepay_annual refuses (selection_conflict) while a completion holds the parent claim (negative stamp) and CAS-clears only a positive one (codex #3591 r40 P1)', async () => {
+    setTables({
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
+      scheduled_services: {
+        first: () => ({ ...rodentVisit, pending_setup_fee: '-99.00' }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    await expect(selectSecurePlan({ token: 'tok', plan: 'prepay_annual' })).rejects.toMatchObject({ code: 'selection_conflict' });
+    expect(updatesFor('scheduled_services')).toEqual([]);
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
+    mockDbCalls = [];
+    setTables({
+      appointment_card_requests: { first: () => ({ ...pendingRequest, accepted_setup_fee: String(setup.toFixed(2)) }) },
+      scheduled_services: {
+        first: () => ({ ...rodentVisit, pending_setup_fee: String(setup.toFixed(2)) }),
+        select: () => [{ scheduled_date: FUTURE }, { scheduled_date: '2099-08-04' }],
+      },
+    });
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    const clears = mockDbCalls.filter((c) => c.table === 'scheduled_services'
+      && c.calls.some(([op, patch]) => op === 'update' && patch?.pending_setup_fee === null));
+    expect(clears).toHaveLength(1);
+    // Exact-value CAS on the stamp, never a blanket whereNotNull clear.
+    expect(clears[0].calls.some(([op, w]) => op === 'where' && w?.pending_setup_fee === String(setup.toFixed(2)))).toBe(true);
+    expect(clears[0].calls.some(([op]) => op === 'whereNotNull')).toBe(false);
+  });
+
   test('member (another qualifying service on the account) → no stamp, no setup line', async () => {
     mockQualifyingKeys = async () => ['pest_control'];
     await selectSecurePlan({ token: 'tok', plan: 'per_application' });

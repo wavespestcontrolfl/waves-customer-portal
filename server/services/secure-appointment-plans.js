@@ -186,7 +186,7 @@ function seriesAnchorId(visit) {
 // unpersisted preview row (no id — the prepay-on-book preview prices a
 // booking that does not exist yet) is taken as given. A missing row throws
 // (callers fail closed).
-const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id'];
+const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id', 'pending_setup_fee'];
 
 // The visit's service identity, CATALOG first (codex #3591 r32 P1): a
 // scheduled row's service_type label goes stale after a catalog
@@ -212,9 +212,30 @@ async function loadAuthoritativeSetupVisit(database, visit) {
   return row;
 }
 
+// The POSITIVE per-application claim already stamped on the series anchor —
+// the exact figure the customer accepted through /secure, frozen at
+// disclosure (codex #3591 r40 P1). A persisted child resolves to its parent's
+// stamp; a draft fragment (no row) has none. A negative stamp is a completion
+// mid-claim, not an accepted figure — callers that retire it refuse.
+async function frozenAnchorSetupStamp(database, row) {
+  if (!row || !row.id) return null;
+  let anchor = row;
+  if (row.recurring_parent_id) {
+    anchor = await database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee');
+  }
+  const stamp = anchor && anchor.pending_setup_fee != null ? Number(anchor.pending_setup_fee) : NaN;
+  return Number.isFinite(stamp) && stamp > 0 ? cents(stamp) : null;
+}
+
 async function directRodentSetupForRow(database, row) {
   if (!row || !row.customer_id || row.source_estimate_id) return 0;
   if ((await authoritativeServiceKey(database, row)) !== 'rodent_bait') return 0;
+  // An accepted, frozen claim outranks the LIVE constant (codex #3591 r40
+  // P1): a config raise after the customer accepted $99 must not re-price
+  // the switch / prepay-on-book / secure mint — the stamp is what the
+  // retirement path clears, so it is also what the prepay bills.
+  const frozen = await frozenAnchorSetupStamp(database, row);
+  if (frozen != null) return frozen;
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
   const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
     .filter((key) => key !== 'rodent_bait');
@@ -306,24 +327,30 @@ async function retirePrepayOnBookSetupClaim(trx, { customerId, scheduledServiceI
 // fee against the prepay (restore key), then retire the positive claim by
 // exact-value CAS. A NEGATIVE stamp is a completion mint mid-claim — refuse
 // the switch rather than race it (the operator retries once it settles).
+// amount 0 (the waived WaveGuard class — no line billed, nothing to ledger)
+// still runs the same guarded retire: a positive claim is cleared by CAS
+// because prepay waives it, and a negative one still refuses (codex #3591
+// r40 P1 — the /secure prepay selection used to clear ANY non-null stamp,
+// racing the technician's completion claim on the parent into a double
+// charge).
 async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount }) {
   const fee = cents(Math.max(0, Number(amount) || 0));
-  if (!anchorId || !invoiceId || !(fee > 0)) return { recorded: false, retired: false };
-  const parent = await trx('scheduled_services').where({ id: anchorId }).first('id', 'pending_setup_fee');
+  if (!anchorId || !invoiceId) return { recorded: false, retired: false };
+  const parent = await trx('scheduled_services').where({ id: anchorId }).forUpdate().first('id', 'pending_setup_fee');
   const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
   if (stamp != null && stamp < 0) {
     const err = new Error('The bait-station setup is being billed by a completion in progress — retry in a moment');
     err.switchConflict = true;
     throw err;
   }
-  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
+  if (fee > 0) await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
   let retired = 0;
   if (stamp != null && stamp > 0) {
     retired = await trx('scheduled_services')
       .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
       .update({ pending_setup_fee: null, updated_at: new Date() });
   }
-  return { recorded: true, retired: retired === 1 };
+  return { recorded: fee > 0, retired: retired === 1 };
 }
 
 // consumeDisclosure: the SELECTION path (selectSecurePlan). There a NULL
@@ -778,18 +805,19 @@ async function selectSecurePlan({ token, plan }) {
         });
       if (stamped !== 1) throw fail('selection_conflict');
 
-      // Clear a per-application setup-fee stamp from an earlier selection —
-      // prepay waives it. Same series-parent anchor as the stamp itself.
-      await trx('scheduled_services')
-        .where({ id: anchorId })
-        .whereNotNull('pending_setup_fee')
-        .update({ pending_setup_fee: null, updated_at: new Date() });
-      // An UNWAIVED (rodent) setup rode this prepay as its own line — ledger
-      // it so a later void/refund of the prepay re-stamps the claim the
-      // clear above retired (codex #3591 r34 P1). Nothing to ledger for the
-      // waived WaveGuard class (no fee was billed).
-      if (setupAmount > 0) {
-        await recordSetupFeeClaimForInvoice(trx, { invoiceId: invoice.id, anchorId, amount: setupAmount });
+      // Retire the per-application claim on the series parent through the
+      // SAME guarded helper the on-site switch runs (codex #3591 r40 P1):
+      // the parent is read FOR UPDATE, a NEGATIVE stamp (the technician's
+      // completion mid-claim on a sibling child) refuses the selection
+      // instead of erasing the claim under it, and only a positive stamp is
+      // CAS-cleared — prepay waives the WaveGuard class (nothing ledgered)
+      // and bills the rodent class as its own line (ledgered against this
+      // prepay so a later void/refund re-stamps it; codex #3591 r34 P1).
+      try {
+        await retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId: invoice.id, amount: setupAmount });
+      } catch (retireErr) {
+        if (retireErr.switchConflict) throw fail('selection_conflict');
+        throw retireErr;
       }
 
       await trx('activity_log').insert({

@@ -185,6 +185,23 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     mockQualifyingKeys = async () => { throw new Error('db down'); };
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');
   });
+
+  test('a POSITIVE frozen claim on the series anchor outranks the live constant; a negative (mid-mint) stamp does not (codex #3591 r40 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    // The customer accepted $79 through /secure; the config was raised since.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '79.00' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    // The accepted figure is the obligation even after another family joined
+    // the account — it is what completion would bill and what the prepay
+    // retires; the waiver only decides when no claim was ever accepted.
+    mockQualifyingKeys = async () => ['pest_control'];
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', pending_setup_fee: '-99.00' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    // A draft fragment carries no stamp → live constant.
+    await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
 });
 
 describe('buildSecurePlanContext', () => {

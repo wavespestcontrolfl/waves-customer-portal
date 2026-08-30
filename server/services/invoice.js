@@ -4985,8 +4985,20 @@ const InvoiceService = {
    */
   async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null } = {}) {
     if (!prepayInvoiceId) return null;
+    // Re-stamp + record consume run in ONE transaction with the record
+    // locked (codex #3591 r40 P1): an autocommitted re-stamp followed by a
+    // failed delete would leave a live fee AND a live record, and the next
+    // re-entry (a repeated refund sync) would restore — and bill — it again.
+    const run = async (trx) => this._restoreRetiredSetupFeeClaimLocked(trx, prepayInvoiceId, sourceEstimateId);
+    return typeof conn.transaction === "function" && !conn.isTransaction
+      ? conn.transaction(run)
+      : run(conn);
+  },
+
+  async _restoreRetiredSetupFeeClaimLocked(conn, prepayInvoiceId, sourceEstimateId) {
     const claim = await conn("setup_fee_claims")
       .where({ invoice_id: prepayInvoiceId })
+      .forUpdate()
       .first("id", "scheduled_service_id", "amount");
     if (!claim) return null;
     const amount = Math.round(Number(claim.amount) * 100) / 100;
