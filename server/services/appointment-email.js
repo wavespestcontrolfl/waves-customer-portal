@@ -209,11 +209,22 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
     if (Number.isFinite(renderedSlotMs)) {
       const live = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('scheduled_date', 'window_start');
+        .first('scheduled_date', 'window_start', 'visit_id');
       if (!live || !live.scheduled_date) return true;
       const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
-      const liveStart = parseETDateTime(`${etCalendarDayOf(live.scheduled_date)}T${live.window_start ? String(live.window_start).slice(0, 5) : '08:00'}`);
-      if (!liveStart || Number.isNaN(liveStart.getTime()) || liveStart.getTime() !== renderedSlotMs) return true;
+      const day = etCalendarDayOf(live.scheduled_date);
+      const toMs = (hhmm) => {
+        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
+        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
+      };
+      // Row start OR the grouped stop's canonical start (codex r40) — a
+      // stale body matches neither.
+      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      if (live.visit_id) {
+        const stopStart = await require('./visit-groups').liveStopStartHHMM(db, live.visit_id);
+        if (stopStart) candidates.push(toMs(stopStart));
+      }
+      if (!candidates.some((ms) => ms !== null && ms === renderedSlotMs)) return true;
     }
     return false;
   } catch (err) {

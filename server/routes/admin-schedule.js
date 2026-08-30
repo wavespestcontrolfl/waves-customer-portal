@@ -1180,13 +1180,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
         preDispatchCheck: async () => {
-          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
           if (TERMINAL_FOR_NOTICE.includes(String(row.status))) {
             return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
           }
           const stillDate = normalizeDateOnly(row.scheduled_date) === dateStr;
-          const stillStart = normalizeHHMM(row.window_start) === start;
+          // Grouped move from a LATER chained member (codex r40): the
+          // dispatch route passes visitMove.visitStart — the STOP's
+          // earliest start — which legitimately differs from this row's
+          // own start; accept either (a stale write matches neither).
+          let stillStart = normalizeHHMM(row.window_start) === start;
+          if (!stillStart && row.visit_id) {
+            const stopStart = await require('../services/visit-groups').liveStopStartHHMM(db, row.visit_id).catch(() => null);
+            stillStart = !!stopStart && normalizeHHMM(stopStart) === start;
+          }
           return stillDate && stillStart
             ? { ok: true }
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };

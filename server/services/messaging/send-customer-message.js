@@ -88,11 +88,23 @@ async function appointmentMoveHeld(input) {
     if (Number.isFinite(input.renderedSlotMs)) {
       const live = await db('scheduled_services')
         .where({ id: input.appointmentId })
-        .first('scheduled_date', 'window_start');
+        .first('scheduled_date', 'window_start', 'visit_id');
       if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
       const { parseETDateTime, etCalendarDayOf } = require('../../utils/datetime-et');
-      const liveStart = parseETDateTime(`${etCalendarDayOf(live.scheduled_date)}T${live.window_start ? String(live.window_start).slice(0, 5) : '08:00'}`);
-      if (!liveStart || Number.isNaN(liveStart.getTime()) || liveStart.getTime() !== input.renderedSlotMs) return true;
+      const day = etCalendarDayOf(live.scheduled_date);
+      const toMs = (hhmm) => {
+        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
+        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
+      };
+      // The rendered value is EITHER the row's own start (reminders) OR the
+      // grouped stop's canonical start (rain-out/appointment-page copy for
+      // a later chained member — codex r40); a stale body matches neither.
+      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      if (live.visit_id) {
+        const stopStart = await require('../visit-groups').liveStopStartHHMM(db, live.visit_id);
+        if (stopStart) candidates.push(toMs(stopStart));
+      }
+      if (!candidates.some((ms) => ms !== null && ms === input.renderedSlotMs)) return true;
     }
     return false;
   } catch (err) {

@@ -1649,6 +1649,20 @@ function visitSummariesForRows(rows, {
 }
 
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// The grouped stop's canonical start (earliest live member's HH:MM) — the
+// value grouped customer copy quotes (rain-out, the appointment page).
+// Shared by the last-moment notice checks so a LATER chained member's own
+// start never fails a comparison against the stop start (codex r40).
+async function liveStopStartHHMM(conn, visitId) {
+  if (!visitId) return null;
+  const members = await conn('scheduled_services')
+    .where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES)
+    .select('window_start');
+  const starts = members.map((m) => (m.window_start ? String(m.window_start).slice(0, 5) : null)).filter(Boolean).sort();
+  return starts[0] || null;
+}
+
 // Ensure a member has a reminder row a hold can live on (shared by the
 // unit-move claim and createOrJoinVisit's join-inherit — codex r35): a
 // WINDOWED member gets an ARMED registration (normal 72h/24h once any hold
@@ -2686,6 +2700,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
 module.exports = {
   windowedMembersConnected,
+  liveStopStartHHMM,
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,
