@@ -212,7 +212,7 @@ function mosquitoCogs(program, addOns = {}) {
 // which is exactly what this snapshot exists to prevent.
 const QUOTED_LINE_KEYS = [
   'service', 'tier', 'program', 'pricingVersion', 'cadence', 'frequency', 'frequencyKey',
-  'visitsPerYear', 'visits', 'appsPerYear', 'perTreatment',
+  'visitsPerYear', 'visits', 'appsPerYear', 'perTreatment', 'perApp', 'perVisit',
   'annualAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime',
   'priceAfterDiscount', 'recurringCustomerDiscountRate', 'setupCharge',
   'taxable', 'taxCategory', 'quoteRequired',
@@ -574,17 +574,20 @@ function normalizeEngineLineItems(result) {
     //   amounts live in manualFinal*/​*AfterDiscount.
     // Net = first customer-paid witness; gross = first pre-discount witness.
     const monthly = pickNum(item.monthlyAfterDiscount, item.monthly);
-    const isRecurring = Number.isFinite(monthly) && monthly !== 0;
     const netAnnual = pickNum(item.manualFinalAnnual, item.annualAfterDiscount, item.annual);
+    // ANY recurring-money witness makes the row recurring — an annual-only
+    // or fully-discounted zero-monthly line is still a program, not a
+    // one-time job (GH codex P1).
+    const isRecurring = monthly !== undefined || netAnnual !== undefined;
     const price = isRecurring
-      ? money(Number.isFinite(netAnnual) ? netAnnual : monthly * 12)
+      ? money(Number.isFinite(netAnnual) ? netAnnual : (monthly || 0) * 12)
       : money(pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) ?? 0);
     // A manual discount lands ONLY in manualFinalAnnual — the row's
     // monthlyAfterDiscount predates it, so the audited monthly derives
     // from the final annual when present (codex pre-push P1).
     const netMonthly = Number.isFinite(num(item.manualFinalAnnual))
       ? money(num(item.manualFinalAnnual) / 12)
-      : (isRecurring ? money(monthly) : null);
+      : (isRecurring ? money(Number.isFinite(monthly) ? monthly : price / 12) : null);
     const before = isRecurring
       ? pickNum(item.annualBeforeDiscount, item.annual)
       : pickNum(item.priceBeforeDiscount, item.price, item.totalBeforeDiscount, item.total);
@@ -642,8 +645,12 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // Quote-wizard rows persist their priced services ONLY at
   // engineResult.lineItems (no recurring/oneTime blocks) — without this
   // fallback such snapshots had empty lines, zero cost, and a falsely
-  // perfect margin (GH codex P1).
+  // perfect margin (GH codex P1). An ancillary data.result can shadow
+  // engineResult in the `result` alias, so the fallback tries BOTH.
   if (!rawLines.length) rawLines = normalizeEngineLineItems(result);
+  if (!rawLines.length && data.engineResult && data.engineResult !== result) {
+    rawLines = normalizeEngineLineItems(data.engineResult);
+  }
   const lines = [];
 
   for (const raw of rawLines) {

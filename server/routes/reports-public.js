@@ -1271,11 +1271,20 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // never wrote an audit snapshot. AFTER commit (the trx above is
           // closed once outcome exists) and fail-soft — analytics never
           // unwind a minted offer.
-          if (mintedEstimate?.estimateId && !mintedEstimate.reused) {
+          if (mintedEstimate?.estimateId) {
             try {
-              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
-              if (mintedRow) await saveEstimatePricingAuditSnapshot(mintedRow, { trigger: 'cta_mint' });
+              const { saveEstimatePricingAuditSnapshot, getLatestEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              // A REUSED live mint gets a recovery snapshot only when none
+              // exists (pre-change mints, or a transient failure on the
+              // original attempt) — fresh mints always snapshot (GH codex
+              // P2). Both fail-soft.
+              const existing = mintedEstimate.reused
+                ? await getLatestEstimatePricingAuditSnapshot(mintedEstimate.estimateId)
+                : null;
+              if (!mintedEstimate.reused || !existing) {
+                const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
+                if (mintedRow) await saveEstimatePricingAuditSnapshot(mintedRow, { trigger: 'cta_mint' });
+              }
             } catch (auditErr) {
               logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
             }

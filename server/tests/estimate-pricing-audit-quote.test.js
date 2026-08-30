@@ -231,6 +231,24 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(flea).toMatchObject({ serviceKey: 'flea', cadence: 'one_time', price: 150 });
   });
 
+  test('annual-only and zero-monthly rows stay recurring; ancillary result does not hide engineResult lines', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-anc', status: 'sent', monthly_total: '0.00', annual_total: '500.00', onetime_total: null,
+      estimate_data: {
+        result: { someAncillary: true }, // truthy result WITHOUT priced lines
+        engineResult: {
+          lineItems: [
+            { service: 'termite_bait', name: 'Termite Bait', annual: 500, monthly: null, visits: 4 },
+            { service: 'lawn_care', name: 'Lawn Care', monthly: 0, monthlyAfterDiscount: 0, annual: 0, visitsPerYear: 9 },
+          ],
+        },
+      },
+    });
+    const bait = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(bait).toMatchObject({ cadence: 'recurring', price: 500 });
+    expect(audit.lines.find((l) => l.serviceKey === 'lawn_care')).toMatchObject({ cadence: 'recurring', price: 0 });
+  });
+
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,

@@ -1732,6 +1732,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             floorMo: item.floorMo ?? null,
             marginFloorMonthly: item.marginFloorMonthly ?? null,
             waveGuardDiscountEligible: item.waveGuardDiscountEligible ?? null,
+            discountEligible: item.discountEligible ?? null,
+            waveGuardTierEligible: item.waveGuardTierEligible ?? null,
+            countsTowardWaveGuardTier: item.countsTowardWaveGuardTier ?? null,
             perApp: item.perApp ?? null,
             // Mosquito lines carry perVisit/visits instead of
             // perApp/visitsPerYear (codex 2642 r4) — preserve both shapes so
