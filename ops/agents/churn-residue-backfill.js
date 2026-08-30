@@ -212,7 +212,10 @@ async function main() {
         raceErr.code = 'BACKFILL_CONCURRENT_LIVE_WORK';
         throw raceErr;
       }
-      wound = { prior: customer, planRates };
+      // laneCleared tells the compensation what billing_mode to EXPECT
+      // post-wind-down (monthly_membership stays; per_application stays
+      // when an uninvoiced completion retained it).
+      wound = { prior: customer, planRates, expectedBillingMode: laneCleared ? null : (customer.billing_mode || null) };
     }).catch((err) => {
       if (err && err.code === 'BACKFILL_CONCURRENT_LIVE_WORK') { wound = null; return; }
       throw err;
@@ -234,7 +237,8 @@ async function main() {
           && current.active === false
           && current.waveguard_tier == null
           && (current.monthly_rate == null || Number(current.monthly_rate) === 0)
-          && current.billing_mode == null;
+          && String(current.billing_mode || '') === String(wound.expectedBillingMode || '');
+        let restored = false;
         if (stillWoundDown) {
           await trx('customers').where({ id: candidate.id }).update({
             active: wound.prior.active,
@@ -248,16 +252,25 @@ async function main() {
             const ledgerNow = await trx('customer_plan_rates').where({ customer_id: candidate.id }).first('id');
             if (!ledgerNow) await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
           }
+          restored = true;
         }
         await trx('customer_interactions').insert({
           customer_id: candidate.id,
           interaction_type: 'note',
-          subject: 'Churn residue backfill REVERTED (2026-08-30)',
-          body: 'A booking landed while the residue backfill wound this account down — billing identity restored from the pre-clear snapshot (autopay left off). Office review: reconcile the new booking with the churned stage.',
+          subject: restored ? 'Churn residue backfill REVERTED (2026-08-30)' : 'Churn residue backfill: live work appeared, state already changed (2026-08-30)',
+          body: restored
+            ? 'A booking landed while the residue backfill wound this account down — billing identity restored from the pre-clear snapshot (autopay left off). Office review: reconcile the new booking with the churned stage.'
+            : 'Live work appeared right after the residue backfill wound this account down, but the billing fields no longer match the wound-down state (another writer touched them) — nothing restored automatically. Office review: reconcile pricing with the new booking.',
         });
+        return restored;
+      }).then((restored) => {
+        if (restored) {
+          reverted += 1;
+          console.log(`  ${candidate.id}: REVERTED (live state appeared post-commit) — office review`);
+        } else {
+          console.log(`  ${candidate.id}: live state appeared post-commit but state changed — review note left, nothing restored`);
+        }
       });
-      reverted += 1;
-      console.log(`  ${candidate.id}: REVERTED (live state appeared post-commit) — office review`);
     }
   }
 
