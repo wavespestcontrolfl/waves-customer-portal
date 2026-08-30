@@ -114,8 +114,11 @@ function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS, resol
         // closed before 'end') so callers never treat a partial page as proof
         // that something is absent from it.
         const wrap = (body, complete = true) => ({ ok: status >= 200 && status < 300, status, complete, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: async () => body });
-        if (status < 200 || status >= 300) { res.resume(); return done(wrap('')); } // incl. 3xx (caller follows)
-        if (resolveOnly) { res.destroy(); return done(wrap('')); }                 // headers captured; never read the body
+        // Headers are all we need for a redirect hop (the caller follows with a
+        // fresh request), a terminal non-2xx, or a resolveOnly probe: destroy the
+        // response so a slow or endless body can never hold the socket past the
+        // caller's timer. Never `resume()` — draining is unbounded.
+        if (resolveOnly || status < 200 || status >= 300) { res.destroy(); return done(wrap('')); }
         let data = '';
         let ended = false;
         res.setEncoding('utf8');

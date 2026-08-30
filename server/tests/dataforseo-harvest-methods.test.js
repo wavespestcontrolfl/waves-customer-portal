@@ -28,6 +28,12 @@ describe('dataforseo harvest methods', () => {
     expect(calls).toHaveLength(0);
   });
 
+  test('bulkRanks posts targets on the one_hundred rank scale (0–100 = domain_rating semantics)', async () => {
+    await dataforseo.bulkRanks(['a.com', 'b.com']);
+    expect(calls[0].endpoint).toBe('/backlinks/bulk_ranks/live');
+    expect(calls[0].body[0]).toEqual({ targets: ['a.com', 'b.com'], rank_scale: 'one_hundred' });
+  });
+
   test('bulkSpamScore posts targets', async () => {
     await dataforseo.bulkSpamScore(['a.com', 'b.com']);
     expect(calls[0].endpoint).toBe('/backlinks/bulk_spam_score/live');

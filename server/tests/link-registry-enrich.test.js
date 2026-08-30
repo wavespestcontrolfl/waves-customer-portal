@@ -68,7 +68,7 @@ const D = (id, domain, extra = {}) => ({ id, domain, discovery_priority: 'normal
 beforeEach(() => { isEnabled.mockReset(); isEnabled.mockReturnValue(true); });
 
 describe('enrichDomains', () => {
-  test('enriches a batch with ONE bulkRanks + ONE bulkSpamScore; maps rank/spam/referring_domains; caches raw payloads; enriched_at set', async () => {
+  test('enriches a batch with ONE bulkRanks + ONE bulkSpamScore; maps rank (one_hundred scale) + spam; never invents referring_domains; caches raw payloads; enriched_at set', async () => {
     const db = fakeDb({
       domains: [D('d1', 'alpha.example'), D('d2', 'beta.example')],
       competitorBacklinks: [
@@ -86,7 +86,8 @@ describe('enrichDomains', () => {
     expect(dfs.calls).toEqual([['bulkRanks', ['alpha.example', 'beta.example']], ['bulkSpamScore', ['alpha.example', 'beta.example']]]);
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const byId = Object.fromEntries(db._store.updates.map((u) => [u.where.id, u.patch]));
-    expect(byId.d1).toMatchObject({ domain_rating: 41, referring_domains: 120, spam_score: 5, competitors_linked: 2, enriched_at: NOW });
+    expect(byId.d1).toMatchObject({ domain_rating: 41, spam_score: 5, competitors_linked: 2, enriched_at: NOW });
+    expect(byId.d1.referring_domains).toBeUndefined(); // bulk_ranks carries no referring_domains — a stray field is cached raw, never mapped
     expect(byId.d1.organic_traffic).toBeUndefined();
     expect(JSON.parse(byId.d1.enrichment)).toEqual({ fetched_at: NOW.toISOString(), bulk_ranks: { target: 'alpha.example', rank: 41, referring_domains: 120 }, bulk_spam_score: { target: 'alpha.example', spam_score: 5 } });
     // www. spelling in the response still maps onto the canonical host

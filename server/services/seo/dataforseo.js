@@ -167,9 +167,12 @@ class DataForSEO {
   }
 
   // Bulk domain rank for up to 1000 targets in ONE call (credit discipline).
+  // rank_scale: one_hundred so `rank` comes back 0–100 (DR semantics) — the
+  // default is 0–1000 and would saturate seo_link_domains.domain_rating.
+  // Items carry { target, rank } only — no referring_domains / traffic.
   async bulkRanks(targets) {
     if (!Array.isArray(targets) || targets.length === 0) return null;
-    return this.request('/backlinks/bulk_ranks/live', [{ targets }]);
+    return this.request('/backlinks/bulk_ranks/live', [{ targets, rank_scale: 'one_hundred' }]);
   }
 
   // Bulk backlink spam score for up to 1000 targets in ONE call — feeds the

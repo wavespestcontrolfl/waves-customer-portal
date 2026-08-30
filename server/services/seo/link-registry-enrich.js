@@ -140,12 +140,11 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
               const enrichment = { fetched_at: nowIso };
               if (rk) {
                 enrichment.bulk_ranks = rk;
+                // bulk_ranks items are { target, rank } on the one_hundred scale
+                // (dataforseo.bulkRanks); referring_domains / organic_traffic
+                // have no source in this pass and stay untouched.
                 const dr = intOrNull(rk.rank);
                 if (dr != null) patch.domain_rating = dr;
-                const rd = intOrNull(rk.referring_domains);
-                if (rd != null) patch.referring_domains = rd;
-                const traffic = intOrNull(rk.organic_traffic ?? rk.etv ?? (rk.organic && rk.organic.etv));
-                if (traffic != null) patch.organic_traffic = traffic;
               } else enrichment.bulk_ranks = { missing: true };
               if (sp) {
                 enrichment.bulk_spam_score = sp;
