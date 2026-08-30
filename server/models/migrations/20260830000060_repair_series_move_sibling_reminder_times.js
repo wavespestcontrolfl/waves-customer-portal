@@ -19,6 +19,17 @@
  * deliberate placeholder sent flags are preserved: suppressed rows are
  * excluded from the re-arm passes only.
  *
+ * Third pass — ownership reconciliation: if a suppressed row's owner
+ * moved or was cancelled WHILE the row sat mis-parked at 08:00, the
+ * promotion trigger could not find it (promotion matches on
+ * appointment_time), so after the time repair the row would stay
+ * suppressed forever with no owner sending for its slot. Each repaired
+ * suppressed row is run through the canonical
+ * promote_suppressed_reminder_sibling function (zero-uuid departing id =
+ * no exclusion): it promotes and re-arms only when NO active unsuppressed
+ * owner holds the slot, one owner per slot, with the canonical
+ * reachability flag semantics.
+ *
  * Second pass: the erroneous 08:00 time may have sat inside the 72h/24h
  * cutoff when the move re-armed the row, stamping a SYNTHETIC coverage flag
  * with no text ever sent — repairing only the time would then silence the
@@ -56,7 +67,6 @@ exports.up = async function up(knex) {
   const rows = repaired.rows || [];
   console.log(`[migration] repaired ${rows.length} reminder row(s) mis-armed at the 08:00 fallback`);
   const ids = rows.filter((r) => !r.suppressed_by_sibling).map((r) => r.id);
-  if (!ids.length) return;
 
   const rearm = async (flag, flagAt, cutoff, purpose, templateKey) => {
     const res = await knex.raw(
@@ -88,8 +98,27 @@ exports.up = async function up(knex) {
     );
     console.log(`[migration] re-armed ${res.rowCount ?? 0} synthetic ${flag} flag(s)`);
   };
-  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', '72 hours 15 minutes', 'appointment_reminder_72h', 'appointment.reminder_72h');
-  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', '24 hours 15 minutes', 'appointment_reminder_24h', 'appointment.reminder_24h');
+  if (ids.length) {
+    await rearm('reminder_72h_sent', 'reminder_72h_sent_at', '72 hours 15 minutes', 'appointment_reminder_72h', 'appointment.reminder_72h');
+    await rearm('reminder_24h_sent', 'reminder_24h_sent_at', '24 hours 15 minutes', 'appointment_reminder_24h', 'appointment.reminder_24h');
+  }
+
+  const suppressedIds = rows.filter((r) => r.suppressed_by_sibling).map((r) => r.id);
+  if (suppressedIds.length) {
+    const promoted = await knex.raw(
+      `
+      SELECT promote_suppressed_reminder_sibling(
+        ar.customer_id, '00000000-0000-0000-0000-000000000000'::uuid,
+        ar.appointment_time, ss.scheduled_date, ss.window_start
+      )
+      FROM appointment_reminders ar
+      JOIN scheduled_services ss ON ss.id = ar.scheduled_service_id
+      WHERE ar.id = ANY(?)
+    `,
+      [suppressedIds]
+    );
+    console.log(`[migration] ownership reconciliation ran for ${promoted.rowCount ?? 0} repaired suppressed row(s)`);
+  }
 };
 
 exports.down = async function down() {
