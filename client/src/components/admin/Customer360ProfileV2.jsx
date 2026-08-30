@@ -3753,8 +3753,14 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
     const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    // A label-inferred cadence only takes effect when the operator hasn't
+    // chosen one manually — and the prefill must evaluate against the cadence
+    // that will actually be SUBMITTED, never the ignored inference (a
+    // quarterly quote must not restore onto a manually-selected monthly
+    // schedule just because the label says "Quarterly").
+    const cadenceApplies = !!inferredCadence && !cadenceTouchedRef.current;
     let nextVisitCount = visitCount;
-    if (inferredCadence && !cadenceTouchedRef.current) {
+    if (cadenceApplies) {
       setCoverageCadence(inferredCadence);
       const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
       if (inferredVisitCount && !visitCountTouchedRef.current) {
@@ -3762,7 +3768,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
         nextVisitCount = inferredVisitCount;
       }
     }
-    updateSuggestedAmount(value, inferredCadence || coverageCadence, nextVisitCount);
+    updateSuggestedAmount(value, cadenceApplies ? inferredCadence : coverageCadence, nextVisitCount);
   };
 
   const handleServiceOptionChange = (value) => {

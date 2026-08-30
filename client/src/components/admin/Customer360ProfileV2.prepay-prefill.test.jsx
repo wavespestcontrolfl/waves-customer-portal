@@ -128,6 +128,22 @@ describe('AnnualPrepayModal estimate prefill', () => {
     expect(amountInput).toHaveValue(384);
   });
 
+  it('a manually selected cadence is never overridden by the label inference', () => {
+    renderModal({ estimateSuggestion: SUGGESTION });
+    const amountInput = document.querySelector('input[type="number"][step="0.01"]');
+    expect(amountInput).toHaveValue(384);
+    // Operator manually selects monthly — the quarterly quote must clear.
+    const cadenceSelect = document.querySelectorAll('select')[1];
+    fireEvent.change(cadenceSelect, { target: { value: 'monthly' } });
+    expect(amountInput).toHaveValue(null);
+    // Re-typing a "Quarterly" label must NOT restore the amount: the
+    // submitted cadence is still the manually chosen monthly.
+    const serviceInput = screen.getByPlaceholderText('Enter custom service label');
+    fireEvent.change(serviceInput, { target: { value: 'Quarterly Pest Control' } });
+    expect(amountInput).toHaveValue(null);
+    expect(screen.queryByText(/From estimate/)).not.toBeInTheDocument();
+  });
+
   it('renders exactly as before with no suggestion', () => {
     renderModal();
     expect(screen.queryByText(/From estimate/)).not.toBeInTheDocument();
