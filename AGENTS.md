@@ -293,6 +293,13 @@ finding and warns on P1. Reviewers must return JSON matching
   (owner rule re-affirmed 2026-07-23). Invoice/prepay surfaces and
   commercial proposals are exempt; true monthly-billed legacy plans keep
   "/mo". No service is ever presented as a flat monthly spread.
+  A second owner-dictated shape (2026-08-30, iterated live on the rendered
+  page): the estimate payment section's breakdown boxes are prepay/invoice
+  previews (exempt class) — the prepay box shows the 12-month plan's LIST
+  annual as a line item (never labeled a total; the exact charge is quoted
+  at confirm), and the boxes carry no per-option timing sentence except the
+  card-lane Auto Pay note and the in-lane charged-when-you-approve
+  disclosure — the owner explicitly removed the rest.
   One owner-dictated exception (2026-08-13, iterated live on the rendered
   page): the service-report cross-sell card HEADLINE shows the bare
   per-application amount with no unit ("… protected for just $114!") —
