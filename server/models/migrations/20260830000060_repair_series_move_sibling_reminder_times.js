@@ -21,7 +21,10 @@
  * cutoff when the move re-armed the row, stamping a SYNTHETIC coverage flag
  * with no text ever sent — repairing only the time would then silence the
  * reminder forever. For repaired rows whose corrected time is still beyond
- * the cutoff, re-arm the flag unless THAT reminder was genuinely delivered:
+ * the cutoff — the canonical 72.25h/24.25h boundaries from
+ * reminderFlagsCoveredByNotice, so a reminder legitimately covered by a
+ * notice inside the cron's 15-minute slack band is never re-armed —
+ * re-arm the flag unless THAT reminder was genuinely delivered:
  * per-purpose, per-appointment. SMS deliveries live in
  * messaging_audit_log (appointment_reminder_72h vs _24h, sent, real
  * provider id); reminder EMAILS audit into customer_interactions
@@ -59,7 +62,7 @@ exports.up = async function up(knex) {
       WHERE ar.id = ANY(?)
         AND ar.${flag} = true
         AND COALESCE(ar.suppressed_by_sibling, false) = false
-        AND ar.appointment_time > NOW() + interval '${cutoff} hours'
+        AND ar.appointment_time > NOW() + interval '${cutoff}'
         AND NOT EXISTS (
           SELECT 1 FROM messaging_audit_log mal
           WHERE mal.appointment_id = ar.scheduled_service_id::text
@@ -79,8 +82,8 @@ exports.up = async function up(knex) {
     );
     console.log(`[migration] re-armed ${res.rowCount ?? 0} synthetic ${flag} flag(s)`);
   };
-  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72, 'appointment_reminder_72h', 'appointment.reminder_72h');
-  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24, 'appointment_reminder_24h', 'appointment.reminder_24h');
+  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', '72 hours 15 minutes', 'appointment_reminder_72h', 'appointment.reminder_72h');
+  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', '24 hours 15 minutes', 'appointment_reminder_24h', 'appointment.reminder_24h');
 };
 
 exports.down = async function down() {
