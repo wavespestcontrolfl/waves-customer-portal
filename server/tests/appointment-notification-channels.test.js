@@ -390,6 +390,7 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
       notification_prefs: [firstChain({ appointment_confirmation_channel: 'email' })],
       customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
       scheduled_services: [firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' })],
+      appointment_reminders: [firstChain(null)], // deliverAppointmentNotice unit-move hold check → no hold
     });
     const smsAttempt = jest.fn(async () => true);
     const reached = await deliverConfirmationByChannel({ customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'X', smsAttempt });

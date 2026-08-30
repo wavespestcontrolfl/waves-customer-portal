@@ -372,6 +372,11 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
         .first('move_hold_until');
       if (holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now()) {
         logger.info(`[appt-remind] ${kind} for ${scheduledServiceId} held — grouped move in progress (move_hold_until)`);
+        // Distinct hold code (codex r30 P1): a bare false reads as a
+        // completed-but-undelivered send to the callers, which mark their
+        // sent flags and suppress the message forever. MOVE_HOLD, like
+        // QUIET_HOURS_HOLD, means "leave the flags, retry later".
+        if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
         return false;
       }
     } catch (err) {
@@ -379,6 +384,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
       // inline sends and holds stamped after batch selection — an
       // unverifiable hold must not send. The unmarked notice retries.
       logger.warn(`[appt-remind] ${kind} hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
       return false;
     }
   }
@@ -1660,7 +1666,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Boundary hold — same treatment as the pre-check above: return
       // WITHOUT marking, so the stranded-confirmation sweep re-calls this
       // function and the text goes out when the window opens at 8:00 AM.
-      if (!sent && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+      if (!sent && (smsOutcome.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome.blockedCode === 'MOVE_HOLD')) {
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held at the send-window boundary — deferred, row left unmarked`);
         return false;
       }
@@ -2590,7 +2596,7 @@ const AppointmentReminders = {
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
-            if (!reached72 && smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD') {
+            if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
               logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred, row left unmarked`);
               continue;
             }
@@ -2748,7 +2754,7 @@ const AppointmentReminders = {
             // owner's ruling (defer when the window reopens before the
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
-            if (!reached24 && smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD') {
+            if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
               continue;
             }
@@ -3150,7 +3156,7 @@ const AppointmentReminders = {
         // own pre-check defers to 8:00 AM and then sends the standard
         // confirmation carrying the NEW time. Same guards as the 72h
         // re-arm so a newer reschedule's state is never clobbered.
-        if (!noticeSent && rescheduleNoticeOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+        if (!noticeSent && (rescheduleNoticeOutcome.blockedCode === 'QUIET_HOURS_HOLD' || rescheduleNoticeOutcome.blockedCode === 'MOVE_HOLD')) {
           await db('appointment_reminders')
             .where({
               id: record.id,
