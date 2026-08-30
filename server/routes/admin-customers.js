@@ -4890,41 +4890,18 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const note = cleanOptionalText(req.body?.note);
 
     // Estimate provenance (best-effort, never blocks the money recording):
-    // link the term to the estimate the prefill came from. The client's claim
-    // is not trusted — the link is persisted only when the server's OWN
-    // suggestion (rebuilt here: ownership, status, expiry, eligibility,
-    // single-option pricing, consumed-term exclusion) picks the same estimate
-    // AND its service matches the coverage being recorded. Anything else
-    // skips the link rather than failing: createTermForAnnualPrepay upserts
-    // by source_estimate_id, so re-linking a used estimate would UPDATE the
-    // prior term (e.g. last year's) instead of creating this one.
-    let sourceEstimateId = null;
+    // link the term to the estimate the prefill came from. The client's
+    // claim is only a HINT — every check (ownership, status, expiry,
+    // eligibility, quarantine, single-option pricing, consumed-term
+    // exclusion, service/cadence/visit-count agreement, exact cents
+    // agreement with the collected amount) runs inside the transaction
+    // against the locked row. Anything else skips the link rather than
+    // failing the recording.
     const sourceEstimateIdRaw = cleanOptionalText(req.body?.sourceEstimateId);
-    if (sourceEstimateIdRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceEstimateIdRaw)) {
-      try {
-        const [estimateRows, linkedTermRows] = await Promise.all([
-          db('estimates').where({ customer_id: customer.id }),
-          db('annual_prepay_terms').where({ customer_id: customer.id })
-            .whereNotNull('source_estimate_id').select('source_estimate_id'),
-        ]);
-        const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
-        const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion(estimateRows, {
-          excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
-          resolveLineCadence: cadenceFromEstimateLine,
-          db,
-        });
-        if (suggestion && !suggestion.blocked
-          && String(suggestion.estimateId).toLowerCase() === sourceEstimateIdRaw.toLowerCase()
-          && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
-          // The quoted annual is only valid for the quoted schedule — the
-          // recorded cadence and visit count must be the estimate's own.
-          && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)) {
-          sourceEstimateId = suggestion.estimateId;
-        }
-      } catch (e) {
-        logger.warn(`[customers:${customer.id}] annual-prepay provenance skipped: ${e.message}`);
-      }
-    }
+    const sourceEstimateId = sourceEstimateIdRaw
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceEstimateIdRaw)
+      ? sourceEstimateIdRaw.toLowerCase()
+      : null;
 
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const invoiceNotes = [
@@ -5013,29 +4990,45 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // the accept routes, never from a status change.
       let freshEstimateUpdatedAt = null;
       if (linkEstimateId) {
-        // Re-validate ownership and live call linkage on the FRESH in-trx
-        // row, under a row lock: a concurrent customer relink, archive, or
-        // call-linkage correction since the pre-transaction check must drop
-        // the link, never attach another customer's (or a quarantined)
-        // estimate to this customer's paid term.
+        // The COMPLETE validation runs here, on the locked in-trx row — the
+        // client's sourceEstimateId is only a hint, and any pre-transaction
+        // state is stale by definition. buildAnnualPrepayEstimateSuggestion
+        // over the locked row re-checks ownership (the WHERE), status,
+        // expiry, archive, eligibility, call quarantine (db: trx),
+        // single-option pricing, and consumed-term exclusion; the matchers
+        // re-check service/cadence/visit count; and the collected amount
+        // must equal the quoted prepay year to the CENT — an operator
+        // override records unlinked (the quote wasn't what was paid), and
+        // a concurrent reprice changes the suggestion and fails a check.
+        let validated = false;
         const freshEstimate = await trx('estimates')
           .where({ id: linkEstimateId, customer_id: customer.id })
           .whereNull('archived_at')
           .forUpdate()
-          .first('id', 'estimate_data', 'updated_at');
-        let freshCallBlock = null;
+          .first();
         if (freshEstimate) {
-          let freshData = freshEstimate.estimate_data;
-          if (typeof freshData === 'string') {
-            try { freshData = JSON.parse(freshData); } catch { freshData = null; }
-          }
-          if (freshData?.estimatorEngine?.callLogId) {
-            const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
-            freshCallBlock = await callSideBlockForEstimateData(trx, freshData)
-              .catch(() => 'call_linkage_unverifiable');
+          try {
+            const linkedTermRows = await trx('annual_prepay_terms')
+              .where({ customer_id: customer.id })
+              .whereNotNull('source_estimate_id')
+              .select('source_estimate_id');
+            const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
+            const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion([freshEstimate], {
+              excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
+              resolveLineCadence: cadenceFromEstimateLine,
+              db: trx,
+            });
+            validated = !!(suggestion && !suggestion.blocked
+              && String(suggestion.estimateId).toLowerCase() === String(linkEstimateId).toLowerCase()
+              && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
+              && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)
+              && Math.round(Number(suggestion.amount) * 100) === Math.round(Number(amount) * 100));
+          } catch (validationErr) {
+            logger.warn(`[customers:${customer.id}] annual-prepay provenance validation skipped: ${validationErr.message}`);
+            validated = false;
           }
         }
-        if (!freshEstimate || freshCallBlock) linkEstimateId = null;
+        if (!validated) linkEstimateId = null;
         else freshEstimateUpdatedAt = freshEstimate.updated_at;
       }
       if (linkEstimateId) {

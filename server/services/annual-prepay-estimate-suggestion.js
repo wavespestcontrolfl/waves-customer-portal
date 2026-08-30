@@ -20,8 +20,12 @@
 // estimates never suggest either.
 const SUGGESTION_STATUSES = { viewed: 2, sent: 1 };
 
+// Latest of ALL activity timestamps — a resent quote keeps its old viewed_at
+// while sent_at refreshes, and ranking by viewed_at first would let an older
+// candidate outrank the estimate the operator just re-sent.
 function suggestionActivityStamp(estimate = {}) {
-  return estimate.accepted_at || estimate.viewed_at || estimate.sent_at || estimate.created_at || 0;
+  return Math.max(...[estimate.viewed_at, estimate.sent_at, estimate.created_at]
+    .map((value) => (value ? new Date(value).getTime() : 0)));
 }
 
 // Latest customer activity wins; status ranks only break exact-timestamp
@@ -41,7 +45,7 @@ function pickAnnualPrepayEstimate(estimates = [], { excludeIds = [] } = {}) {
       // the same way).
       && !(e.expires_at && new Date(e.expires_at).getTime() < now));
   ranked.sort((a, b) => (
-    (new Date(suggestionActivityStamp(b)) - new Date(suggestionActivityStamp(a)))
+    (suggestionActivityStamp(b) - suggestionActivityStamp(a))
     || (SUGGESTION_STATUSES[String(b.status)] - SUGGESTION_STATUSES[String(a.status)])
   ));
   return ranked[0] || null;

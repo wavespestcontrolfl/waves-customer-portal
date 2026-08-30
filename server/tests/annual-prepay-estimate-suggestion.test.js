@@ -56,6 +56,14 @@ describe('pickAnnualPrepayEstimate', () => {
     expect(pickAnnualPrepayEstimate([sent, viewed]).id).toBe(viewed.id);
   });
 
+  test('a freshly RESENT viewed estimate outranks an older candidate', () => {
+    // The send flow refreshes sent_at while preserving viewed_at/status —
+    // ranking must use the LATEST activity stamp, not viewed_at first.
+    const resent = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-07-01T00:00:00Z', sent_at: '2026-08-29T00:00:00Z' });
+    const midAge = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-10T00:00:00Z', sent_at: '2026-08-01T00:00:00Z' });
+    expect(pickAnnualPrepayEstimate([midAge, resent]).id).toBe(resent.id);
+  });
+
   test('past-due sent/viewed estimates are excluded', () => {
     const expiredViewed = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-26T00:00:00Z' });
     const olderLive = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-10T00:00:00Z', expires_at: '2099-01-01T00:00:00Z' });

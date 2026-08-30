@@ -3816,10 +3816,12 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
           termEnd,
           reference: reference.trim() || undefined,
           note: note.trim() || undefined,
-          // Provenance: the term covers the service this estimate quoted,
-          // even when the operator overrode the amount. The server re-checks
-          // ownership and skips the link rather than failing the recording.
+          // Provenance hint: only when the recorded amount IS the quoted
+          // prepay year (an override means the quote wasn't what was paid).
+          // The server independently re-validates everything on the locked
+          // row and skips the link rather than failing the recording.
           sourceEstimateId: estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount)
+            && Number(amount) === Number(estimateSuggestion.amount)
             ? estimateSuggestion.estimateId
             : undefined,
         }),
