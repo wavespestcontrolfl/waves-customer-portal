@@ -22,9 +22,11 @@
  * with no text ever sent — repairing only the time would then silence the
  * reminder forever. For repaired rows whose corrected time is still beyond
  * the cutoff, re-arm the flag unless THAT reminder was genuinely delivered:
- * per-purpose, per-appointment via messaging_audit_log
- * (appointment_reminder_72h vs _24h, sent, real provider id or email
- * channel). No legacy sms_log fallback — the bug postdates audit-log
+ * per-purpose, per-appointment. SMS deliveries live in
+ * messaging_audit_log (appointment_reminder_72h vs _24h, sent, real
+ * provider id); reminder EMAILS audit into customer_interactions
+ * (template_key appointment.reminder_72h / _24h, status sent) — both are
+ * checked. No legacy sms_log fallback — the bug postdates audit-log
  * linkage, so every genuine send for an affected row has a linked audit
  * row.
  */
@@ -49,7 +51,7 @@ exports.up = async function up(knex) {
   console.log(`[migration] repaired ${ids.length} reminder row(s) mis-armed at the 08:00 fallback`);
   if (!ids.length) return;
 
-  const rearm = async (flag, flagAt, cutoff, purpose) => {
+  const rearm = async (flag, flagAt, cutoff, purpose, templateKey) => {
     const res = await knex.raw(
       `
       UPDATE appointment_reminders ar
@@ -65,13 +67,20 @@ exports.up = async function up(knex) {
             AND mal.sent_at IS NOT NULL
             AND (mal.provider_message_id ~ '^(SM|MM)' OR mal.channel = 'email')
         )
+        AND NOT EXISTS (
+          SELECT 1 FROM customer_interactions ci
+          WHERE ci.interaction_type = 'email_outbound'
+            AND ci.metadata->>'scheduled_service_id' = ar.scheduled_service_id::text
+            AND ci.metadata->>'template_key' = ?
+            AND ci.metadata->>'status' = 'sent'
+        )
     `,
-      [ids, purpose]
+      [ids, purpose, templateKey]
     );
     console.log(`[migration] re-armed ${res.rowCount ?? 0} synthetic ${flag} flag(s)`);
   };
-  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72, 'appointment_reminder_72h');
-  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24, 'appointment_reminder_24h');
+  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72, 'appointment_reminder_72h', 'appointment.reminder_72h');
+  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24, 'appointment_reminder_24h', 'appointment.reminder_24h');
 };
 
 exports.down = async function down() {
