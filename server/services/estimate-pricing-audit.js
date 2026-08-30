@@ -677,8 +677,14 @@ function normalizeEngineLineItems(result) {
     const isAdjustment = price < 0
       || /(_|^)(discount|credit)s?($|_)/.test(String(item.service || ''))
       || /discount|credit/i.test(String(item.name || '')) && price <= 0;
+    // Commercial engine rows carry their own authoritative annual COGS at
+    // costs.total — their IDs stay outside SERVICE_MAP by design, so this
+    // persisted figure is the honest cost source (GH codex P1).
+    const explicitAnnualCost = num(item.costs?.total);
     lines.push({
       ...(isAdjustment ? { skipCogs: true } : {}),
+      ...(!isAdjustment && Number.isFinite(explicitAnnualCost) && explicitAnnualCost > 0
+        ? { explicitCogsCost: money(explicitAnnualCost) } : {}),
       ...(mosquitoExtras ? {
         cogsServiceTypes: mosquitoExtras.serviceTypes,
         cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,

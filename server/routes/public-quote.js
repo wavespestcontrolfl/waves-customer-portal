@@ -1736,6 +1736,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // (price + persisted costs) — the audit splits it into its own
             // row (GH codex on #3628).
             installation: item.installation ?? null,
+            // Auto-priced commercial rows persist their authoritative
+            // annual COGS at costs.total — commercial IDs are deliberately
+            // outside SERVICE_MAP, so this block is the audit's only cost
+            // source for them (GH codex on #3628).
+            costs: item.costs ?? null,
             discountEligible: item.discountEligible ?? null,
             waveGuardTierEligible: item.waveGuardTierEligible ?? null,
             countsTowardWaveGuardTier: item.countsTowardWaveGuardTier ?? null,
