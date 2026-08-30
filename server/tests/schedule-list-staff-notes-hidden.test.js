@@ -81,6 +81,11 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(byId['svc-s'].waveguardQualifying).toBe(true);
       expect(byId['svc-tc'].waveguardQualifying).toBe(false);
       expect(byId['svc-c'].waveguardQualifying).toBe(false);
+      // The RESOLVED family rides the payload (codex #3591 r58 P1): the
+      // stale-labeled bait row resolves rodent_bait; non-qualifying rows null.
+      expect(byId['svc-s'].serviceFamily).toBe('rodent_bait');
+      expect(byId['svc-1'].serviceFamily).toBe('pest_control');
+      expect(byId['svc-t'].serviceFamily).toBeNull();
     });
     // Live flag off → rodent bait no longer qualifies on the portal payload.
     const constants = require('../services/pricing-engine/constants');

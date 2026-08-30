@@ -14,10 +14,14 @@ const { qualifyingKeysForRow } = require('../services/waveguard-existing-service
 // unlinked rows) is never plan coverage, even when its stale/canonical
 // service_type ("Rodent Pest Control") would classify as pest_control on the
 // combined text. Only then does the family classifier decide.
-function portalRowQualifiesForWaveGuard(row) {
+function portalRowWaveGuardFamily(row) {
   const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('../services/self-booking-plan-sync');
-  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
-  return qualifyingKeysForRow(row).length > 0;
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return null;
+  const keys = qualifyingKeysForRow(row);
+  return keys.length > 0 ? keys[0] : null;
+}
+function portalRowQualifiesForWaveGuard(row) {
+  return portalRowWaveGuardFamily(row) !== null;
 }
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
@@ -167,6 +171,14 @@ router.get('/', async (req, res, next) => {
         // rodent_waveguard.tier_qualifier flag) — the portal reads this
         // instead of re-deriving coverage from the label (codex #3591 r19 P1).
         waveguardQualifying: portalRowQualifiesForWaveGuard({
+          service_type: s.service_type,
+          service_key: s.catalog_service_key,
+          service_name: s.catalog_service_name,
+        }),
+        // The RESOLVED family key (codex #3591 r58 P1): the portal's plan
+        // cards consume this instead of re-classifying a stale label —
+        // catalog-over-label, same classifier as the flag above.
+        serviceFamily: portalRowWaveGuardFamily({
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,

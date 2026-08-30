@@ -9942,6 +9942,15 @@ function MyPlanTab({ customer, focusService }) {
   }, [loadPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
+    // Server-resolved family wins when present (codex #3591 r58 P1):
+    // catalog-over-label, so a bait row wearing a stale 'Rodent Trapping'
+    // label lands on the bait plan card instead of being dropped or
+    // reclassified from text.
+    const fam = String(service.serviceFamily || '').toLowerCase();
+    if (fam) {
+      if (svcId === 'termite') return fam === 'termite_bait' || fam === 'termite';
+      return fam === svcId;
+    }
     const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
     return (
       (svcId === 'pest_control' && (svcType.includes('pest') || svcType.includes('general'))) ||

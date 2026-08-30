@@ -5584,6 +5584,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         } catch (e) { logger.error(`Appointment confirmation SMS failed: ${e.message}`); }
 
+        // A direct rodent-bait booking owes its setup INDEPENDENT of the
+        // optional card-link text (codex #3591 r58 P1): resolve and stamp
+        // pending_setup_fee on the parent now, so the first completion
+        // bills the program the office booked even when no /secure link is
+        // ever sent (staff quoted the program at booking; the completion
+        // invoice itemizes the fee). A later /secure page freezes/consumes
+        // this same stamp. Best-effort with a FIX page — the booking stands.
+        try {
+          const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
+          const owedSetup = await resolveDirectRodentSetupObligation(db, { id: svc.id });
+          if (owedSetup > 0) {
+            const stamped = await db('scheduled_services')
+              .where({ id: svc.id })
+              .whereNull('pending_setup_fee')
+              .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
+            if (stamped === 1) logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on direct booking ${svc.id} — billed at first completion`);
+          }
+        } catch (e) {
+          logger.error(`[schedule] FIX: rodent setup stamp failed for direct booking ${svc.id}: ${e.message} — stamp pending_setup_fee manually or send the /secure link`);
+        }
+
         // Office opted in to the secure-card / Auto Pay setup text (the
         // "Text card-on-file link" checkbox, OFF by default). Parent visit
         // only — a recurring series must never fan the link out per

@@ -6072,6 +6072,11 @@ const InvoiceService = {
             if (voidedInvoice.payer_statement_id) {
               await require("./payer-statements").rollupStatement(voidedInvoice.payer_statement_id, trx);
             }
+            // A cancelled visit's auto-voided invoice may have billed the
+            // rodent bait-station setup (codex #3591 r58 P1) — restore the
+            // obligation to the living series exactly like voidInvoice does
+            // (billable-visit guard + dead-series re-bill inside).
+            await InvoiceService.restoreRodentSetupObligationForReversedInvoice(trx, voidedInvoice);
             return { voided: true, invoice: voidedInvoice, previousStatus: locked.status };
           });
 
