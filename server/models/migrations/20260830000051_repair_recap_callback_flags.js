@@ -22,13 +22,24 @@ exports.up = async function up(knex) {
     console.log('[migration] is_callback column missing — nothing to repair');
     return;
   }
+  // Scope: ONLY rows the recap path created (field_flags.recap = true) —
+  // that is the population whose insert omitted the flag. An unscoped
+  // repair would also promote ordinary completed visits whose scheduled
+  // row was LATER repointed to a callback via update-details, rewriting
+  // history the record deliberately preserved (codex GH-r3 P2).
+  const hasFieldFlags = await knex.schema.hasColumn('service_records', 'field_flags');
+  if (!hasFieldFlags) {
+    console.log('[migration] field_flags column missing — no recap-created rows to repair');
+    return;
+  }
   const repaired = await knex('service_records')
     .whereIn('scheduled_service_id', knex('scheduled_services').select('id').where({ is_callback: true }))
+    .whereRaw("(field_flags ->> 'recap') = 'true'")
     .where(function notTrue() {
       this.where('is_callback', false).orWhereNull('is_callback');
     })
     .update({ is_callback: true, updated_at: knex.fn.now() });
-  console.log(`[migration] repaired is_callback on ${repaired} service_records row(s) from their scheduled rows`);
+  console.log(`[migration] repaired is_callback on ${repaired} recap-created service_records row(s) from their scheduled rows`);
 };
 
 exports.down = async function down() {

@@ -7115,7 +7115,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardTierSource: svc.cust_waveguard_tier_source,
             monthlyRate: svc.cust_monthly_rate,
             billingMode: svc.cust_billing_mode,
-            isCallback: !!svc.is_callback,
+            // The LOCKED completion row's flag — svc was read before the
+            // FOR UPDATE and a concurrent update-details reclassify would
+            // freeze a stale callback identity forever (codex GH-r3 P2;
+            // same rule as the recap path).
+            isCallback: lockedSvcRow ? lockedSvcRow.is_callback === true : !!svc.is_callback,
           }));
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           const recordTimingFields = buildServiceRecordCompletionTimingFields({

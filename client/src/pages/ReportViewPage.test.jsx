@@ -1145,6 +1145,20 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.heading).toBe('we found activity that needs attention!');
   });
 
+  it('a non-performed callback with pending re-entry targets never gets the "still drying" arm', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'customer_declined' },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      dynamicContext: {
+        reentry: { displayTimezone: 'America/New_York', targets: [{ label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' }] },
+      },
+      applications: [],
+    }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
+    expect(status.result).not.toMatch(/still drying/);
+    expect(status.detail).not.toMatch(/away from treated zones/);
+    expect(status.detail).toContain('No application was made on this visit');
+  });
+
   it('a non-performed callback never claims treatment, even in the high-priority branch', () => {
     const status = smartStatusSummary({
       reserviceReport: {

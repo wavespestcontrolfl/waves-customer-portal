@@ -817,17 +817,21 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   });
 
   if (primaryFinding) {
+    // A non-performed callback applied nothing, so the pending re-entry
+    // arm ("still drying", "keep off treated zones") can never be true for
+    // it — force the non-pending, outcome-honest arm (codex GH-r3 P1).
+    const pendingText = reserviceNotPerformed ? null : pendingReadyText;
     return {
       heading: 'we found activity that needs attention!',
-      status: pendingReadyText || 'Follow-up recommended',
-      statusTone: pendingReadyText ? 'pending' : 'warning',
-      result: pendingReadyText
+      status: pendingText || 'Follow-up recommended',
+      statusTone: pendingText ? 'pending' : 'warning',
+      result: pendingText
         ? `${pendingTarget.label || 'Treated'} areas are still drying. ${primaryFinding.title || 'Activity was noted'} still needs attention.`
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
       completedLine: completedAreas
         ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
         : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
-      detail: pendingReadyText
+      detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
         : (reserviceNotPerformed
           ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
