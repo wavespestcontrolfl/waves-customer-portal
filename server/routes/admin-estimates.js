@@ -1639,7 +1639,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
               const terminalSibling = await db('estimates').where({ id: sibling.id }).first();
               if (terminalSibling) {
-                await saveEstimatePricingAuditSnapshot(terminalSibling, { trigger: 'group_send', sendMethod });
+                // The zero-row update never persisted the freshly built
+                // sendSnapshot — graft it in for the AUDIT ONLY (no row
+                // write) so the frozen pricingBundle isn't lost; a
+                // snapshot the accept path already persisted wins (GH
+                // codex P1).
+                let terminalData = terminalSibling.estimate_data;
+                if (typeof terminalData === 'string') { try { terminalData = JSON.parse(terminalData); } catch { terminalData = {}; } }
+                terminalData = terminalData || {};
+                const auditRow = terminalData.sendSnapshot
+                  ? terminalSibling
+                  : { ...terminalSibling, estimate_data: { ...terminalData, sendSnapshot: snapshot.sendSnapshot } };
+                await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'group_send', sendMethod });
               }
             } catch (auditErr) {
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
