@@ -2850,7 +2850,23 @@ router.post('/:id/unarchive', async (req, res, next) => {
       .where({ id: req.params.id })
       .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
-      .update({ archived_at: null, updated_at: db.fn.now() })
+      .update({
+        archived_at: null,
+        updated_at: db.fn.now(),
+        // A LIVE (sent/viewed) row can only have gotten its disposition from
+        // the archive action — reviving the courtship un-classifies it, or a
+        // later expiry would COALESCE-preserve a stale "archived" loss
+        // (codex pre-push P1). Terminal rows (declined/expired/accepted)
+        // keep theirs: those were stamped by their own resolution.
+        ...(['sent', 'viewed'].includes(estimate.status) ? {
+          disposition: null,
+          disposition_source: null,
+          disposition_at: null,
+          disposition_note: null,
+          competitor_name: null,
+          competitor_price: null,
+        } : {}),
+      })
       .returning('*');
     if (!updated) return res.status(409).json({ error: invalidatedMessage });
     res.json(updated);

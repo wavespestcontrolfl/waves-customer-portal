@@ -56,13 +56,15 @@ exports.up = async function up(knex) {
         WHEN LOWER(TRIM(decline_reason)) LIKE '%no response%' THEN 'no_response'
         WHEN LOWER(TRIM(decline_reason)) = 'diy' THEN 'diy'
         WHEN LOWER(TRIM(decline_reason)) LIKE '%invalid%' OR LOWER(TRIM(decline_reason)) LIKE '%out of area%' OR LOWER(TRIM(decline_reason)) LIKE '%duplicate%' THEN 'invalid_lead'
-        WHEN COALESCE(TRIM(decline_reason), '') = '' THEN 'declined_other'
+        WHEN COALESCE(TRIM(decline_reason), '') = '' THEN 'declined_by_customer'
         ELSE 'declined_other' END,
       disposition_note = CASE
         WHEN COALESCE(TRIM(decline_reason), '') <> ''
           AND LOWER(TRIM(decline_reason)) NOT IN ('too expensive', 'went with competitor', 'not ready', 'service not needed', 'no response')
         THEN decline_reason ELSE NULL END,
-      disposition_source = 'staff',
+      -- Only the admin modals wrote decline_reason; the public customer
+      -- decline button never did — don't claim those were staff-authored.
+      disposition_source = CASE WHEN COALESCE(TRIM(decline_reason), '') = '' THEN 'customer' ELSE 'staff' END,
       disposition_at = COALESCE(declined_at, updated_at, created_at)
     WHERE status = 'declined' AND disposition IS NULL
   `);

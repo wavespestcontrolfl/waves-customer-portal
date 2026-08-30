@@ -131,7 +131,9 @@ function finalize(cell) {
 function effectiveDisposition(row) {
   if (row.disposition) return row.disposition;
   if (row.status === 'expired') return expiredDispositionFor(row);
-  if (row.status === 'declined') return dispositionFromDeclineReason(row.decline_reason) || 'declined_other';
+  // A declined row with no reason at all predates the disposition layer's
+  // required-reason PATCH — only the public customer button wrote those.
+  if (row.status === 'declined') return dispositionFromDeclineReason(row.decline_reason) || 'declined_by_customer';
   return null;
 }
 
@@ -379,14 +381,21 @@ async function winLossSlices({ days = 90 } = {}) {
     .map(([field, cell]) => ({ field, ...finalize(cell) }))
     .sort((a, b) => b.total - a.total);
 
-  const lossTotal = [...byDispositionCount.values()].reduce((a, b) => a + b, 0);
+  // The percentage denominator is REAL losses only — dead leads and
+  // customers who converted another way are listed for visibility but must
+  // not dilute pctOfLosses (codex pre-push P1).
+  const lossTotal = DISPOSITIONS
+    .filter((d) => d.group === 'lost')
+    .reduce((sum, d) => sum + (byDispositionCount.get(d.code) || 0), 0);
   const byDisposition = DISPOSITIONS
     .map((d) => ({
       code: d.code,
       label: d.label,
       group: d.group,
       count: byDispositionCount.get(d.code) || 0,
-      pctOfLosses: lossTotal > 0 ? Math.round(((byDispositionCount.get(d.code) || 0) / lossTotal) * 1000) / 10 : null,
+      pctOfLosses: d.group === 'lost' && lossTotal > 0
+        ? Math.round(((byDispositionCount.get(d.code) || 0) / lossTotal) * 1000) / 10
+        : null,
     }))
     .filter((d) => d.count > 0)
     .sort((a, b) => b.count - a.count);

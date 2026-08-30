@@ -14477,7 +14477,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
-        .update({ status: 'declined', declined_at: trx.fn.now(), updated_at: trx.fn.now() });
+        .update({
+          status: 'declined',
+          declined_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+          // Normalized loss disposition (estimator audit 2026-08-29): this
+          // is the one CUSTOMER-authored decline path — no reason is
+          // collected, the classification IS the reason. COALESCE keeps any
+          // earlier staff stamp.
+          disposition: trx.raw("COALESCE(disposition, 'declined_by_customer')"),
+          disposition_source: trx.raw("COALESCE(disposition_source, 'customer')"),
+          disposition_at: trx.raw('COALESCE(disposition_at, NOW())'),
+        });
       // Click-to-estimate mints only (GitHub #3391 round P1, mirrors the
       // acceptance path): the customer just REJECTED the very thing the
       // CTA request row asked staff to follow up on — leaving it open

@@ -24,10 +24,10 @@ describe('vocabulary', () => {
     expect(new Set(codes).size).toBe(codes.length);
     for (const d of DISPOSITIONS) {
       expect(['lost', 'dead', 'won_elsewhere']).toContain(d.group);
-      expect(['system', 'staff']).toContain(d.source);
+      expect(['system', 'staff', 'customer']).toContain(d.source);
     }
     // System codes are never accepted from a client.
-    for (const code of ['expired_unviewed', 'expired_viewed', 'archived_unresolved', 'converted_other_path']) {
+    for (const code of ['expired_unviewed', 'expired_viewed', 'archived_unresolved', 'converted_other_path', 'declined_by_customer']) {
       expect(isStaffDispositionCode(code)).toBe(false);
       expect(STAFF_DISPOSITION_CODES).not.toContain(code);
     }

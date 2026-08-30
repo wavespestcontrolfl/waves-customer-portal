@@ -262,12 +262,14 @@ describe('winLossSlices — audit slices', () => {
     const result = await winLossSlices({ days: 90 });
 
     expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 1 });
+    // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
+    // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
-      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 20, group: 'lost' }),
-      expect.objectContaining({ code: 'expired_viewed', count: 1 }),
+      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 25, group: 'lost' }),
+      expect.objectContaining({ code: 'expired_viewed', count: 1, pctOfLosses: 25 }),
       expect.objectContaining({ code: 'archived_unresolved', count: 1 }),
       expect.objectContaining({ code: 'declined_price', count: 1 }),
-      expect.objectContaining({ code: 'invalid_lead', count: 1, group: 'dead' }),
+      expect.objectContaining({ code: 'invalid_lead', count: 1, group: 'dead', pctOfLosses: null }),
     ]);
 
     const lawn = result.byServiceLine.find((s) => s.key === 'lawn');

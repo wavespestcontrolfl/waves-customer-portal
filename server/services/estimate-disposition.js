@@ -33,6 +33,9 @@ const DISPOSITIONS = [
   { code: 'expired_viewed', label: 'Expired — opened, no decision', group: 'lost', source: 'system' },
   { code: 'archived_unresolved', label: 'Archived without a decision', group: 'lost', source: 'system' },
   { code: 'converted_other_path', label: 'Converted another way', group: 'won_elsewhere', source: 'system' },
+  // Customer-authored: the public /:token/decline button (no reason is
+  // collected there — the customer just says no).
+  { code: 'declined_by_customer', label: 'Customer declined online', group: 'lost', source: 'customer' },
   { code: 'declined_price', label: 'Too expensive', group: 'lost', source: 'staff' },
   { code: 'declined_competitor', label: 'Went with competitor', group: 'lost', source: 'staff' },
   { code: 'declined_timing', label: 'Not ready / timing', group: 'lost', source: 'staff' },
