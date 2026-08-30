@@ -2707,6 +2707,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const late = rows.filter((r) => !plan.memberIds.map(String).includes(String(r.id)) && !atTargetStop(r));
       if (late.length) {
         await t('scheduled_services').whereIn('id', late.map((r) => r.id)).update({ visit_id: null });
+        // The detached row leaves THIS move's cohort too (codex on-merge
+        // r2): it inherited the token at join, and a token still on a row
+        // at the OLD stop would fail the finalizer's one-stop test and
+        // strand the whole successful cohort held for 24h. Its own
+        // reminders resume normally (it kept its old slot).
+        await t('appointment_reminders')
+          .whereIn('scheduled_service_id', late.map((r) => r.id))
+          .where({ move_hold_token: reminderHoldToken })
+          .update({ move_hold_until: null, move_hold_token: null });
         warnings.push(`${late.length} service(s) joined this stop during the move and were left at the old time — check the schedule`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: detached late joiner(s) ${late.map((r) => r.id).join(',')}`);
       }

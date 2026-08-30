@@ -867,13 +867,21 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // carrying the SAME stamp (the equality is the fence: a re-grouped row
     // carries a newer mover's stamp) whose service is UNGROUPED. Runs only
     // after the guarded sync committed.
+    // the finalizer is the SHARED releaseMoveHoldIfRepaired (codex on-merge
+    // r2): handleReschedule delegates after its guarded sync, and the
+    // canonical assignment writer invokes the same mechanism post-commit
+    // for tech-only repairs.
     const resched = src.slice(src.indexOf('async handleReschedule'), src.indexOf('if (!sendNotification)'));
     expect(resched).toMatch(/record\.move_hold_until && record\.move_hold_token && syncedRows > 0/);
-    expect(resched).toMatch(/\.where\(\{ 'ar\.move_hold_token': record\.move_hold_token \}\)/);
     expect(resched).toMatch(/options\.preserveMoveHold !== true/);
+    expect(resched).toMatch(/AppointmentReminders\.releaseMoveHoldIfRepaired\(scheduledServiceId\)/);
+    const releaseSrc = src.slice(src.indexOf('async releaseMoveHoldIfRepaired'), src.indexOf('async handleReschedule'));
+    expect(releaseSrc).toMatch(/\.where\(\{ 'ar\.move_hold_token': record\.move_hold_token \}\)/);
     // one-stop verification before release (local gate P1): a partial move's
     // own post-move primary sync must keep the hold while siblings sit split
-    expect(resched).toMatch(/windowedMembersConnected\(liveRows\)/);
+    expect(releaseSrc).toMatch(/windowedMembersConnected\(liveRows\)/);
+    const assignSrc = require('fs').readFileSync(require.resolve('../services/dispatch-assignment'), 'utf8');
+    expect(assignSrc).toMatch(/releaseMoveHoldIfRepaired\(jobId\)/);
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {

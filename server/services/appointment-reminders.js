@@ -289,11 +289,16 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
 // silently losing the only durable record of the obligation. One retry,
 // then a loud error naming the lost manual action.
 async function handOffToOffice(title, message) {
-  const notify = () => require('./notification-service').notifyAdmin('comms', title, message);
+  // bell: true — lifecycle-critical manual-send obligations always ring
+  // (codex on-merge r2: GATE_ADMIN_BELL_POLICY would otherwise silence an
+  // unallowlisted 'comms' bell with a truthy suppressed sentinel and the
+  // only durable record of the obligation would be discarded). Success
+  // requires a PERSISTED id, never a sentinel.
+  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { bell: true });
   try {
     let res = await notify();
-    if (!res) res = await notify();
-    if (!res) {
+    if (!res || !res.id) res = await notify();
+    if (!res || !res.id) {
       logger.error(`[appt-remind] OFFICE HAND-OFF LOST (notification could not be persisted): ${title} — ${message}`);
       return false;
     }
@@ -694,7 +699,14 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
         );
       }
     } catch (rearmErr) {
+      // A transient failure here would otherwise drop the ONLY retry path
+      // for a booking-owned confirmation (codex on-merge r2) — same
+      // durable hand-off as the zero-row branch.
       logger.error(`[appt-remind] held confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+      await handOffToOffice(
+        'Held confirmation needs a manual send',
+        `A confirmation for service ${scheduledServiceId} was held by an in-progress visit move and its reminder row could not be re-armed (${rearmErr.message}) — send it from the composer once the stop settles.`,
+      );
     }
   }
   return reached;
@@ -3068,6 +3080,69 @@ const AppointmentReminders = {
   /**
    * Handle appointment reschedule — reset reminder flags and notify customer.
    */
+  /**
+   * THE verified cohort release for a retained unit-move hold (codex #3609
+   * on-merge r2 — one mechanism, shared by handleReschedule's post-sync
+   * finalizer AND the canonical assignment writer's post-commit repair
+   * path). Releases the WHOLE token cohort only when its live services
+   * form ONE quiet stop (one date, one technician, connected windows, no
+   * rescheduled member) and every referenced service_visits parent is
+   * OPEN and agrees with the children's date + earliest start. Best-effort
+   * — failure keeps the rows quiet until the TTL, the safe direction.
+   * Returns true when a release happened.
+   */
+  async releaseMoveHoldIfRepaired(scheduledServiceId) {
+    if (!scheduledServiceId) return false;
+    try {
+      const record = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('move_hold_until', 'move_hold_token');
+      if (!record || !record.move_hold_token || !record.move_hold_until) return false;
+      if (new Date(record.move_hold_until).getTime() <= Date.now()) return false;
+      const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
+      const cohort = await db('appointment_reminders as ar')
+        .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+        .where({ 'ar.move_hold_token': record.move_hold_token })
+        .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
+      const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
+      const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
+      let oneStop = !pendingRebook && (liveRows.length < 2 || (
+        new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
+        && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
+        && require('./visit-groups').windowedMembersConnected(liveRows)
+      ));
+      if (oneStop) {
+        const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
+        for (const vid of parentIds) {
+          const parent = await db('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start');
+          const childDate = dayOf(liveRows[0].scheduled_date);
+          const childStarts = liveRows.filter((r) => String(r.visit_id || '') === vid).map((r) => (r.window_start ? String(r.window_start).slice(0, 5) : null)).filter(Boolean).sort();
+          const parentStart = parent && parent.window_start ? String(parent.window_start).slice(0, 5) : null;
+          if (!parent || String(parent.status) !== 'open'
+            || dayOf(parent.scheduled_date) !== childDate
+            || (childStarts.length && parentStart !== childStarts[0])) {
+            oneStop = false;
+            break;
+          }
+        }
+      }
+      if (!oneStop) {
+        logger.info(`[appt-remind] retained move hold kept for ${scheduledServiceId} — its cohort does not yet form one stop`);
+        return false;
+      }
+      const released = await db('appointment_reminders')
+        .where({ move_hold_token: record.move_hold_token })
+        .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
+      if (released > 0) {
+        logger.info(`[appt-remind] released the retained move hold on ${released} row(s) of ${scheduledServiceId}'s repaired cohort`);
+      }
+      return released > 0;
+    } catch (holdErr) {
+      logger.warn(`[appt-remind] retained move-hold release failed for ${scheduledServiceId}: ${holdErr.message}`);
+      return false;
+    }
+  },
+
   async handleReschedule(scheduledServiceId, newTime, options = {}) {
     try {
       const sendNotification = options.sendNotification !== false;
@@ -3236,72 +3311,8 @@ const AppointmentReminders = {
       // committed sync — a failed release leaves rows quiet until the TTL,
       // the safe direction, and the senders' own checks stay authoritative.
       if (record.move_hold_until && record.move_hold_token && syncedRows > 0
-        && options.preserveMoveHold !== true
-        && new Date(record.move_hold_until).getTime() > Date.now()) {
-        try {
-          // The release fires ONLY when the cohort's LIVE services now form
-          // ONE quiet stop (one date, one technician, connected windows —
-          // the same one-stop invariant visit-groups enforces): a partial
-          // move's own post-move primary sync reaches here too (the
-          // dispatch routes sync unconditionally after moveVisitAsUnit
-          // returns), and with siblings still split across conflicting
-          // slots the stop is NOT repaired — the hold must survive (codex
-          // r34/local gate). A genuine repair lands every member back on
-          // one stop and passes.
-          const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
-          // Cohort identity = the move's unique token (codex r35 — the lease
-          // expiry is not unique across moves); rows stamped without one
-          // (legacy) are left to the TTL backstop.
-          const cohort = await db('appointment_reminders as ar')
-            .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-            .where({ 'ar.move_hold_token': record.move_hold_token })
-            .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
-          // A 'rescheduled' cohort member is UNRESOLVED, not ignorable
-          // (local gate P1): it is a failed sibling awaiting its
-          // replacement slot — the stop is not repaired while one exists.
-          const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
-          const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
-          let oneStop = !pendingRebook && (liveRows.length < 2 || (
-            new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
-            && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
-            && require('./visit-groups').windowedMembersConnected(liveRows)
-          ));
-          // Parent-tuple verification (uncapped codex audit P1): after a
-          // parentRetargetFailed partial, every CHILD can already sit at
-          // the new stop while service_visits still describes the old one
-          // — the children-only test passes and the unconditional primary
-          // sync would release. Any live grouped member's parent must be
-          // OPEN and agree with the children's date and earliest start
-          // before the hold may clear; a stale or finalizing parent keeps
-          // it (staff re-save the stop, which retargets and releases).
-          if (oneStop) {
-            const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
-            for (const vid of parentIds) {
-              const parent = await db('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start');
-              const childDate = dayOf(liveRows[0].scheduled_date);
-              const childStarts = liveRows.filter((r) => String(r.visit_id || '') === vid).map((r) => (r.window_start ? String(r.window_start).slice(0, 5) : null)).filter(Boolean).sort();
-              const parentStart = parent && parent.window_start ? String(parent.window_start).slice(0, 5) : null;
-              if (!parent || String(parent.status) !== 'open'
-                || dayOf(parent.scheduled_date) !== childDate
-                || (childStarts.length && parentStart !== childStarts[0])) {
-                oneStop = false;
-                break;
-              }
-            }
-          }
-          if (oneStop) {
-            const released = await db('appointment_reminders')
-              .where({ move_hold_token: record.move_hold_token })
-              .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
-            if (released > 0) {
-              logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its repaired partial-move cohort`);
-            }
-          } else {
-            logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} kept the retained move hold — its cohort does not yet form one stop`);
-          }
-        } catch (holdErr) {
-          logger.warn(`[appt-remind] retained move-hold release failed after rescheduling ${scheduledServiceId}: ${holdErr.message}`);
-        }
+        && options.preserveMoveHold !== true) {
+        await AppointmentReminders.releaseMoveHoldIfRepaired(scheduledServiceId);
       }
 
       if (!sendNotification) {

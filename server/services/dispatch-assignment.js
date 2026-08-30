@@ -252,17 +252,26 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   // and the parent itself, then runs the seam once per member after the
   // retarget — a per-row seam here would observe a half-reassigned visit
   // (mixed technicians) and detach the first sibling for good.
+  // Assignment-only cohort repair (codex #3609 on-merge r2): fixing a
+  // straggler's technician changes no slot, so no handleReschedule
+  // finalizer runs — without this, a repaired stop's retained reminder
+  // hold outlived the fix until the 24h TTL. The shared verified release
+  // (one-stop + parent-tuple checks inside) is a no-op when no hold or an
+  // unrepaired cohort exists. Best-effort, post-commit.
+  const runHoldRepair = () => require('./appointment-reminders').releaseMoveHoldIfRepaired(jobId)
+    .catch((hrErr) => logger.warn(`[dispatch-assignment] move-hold repair check failed for ${jobId}: ${hrErr.message}`));
   const seamCommitPromise = skipVisitSeam ? null : require('../utils/trx-commit-promise').commitPromiseOf(trx);
   if (skipVisitSeam) {
-    // no seam — the caller owns it
+    // no seam — the caller owns it (the unit mover's own finalizers run)
   } else if (seamCommitPromise) {
     // Transactional callers (admin-schedule assign) — run after THEIR
     // outermost commit, same pattern as the broadcast above (codex #3590
     // r4: the canonical schedule-assignment route always passes a trx;
     // r14: savepoint callers hook the enclosing transaction).
-    seamCommitPromise.then(runVisitSeam).catch(() => {});
+    seamCommitPromise.then(runVisitSeam).then(runHoldRepair).catch(() => {});
   } else {
     await runVisitSeam();
+    await runHoldRepair();
   }
 
   return {
