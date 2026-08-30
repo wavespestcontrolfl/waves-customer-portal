@@ -1283,6 +1283,15 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
                 : null;
               if (!mintedEstimate.reused || !existing) {
                 const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
+                // acceptedReuse also lands here — acceptance rewrites
+                // result/totals, so a backfill from that row would mix
+                // post-acceptance lines with the original sendSnapshot.
+                // No snapshot beats an internally inconsistent one (GH
+                // codex P2).
+                if (mintedEstimate.reused && mintedRow
+                  && (mintedRow.status === 'accepted' || mintedRow.price_locked_at)) {
+                  throw Object.assign(new Error('skip: accepted reuse — no send-time state to backfill'), { skipBackfill: true });
+                }
                 // A recovery row for an OLD reused mint quotes the persisted
                 // send-time prices but costs them with TODAY's inventory —
                 // the distinct trigger keeps it from masquerading as a
@@ -1294,7 +1303,9 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
                 }
               }
             } catch (auditErr) {
-              logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
+              if (!auditErr.skipBackfill) {
+                logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
+              }
             }
           }
           if (!outcome.deduped && !mintedEstimate?.acceptedReuse) {
