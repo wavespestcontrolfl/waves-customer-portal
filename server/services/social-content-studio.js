@@ -2103,15 +2103,24 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
 
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
+    // The link was probed when the preview was built; creative rendering and
+    // uploads sit between that and here. Re-probe once more so the URL that
+    // ships is the URL that answered 200 seconds ago (same rule as approval).
+    const publishLink = finalPreview.suggestedLink && (await linkIsLive(finalPreview.suggestedLink))
+      ? finalPreview.suggestedLink
+      : '';
+    if (finalPreview.suggestedLink && !publishLink) {
+      logger.warn(`[social-studio] link no longer live at publish time, publishing without it: ${finalPreview.suggestedLink}`);
+    }
     // The snapshot gates above reject cheaply; the locks close their TOCTOU —
     // the reconcile cannot stamp the source row (review runs) and the stats
     // sync cannot move the fleet count (milestone runs) between here and the post.
     const publishFn = () => SocialMediaService.publishToAll({
         // LinkedIn renders `title` as the article headline — use the linked
         // page's real title when there is one, the topic literal otherwise.
-        title: finalPreview.suggestedLinkTitle || plan.topic,
+        title: (publishLink && finalPreview.suggestedLinkTitle) || plan.topic,
         description: plan.service,
-        link: finalPreview.suggestedLink,
+        link: publishLink,
         guid,
         source: AUTONOMOUS_SOURCE,
         customContent: finalPreview.drafts,
