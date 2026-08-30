@@ -115,6 +115,19 @@ describe('AnnualPrepayModal estimate prefill', () => {
     expect(screen.getByText(/From estimate #0B1C2D/)).toBeInTheDocument();
   });
 
+  it('clears an estimate-derived amount when the visit count changes away from the estimate', () => {
+    renderModal({ estimateSuggestion: SUGGESTION });
+    const amountInput = document.querySelector('input[type="number"][step="0.01"]');
+    expect(amountInput).toHaveValue(384);
+    const visitInput = document.querySelector('input[type="number"][step="1"]');
+    fireEvent.change(visitInput, { target: { value: '6' } });
+    // A 4-visit quote must not persist as a 6-visit term's amount.
+    expect(amountInput).toHaveValue(null);
+    expect(screen.queryByText(/From estimate/)).not.toBeInTheDocument();
+    fireEvent.change(visitInput, { target: { value: '4' } });
+    expect(amountInput).toHaveValue(384);
+  });
+
   it('renders exactly as before with no suggestion', () => {
     renderModal();
     expect(screen.queryByText(/From estimate/)).not.toBeInTheDocument();

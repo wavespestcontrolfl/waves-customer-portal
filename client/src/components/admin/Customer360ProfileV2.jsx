@@ -3782,6 +3782,9 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   const handleVisitCountChange = (value) => {
     visitCountTouchedRef.current = true;
     setVisitCount(value);
+    // An estimate-derived amount is only valid for the estimate's own visit
+    // count — re-evaluate so a mismatched count clears the prefill.
+    updateSuggestedAmount(serviceType, coverageCadence, value);
   };
 
   const handleAmountChange = (value) => {
