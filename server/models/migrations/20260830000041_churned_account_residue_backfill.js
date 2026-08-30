@@ -22,6 +22,14 @@
  * No customer comms. Down = no-op (data fix; the audit script is the check).
  */
 
+// Knex wraps migrations in one outer transaction by default, which would
+// turn each per-customer knex.transaction below into a SAVEPOINT — the
+// scheduled_services table lock would then survive until the WHOLE
+// migration commits and could deadlock a booking that grabbed a customer
+// row first. transaction:false makes each per-customer transaction a real
+// top-level one, so the table lock lives for milliseconds per account.
+exports.config = { transaction: false };
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('customers'))) return;
 

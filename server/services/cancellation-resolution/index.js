@@ -51,6 +51,14 @@ async function openCancellationCase({
       // reports the cancel as processed — never rewrite recorded facts.
       const repair = {};
       if (processed && existing.status === 'open') repair.status = 'committed';
+      // A retry can carry a SITUATIONAL hard-stop verdict (adverse event /
+      // safety complaint, reconstructed from reason+context) that the
+      // original write lost — record it so the case reaches the incident
+      // lane; never downgrade an existing verdict.
+      if (!existing.hard_stop && resolution && resolution.kind === 'hard_stop') {
+        repair.hard_stop = true;
+        if (!existing.review_type) repair.review_type = resolution.reviewType || null;
+      }
       if (!existing.reason_code && isReasonCode(reasonCode)) {
         repair.reason_code = reasonCode;
         // The taxonomy travels with the code: a repaired billing_issue must

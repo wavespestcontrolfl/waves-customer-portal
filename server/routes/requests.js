@@ -360,38 +360,17 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
     }
 
-    const [request] = await db('service_requests')
-      .insert({
-        customer_id: req.customer.id,
-        category,
-        subject: cleanSubject,
-        description: cleanDescription,
-        urgency: validUrgency,
-        location_on_property: validLocation,
-        photos: JSON.stringify(photoData),
-        status: 'new',
-      })
-      .returning('*');
-
-    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
-
-    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
-    const categoryLabel = category.replace(/_/g, ' ');
-    const photoCount = photoData.length;
-    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+    // Cancellation case snapshot + SERVER-side resolution recompute — with
+    // ALL external I/O (the paid, up-to-30s Google address validation)
+    // resolved BEFORE the acceptance persists below: once the
+    // service_requests row exists the account must reach the billing
+    // wind-down without awaiting anything external, or a billing cron can
+    // charge inside the gap (and a crash would leave a durable acceptance
+    // with billing still armed). The audit record is the SERVER's
+    // resolution under the SAME scope/context the preview took — never the
+    // caller's claim; the claimed template id only decides whether the
+    // claimed outcome refers to the card the server would have shown.
     const isCancellation = category === 'cancellation';
-
-    // A cancellation request is auto-processed: pull the customer's upcoming
-    // visits off the calendar, stop any recurring series, and mark the account
-    // churned. Best-effort — run it before the admin alert so the notification
-    // can report what happened. The durable service_requests row and the alert
-    // itself remain even if this fails.
-    let cancellationResult = null;
-    let cancellationProcessed = false;
-    let caseOpened = false;
-    // Case snapshot AND the server-side resolution must be computed BEFORE
-    // the processor runs — with GATE_CANCEL_FLOW_V2 on, the churn wind-down
-    // clears tier/rate and the facts change under the resolver.
     let caseSnapshot = null;
     let serverResolution = null;
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
@@ -402,11 +381,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (snapErr) {
         logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
       }
-      // The audit record is the SERVER's resolution, recomputed here under
-      // the SAME scope/context the preview took (address re-validated, never
-      // trusted) — never the caller's claim. The claimed template id is only
-      // used below to decide whether the claimed outcome refers to the card
-      // the server would actually have shown.
       if (value.reasonCode) {
         try {
           let newAddressInServiceArea = null;
@@ -433,6 +407,37 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
         }
       }
+    }
+
+    const [request] = await db('service_requests')
+      .insert({
+        customer_id: req.customer.id,
+        category,
+        subject: cleanSubject,
+        description: cleanDescription,
+        urgency: validUrgency,
+        location_on_property: validLocation,
+        photos: JSON.stringify(photoData),
+        status: 'new',
+      })
+      .returning('*');
+
+    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
+
+    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
+    const categoryLabel = category.replace(/_/g, ' ');
+    const photoCount = photoData.length;
+    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+
+    // A cancellation request is auto-processed: pull the customer's upcoming
+    // visits off the calendar, stop any recurring series, and mark the account
+    // churned. Best-effort — run it before the admin alert so the notification
+    // can report what happened. The durable service_requests row and the alert
+    // itself remain even if this fails.
+    let cancellationResult = null;
+    let cancellationProcessed = false;
+    let caseOpened = false;
+    if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
       // Open the durable case NOW, with the pre-churn snapshot and the
       // server resolution, so a crash mid-processing can never lose them —
       // the post-processor call below only promotes open→committed.
