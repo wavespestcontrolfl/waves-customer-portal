@@ -1920,29 +1920,40 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   }
 
   // ---- 2. move members: primary first, then siblings ----
-  // Pending creation confirmations are CLAIMED before the first member
-  // write (local gate r36; owner ruling 2026-08-30): the per-member reminder
-  // sync keeps confirmations armed (keepPendingConfirmation), so the
-  // deferred sender could otherwise text a moved sibling's NEW time while a
-  // later member still fails — a partly-moved stop must text NOBODY. On a
-  // fully successful move the claims are restored (fenced on our own claim
-  // stamp) and delivery proceeds as before; on a partial they stay claimed
-  // and the dispatcher owns the message after the repair.
-  const confirmationClaimStamp = new Date();
-  let confirmationHoldIds = [];
+  // EVERY reminder leg (creation confirmation + 72h + 24h) is CLAIMED
+  // before the first member write (local gate r36 + codex r28 P1; owner
+  // ruling 2026-08-30): the per-member sync keeps confirmations armed
+  // (keepPendingConfirmation) and the cron treats sent-flags as authority,
+  // so a deferred sender or the 72h/24h sweep could otherwise text a
+  // half-moved stop. On a fully successful move the claims are restored
+  // (fenced per flag on our own stamp); on a partial they stay claimed —
+  // nobody is auto-texted, the dispatcher owns the message after repair.
+  // The claim itself failing ABORTS the move before anything is written.
+  const reminderClaimStamp = new Date();
+  const REMINDER_HOLD_FLAGS = [
+    ['confirmation_sent', 'confirmation_sent_at'],
+    ['reminder_72h_sent', 'reminder_72h_sent_at'],
+    ['reminder_24h_sent', 'reminder_24h_sent_at'],
+  ];
+  const reminderHolds = new Map(); // flag -> reminder row ids we flipped
   try {
     const holdRows = await db('appointment_reminders')
       .whereIn('scheduled_service_id', pending.map((x) => x.id))
-      .where({ confirmation_sent: false })
-      .select('id');
-    if (holdRows.length) {
-      await db('appointment_reminders').whereIn('id', holdRows.map((r) => r.id))
-        .where({ confirmation_sent: false })
-        .update({ confirmation_sent: true, confirmation_sent_at: confirmationClaimStamp });
-      confirmationHoldIds = holdRows.map((r) => r.id);
+      .where({ cancelled: false })
+      .select('id', 'confirmation_sent', 'reminder_72h_sent', 'reminder_24h_sent');
+    for (const [flag, at] of REMINDER_HOLD_FLAGS) {
+      const ids = holdRows.filter((r) => !r[flag]).map((r) => r.id);
+      if (!ids.length) continue;
+      await db('appointment_reminders').whereIn('id', ids)
+        .where({ [flag]: false })
+        .update({ [flag]: true, [at]: reminderClaimStamp });
+      reminderHolds.set(flag, ids);
     }
   } catch (err) {
-    logger.warn(`[visit-groups] unit move confirmation claim failed for visit ${plan.visitId}: ${err.message}`);
+    // The hold could not be secured (codex #3609 r28 P1): moving anyway
+    // would let a cron text a half-moved stop. Nothing has been written —
+    // abort, the caller retries.
+    throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true });
   }
   const moved = [];
   const failed = [];
@@ -2312,16 +2323,22 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // Partial: the up-front confirmation claims STAY — nobody is auto-texted
     // (owner ruling 2026-08-30); the dispatcher owns the message after the
     // repair (needsAttention carries the straggler ids).
-  } else if (confirmationHoldIds.length) {
-    // Full success: restore the claims, fenced on our own stamp so a
-    // confirmation genuinely delivered (or claimed by a newer writer) in
-    // the meantime is never re-armed.
-    try {
-      await db('appointment_reminders').whereIn('id', confirmationHoldIds)
-        .where({ confirmation_sent: true, confirmation_sent_at: confirmationClaimStamp })
-        .update({ confirmation_sent: false, confirmation_sent_at: null });
-    } catch (err) {
-      logger.warn(`[visit-groups] unit move confirmation restore failed for visit ${plan.visitId}: ${err.message}`);
+  } else if (reminderHolds.size) {
+    // Full success: restore each claimed flag, fenced per flag on our own
+    // stamp so a send genuinely delivered (or claimed by a newer writer) in
+    // the meantime is never re-armed. A failed restore leaves the row HELD
+    // (no reminder texts — the safe direction) and warns.
+    for (const [flag, at] of REMINDER_HOLD_FLAGS) {
+      const ids = reminderHolds.get(flag);
+      if (!ids || !ids.length) continue;
+      try {
+        await db('appointment_reminders').whereIn('id', ids)
+          .where({ [flag]: true, [at]: reminderClaimStamp })
+          .update({ [flag]: false, [at]: null });
+      } catch (err) {
+        warnings.push(`reminder hold restore failed for the moved stop (${flag}) — reminders stay quiet; re-save the visit to re-arm them`);
+        logger.warn(`[visit-groups] unit move reminder-hold restore (${flag}) failed for visit ${plan.visitId}: ${err.message}`);
+      }
     }
   }
   // members: per-row pre-move state so a caller with its own post-move

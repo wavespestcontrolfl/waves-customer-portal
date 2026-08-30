@@ -260,52 +260,30 @@ router.post('/:id/confirm', async (req, res, next) => {
     // The staff board can move this visit after the read above. Gate the write
     // on the customer and status we actually observed so a stale portal click
     // cannot revive a cancelled/completed visit (or overwrite an in-progress
-    // transition). Grouped rows (codex #3609 r27 P2): the page presented the
-    // stop as ONE appointment, so a portal confirm fans out to the other
-    // customer-confirmable pending members under the visit's stop lock —
-    // the token page's own contract — never leaving the stop partly pending
-    // behind a "confirmed" label.
-    let updatedCount = 0;
-    try {
-      await db.transaction(async (trx) => {
-        if (service.visit_id) {
-          await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
-        }
-        updatedCount = await trx('scheduled_services')
-          .where({
-            id: req.params.id,
-            customer_id: req.customerId,
-            status: service.status,
-          })
-          .update({
-            status: 'confirmed',
-            customer_confirmed: true,
-            confirmed_at: new Date(),
-            updated_at: new Date(),
-          });
-        if (!updatedCount || !service.visit_id) return;
-        const siblings = await trx('scheduled_services')
-          .where({ visit_id: service.visit_id, status: 'pending' })
-          .whereNot('id', req.params.id)
-          .forUpdate()
-          .select('id', 'status', 'source_action', 'customer_confirmed');
-        for (const sib of siblings) {
-          // Dispatch-owned unreviewed bookings stay pending (same guard the
-          // token page's fan-out applies).
-          if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(sib.source_action) && !sib.customer_confirmed) continue;
-          const n = await trx('scheduled_services')
-            .where({ id: sib.id, status: 'pending' })
-            .update({ status: 'confirmed', customer_confirmed: true, confirmed_at: trx.fn.now(), updated_at: trx.fn.now() });
-          if (n === 0) continue;
-          await trx('job_status_history').insert({ job_id: sib.id, from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
-        }
+    // transition).
+    // DELIBERATELY single-row (codex #3609 r28 P1): the portal lists a
+    // grouped stop's members as SEPARATE rows, so this confirm applies to
+    // exactly the row the customer clicked. A silent sibling fan-out here
+    // would act on membership the customer was never shown and that this
+    // route cannot prove (no membership key); the token appointment page —
+    // which presents the stop as one appointment and proves the shown set
+    // under the stop lock — is the grouped-confirm surface.
+    const updatedCount = await db('scheduled_services')
+      .where({
+        id: req.params.id,
+        customer_id: req.customerId,
+        status: service.status,
+        // The observed membership is part of the CAS: a row grouped or split
+        // since the read misses (knex renders null as IS NULL) and the
+        // customer refreshes, instead of a stale confirm landing.
+        visit_id: service.visit_id || null,
+      })
+      .update({
+        status: 'confirmed',
+        customer_confirmed: true,
+        confirmed_at: new Date(),
+        updated_at: new Date(),
       });
-    } catch (err) {
-      if (err && err.code === 'VISIT_STOP_MOVED') {
-        return res.status(409).json({ error: 'This appointment changed before it could be confirmed. Refresh to see the latest status.' });
-      }
-      throw err;
-    }
 
     if (!updatedCount) {
       return res.status(409).json({
