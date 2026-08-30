@@ -190,7 +190,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
           lineItems: [
             { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, annualBeforeDiscount: 733.33, tier: 'quarterly', pricingVersion: 'v2' },
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
-            { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
+            { service: 'flea_package', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
             // Manual discount lands ONLY in manualFinalAnnual — the audited
             // monthly must derive from it, not the stale monthlyAfterDiscount.
@@ -219,7 +219,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     const pest = audit.lines.find((l) => l.serviceKey === 'pest_control');
     expect(pest).toMatchObject({ cadence: 'recurring', monthly: 55, price: 660, priceBeforeDiscount: 733.33, discount: 0.1, priceSource: 'saved_estimate.engineResult.lineItems' });
     expect(pest.quoted).toMatchObject({ pricingVersion: 'v2' });
-    expect(audit.lines.find((l) => l.serviceKey === 'flea_treatment')).toMatchObject({ cadence: 'one_time', price: 150 });
+    // Unmapped engine id resolves through the label's SERVICE_MAP match.
+    const flea = audit.lines.find((l) => /flea/.test(l.serviceKey));
+    expect(flea).toMatchObject({ cadence: 'one_time', price: 150 });
+    expect(flea.serviceKey).not.toBe('flea_package');
   });
 
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {

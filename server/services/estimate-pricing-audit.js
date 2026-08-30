@@ -547,7 +547,14 @@ function normalizeEngineLineItems(result) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   for (const item of items) {
-    const serviceKey = item.service || keyFromName(item.name);
+    // Engine service IDs (flea_package, stinging_insect_v2, …) are not all
+    // SERVICE_MAP keys — when the raw id has no COGS mapping but the LABEL
+    // pattern-matches one, prefer the mapped key so the line doesn't
+    // record zero COGS + a false unmapped risk (codex pre-push P1).
+    const byName = keyFromName(item.name);
+    const serviceKey = SERVICE_MAP[item.service]
+      ? item.service
+      : (SERVICE_MAP[byName] ? byName : (item.service || byName));
     const quoted = quotedFieldsFrom(item);
     // Number(null) is a finite 0 — nullish values must fall through, not
     // zero out revenue or cadence (codex pre-push P1 x2).
