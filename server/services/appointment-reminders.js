@@ -3123,26 +3123,45 @@ const AppointmentReminders = {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
-      // Repair-clear for a retained unit-move hold (codex #3609 uncapped
-      // audit P1): a member DETACHED by a partial move keeps its
-      // move_hold_until, and neither a later unit move (releases current
-      // members only) nor this path cleared it — the repaired row's
-      // reminders stayed silent for the full 24h TTL. A successful
-      // reschedule of an UNGROUPED row IS the repair completing, so the
-      // hold clears with the sync. Guarded in SQL, not from a pre-read: a
-      // row still (or newly) grouped keeps its hold — the visit's own
-      // mover owns that lease and releases/re-stamps it itself.
-      if (record.move_hold_until) {
-        rescheduleUpdate.move_hold_until = db.raw(
-          'CASE WHEN EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.visit_id IS NULL) THEN NULL ELSE move_hold_until END',
-        );
-      }
       const syncedRows = await expectGuard(
         db('appointment_reminders').where({ id: record.id }),
       ).update(rescheduleUpdate);
       if (options.expectSchedule && syncedRows === 0) {
         logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
         return { skippedStale: true };
+      }
+      // Repair-release for a retained unit-move hold (codex #3609 uncapped
+      // audit + r33 P1s): a PARTIAL move retains move_hold_until on every
+      // planned member — the detached straggler AND the already-landed
+      // members (often ungrouped once the seam dissolves the visit) — and
+      // neither a later unit move (releases current members only) nor this
+      // sync cleared them, so a repaired stop stayed silent for the full
+      // 24h TTL. A successful reschedule of a held row IS the repair
+      // completing, so release the WHOLE cohort: every reminder row still
+      // carrying THIS EXACT stamp (all planned members were stamped with
+      // one value — the stamp equality is the fence: a row re-grouped into
+      // another mover carries that mover's NEWER stamp and is untouched)
+      // whose service row is UNGROUPED (a still-grouped member's lease
+      // belongs to its visit's own mover). Best-effort after the committed
+      // sync — a failed release leaves rows quiet until the TTL, the safe
+      // direction, and the senders' own hold checks stay authoritative.
+      if (record.move_hold_until && syncedRows > 0 && new Date(record.move_hold_until).getTime() > Date.now()) {
+        try {
+          const released = await db('appointment_reminders')
+            .where({ move_hold_until: record.move_hold_until })
+            .whereExists(function serviceUngrouped() {
+              this.select(1)
+                .from('scheduled_services')
+                .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
+                .whereNull('scheduled_services.visit_id');
+            })
+            .update({ move_hold_until: null, updated_at: new Date() });
+          if (released > 0) {
+            logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its partial-move cohort`);
+          }
+        } catch (holdErr) {
+          logger.warn(`[appt-remind] retained move-hold release failed after rescheduling ${scheduledServiceId}: ${holdErr.message}`);
+        }
       }
 
       if (!sendNotification) {

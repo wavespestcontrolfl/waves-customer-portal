@@ -666,6 +666,12 @@ router.get('/:token', async (req, res, next) => {
         windowStart: hhmm(svc.window_start),
         arrivalWindow: arrivalWindowLabel(visitInfo.visit?.windowStart || hhmm(svc.window_start)),
       },
+      // Whether the .ics route would actually serve this visit (codex r33
+      // P2): the page must not render an Add-to-calendar action whose
+      // request 404s — e.g. an all-windowless grouped stop is 'upcoming'
+      // until end of day but has no DTSTART to file. Same verdict the ICS
+      // route applies (calendarEligible over the raw visit snapshot).
+      calendarEligible: visitUnknown ? false : calendarEligible(svc, visitInfoRaw),
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
 

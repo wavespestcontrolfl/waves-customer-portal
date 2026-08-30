@@ -507,19 +507,21 @@ export default function AppointmentPage() {
           </div>
         ) : null}
 
-        <a
-          data-glass="soft"
-          href={`${API_BASE}/public/appointment/${token}/calendar.ics`}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-            marginTop: 12, padding: '12px 16px', borderRadius: 8,
-            background: S.soft, border: `1px solid ${S.softBorder}`,
-            fontSize: 15, fontWeight: 600, color: S.text, textDecoration: 'none',
-          }}
-        >
-          <Icon name="calendar" size={16} />
-          Add to calendar
-        </a>
+        {data.calendarEligible ? (
+          <a
+            data-glass="soft"
+            href={`${API_BASE}/public/appointment/${token}/calendar.ics`}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              marginTop: 12, padding: '12px 16px', borderRadius: 8,
+              background: S.soft, border: `1px solid ${S.softBorder}`,
+              fontSize: 15, fontWeight: 600, color: S.text, textDecoration: 'none',
+            }}
+          >
+            <Icon name="calendar" size={16} />
+            Add to calendar
+          </a>
+        ) : null}
       </Card>
 
       {data.rescheduleToken ? (

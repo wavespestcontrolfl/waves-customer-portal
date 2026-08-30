@@ -13099,14 +13099,36 @@ const CallRecordingProcessor = {
                         .filter((s) => s.email && !s.phone);
                       if (emailOnlySlots.length) {
                         const AppointmentEmail = require('./appointment-email');
-                        await AppointmentEmail.sendAppointmentConfirmationEmail({
+                        const emailRes = await AppointmentEmail.sendAppointmentConfirmationEmail({
                           customerId,
                           scheduledServiceId,
                           appointmentTime: parseETDateTime(extracted.preferred_date_time),
                           serviceLabel: serviceType,
                           recipientFilter: emailOnlySlots.map((s) => s.email),
                         });
-                        logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
+                        if (emailRes?.held) {
+                          // Grouped move stamped the hold while this email
+                          // was being prepared (codex #3609 r33 P1): this
+                          // booking registered sendConfirmation:false, so
+                          // without a re-arm nothing would ever retry the
+                          // email-only contact. Re-arm the reminder row —
+                          // the stranded-confirmation sweep then delivers
+                          // the standard confirmation with the POST-move
+                          // time to every appointment contact once the
+                          // hold clears (the primary's pre-hold text
+                          // described a slot the move is changing, so the
+                          // corrected notice is right, not a duplicate).
+                          try {
+                            await db('appointment_reminders')
+                              .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+                              .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                            logger.info(`[call-proc] Email-only confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
+                          } catch (rearmErr) {
+                            logger.error(`[call-proc] held email-only confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+                          }
+                        } else {
+                          logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
+                        }
                       }
                     } catch (fanErr) {
                       logger.warn(`[call-proc] secondary confirmation fan-out skipped for customer ${customerId}: ${fanErr.code || fanErr.name || 'error'}`);

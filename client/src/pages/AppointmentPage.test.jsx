@@ -31,6 +31,9 @@ function upcomingPayload(overrides = {}) {
     plan: { isRecurring: true, collectiveAnchor: true },
     weather: { rainChance: 15, stormy: false },
     rescheduleToken: 'deadbeef',
+    // Server-computed ICS servability (codex r33 P2) — the page renders the
+    // Add-to-calendar action only when the .ics route would serve it.
+    calendarEligible: true,
     ...overrides,
   };
 }
