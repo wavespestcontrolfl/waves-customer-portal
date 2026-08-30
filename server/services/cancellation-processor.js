@@ -201,9 +201,25 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // live price for unpriced visit completions and survive nothing else
         // clearing them (same reasoning and shape as customer-offboarding).
         // NULL mode + NULL rate = the billing paths have nothing to charge.
+        // EXCEPT while a visit is actually in progress (en_route/on_site —
+        // the sweep below deliberately never auto-cancels those): its
+        // completion still needs this price, so the lane fields are KEPT and
+        // the in_progress_visit flag the sweep raises routes the whole
+        // account to manual review, where the office clears the lane after
+        // settling the visit (offboarding's straggler-completion rail).
         if (customer.billing_mode === 'per_application') {
-          update.billing_mode = null;
-          update.per_application_fee = null;
+          const liveWork = await db('scheduled_services')
+            .where({ customer_id: customerId })
+            .where(function liveNow() {
+              this.whereIn('status', ['en_route', 'on_site']).orWhereIn('track_state', LIVE_TRACK_STATES);
+            })
+            .first('id');
+          if (!liveWork) {
+            update.billing_mode = null;
+            update.per_application_fee = null;
+          } else {
+            logger.warn(`[cancellation-processor] per-application price kept for ${customerId} — visit in progress; office clears the lane after settling it`);
+          }
         }
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
         const ledgerAuthoritative = planRateLedgerEnabled();
