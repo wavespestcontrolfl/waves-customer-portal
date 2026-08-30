@@ -476,21 +476,6 @@ const LIVE_LIFECYCLE_RESET = {
   arrival_sms_sent_at: null,
 };
 
-// Everything a unit move's compensating rollback must put back besides the
-// slot/status/technician it restores explicitly: route sequence, the
-// this-visit-only date-exception stamp, and the tracker/lifecycle fields the
-// rewind clears (codex #3609 local audit). Consumed by visit-groups.
-const FROZEN_ROLLBACK_SNAPSHOT_COLUMNS = [
-  'route_order', 'time_window', 'window_display', 'track_token_expires_at',
-  'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
-  // Confirmation marker + stamp (codex #3609 r19): a confirm that lands after
-  // the forward move is newer state the compensation CAS must miss on, and
-  // a rolled-back row must read exactly as it did before the move.
-  'customer_confirmed', 'confirmed_at',
-  ...Object.keys(LIVE_LIFECYCLE_RESET),
-];
-
-
 // Live TRACK states the rewind test recognizes alongside the operational
 // statuses above. `status` alone under-detects: the manual En Route taps
 // advance track_state and stamp lifecycle columns WITHOUT syncing status
@@ -2821,4 +2806,3 @@ module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;
-module.exports.FROZEN_ROLLBACK_SNAPSHOT_COLUMNS = FROZEN_ROLLBACK_SNAPSHOT_COLUMNS;

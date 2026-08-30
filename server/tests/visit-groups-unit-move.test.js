@@ -45,7 +45,6 @@ jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mock
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
-jest.mock('../services/rebooker', () => ({ FROZEN_ROLLBACK_SNAPSHOT_COLUMNS: ['route_order', 'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date', 'customer_confirmed', 'confirmed_at', 'track_state', 'en_route_at'] }));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -58,7 +57,7 @@ const SERVICE = { id: 'a', visit_id: 'v1' };
 
 function fakeRebooker(behaviour = {}) {
   const impl = async (id, date, win, reason, by, opts) => {
-    if (behaviour[id] === 'throw' && reason !== 'visit_move_rollback') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
+    if (behaviour[id] === 'throw') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
     return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts };
   };
   return { reschedule: jest.fn(impl), rescheduleSeries: jest.fn(impl) };
@@ -612,237 +611,31 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
   });
 });
 
-describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex audit)', () => {
+describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)', () => {
   const FROZEN = { ...VISIT, summary_token_issued_at: '2026-08-28T12:00:00Z' }; // issued link ⇒ membership frozen
-  const script = ({ visit = FROZEN, members, landed = null }) => ({
+  const script = ({ visit = VISIT, members, landed = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
     scheduled_services: {
-      // the rollback's FOR UPDATE re-read: the row as the rollback reschedule + tech restore left it
-      first: (ops) => {
-        const w = ops.find((o) => o[0] === 'where' && o[1] && o[1].id);
-        const m = w && members.find((x) => String(x.id) === String(w[1].id));
-        return (m && ops.some((o) => o[0] === 'forUpdate')) ? { ...m, visit_id: 'v1', status: 'confirmed', track_state: 'scheduled' } : null;
-      },
       select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
         : ops.some((o) => o[0] === 'forUpdate') ? members
-        : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
-          : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
+          : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
+            : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
     },
   });
 
-  test('a sibling failure on a frozen visit rolls the landed primary back to its original slot (fenced on what this move wrote) and 409s; nothing is retargeted', async () => {
-    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
-    const rebooker = fakeRebooker({ b: 'throw' });
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'admin' }).catch((e) => e);
-    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a'], rollbackFailed: [] });
-    expect(err.message).toMatch(/issued link or records, so nothing was moved/);
-    const calls = rebooker.reschedule.mock.calls;
-    expect(calls.map((c) => [c[0], c[1], c[3]])).toEqual([
-      ['a', '2026-09-02', undefined],                 // primary moved
-      ['b', '2026-09-02', undefined],                 // sibling failed
-      ['a', '2026-08-30', 'visit_move_rollback'],     // primary rolled back
-    ]);
-    expect(calls[2][2]).toBe('09:00-10:00');
-    // the compensation CAS pins the COMPLETE landed state (codex r19): slot, visit, forced status, the tech the row was left on
-    expect(calls[2][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true, expect: { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1', status: 'confirmed', technician_id: 't1' } });
-    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
-  });
-
-  test('rollback restores a pending member\'s status (the rebooker forced confirmed), fenced on the restored slot; a frozen visit with a LIVE member is refused up front', async () => {
-    db.__script = script({ members: [member('a', { status: 'pending' }), member('b')] });
-    db.__script.scheduled_services.update = undefined; // harness default update() resolves 1
-    const rebooker = fakeRebooker({ b: 'throw' });
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }).catch((e) => e);
-    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
-    // one row-locking restoration: FOR UPDATE re-read, then the status flip on the locked row
-    const lockRead = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'first' && c.ops.some((o) => o[0] === 'forUpdate'));
-    expect(lockRead.ops).toEqual(expect.arrayContaining([['where', { id: 'a' }], ['forUpdate']]));
-    const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
-    expect(restore.ops).toEqual([['where', { id: 'a' }]]);
-    expect(db.__calls.indexOf(lockRead)).toBeLessThan(db.__calls.indexOf(restore));
-    const hist = db.__calls.find((c) => c.table === 'job_status_history' && c.op === 'insert');
-    expect(hist.values).toEqual({ job_id: 'a', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
-    // a live member on a frozen visit: refused before any write (its lifecycle could never be compensated)
-    jest.clearAllMocks(); db.__calls.length = 0;
-    db.__script = script({ members: [member('a'), member('b', { status: 'on_site' })] });
-    await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { allowLive: true } }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_LIVE_MOVE_UNSUPPORTED' });
-    expect(db.__calls.some((c) => c.op === 'update')).toBe(false);
-  });
-
-  test('a frozen visit whose parent cannot be retargeted after the members moved is rolled back and refused; a frozen primary never widens into a series move', async () => {
-    let reads = 0;
-    db.__script = script({ members: [member('a'), member('b')] });
-    db.__script.service_visits.first = (ops) => {
-      if (ops.some((o) => o[0] === 'max')) return { max: 0 };
-      reads += 1;
-      return reads <= 3 ? FROZEN : { ...FROZEN, status: 'dissolved' }; // plan reads (peek, locked, activity) open+frozen; the retarget read finds it dissolved
-    };
-    const rebooker = fakeRebooker();
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
-    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_PARENT_RETARGET_FAILED', rolledBack: ['a', 'b'], rollbackFailed: [] });
-    expect(rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0])).toEqual(['b', 'a']);
-    // series widening refused up front on a frozen visit (gate on, cadence primary, date change, no explicit single scope)
-    const prevGate = process.env.GATE_ADMIN_COLLECTIVE_MOVE;
-    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
-    try {
+  test('a visit with an issued link / packet / records / payment is refused before any write — members move in separate transactions, so no compensation could make it atomic', async () => {
+    for (const [visit, expectReason] of [[FROZEN, 'link_issued'], [{ ...VISIT, payment_intent_id: 'pi_1' }, 'payment_attempted']]) {
       jest.clearAllMocks(); db.__calls.length = 0;
-      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
-      const rb = fakeRebooker();
-      await expect(moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
-        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_SERIES_MOVE_UNSUPPORTED' });
-      expect(rb.reschedule).not.toHaveBeenCalled();
-      // explicit this-visit-only scope proceeds
-      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
-      const out = await moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { seriesPolicy: 'single' } });
-      expect(out.visitMove.moved).toEqual(['a', 'b']);
-    } finally {
-      if (prevGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; else process.env.GATE_ADMIN_COLLECTIVE_MOVE = prevGate;
+      db.__script = script({ visit, members: [member('a'), member('b')] });
+      const rebooker = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: expectReason, isOperational: true });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+      expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
     }
-  });
-
-  test('a null-ended member rolls back to { start, end: null } — never a zero-length window — and its status fence uses the original bounds (local audit)', async () => {
-    db.__script = script({ members: [member('a', { status: 'pending', window_end: null }), member('b')] });
-    const rebooker = fakeRebooker({ b: 'throw' });
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', initiatedBy: 'admin' }).catch((e) => e);
-    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
-    const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
-    expect(rb[2]).toEqual({ start: '09:00', end: null });
-    // the rebooker keeps the destination end for an open-ended window: cleared in the same locked restoration as the status flip (codex r18 / P0)
-    const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
-    expect(restore.values).toMatchObject({ status: 'pending', window_end: null });
-    expect(restore.ops).toEqual([['where', { id: 'a' }]]);
-  });
-
-  test('rollback restores the snapshotted route order / date-exception stamp / lifecycle fields, fenced on the restored slot (local audit)', async () => {
-    // the frozen plan snapshots members (whereIn id, no forUpdate) — answer with the mutable columns as they were
-    db.__script = script({ members: [member('a'), member('b')] });
-    const base = db.__script.scheduled_services.select;
-    db.__script.scheduled_services.select = (ops) => (ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') && !ops.some((o) => o[0] === 'forUpdate')
-      ? [{ id: 'a', visit_id: 'v1', route_order: 3, date_exception: false, date_exception_source: null, date_exception_at: null, date_exception_cadence_date: null, track_state: 'scheduled', en_route_at: null },
-        { id: 'b', visit_id: 'v1', route_order: 4, date_exception: true, date_exception_source: 'admin', date_exception_at: '2026-08-01T00:00:00Z', date_exception_cadence_date: '2026-08-30', track_state: 'scheduled', en_route_at: null }]
-      : base(ops));
-    const err = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }).catch((e) => e);
-    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
-    const put = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.route_order === 3);
-    expect(put.ops).toEqual([['where', { id: 'a' }]]); // on the FOR UPDATE-locked row, after full-state verification
-    expect(put.values).toMatchObject({ route_order: 3, date_exception: false, track_state: 'scheduled', en_route_at: null });
-  });
-
-  test('the compensation CAS carries the snapshotted confirmation marker and the requested technician (codex r19)', async () => {
-    db.__script = script({ members: [member('a'), member('b')], landed: [
-      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
-      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
-    ] });
-    const base = db.__script.scheduled_services.select;
-    db.__script.scheduled_services.select = (ops) => (ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') && !ops.some((o) => o[0] === 'forUpdate')
-      ? [{ id: 'a', visit_id: 'v1', customer_confirmed: false }, { id: 'b', visit_id: 'v1', customer_confirmed: true }] : base(ops));
-    const rebooker = fakeRebooker({ b: 'throw' });
-    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch(() => {});
-    const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
-    expect(rb[5].expect).toMatchObject({ visit_id: 'v1', status: 'confirmed', technician_id: 't9', customer_confirmed: false });
-  });
-
-  test('members the plan found already at the target are reported as unchanged (covered by this visit\'s move), never as moved (codex r19)', async () => {
-    db.__script = script({ visit: VISIT, members: [member('a'), member('b', { window_start: null, window_end: null })], landed: [
-      { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
-      { id: 'b', scheduled_date: '2026-08-30', window_start: null, window_end: null, technician_id: 't1' },
-    ] });
-    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00' });
-    expect(out.visitMove.moved).toEqual(['a']);
-    expect(out.visitMove.unchanged).toEqual(['b']); // windowless sibling stays windowless on a same-day window move
-    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
-    const noop = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(noop.visitMove).toMatchObject({ alreadyAtTarget: true, unchanged: ['a', 'b'] });
-  });
-
-  test('restoration is refused (row stuck) when the row changed after the rollback reschedule — a newer confirmation or live transition is never overwritten (local audit P0)', async () => {
-    for (const changed of [{ customer_confirmed: true }, { track_state: 'en_route', en_route_at: '2026-08-30T13:00:00Z' }, { technician_id: 't9' }, { status: 'pending' }]) {
-      jest.clearAllMocks(); db.__calls.length = 0;
-      db.__script = script({ members: [member('a'), member('b')] });
-      const snapSelect = db.__script.scheduled_services.select;
-      db.__script.scheduled_services.select = (ops) => (ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') && !ops.some((o) => o[0] === 'forUpdate')
-        ? [{ id: 'a', visit_id: 'v1', customer_confirmed: false }, { id: 'b', visit_id: 'v1', customer_confirmed: false }] : snapSelect(ops));
-      const baseFirst = db.__script.scheduled_services.first;
-      db.__script.scheduled_services.first = (ops) => { const r = baseFirst(ops); return r && r.id === 'a' ? { ...r, ...changed } : r; };
-      const err = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
-      expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: [], rollbackFailed: ['a'] });
-      expect(db.__calls.some((c) => c.op === 'update' && c.values.route_order !== undefined)).toBe(false);
-    }
-  });
-
-  test('a member that diverged before the retarget on a FROZEN visit rolls the rest back and refuses (codex r18)', async () => {
-    db.__script = script({ members: [member('a'), member('b')], landed: [
-      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
-      // b moved again (another window) after it landed
-      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
-    ] });
-    const rebooker = fakeRebooker();
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
-    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', diverged: ['b'], rolledBack: ['a'], rollbackFailed: [] });
-    // only the member that still holds this move's landed state is compensated
-    expect(rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0])).toEqual(['a']);
-    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
-  });
-
-  test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {
-    db.__script = script({ members: [member('a'), member('b')] });
-    const rebooker = { reschedule: jest.fn(async (id, date, win, reason) => {
-      if (id === 'b') throw Object.assign(new Error('member b boom'), { code: 'SLOT_TAKEN' });
-      if (reason === 'visit_move_rollback') throw new Error('rollback boom');
-      return { success: true };
-    }) };
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
-    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: [], rollbackFailed: ['a'] });
-    expect(err.message).toMatch(/1 service\(s\) could NOT be moved back \(a\)/);
-    // not frozen ⇒ partial + warning (the r3 staff contract), no rollback call
-    db.__calls.length = 0;
-    db.__script = script({ visit: VISIT, members: [member('a'), member('b')] });
-    const rb = fakeRebooker({ b: 'throw' });
-    const out = await moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(out.visitMove).toMatchObject({ moved: ['a'], failed: [{ id: 'b', reason: 'member b boom', code: 'SLOT_TAKEN' }] });
-    expect(rb.reschedule.mock.calls.some((c) => c[3] === 'visit_move_rollback')).toBe(false);
-  });
-
-  test('a sibling whose technician re-point fails on a frozen visit is rolled back too (slot and technician)', async () => {
-    db.__script = script({ members: [member('a'), member('b')] });
-    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
-    const rebooker = fakeRebooker();
-    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
-    expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a', 'b'] }); // reported in move order; executed in reverse
-    const rollbacks = rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0]);
-    expect(rollbacks).toEqual(['b', 'a']);
-    // b's re-point FAILED, so b still sits on t1: its rollback CAS expects t1 and no tech restore runs for it;
-    // the primary's tech rode its own move, so a IS restored through the canonical writer, fenced on t9 (local audit)
-    const rbB = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback' && c[0] === 'b');
-    expect(rbB[5].expect).toMatchObject({ technician_id: 't1' });
-    const rbA = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback' && c[0] === 'a');
-    expect(rbA[5].expect).toMatchObject({ technician_id: 't9' });
-    const restores = assignDispatchJob.mock.calls.filter((c) => c[0].technicianId === 't1').map((c) => c[0]);
-    expect(restores).toEqual([
-      expect.objectContaining({ jobId: 'a', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }),
-    ]);
-    // a technician-restore failure is a rollback failure (never "nothing was moved" with state still at the destination)
-    jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
-    assignDispatchJob
-      .mockRejectedValueOnce(Object.assign(new Error('stale'), { code: 'ASSIGNMENT_STALE' })) // b's re-point (b stays on t1 ⇒ no restore needed)
-      .mockRejectedValueOnce(new Error('restore boom'));                                          // a's restore
-    const err2 = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
-    expect(err2).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['b'], rollbackFailed: ['a'] });
-  });
-
-  test('a parent that is gone or no longer open at retarget time is a retarget FAILURE (parentRetargetFailed + warning), never a silent success (local audit)', async () => {
-    let reads = 0;
-    db.__script = script({ members: [member('a'), member('b')] });
-    db.__script.service_visits.first = (ops) => {
-      if (ops.some((o) => o[0] === 'max')) return { max: 0 };
-      reads += 1;
-      return reads <= 2 ? VISIT : { ...VISIT, status: 'dissolved' }; // plan reads open; the retarget read finds it dissolved
-    };
-    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(out.visitMove).toMatchObject({ moved: ['a', 'b'], parentRetargetFailed: true });
-    expect(out.warnings.some((w) => /visit parent retarget failed: visit v1 is dissolved/.test(w))).toBe(true);
-    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+    // a visit that is merely not open (closing/dissolved) is the mover's own null path, not the frozen refusal
+    db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
+    expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
   });
 
   test('same-day window move: a failed sibling still on the date at its OLD window never feeds the parent retarget (local audit)', async () => {
@@ -877,5 +670,18 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     ]);
     expect(out.visitMove.members.map((m) => m.id)).toEqual(['a']);
     expect(out.warnings.some((w) => /2 grouped service\(s\) did not move with this stop/.test(w))).toBe(true);
+  });
+
+  test('members the plan found already at the target are reported as unchanged (covered by this visit\'s move), never as moved (codex r19)', async () => {
+    db.__script = script({ visit: VISIT, members: [member('a'), member('b', { window_start: null, window_end: null })], landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: null, window_end: null, technician_id: 't1' },
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00' });
+    expect(out.visitMove.moved).toEqual(['a']);
+    expect(out.visitMove.unchanged).toEqual(['b']); // windowless sibling stays windowless on a same-day window move
+    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
+    const noop = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(noop.visitMove).toMatchObject({ alreadyAtTarget: true, unchanged: ['a', 'b'] });
   });
 });
