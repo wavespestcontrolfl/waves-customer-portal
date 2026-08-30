@@ -78,6 +78,13 @@ export default function WinLossSlicesCard() {
   const leadSources = (data?.byLeadSource || []).slice(0, 8);
   const tiers = data?.byWaveguardTier || [];
   const cohorts = data?.sentCohorts;
+  // The audit sections carry their own populations (archived outcomes, open
+  // offers, shifted cohort windows) — they must render even when the active
+  // resolved-rate denominator is zero (codex pre-push P1).
+  const hasAuditData = dispositions.length > 0
+    || serviceLines.length > 0
+    || leadSources.length > 0
+    || (cohorts?.sentTotal ?? 0) > 0;
   // Headline counts REAL losses only — dead leads / converted-elsewhere
   // rows stay listed below with a null percentage (mirrors the server).
   const lossTotal = dispositions
@@ -121,14 +128,15 @@ export default function WinLossSlicesCard() {
           Couldn&apos;t load win/loss slices ({error.message}).
         </div>
       )}
-      {!loading && !error && data && data.resolved === 0 && (
+      {!loading && !error && data && data.resolved === 0 && !hasAuditData && (
         <div className="text-13 text-zinc-500">
           No resolved estimates in the last {days} days.
         </div>
       )}
 
-      {!loading && !error && data && data.resolved > 0 && (
+      {!loading && !error && data && (data.resolved > 0 || hasAuditData) && (
         <div className="grid gap-4 md:grid-cols-2">
+          {data.resolved > 0 && (
           <div>
             <div className="text-13 text-zinc-500 mb-1">
               Win rate by lookup state ({data.resolved} resolved,{" "}
@@ -189,7 +197,9 @@ export default function WinLossSlicesCard() {
               </>
             )}
           </div>
+          )}
 
+          {data.resolved > 0 && (
           <div>
             <div className="text-13 text-zinc-500 mb-1">
               Recurring price band × lookup state (win rate)
@@ -222,6 +232,7 @@ export default function WinLossSlicesCard() {
               Bands are display buckets, not pricing config.
             </div>
           </div>
+          )}
 
           {dispositions.length > 0 && (
             <div>

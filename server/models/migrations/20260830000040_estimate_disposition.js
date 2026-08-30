@@ -68,6 +68,27 @@ exports.up = async function up(knex) {
       disposition_at = COALESCE(declined_at, updated_at, created_at)
     WHERE status = 'declined' AND disposition IS NULL
   `);
+
+  // Backfill archived LIVE (sent/viewed) rows — the archive path never
+  // rewrote status, so these carry their whole story in disposition. Split
+  // on conversion evidence (a completed service for the customer after the
+  // estimate was created — an approximation of the conversion sweep's
+  // rule): converted customers were WINS routed around the estimate, the
+  // rest were parked courtships.
+  await knex.raw(`
+    UPDATE estimates e SET
+      disposition = CASE WHEN e.customer_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM scheduled_services ss
+        WHERE ss.customer_id = e.customer_id
+          AND ss.status = 'completed'
+          AND COALESCE(ss.completed_at, ss.created_at) >= e.created_at
+      ) THEN 'converted_other_path' ELSE 'archived_unresolved' END,
+      disposition_source = 'system',
+      disposition_at = COALESCE(e.archived_at, e.updated_at, e.created_at)
+    WHERE e.status IN ('sent', 'viewed')
+      AND e.archived_at IS NOT NULL
+      AND e.disposition IS NULL
+  `);
 };
 
 exports.down = async function down(knex) {
