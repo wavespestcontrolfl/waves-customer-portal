@@ -178,7 +178,9 @@ test('a GROUPED member is refused before any write (codex #3609 r23 P1): the bul
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', visit_id: 'visit-1' }) }),
-      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'pending' }, { id: 'svc-2', status: 'pending' }]) }), // openMembers
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2026-07-01' }) }), // lockStopForRow peek
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2026-07-01' }) }), // lockStopForRow verify
+      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'pending' }, { id: 'svc-2', status: 'pending' }]) }), // openMembers (under the stop lock)
       updateChain,
     ],
   });
@@ -187,6 +189,20 @@ test('a GROUPED member is refused before any write (codex #3609 r23 P1): the bul
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([{ id: 'svc-1', reason: expect.stringMatching(/grouped with another service at the same stop/) }]);
   expect(updateChain.update).not.toHaveBeenCalled();
+});
+
+test('an UNGROUPED row pins visit_id IS NULL in its CAS (a row grouped since the read misses instead of moving alone)', async () => {
+  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'confirmed', visit_id: null }) }),
+      chain(), // advisory occupancy probe
+      updateChain,
+    ],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(body.failed).toHaveLength(1);
+  expect(updateChain.where).toHaveBeenCalledWith({ scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00', visit_id: null });
 });
 
 test('a past scheduledDate produces per-row failed[] entries instead of moving anything', async () => {
@@ -367,7 +383,7 @@ test('a row that changes status between the read and the write is skipped, not r
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([{
     id: 'svc-1',
-    reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
+    reason: 'the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry',
   }]);
 
   // The UPDATE was scoped to the OBSERVED status, so a row that moved on
@@ -591,7 +607,7 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   expect(body.updated).toEqual([]);
   expect(body.failed).toEqual([{
     id: 'svc-1',
-    reason: 'the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry',
+    reason: 'the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry',
   }]);
 
   // The CAS carried the full observed snapshot — status, the complete
@@ -599,7 +615,7 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   // concurrent En Route flip advances track_state without touching status).
   expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
   expect(updateChain.where).toHaveBeenCalledWith({
-    scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
+    scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00', visit_id: null,
   });
   // applyTrackLifecycleCas: track_state via where, null stamps via whereNull.
   expect(updateChain.where).toHaveBeenCalledWith({ track_state: null });

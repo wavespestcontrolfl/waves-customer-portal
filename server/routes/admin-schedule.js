@@ -5995,7 +5995,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // update-details: refuse before the first write; the schedule's
               // move (the unit mover) carries the whole visit.
               if (svc.visit_id && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
-                const { openMembers } = require('../services/visit-groups');
+                // Under the row's STOP lock (the visit writers' own key, after
+                // rung 1 — the order update-details uses), so a
+                // createOrJoinVisit that would add a sibling serializes
+                // BEFORE this count or after the write; the write below also
+                // pins the observed visit_id (local gate r27).
+                const { openMembers, lockStopForRow } = require('../services/visit-groups');
+                await lockStopForRow(trx, id);
                 const members = await openMembers(trx, svc.visit_id);
                 if (members.length >= 2) {
                   throw Object.assign(
@@ -6225,13 +6231,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                     scheduled_date: prevDate,
                     window_start: svc.window_start ?? null,
                     window_end: svc.window_end ?? null,
+                    // Observed membership is part of the CAS (local gate r27):
+                    // a row grouped since the read misses instead of moving
+                    // alone (knex renders null as IS NULL).
+                    visit_id: svc.visit_id ?? null,
                   }),
                 svc,
               )
                 .update(updates);
               if (updatedRows === 0) {
                 throw Object.assign(
-                  new Error('the visit changed concurrently (status, date, or window) while the reschedule was pending — re-check and retry'),
+                  new Error('the visit changed concurrently (status, date, window, or grouping) while the reschedule was pending — re-check and retry'),
                   { isValidation: true },
                 );
               }
