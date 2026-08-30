@@ -152,6 +152,17 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   };
   const revivedStatus = extensionStatusUpdate(estimate);
   if (revivedStatus) updates.status = revivedStatus;
+  // A revived row is a LIVE courtship again — clear the expiry sweep's loss
+  // classification, or the next expiry/decline would COALESCE-preserve a
+  // stale expired_unviewed on a row the customer has since opened (codex
+  // pre-push P1). Only the sweep's own codes: nothing else can sit on an
+  // extendable row (declined isn't extendable; archived rows 400 above).
+  if (revivedStatus && ['expired_unviewed', 'expired_viewed'].includes(estimate.disposition)) {
+    updates.disposition = null;
+    updates.disposition_source = null;
+    updates.disposition_at = null;
+    updates.disposition_note = null;
+  }
 
   // Guarded write — the caller's row is a snapshot, so predicate on the
   // state this extension was computed FROM, not just the id. This stops a
@@ -209,6 +220,12 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
           // it too is deliberate — admins can always extend again.
           extension_auto_granted_at: db.raw('COALESCE(extension_auto_granted_at, NOW())'),
           status: db.raw("CASE WHEN status IN ('expired','send_failed') THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          // Mirror of the anchor row's revival clear (codex pre-push P1):
+          // a revived sibling sheds the sweep's expiry classification.
+          disposition: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition END"),
+          disposition_source: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_source END"),
+          disposition_at: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_at END"),
+          disposition_note: db.raw("CASE WHEN status = 'expired' AND disposition IN ('expired_unviewed','expired_viewed') THEN NULL ELSE disposition_note END"),
           updated_at: db.fn.now(),
         });
     } catch (siblingErr) {

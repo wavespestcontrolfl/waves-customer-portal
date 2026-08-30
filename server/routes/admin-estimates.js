@@ -2876,6 +2876,9 @@ router.post('/:id/unarchive', async (req, res, next) => {
           disposition_note: null,
           competitor_name: null,
           competitor_price: null,
+          // The archive path also wrote the legacy badge label — a revived
+          // live row must not keep displaying a stale loss (codex P1).
+          decline_reason: null,
         } : {}),
       })
       .returning('*');

@@ -52,3 +52,38 @@ test('both rules stamp disposition in the flip UPDATE and return it', async () =
   }
   expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('unviewed=2'));
 });
+
+
+// Revival clears the sweep's classification (codex pre-push P1): an
+// extended expired estimate is a live courtship again.
+describe('extension revival', () => {
+  const { extendEstimate } = require('../services/estimate-extension');
+
+  test('extending an expired_unviewed row nulls the expiry disposition fields', async () => {
+    const calls = [];
+    const q = {};
+    const chain = (name) => (...args) => {
+      if (typeof args[0] === 'function' && name === 'where') { args[0].call(q, q); }
+      calls.push([name, ...args]);
+      return name === 'update' ? Promise.resolve(1) : q;
+    };
+    ['where', 'whereNull', 'orWhere', 'update', 'first', 'whereIn', 'whereNot', 'select'].forEach((m) => { q[m] = chain(m); });
+    db.mockImplementation(() => q);
+    db.fn = { now: () => 'NOW' };
+
+    await extendEstimate({
+      estimate: {
+        id: 'e1', status: 'expired', sent_at: '2026-08-01T00:00:00Z', viewed_at: null,
+        expires_at: '2026-08-08T00:00:00Z', archived_at: null, estimate_data: {},
+        disposition: 'expired_unviewed', estimate_group_id: null,
+      },
+      days: 7,
+      silent: true,
+      entryPoint: 'test',
+    });
+
+    const update = calls.find(([m]) => m === 'update')[1];
+    expect(update.status).toBe('sent');
+    expect(update).toMatchObject({ disposition: null, disposition_source: null, disposition_at: null });
+  });
+});
