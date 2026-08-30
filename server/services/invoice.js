@@ -5048,8 +5048,51 @@ const InvoiceService = {
     // accept never writes a record and never lands here.
     const parent = await conn("scheduled_services")
       .where({ id: anchorId })
-      .first("id", "source_estimate_id", "pending_setup_fee");
+      .first("id", "customer_id", "source_estimate_id", "pending_setup_fee", "status");
     if (!parent) return null;
+    // A pending_setup_fee stamp is only ever consumed by a FUTURE completion
+    // mint (codex #3591 r43 P1): when the series has no billable visit left
+    // (root completed/cancelled, no live child), a re-stamp is inert and the
+    // refunded setup would never be collected. Mint a collectible DRAFT
+    // setup invoice instead (staff send it from Invoices), consuming the
+    // record the same way. Fail safe: an unreadable probe or failed mint
+    // keeps the record and pages a human.
+    const parentLive = ["pending", "confirmed", "rescheduled"].includes(String(parent.status || "").toLowerCase());
+    let billableRemains = parentLive;
+    if (!billableRemains) {
+      const liveChild = await conn("scheduled_services")
+        .where({ recurring_parent_id: parent.id })
+        .whereIn("status", ["pending", "confirmed", "rescheduled"])
+        .first("id");
+      billableRemains = !!liveChild;
+    }
+    if (!billableRemains) {
+      if (!parent.customer_id) {
+        logger.error(`[invoice] FIX: setup-fee claim for dead series ${parent.id} (prepay ${prepayInvoiceId}) has no customer to re-bill — $${amount.toFixed(2)} bait-station setup is owed; bill it manually (record kept)`);
+        return null;
+      }
+      try {
+        const reInvoice = await this.create({
+          database: conn,
+          customerId: parent.customer_id,
+          title: "Bait Station Setup",
+          lineItems: [{
+            description: "Bait Station Setup — one-time setup fee",
+            quantity: 1,
+            unit_price: amount,
+            category: "Setup fee",
+          }],
+          notes: `Re-billed after prepay invoice ${prepayInvoiceId} was voided/refunded — the series has no future visit left to collect the setup on (visit ${parent.id}).`,
+          dueDate: new Date().toISOString().slice(0, 10),
+        });
+        await conn("setup_fee_claims").where({ id: claim.id }).delete();
+        logger.info(`[invoice] setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${parent.id}, prepay ${prepayInvoiceId} refunded ($${amount.toFixed(2)})`);
+        return { scheduledServiceId: parent.id, amount, reInvoiceId: reInvoice?.id || null };
+      } catch (mintErr) {
+        logger.error(`[invoice] FIX: setup re-bill mint FAILED for dead series ${parent.id} (prepay ${prepayInvoiceId}): ${mintErr.message} — $${amount.toFixed(2)} bait-station setup is owed; bill it manually (record kept)`);
+        return null;
+      }
+    }
     const restored = await conn("scheduled_services")
       .where({ id: parent.id })
       .whereNull("pending_setup_fee")

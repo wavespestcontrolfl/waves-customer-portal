@@ -667,3 +667,53 @@ describe('admin pricing-config validation for the rodent rows (codex #3591 r9)',
     expect(validatePricingConfigData('rodent_setup_fee', { value: 'abc' }).ok).toBe(false);
   });
 });
+
+describe('saved-replay rodent WaveGuard posture freeze (codex #3591 r43 P1)', () => {
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  const rodentPest = () => baseInput({ services: { rodentBait: {}, pest: { frequency: 'quarterly' } } });
+
+  test('a frozen NON-qualifying posture keeps the sent quote out of the tier and off the % even after the live flag turns on', () => {
+    const frozen = generateEstimate({
+      ...rodentPest(),
+      rodentWaveguardPostureReplay: { tierQualifier: false, excludeFromPctDiscount: true },
+    });
+    const live = generateEstimate(rodentPest());
+    expect(live.waveGuard.qualifyingCount).toBe(2); // pest + rodent = Silver live
+    expect(frozen.waveGuard.qualifyingCount).toBe(1); // rodent frozen out
+    const row = frozen.lineItems.find((i) => i.service === 'rodent_bait');
+    expect(row).toMatchObject({ tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, waveGuardDiscountEligible: false });
+  });
+
+  test('a frozen QUALIFYING posture holds the tier after the live flag turns off (assumeQualifying, replay-only)', () => {
+    const idx = WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+    WAVEGUARD.qualifyingServices.splice(idx, 1);
+    try {
+      const fresh = generateEstimate(rodentPest());
+      expect(fresh.waveGuard.qualifyingCount).toBe(1); // live: rodent no longer counts
+      const frozen = generateEstimate({
+        ...rodentPest(),
+        rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: false },
+      });
+      expect(frozen.waveGuard.qualifyingCount).toBe(2); // sent quote holds Silver
+    } finally {
+      WAVEGUARD.qualifyingServices.push('rodent_bait');
+    }
+  });
+
+  test('the posture signal reads the stored new-model row; legacy rows and estimates without posture stamps inject nothing', () => {
+    const stored = { engineResult: { lineItems: [
+      { service: 'rodent_bait', perApplicationBilled: true, stations: 5, tierQualifier: false, countsTowardWaveGuardTier: false, excludeFromPctDiscount: true, waveGuardDiscountEligible: false },
+    ] } };
+    expect(rodentWaveguardPostureReplaySignal(stored)).toEqual({ tierQualifier: false, excludeFromPctDiscount: true });
+    const storedOn = { result: { recurring: { services: [
+      { service: 'rodent_bait', perApplicationBilled: true, stations: 5, tierQualifier: true, excludeFromPctDiscount: false },
+    ] } } };
+    expect(rodentWaveguardPostureReplaySignal(storedOn)).toEqual({ tierQualifier: true, excludeFromPctDiscount: false });
+    // Legacy monthly row (no new-model marker) → nothing.
+    expect(rodentWaveguardPostureReplaySignal({ result: { recurring: { services: [{ service: 'rodent_bait', mo: 49 }] } } })).toBeNull();
+    // New-model row that predates the posture stamps → nothing.
+    expect(rodentWaveguardPostureReplaySignal({ engineResult: { lineItems: [{ service: 'rodent_bait', perApplicationBilled: true, stations: 5 }] } })).toBeNull();
+    expect(rodentWaveguardPostureReplaySignal({})).toBeNull();
+  });
+});

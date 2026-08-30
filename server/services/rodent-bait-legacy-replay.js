@@ -96,4 +96,33 @@ function rodentBaitLegacyReplaySignal(estData = {}) {
   return null;
 }
 
-module.exports = { rodentBaitLegacyReplaySignal, RODENT_BAIT_REALIGNMENT_MIGRATION, rodentRealignmentRolloutMs };
+// NEW-MODEL posture freeze (codex #3591 r43 P1): a bracket-priced rodent row
+// stamps the rodent_waveguard flags in force at save time (tierQualifier /
+// excludeFromPctDiscount, service-pricing.js). A saved replay must keep that
+// posture — flipping the live flag after send must not move a sent quote's
+// tier or discounts. Returns { tierQualifier, excludeFromPctDiscount } from
+// the stored new-model residential rodent row, or null when the estimate has
+// no such row or the row predates the posture stamps (inject nothing).
+function rodentWaveguardPostureReplaySignal(estData = {}) {
+  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+  const containers = [result, estData?.engineResult].filter((c) => c && typeof c === 'object');
+  for (const c of containers) {
+    const rows = [
+      ...(Array.isArray(c?.recurring?.services) ? c.recurring.services : []),
+      ...(Array.isArray(c?.lineItems) ? c.lineItems : []),
+    ];
+    const row = rows.find((svc) => String(svc?.service || svc?.serviceKey || svc?.service_key || '').toLowerCase() === 'rodent_bait'
+      && (svc.perApplicationBilled === true || Number(svc.stations) > 0 || svc.pricingBasis === 'RODENT_BAIT_BRACKET')
+      && (typeof svc.tierQualifier === 'boolean' || typeof svc.countsTowardWaveGuardTier === 'boolean'
+        || typeof svc.excludeFromPctDiscount === 'boolean' || typeof svc.waveGuardDiscountEligible === 'boolean'));
+    if (row) {
+      return {
+        tierQualifier: row.tierQualifier !== false && row.countsTowardWaveGuardTier !== false,
+        excludeFromPctDiscount: row.excludeFromPctDiscount === true || row.waveGuardDiscountEligible === false,
+      };
+    }
+  }
+  return null;
+}
+
+module.exports = { rodentBaitLegacyReplaySignal, rodentWaveguardPostureReplaySignal, RODENT_BAIT_REALIGNMENT_MIGRATION, rodentRealignmentRolloutMs };

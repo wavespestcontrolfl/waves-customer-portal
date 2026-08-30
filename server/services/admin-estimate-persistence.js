@@ -997,7 +997,7 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // it would forge a $99 waiver, so it is stripped like the rest; the admin
 // save re-supplies its own ACCOUNT-wide server-derived list (codex #3591
 // r15 P1 / r34 P1).
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay'];
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -1140,6 +1140,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // keep its disclosed price through this authoritative recompute too.
     const rodentPin = require('./rodent-bait-legacy-replay').rodentBaitLegacyReplaySignal(estimateData);
     if (rodentPin) v1Input.rodentBaitLegacyReplay = rodentPin;
+    // New-model rodent posture freeze (codex #3591 r43 P1) — same stored-row
+    // evidence the public replay injects.
+    const rodentPosture = require('./rodent-bait-legacy-replay').rodentWaveguardPostureReplaySignal(estimateData);
+    if (rodentPosture) v1Input.rodentWaveguardPostureReplay = rodentPosture;
   }
 
   try {

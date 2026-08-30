@@ -1229,10 +1229,24 @@ function generateEstimate(input) {
       }
     } else {
       const result = priceRodentBait(property, { modifiers });
+      // Saved-replay posture freeze (codex #3591 r43 P1): the stored
+      // new-model row carries the rodent_waveguard flags in force at save —
+      // a replay re-stamps them so a later live-flag flip never moves a
+      // sent quote's tier or % treatment. Fresh pricing injects nothing.
+      const postureReplay = input.rodentWaveguardPostureReplay && typeof input.rodentWaveguardPostureReplay === 'object'
+        ? input.rodentWaveguardPostureReplay
+        : null;
+      if (postureReplay) {
+        result.tierQualifier = postureReplay.tierQualifier !== false;
+        result.countsTowardWaveGuardTier = postureReplay.tierQualifier !== false;
+        result.excludeFromPctDiscount = postureReplay.excludeFromPctDiscount === true;
+        result.waveGuardDiscountEligible = postureReplay.excludeFromPctDiscount !== true;
+      }
       lineItems.push(result);
       // WaveGuard member since 2026-08-29 (owner directive): counts toward
       // the tier and receives the tier % like the other recurring programs.
-      activeServiceKeys.push('rodent_bait');
+      // A frozen non-qualifying posture keeps the key OUT of the tier count.
+      if (!postureReplay || postureReplay.tierQualifier !== false) activeServiceKeys.push('rodent_bait');
     }
   }
 
@@ -1923,7 +1937,16 @@ function generateEstimate(input) {
   const tierServiceKeys = priorQualifyingServices.length
     ? [...new Set([...activeServiceKeys, ...priorQualifyingServices])]
     : activeServiceKeys;
-  const waveGuardTier = determineWaveGuardTier(tierServiceKeys);
+  // Frozen-ON rodent posture with the live flag since turned OFF (codex
+  // #3591 r43 P1): the key is in activeServiceKeys but the live filter would
+  // drop it — assume it qualifying so the sent quote's tier holds.
+  const rodentPostureReplay = input.rodentWaveguardPostureReplay && typeof input.rodentWaveguardPostureReplay === 'object'
+    ? input.rodentWaveguardPostureReplay
+    : null;
+  const waveGuardTier = determineWaveGuardTier(tierServiceKeys,
+    rodentPostureReplay && rodentPostureReplay.tierQualifier !== false && tierServiceKeys.includes('rodent_bait')
+      ? { assumeQualifying: ['rodent_bait'] }
+      : undefined);
 
   // ── 5. Apply discounts to each line item ───────────────────
   // paymentMethod is no longer a pricing input (ACH discount retired in an

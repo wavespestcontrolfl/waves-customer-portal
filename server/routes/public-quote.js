@@ -1713,13 +1713,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // handoff instead of vanishing with the archived draft.
         return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued });
       } catch (memberErr) {
-        logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
-        // The waiver keeps its KIND (codex #3591 r30 P1): the rodent-setup
-        // strip below and frozenRodentBaitSetupAmount both key on
-        // kind === 'rodent_bait_setup' — a kindless zero left the engine's
-        // positive rodent_bait_setup row in the draft, so a later view or
-        // acceptance charged the setup this failure path had waived.
-        return { amount: 0, waived: 'membership_undetermined', kind: setupFeeBasis?.kind };
+        // FAIL CLOSED toward the engine-priced line (codex #3591 r43 local
+        // P0): a transient membership/claim lookup failure must never become
+        // a permanent waiver — the persisted zero stripped the
+        // engine-authorized $99 and the undercharge could never be repaired.
+        // Keep the disclosed amount (a genuine member's fee is one staff
+        // waive away; an erased one is gone); `unverified` records why.
+        logger.warn(`[public-quote] setup-fee membership lookup failed — keeping the engine-priced fee (never waived on failure): ${memberErr.message}`);
+        return { amount: setupFeeBasis.amount, kind: setupFeeBasis?.kind, unverified: 'membership_undetermined' };
       }
     };
 

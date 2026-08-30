@@ -42,7 +42,8 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined } = {}) {
+  if (liveVisitProbe === undefined) liveVisitProbe = scheduledService;
   const writes = [];
   const trx = (table) => {
     const q = { _where: null };
@@ -51,7 +52,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.whereNull = (col) => { q._whereNull = col; return q; };
     q.forUpdate = () => q;
     q.first = async () => {
-      if (table === 'scheduled_services') return scheduledService;
+      if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : scheduledService;
       if (table === 'setup_fee_claims') return claim;
       if (table === 'services') return catalog;
       // The realignment rollout instant — every root fixture below was
@@ -59,10 +60,10 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
       if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
       return null;
     };
-    q.whereIn = () => q;
-    q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return updateResult; };
+        q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return updateResult; };
     q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
     q.whereNotIn = () => q;
+    q.whereIn = () => { q._whereIn = true; return q; };
     q.orderBy = () => q;
     q.select = async () => (table === 'scheduled_services' ? (rootsForCoverage || []) : []);
     q.insert = (row) => {
@@ -242,6 +243,38 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     expect(trx.transaction).not.toHaveBeenCalled();
   });
 
+  test('a refund after the series is DONE re-bills the setup as a collectible draft instead of stamping an inert root (codex #3591 r43 P1)', async () => {
+    const doneParent = { id: 'svc-parent', customer_id: 'cust-1', source_estimate_id: null, pending_setup_fee: null, status: 'completed' };
+    const createSpy = jest.spyOn(InvoiceService, 'create').mockResolvedValue({ id: 'inv-rebill', invoice_number: 'WPC-2026-0500' });
+    try {
+      const c = conn({ claim, scheduledService: doneParent, liveVisitProbe: null });
+      expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c))
+        .toEqual({ scheduledServiceId: 'svc-parent', amount: 99, reInvoiceId: 'inv-rebill' });
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy.mock.calls[0][0]).toMatchObject({
+        customerId: 'cust-1',
+        lineItems: [expect.objectContaining({ description: 'Bait Station Setup — one-time setup fee', unit_price: 99 })],
+      });
+      // Record consumed, and NO stamp was written on the dead root.
+      expect(c.writes.filter((w) => w.table === 'scheduled_services')).toEqual([]);
+      expect(c.writes.filter((w) => w.table === 'setup_fee_claims')).toEqual([
+        expect.objectContaining({ op: 'delete', where: { id: 'claim-1' } }),
+      ]);
+      // A live child keeps the ordinary stamp path.
+      createSpy.mockClear();
+      const live = conn({ claim, scheduledService: doneParent, liveVisitProbe: { id: 'child-live' } });
+      expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', live)).toEqual({ scheduledServiceId: 'svc-parent', amount: 99 });
+      expect(createSpy).not.toHaveBeenCalled();
+      // A failed re-bill mint keeps the record for a human.
+      createSpy.mockRejectedValueOnce(new Error('mint down'));
+      const failed = conn({ claim, scheduledService: doneParent, liveVisitProbe: null });
+      expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', failed)).toBeNull();
+      expect(failed.writes).toEqual([]);
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+
   test('no record for the prepay (nothing was billed) / no prepay id → nothing happens', async () => {
     const c = conn({ claim: null, scheduledService: { id: 'svc-parent', source_estimate_id: null, pending_setup_fee: null } });
     expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c)).toBeNull();
@@ -359,7 +392,8 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(derive).toBeGreaterThan(mintAt);
     expect(refuse).toBeGreaterThan(derive);
     expect(refuse).toBeLessThan(trxAt);
-    expect(customers.slice(mintAt, trxAt)).toMatch(/if \(!\(setupFeeAmount > 0\) && !setupScheduledServiceId\) \{/);
+    // Runs whenever no setup is billed — an anchor with a zero amount still revalidates (codex #3591 r43 P2).
+    expect(customers.slice(mintAt, trxAt)).toMatch(/if \(!\(setupFeeAmount > 0\)\) \{/);
   });
 
   const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');

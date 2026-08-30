@@ -49,8 +49,10 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
   });
 
   test('the lookup-failure waiver keeps the setup-fee KIND so the rodent strip + frozen reader honor it (codex #3591 r30 P1)', () => {
-    expect(publicQuote).toMatch(/return \{ amount: 0, waived: 'membership_undetermined', kind: setupFeeBasis\?\.kind \};/);
-    expect(publicQuote).not.toMatch(/waived: 'membership_undetermined' \}/);
+    // A lookup failure keeps the engine-priced fee (codex #3591 r43 local
+    // P0) — never a persisted zero that strips the authorized line.
+    expect(publicQuote).toMatch(/return \{ amount: setupFeeBasis\.amount, kind: setupFeeBasis\?\.kind, unverified: 'membership_undetermined' \};/);
+    expect(publicQuote).not.toMatch(/amount: 0, waived: 'membership_undetermined'/);
   });
 
   test('consumed-handoff retry identity comes ONLY from the contact-bound shared recovery', () => {

@@ -14973,6 +14973,12 @@ function savedFloorReplayOverrides(estData) {
   // inputs; the pin is server-derived from stored-RESULT evidence on every
   // replay, never trusted from a stored blob.
   overrides.rodentBaitLegacyReplay = rodentBaitLegacyReplaySignal(estData) || undefined;
+  // NEW-MODEL rodent posture freeze (codex #3591 r43 P1): a bracket-priced
+  // row froze the rodent_waveguard flags at save; the replay injects them so
+  // a later flag flip never moves a sent quote's tier or discounts. Same
+  // set-even-when-EMPTY posture as the pin above.
+  const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+  overrides.rodentWaveguardPostureReplay = rodentWaveguardPostureReplaySignal(estData) || undefined;
   return overrides;
 }
 

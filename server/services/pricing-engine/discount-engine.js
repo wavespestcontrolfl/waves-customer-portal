@@ -109,8 +109,12 @@ function lineFlagsBlockPercentDiscount(svc = {}) {
 // carry lawn variants — so the variant normalization inside the predicate is
 // inert here; it just keeps this function consistent with every other
 // membership read).
-function determineWaveGuardTier(activeServices = []) {
-  const qualifying = activeServices.filter(svc => serviceCountsTowardWaveGuardTier(svc));
+// options.assumeQualifying: keys treated as qualifying REGARDLESS of the
+// live flag — a saved replay whose stored posture froze the key as
+// tier-counted must keep its tier after the flag is turned off (codex #3591
+// r43 P1). Never widens fresh pricing (only replay callers pass it).
+function determineWaveGuardTier(activeServices = [], { assumeQualifying = [] } = {}) {
+  const qualifying = activeServices.filter(svc => serviceCountsTowardWaveGuardTier(svc) || assumeQualifying.includes(svc));
   const count = qualifying.length;
 
   if (count >= 4) return { tier: 'platinum', discount: WAVEGUARD.tiers.platinum.discount, qualifyingCount: count };
