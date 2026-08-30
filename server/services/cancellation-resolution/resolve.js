@@ -35,6 +35,9 @@ function ownerTextAudience(facts, context = {}) {
 }
 
 function pick(candidates, { shown12mo = [] } = {}) {
+  // History unknown = fail closed: showing nothing beats risking a repeat
+  // of a card the customer already saw inside the 12-month window.
+  if (shown12mo === 'error') return null;
   const shown = new Set(shown12mo);
   for (const c of candidates) {
     if (!c) continue;
@@ -127,7 +130,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
         facts.lastFinding && facts.lastFinding.lane === 'lawn'
           ? { id: 'results_lawn_agronomy', values: { finding: facts.lastFinding.text } }
           : null,
-        facts.tenureDays < 540 ? { id: 'results_lawn_two_seasons', values: { visits: facts.completedVisits } } : null,
+        facts.tenureDays < 540 ? { id: 'results_lawn_two_seasons', values: { visits: facts.lawnVisits } } : null,
         { id: 'results_lawn_fix' },
       ];
       break;

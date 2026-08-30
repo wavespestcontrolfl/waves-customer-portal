@@ -100,7 +100,7 @@ const TEMPLATES = Object.freeze([
     reason: 'results_pest',
     headline: 'The program is wrong, not you',
     body:
-      '{callbacks} callbacks for the same problem means the program needs to change. ' +
+      '{callbacks} callbacks in the past year means the program needs to change, not you. ' +
       'We are switching the product and adding a follow-up visit at no cost.',
     slots: { callbacks: v.posInt },
     action: { type: 'book_reservice', lane: 'pest', programChange: true },
@@ -276,7 +276,7 @@ const TEMPLATES = Object.freeze([
     id: 'competitor_history',
     reason: 'competitor',
     headline: 'What you would start over',
-    body: 'You have {visits} visits of history, photos and reports here, and callbacks at no charge already earned. If they are offering something we are not, tell us — we would rather add it than lose you.',
+    body: 'You have {visits} visits of history with us and callbacks at no charge already earned. If they are offering something we are not, tell us — we would rather add it than lose you.',
     slots: { visits: v.posInt },
     action: { type: 'owner_text' },
   },

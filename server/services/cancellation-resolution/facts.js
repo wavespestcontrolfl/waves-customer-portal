@@ -169,7 +169,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   }
 
   const [
-    visitCounts, paidVisitCounts, visits12mo, callbacks12mo, callbackRows12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
+    visitCounts, paidVisitCounts, lawnVisits, visits12mo, callbacks12mo, callbackRows12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
     findings, earliestFinding, complaintRequest, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, paidInvoiceCount, paidPaymentsCount, livePrepayTerm,
   ] = await Promise.all([
     leg('visitCounts', () => dbh('scheduled_services')
@@ -190,6 +190,13 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
         this.whereNotNull('i.paid_at').orWhereIn('i.status', ['paid', 'prepaid']);
       })
       .countDistinct({ n: 's.id' }).first(), null),
+    // Lawn-scoped completed visits — the two-seasons lawn card must never
+    // count pest visits ("You are 8 visits in" with zero lawn visits).
+    leg('lawnVisits', () => dbh('scheduled_services')
+      .where({ customer_id: customerId, status: 'completed' })
+      .whereRaw('COALESCE(is_callback, false) = false')
+      .where('service_type', 'ilike', 'lawn%')
+      .count({ n: '*' }).first(), null),
     leg('visits12mo', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .whereRaw('COALESCE(is_callback, false) = false')
@@ -237,7 +244,14 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
         onTruncation: () => { incomplete = true; },
       });
       if (incomplete) return 'error';
-      return rows.find((r) => !r.paid_at && r.due_date && String(dateOnly(r.due_date)) < today) || null;
+      // Overdue = status says so, OR due_date past, OR (legacy due-date-less
+      // row) delivered 30+ ET days ago — the late-payment authority's
+      // created_at fallback, so a NULL due_date can never hide delinquency.
+      const thirtyAgo = dateOnly(daysAgo(30, now));
+      return rows.find((r) => !r.paid_at && (
+        String(r.status || '').toLowerCase() === 'overdue'
+        || (r.due_date ? String(dateOnly(r.due_date)) < today : String(dateOnly(r.created_at)) < thirtyAgo)
+      )) || null;
     }, 'error'),
     leg('failedPayment', () => dbh('payments')
       .where({ customer_id: customerId, status: 'failed' })
@@ -320,7 +334,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
         .whereIn('resolution_outcome', ['shown', 'accepted', 'declined'])
         .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date > ?", [etMonthsAgoFloor(now, 12)])
         .select('resolution_template_id');
-    }, []),
+    }, 'error'),
     leg('termite', () => dbh('termite_stations')
       .where({ customer_id: customerId, program: 'termite', owned_by: 'waves' })
       .whereRaw('COALESCE(is_active, true) = true')
@@ -422,6 +436,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     memberSince: dateOnly(memberSince),
     tenureDays,
     completedVisits,
+    lawnVisits: num(lawnVisits, 'n'),
     completedPaidVisits,
     visits12mo: num(visits12mo, 'n'),
     callbacks12mo: num(callbacks12mo, 'n'),
@@ -452,7 +467,11 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       : null,
     priorRetentionOfferAt: priorOfferAt,
     manualPriceOverrideAt: manualOverrideAt,
-    cardsShown12mo: (Array.isArray(shownCases) ? shownCases : []).map((r) => r.resolution_template_id).filter(Boolean),
+    // 'error' sentinel = history unknown → the resolver suppresses every
+    // repeat-sensitive card (fail closed) rather than risking a repeat.
+    cardsShown12mo: shownCases === 'error'
+      ? 'error'
+      : (Array.isArray(shownCases) ? shownCases : []).map((r) => r.resolution_template_id).filter(Boolean),
     tier: customer.waveguard_tier || null,
     monthlyRate: Number(customer.monthly_rate) || 0,
     billingMode: customer.billing_mode || null,
