@@ -3094,51 +3094,70 @@ const AppointmentReminders = {
   async releaseMoveHoldIfRepaired(scheduledServiceId) {
     if (!scheduledServiceId) return false;
     try {
-      const record = await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .first('move_hold_until', 'move_hold_token');
-      if (!record || !record.move_hold_token || !record.move_hold_until) return false;
-      if (new Date(record.move_hold_until).getTime() <= Date.now()) return false;
-      const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
-      const cohort = await db('appointment_reminders as ar')
-        .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-        .where({ 'ar.move_hold_token': record.move_hold_token })
-        .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
-      const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
-      const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
-      let oneStop = !pendingRebook && (liveRows.length < 2 || (
-        new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
-        && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
-        && require('./visit-groups').windowedMembersConnected(liveRows)
-      ));
-      if (oneStop) {
-        const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
-        for (const vid of parentIds) {
-          const parent = await db('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start');
-          const childDate = dayOf(liveRows[0].scheduled_date);
-          const childStarts = liveRows.filter((r) => String(r.visit_id || '') === vid).map((r) => (r.window_start ? String(r.window_start).slice(0, 5) : null)).filter(Boolean).sort();
-          const parentStart = parent && parent.window_start ? String(parent.window_start).slice(0, 5) : null;
-          if (!parent || String(parent.status) !== 'open'
-            || dayOf(parent.scheduled_date) !== childDate
-            || (childStarts.length && parentStart !== childStarts[0])) {
-            oneStop = false;
-            break;
+      // ATOMIC under the visit stop lock + row locks (codex on-merge r3):
+      // separate validation/update queries allowed drift between the
+      // verification and the release — the whole verdict and the token
+      // clear run in one transaction, serialized against movers.
+      return await db.transaction(async (t) => {
+        const vg = require('./visit-groups');
+        await vg.lockStopForRow(t, scheduledServiceId);
+        const record = await t('appointment_reminders')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .first('move_hold_until', 'move_hold_token');
+        if (!record || !record.move_hold_token || !record.move_hold_until) return false;
+        if (new Date(record.move_hold_until).getTime() <= Date.now()) return false;
+        const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
+        const hm = (v) => (v ? String(v).slice(0, 5) : null);
+        const cohort = await t('appointment_reminders as ar')
+          .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+          .where({ 'ar.move_hold_token': record.move_hold_token })
+          .forUpdate('ar')
+          .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
+        const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
+        const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
+        let oneStop = !pendingRebook && (liveRows.length < 2 || (
+          new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
+          && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
+          && require('./visit-groups').windowedMembersConnected(liveRows)
+        ));
+        // COMPLETE parent tuple (codex on-merge r3): status, date, start,
+        // END and TECHNICIAN — a failed retarget that only diverged on
+        // window_end or technician_id must keep the hold.
+        if (oneStop) {
+          const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
+          for (const vid of parentIds) {
+            const parent = await t('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
+            const members = liveRows.filter((r) => String(r.visit_id || '') === vid);
+            const childDate = dayOf(members[0].scheduled_date);
+            const starts = members.map((r) => hm(r.window_start)).filter(Boolean).sort();
+            const ends = members.map((r) => hm(r.window_end)).filter(Boolean).sort();
+            const childTechs = [...new Set(members.map((r) => String(r.technician_id || '')))];
+            if (!parent || String(parent.status) !== 'open'
+              || dayOf(parent.scheduled_date) !== childDate
+              || (starts.length && hm(parent.window_start) !== starts[0])
+              || (ends.length ? hm(parent.window_end) !== ends[ends.length - 1] : parent.window_end !== null && hm(parent.window_end) !== null)
+              || (childTechs.length === 1 && String(parent.technician_id || '') !== childTechs[0])) {
+              oneStop = false;
+              break;
+            }
           }
         }
-      }
-      if (!oneStop) {
-        logger.info(`[appt-remind] retained move hold kept for ${scheduledServiceId} — its cohort does not yet form one stop`);
-        return false;
-      }
-      const released = await db('appointment_reminders')
-        .where({ move_hold_token: record.move_hold_token })
-        .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
-      if (released > 0) {
-        logger.info(`[appt-remind] released the retained move hold on ${released} row(s) of ${scheduledServiceId}'s repaired cohort`);
-      }
-      return released > 0;
+        if (!oneStop) {
+          logger.info(`[appt-remind] retained move hold kept for ${scheduledServiceId} — its cohort does not yet form one repaired stop`);
+          return false;
+        }
+        const released = await t('appointment_reminders')
+          .where({ move_hold_token: record.move_hold_token })
+          .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
+        if (released > 0) {
+          logger.info(`[appt-remind] released the retained move hold on ${released} row(s) of ${scheduledServiceId}'s repaired cohort`);
+        }
+        return released > 0;
+      });
     } catch (holdErr) {
-      logger.warn(`[appt-remind] retained move-hold release failed for ${scheduledServiceId}: ${holdErr.message}`);
+      // VISIT_STOP_MOVED / deadlocks / read failures: keep the hold — the
+      // next sync, an assignment repair, or the TTL finishes the job.
+      logger.warn(`[appt-remind] retained move-hold release skipped for ${scheduledServiceId}: ${holdErr.message}`);
       return false;
     }
   },
