@@ -2050,12 +2050,27 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
         await t('service_visits').where({ id: plan.visitId }).update(patch);
-        // The stop is whole again — release any retained cohort hold on
-        // these members (a LIVE mover of this stop would be serialized
-        // behind the stop locks held here).
-        await t('appointment_reminders').whereIn('scheduled_service_id', plan.memberIds)
+        // The stop is whole again — release the RETAINED cohort hold on
+        // these members. Same lease semantics as the claim (codex r38): a
+        // stamp inside the takeover grace belongs to a LIVE concurrent
+        // mover (its claim trx released the stop lock before its member
+        // writes, so the stop locks here do NOT serialize against it) and
+        // must survive; only retained (older) or expired stamps clear.
+        const heldRows = await t('appointment_reminders')
+          .whereIn('scheduled_service_id', plan.memberIds)
           .whereNotNull('move_hold_until')
-          .update({ move_hold_until: null, move_hold_token: null });
+          .forUpdate()
+          .select('id', 'move_hold_until');
+        const releasable = heldRows.filter((r) => {
+          const until = new Date(r.move_hold_until).getTime();
+          if (until <= Date.now()) return true; // expired residue
+          const stampedAt = until - MOVE_HOLD_TTL_MS;
+          return Date.now() - stampedAt >= MOVE_HOLD_TAKEOVER_AFTER_MS; // retained, not live
+        });
+        if (releasable.length) {
+          await t('appointment_reminders').whereIn('id', releasable.map((r) => r.id))
+            .update({ move_hold_until: null, move_hold_token: null });
+        }
         logger.info(`[visit-groups] no-op unit move repaired the stale parent of visit ${plan.visitId} and released its retained hold`);
       });
     } catch (repairErr) {
