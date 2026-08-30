@@ -1801,8 +1801,12 @@ const StripeService = {
    * @param {string} [idempotencyKey] — durable-operation key (see charge());
    *   omitted for ad-hoc admin charges, where the random fallback applies.
    */
-  async chargeOneTime(customerId, amount, description, idempotencyKey = null) {
-    return this.charge(customerId, amount, description, { type: 'one_time' }, idempotencyKey);
+  // `metadata` lets a machine-scheduled mint (the billing-cron retry
+  // ladder) stamp `initiated_by: 'machine'` — the webhook's send-window
+  // provenance classifier otherwise reads a bare 'one_time' PI as the
+  // customer's own payment and texts its ACH lifecycle notices at night.
+  async chargeOneTime(customerId, amount, description, idempotencyKey = null, metadata = {}) {
+    return this.charge(customerId, amount, description, { type: 'one_time', ...metadata }, idempotencyKey);
   },
 
   // =========================================================================
@@ -1897,7 +1901,14 @@ const StripeService = {
   // is customer-favorable and allowed). Distinct from maxAuthorizedChargeCents,
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false } = {}) {
+  // opts.customerInitiated — the customer is at the keyboard for THIS charge
+  // (estimate-accept annual prepay on a saved method). Stamps the PI
+  // `initiated_by: 'customer'` and the receipt job `customer_initiated`, so
+  // the payment-lifecycle SMS + receipt send at any hour (owner ruling
+  // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
+  // completion/balance sweeps, admin card-on-file, no-show, recurring) —
+  // fenced to the 8AM-8PM window like every other schedule-driven send.
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2396,6 +2407,9 @@ const StripeService = {
             surcharge_rate_bps: String(invRateBps),
             surcharge_policy_version: invPolicyVersion,
             source: 'admin_card_on_file',
+            // Send-window provenance for the webhook's lifecycle notices +
+            // receipt (see the customerInitiated option doc above).
+            initiated_by: customerInitiated ? 'customer' : 'machine',
           },
         };
         if (invSurchargeDetails) invPiParams.amount_details = invSurchargeDetails;
@@ -2805,6 +2819,10 @@ const StripeService = {
           invoiceId,
           stripePaymentIntentId: paymentIntent.id,
           source: 'card_on_file',
+          // Receipt provenance persisted on the job (fail-closed default):
+          // a customer's accept-time charge texts its receipt tonight; the
+          // machine rails hold for the window.
+          customerInitiated,
           ...(deferReceiptDelivery ? { nextAttemptAt: deferredUntil } : {}),
         });
         if (deferReceiptDelivery && !enqueueResult.enqueued) {

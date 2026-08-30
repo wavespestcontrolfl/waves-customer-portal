@@ -224,6 +224,10 @@ describe('processPaymentRetries — suppression guards', () => {
     await BillingCron.processPaymentRetries();
 
     expect(chargeOneTime).toHaveBeenCalled();
+    // Machine provenance stamp (Codex #3598 r3 P1): the retry rung is a
+    // scheduled collection — its ACH lifecycle notices must stay behind the
+    // send window, so the re-minted 'one_time' PI carries initiated_by.
+    expect(chargeOneTime.mock.calls[0][4]).toEqual({ initiated_by: 'machine' });
   });
 
   test('obligation month already collected: rung superseded by the collecting payment', async () => {

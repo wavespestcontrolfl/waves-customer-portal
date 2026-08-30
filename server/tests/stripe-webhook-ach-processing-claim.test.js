@@ -190,6 +190,20 @@ test('machine-initiated PI discriminator: autopay, card-on-file and no-show char
   expect(isMachine(null)).toBe(false);
 });
 
+test('explicit initiated_by outranks the heuristics both ways (Codex #3598 round-3 P1s)', () => {
+  const { _isMachineInitiatedPaymentIntent: isMachine } = require('../routes/stripe-webhook');
+  // Accept-time annual-prepay charge rides chargeInvoiceWithSavedCard's
+  // 'admin_card_on_file' stamp but is the customer's own action.
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'customer' } })).toBe(false);
+  // Billing-cron retry re-mints a customer-looking 'one_time' PI for a
+  // scheduled collection.
+  expect(isMachine({ metadata: { type: 'one_time', initiated_by: 'machine' } })).toBe(true);
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'machine' } })).toBe(true);
+  // Unknown values fall through to the heuristics — never a blanket pass.
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'bogus' } })).toBe(true);
+  expect(isMachine({ metadata: { type: 'one_time', initiated_by: '' } })).toBe(false);
+});
+
 test('window-held SMS whose rail enqueue fails releases the claim AND still emails', async () => {
   sendCustomerMessage.mockResolvedValue({
     sent: false,

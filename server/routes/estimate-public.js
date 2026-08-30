@@ -12260,6 +12260,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           const StripeService = require('../services/stripe');
           const prepayChargeResult = await chargeUnderJobFence(() => StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+            // Customer-at-keyboard provenance (Codex #3598 r3 P1): the
+            // customer just accepted — the PI's lifecycle SMS and receipt
+            // answer their own action and send at any hour (owner ruling
+            // 2026-08-29). Only this site opts in; every other saved-method
+            // caller keeps the machine default.
+            customerInitiated: true,
             // EXACT-equality freeze to the acknowledged quote (pre-push
             // Codex P0 r2): the in-lock computeChargeAmount result must be
             // the same cents the customer confirmed — any drift (a credit

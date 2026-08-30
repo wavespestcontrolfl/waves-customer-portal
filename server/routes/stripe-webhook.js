@@ -58,9 +58,20 @@ function customerLabel(customer) {
 // at any hour (owner ruling 2026-08-29). Failure direction: an unlisted
 // future machine flow would text at night, so any new off-session charge
 // mint MUST stamp metadata this recognizes (type, source, or purpose).
+//
+// Explicit `metadata.initiated_by` ('customer' | 'machine') outranks the
+// heuristics (Codex round-3 P1s): the shared mints serve both sides —
+// chargeInvoiceWithSavedCard's 'admin_card_on_file' stamp also carries a
+// customer's accept-time annual-prepay charge (estimate-public), and the
+// billing-cron retry ladder re-mints a customer-looking 'one_time' PI for
+// a machine-scheduled collection. The mint site knows the provenance and
+// stamps it; only unstamped legacy PIs fall through to the heuristics.
 const MACHINE_PI_SOURCES = new Set(['admin_card_on_file']);
 const MACHINE_PI_PURPOSES = new Set(['appointment_card_no_show_fee', 'card_hold_no_show_fee']);
 function isMachineInitiatedPaymentIntent(pi) {
+  const initiatedBy = String(pi?.metadata?.initiated_by || '');
+  if (initiatedBy === 'customer') return false;
+  if (initiatedBy === 'machine') return true;
   if (pi?.metadata?.type === 'monthly_autopay') return true;
   if (MACHINE_PI_SOURCES.has(String(pi?.metadata?.source || ''))) return true;
   return MACHINE_PI_PURPOSES.has(String(pi?.metadata?.purpose || ''));
