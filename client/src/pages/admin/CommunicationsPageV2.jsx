@@ -1711,7 +1711,21 @@ function SmsTab() {
       const clause = String(d.line || "").trim() || `${d.url}`;
       const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
       // Replace-don't-stack per kind (same rule as the reschedule insert).
-      const prevUrl = insertedCustomerLinks[kind]?.url || null;
+      const prevEntry = insertedCustomerLinks[kind] || null;
+      const prevUrl = prevEntry?.url || null;
+      // A replaced review link's OLD row would otherwise stay pending and
+      // its +120min safety net would text a second ask — withdraw it before
+      // the tracked entry is overwritten.
+      if (
+        kind === "review_request" &&
+        prevEntry?.requestId &&
+        prevEntry.requestId !== (d.requestId || null)
+      ) {
+        adminFetch("/admin/communications/customer-link/cancel", {
+          method: "POST",
+          body: JSON.stringify({ requestId: prevEntry.requestId }),
+        }).catch(() => {});
+      }
       setMsgBody((b) => {
         const base = prevUrl
           ? b

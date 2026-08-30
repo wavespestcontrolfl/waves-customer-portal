@@ -139,8 +139,33 @@ async function buildReferralLink(customerId) {
   try {
     ({ promoter } = await enrollPromoter(customerId));
   } catch (err) {
-    logger.warn(`[composer-links] referral enroll failed (customerId=${customerId}): ${err.message}`);
-    return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
+    // enrollPromoter is strictly per-customer while referral_promoters.
+    // customer_phone stays unique, so a multi-property sibling whose phone
+    // already backs another sibling's promoter loses the insert (23505).
+    // Same household fallback as the report referral endpoint
+    // (reports-public.js): resolve the promoter read-only, scoped to the
+    // SAME account_id — phone alone is not identity (recycled/shared
+    // numbers cross unrelated customers). No account-scoped match = a
+    // genuine cross-account collision → the plain reason, never a guessed
+    // attribution. Log err.code only, never err.message — PG constraint
+    // violations quote the conflicting value, which here is a phone number
+    // (AGENTS.md PII-in-logs rule).
+    if (err?.code === '23505') {
+      const profile = await db('customers')
+        .where({ id: customerId })
+        .first('id', 'phone', 'account_id');
+      promoter = profile?.phone && profile?.account_id
+        ? await db('referral_promoters as rp')
+          .join('customers as c', 'rp.customer_id', 'c.id')
+          .where('rp.customer_phone', profile.phone)
+          .where('c.account_id', profile.account_id)
+          .first('rp.*')
+        : null;
+    }
+    if (!promoter) {
+      logger.warn(`[composer-links] referral enroll failed (customerId=${customerId}, code=${err?.code || 'none'})`);
+      return { url: null, line: '', reason: 'Could not build a referral link for this customer' };
+    }
   }
   if (!promoter?.referral_link) {
     return { url: null, line: '', reason: 'Could not build a referral link for this customer' };

@@ -455,14 +455,18 @@ router.post('/sms', async (req, res, next) => {
 
     // A composer-inserted review link rode this body — the send that just
     // left IS the ask, so stamp the inline row delivered (clears its +120min
-    // safety-net send; see /customer-link). Guarded on the row still being a
-    // pending inline ask, the recipient owning it, and the link actually
-    // still in the sent body (a deleted link means no ask went out — the
-    // cancel endpoint owns that path). Fail-soft: bookkeeping never breaks
-    // a send that already happened.
+    // safety-net send; see /customer-link). Guarded on a REAL provider send
+    // (same sentinel rule as the SLA stamp below — a suppressed send reports
+    // sent:true with nothing actually delivered, and marking then would
+    // silently drop the ask), the row still being a pending inline ask, the
+    // recipient owning it, and the link actually still in the sent body (a
+    // deleted link means no ask went out — the cancel endpoint owns that
+    // path). Fail-soft: bookkeeping never breaks a send that already
+    // happened.
     if (reviewRequestId) {
       try {
-        const rr = await db('review_requests')
+        const { isRealProviderSend } = require('../services/sms-auto-send');
+        const rr = !isRealProviderSend(result) ? null : await db('review_requests')
           .where({ id: String(reviewRequestId) })
           .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
         if (rr && rr.triggered_by === 'auto_inline' && rr.status === 'pending' && !rr.sms_sent_at) {

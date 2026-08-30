@@ -111,17 +111,27 @@ async function syncSitemapLinks({ fetchFn } = {}) {
     throw new Error(`sitemap sync aborted — only ${pages.length} URLs fetched, refusing to overwrite the library`);
   }
 
-  const existing = await db('link_library').where({ source: 'sitemap' }).select('id', 'url', 'name', 'category');
-  const existingByUrl = new Map(existing.map((r) => [r.url, r]));
+  // ALL rows, not just sitemap ones: a hand-added row for a page that later
+  // lands in the sitemap must be skipped, not re-inserted — the url is
+  // globally unique, so a blind insert would fail this and every later
+  // sync. The manual row wins (it carries the owner's name/clause).
+  const existing = await db('link_library').select('id', 'url', 'name', 'category', 'source');
+  const sitemapByUrl = new Map();
+  const manualUrls = new Set();
+  for (const r of existing) {
+    if (r.source === 'sitemap') sitemapByUrl.set(r.url, r);
+    else manualUrls.add(r.url);
+  }
   const now = new Date();
 
   let added = 0;
   let updated = 0;
   for (const url of pages) {
+    if (manualUrls.has(url)) continue;
     const name = nameForSiteUrl(url);
     if (!name) continue;
     const category = categoryForSiteUrl(url);
-    const row = existingByUrl.get(url);
+    const row = sitemapByUrl.get(url);
     if (!row) {
       await db('link_library').insert({
         name,
@@ -139,11 +149,34 @@ async function syncSitemapLinks({ fetchFn } = {}) {
   }
 
   const currentUrls = new Set(pages);
-  const staleIds = existing.filter((r) => !currentUrls.has(r.url)).map((r) => r.id);
+  const staleIds = [...sitemapByUrl.values()].filter((r) => !currentUrls.has(r.url)).map((r) => r.id);
   if (staleIds.length) await db('link_library').whereIn('id', staleIds).del();
 
+  const result = { fetched: pages.length, added, updated, removed: staleIds.length };
+  await recordSyncOutcome(now, result);
   logger.info(`[link-library] sitemap sync: ${pages.length} pages, +${added} ~${updated} -${staleIds.length}`);
-  return { fetched: pages.length, added, updated, removed: staleIds.length };
+  return result;
+}
+
+// Persist the successful-sync timestamp explicitly (system_config, same
+// key/value store as ai_sms_auto_reply): a stable sitemap makes every row's
+// updated_at stand still, so "last synced" can't be inferred from content
+// changes — and the migration's preseeded rows must not read as a sync that
+// never ran. Best-effort: a bookkeeping failure never fails the sync.
+const LAST_SYNC_CONFIG_KEY = 'link_library_last_sync';
+
+async function recordSyncOutcome(at, result) {
+  try {
+    const value = JSON.stringify({ at: at.toISOString(), ...result });
+    const existing = await db('system_config').where({ key: LAST_SYNC_CONFIG_KEY }).first();
+    if (existing) {
+      await db('system_config').where({ key: LAST_SYNC_CONFIG_KEY }).update({ value, updated_at: new Date() });
+    } else {
+      await db('system_config').insert({ key: LAST_SYNC_CONFIG_KEY, value });
+    }
+  } catch (err) {
+    logger.warn(`[link-library] last-sync bookkeeping failed: ${err.message}`);
+  }
 }
 
 // ── The searchable list ──────────────────────────────────────────────────
@@ -175,10 +208,19 @@ async function listLinks() {
   return [...officeReviewLinks(), ...stored];
 }
 
-/** When the sitemap rows last changed — the Settings screen's "last synced". */
+/**
+ * The Settings screen's "last synced" — the explicitly recorded timestamp of
+ * the last SUCCESSFUL sync (recordSyncOutcome), never inferred from row
+ * updated_at. null until a real sync has run.
+ */
 async function sitemapLastSyncedAt() {
-  const row = await db('link_library').where({ source: 'sitemap' }).max('updated_at as last').first();
-  return row?.last || null;
+  const row = await db('system_config').where({ key: LAST_SYNC_CONFIG_KEY }).first();
+  if (!row?.value) return null;
+  try {
+    return JSON.parse(row.value)?.at || null;
+  } catch {
+    return null;
+  }
 }
 
 // ── Manual CRUD (Settings ▸ Link Library) ────────────────────────────────

@@ -22,12 +22,14 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const { openBalanceSummary } = require('../services/open-balance');
+const { enrollPromoter } = require('../services/referral-engine');
 const { isEstimateCustomerViewable } = require('../routes/estimate-public');
 const ReviewService = require('../services/review-request');
 const {
   buildPayBalanceLink,
   buildLatestEstimateLink,
   buildReviewRequestLink,
+  buildReferralLink,
 } = require('../services/composer-customer-links');
 
 function chainBuilder({ firstRow = null, rows = [] } = {}) {
@@ -35,6 +37,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.where = jest.fn(() => b);
   b.whereIn = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
+  b.join = jest.fn(() => b);
   b.orderByRaw = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
   b.first = jest.fn(async () => firstRow);
@@ -131,5 +134,29 @@ describe('buildReviewRequestLink', () => {
     expect(r.url).toContain('/l/rv123');
     expect(r.requestId).toBe('rr-1');
     expect(r.line).toContain(r.url);
+  });
+});
+
+describe('buildReferralLink', () => {
+  test('a 23505 unique-phone conflict falls back to the account-scoped household promoter', async () => {
+    // Multi-property sibling: another sibling's promoter row already owns
+    // the shared phone — same fallback as the report referral endpoint.
+    enrollPromoter.mockRejectedValue(Object.assign(new Error('duplicate key'), { code: '23505' }));
+    mockBuilders = {
+      customers: chainBuilder({ firstRow: { id: 'c2', phone: '(941) 555-0184', account_id: 'acct-1' } }),
+      'referral_promoters as rp': chainBuilder({
+        firstRow: { id: 'p1', referral_code: 'WAVES-ABC12345', referral_link: 'https://portal.wavespestcontrol.com/r/WAVES-ABC12345' },
+      }),
+    };
+    const r = await buildReferralLink('c2');
+    expect(r.url).toContain('/r/WAVES-ABC12345');
+    expect(r.line).toContain(r.url);
+  });
+
+  test('a non-conflict enroll failure answers the plain reason', async () => {
+    enrollPromoter.mockRejectedValue(new Error('db down'));
+    const r = await buildReferralLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/Could not build/);
   });
 });

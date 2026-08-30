@@ -275,7 +275,7 @@ export default function SettingsPage() {
   // hooks than during the previous render" (codex P1).
   useEffect(() => {
     if (user && user.role !== "admin"
-      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system"].includes(tab)) {
+      && ["service-reports", "blackout-days", "kpi-targets", "integrations", "gates", "system", "link-library"].includes(tab)) {
       selectTab("general");
     }
     // selectTab is stable; errors-only lint config has no exhaustive-deps.

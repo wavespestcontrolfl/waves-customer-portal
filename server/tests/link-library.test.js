@@ -134,6 +134,16 @@ describe('syncSitemapLinks', () => {
     return builder;
   }
 
+  // The last-sync bookkeeping (recordSyncOutcome) upserts one system_config row.
+  function makeSystemConfigBuilder(firstRow = null) {
+    const builder = { inserted: [], updated: [] };
+    builder.where = jest.fn(() => builder);
+    builder.first = jest.fn(async () => firstRow);
+    builder.insert = jest.fn(async (row) => { builder.inserted.push(row); });
+    builder.update = jest.fn(async (patch) => { builder.updated.push(patch); });
+    return builder;
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -141,12 +151,15 @@ describe('syncSitemapLinks', () => {
   it('inserts new pages, renames drifted ones, deletes removed ones — manual rows untouched', async () => {
     const existing = [
       // Still in the sitemap but with a stale name → updated.
-      { id: 1, url: `${SITE}/quote/`, name: 'Old Quote Name', category: 'booking' },
+      { id: 1, url: `${SITE}/quote/`, name: 'Old Quote Name', category: 'booking', source: 'sitemap' },
       // No longer in the sitemap → deleted.
-      { id: 2, url: `${SITE}/retired-page/`, name: 'Retired Page', category: 'website' },
+      { id: 2, url: `${SITE}/retired-page/`, name: 'Retired Page', category: 'website', source: 'sitemap' },
+      // Manual off-site row — must never be considered for deletion.
+      { id: 3, url: 'https://instagram.com/wavespestcontrol', name: 'Instagram', category: 'social', source: 'manual' },
     ];
     const builder = makeLinkLibraryBuilder(existing);
-    mockBuilders = { link_library: builder };
+    const systemConfig = makeSystemConfigBuilder();
+    mockBuilders = { link_library: builder, system_config: systemConfig };
     sitemapManager.listUrls.mockResolvedValue([
       ...PAGES,
       `${SITE}/quote/`, // duplicate — deduped
@@ -166,6 +179,28 @@ describe('syncSitemapLinks', () => {
       expect(row.url.startsWith(SITE)).toBe(true);
     }
     expect(builder.updated[0].name).toBe('Quote');
+    // A successful sync records its own timestamp (never inferred from rows).
+    expect(systemConfig.inserted).toHaveLength(1);
+    expect(JSON.parse(systemConfig.inserted[0].value).fetched).toBe(PAGES.length);
+  });
+
+  it('skips a site URL an owner already added manually — never a duplicate insert', async () => {
+    const existing = [
+      // Hand-added before the page reached the sitemap. url is globally
+      // unique, so a blind sitemap insert would fail this and every later
+      // sync — the manual row wins instead.
+      { id: 7, url: `${SITE}/pest-library/`, name: 'My Pest Library', category: 'website', source: 'manual' },
+    ];
+    const builder = makeLinkLibraryBuilder(existing);
+    mockBuilders = { link_library: builder, system_config: makeSystemConfigBuilder() };
+    sitemapManager.listUrls.mockResolvedValue(PAGES);
+
+    const result = await syncSitemapLinks();
+
+    expect(result.added).toBe(PAGES.length - 1); // the manual URL is skipped
+    expect(builder.inserted.some((r) => r.url === `${SITE}/pest-library/`)).toBe(false);
+    expect(builder.updated).toHaveLength(0);
+    expect(builder.deletedIds).toEqual([]);
   });
 
   it('refuses to overwrite the library from a suspiciously tiny fetch', async () => {

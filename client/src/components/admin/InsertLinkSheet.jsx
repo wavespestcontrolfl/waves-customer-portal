@@ -158,21 +158,11 @@ export default function InsertLinkSheet({
         </div>
       </div>
       <SheetBody className="p-0">
-        {loading && (
-          <div className="px-5 py-6 text-13 text-ink-secondary">Loading links…</div>
-        )}
-        {!loading && error && (
-          <div className="px-5 py-6 text-13">
-            <span className="text-alert-fg">{error}</span>{" "}
-            {onRetry && (
-              <button type="button" onClick={onRetry} className="underline text-zinc-900 u-focus-ring">
-                Retry
-              </button>
-            )}
-          </div>
-        )}
-        {!loading && !error &&
-          groups.map(({ key, label, rows }) => (
+        {/* Groups render from whatever links the parent passed — the
+            customer rows are local config, so a library fetch that is still
+            loading (or failed) must never take the reschedule/re-service
+            inserts down with it. The library's own state renders below. */}
+        {groups.map(({ key, label, rows }) => (
             <div key={key}>
               <div className="px-5 pt-3.5 pb-1 text-11 uppercase tracking-label font-medium text-ink-tertiary">
                 {label}
@@ -219,6 +209,19 @@ export default function InsertLinkSheet({
               })}
             </div>
           ))}
+        {loading && (
+          <div className="px-5 py-4 text-13 text-ink-secondary">Loading the link library…</div>
+        )}
+        {!loading && error && (
+          <div className="px-5 py-4 text-13">
+            <span className="text-alert-fg">{error}</span>{" "}
+            {onRetry && (
+              <button type="button" onClick={onRetry} className="underline text-zinc-900 u-focus-ring">
+                Retry
+              </button>
+            )}
+          </div>
+        )}
         {!loading && !error && !groups.length && (
           <div className="px-5 py-6 text-13 text-ink-secondary leading-relaxed">
             No links match &ldquo;{query.trim()}&rdquo;.
