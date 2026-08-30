@@ -1943,9 +1943,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // P1): a concurrent mover's live stamp is never overwritten (its
       // partial outcome would otherwise lose its hold when our fenced
       // release ran), it is refused — that visit is mid-move elsewhere.
+      // Cancelled rows are held too (codex r28): the schedule-change
+      // trigger can reactivate one mid-move and it must inherit the quiet.
       const holdRows = await t('appointment_reminders')
         .whereIn('scheduled_service_id', plan.memberIds)
-        .where({ cancelled: false })
         .forUpdate()
         .select('id', 'move_hold_until');
       if (!holdRows.length) return;
@@ -1966,13 +1967,28 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // committed; a failed release leaves the rows quiet until the stamp
   // expires (the safe direction) and reports.
   const releaseReminderHold = async (onFailure) => {
-    if (!reminderHoldIds.length) return;
     try {
-      await db('appointment_reminders').whereIn('id', reminderHoldIds)
+      // Keyed on the MEMBERS + our stamp (codex r28): a reminder row
+      // created or re-stamped mid-move carries the same stamp and is
+      // released with the rest; a newer mover's stamp is never touched.
+      await db('appointment_reminders').whereIn('scheduled_service_id', plan.memberIds)
         .where({ move_hold_until: reminderHoldUntil })
         .update({ move_hold_until: null });
     } catch (err) {
       onFailure(err);
+    }
+  };
+  // A reminder row can appear (self-heal, trigger reactivation, the
+  // member's own sync) AFTER the up-front claim (codex r28 P1): re-stamp
+  // the member's row after its move so a late row inherits the quiet.
+  // Best-effort — the senders' own hold checks are the authority.
+  const restampMemberHold = async (memberId) => {
+    try {
+      await db('appointment_reminders').where({ scheduled_service_id: memberId })
+        .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', reminderHoldUntil); })
+        .update({ move_hold_until: reminderHoldUntil });
+    } catch (err) {
+      logger.warn(`[visit-groups] reminder hold re-stamp for ${memberId} failed: ${err.message}`);
     }
   };
   const moved = [];
@@ -2188,6 +2204,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (target.isPrimary) primaryResult = r;
       await alignMember();
       if (!target.isPrimary) await syncSiblingReminder();
+      await restampMemberHold(target.id);
     } catch (err) {
       // The rebooker COMMITS its move transaction and then runs post-commit
       // work (tech_status clear, follow-up shift, escalation, legacy
@@ -2204,6 +2221,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (target.isPrimary) primaryResult = { success: true, newDate };
         await alignMember();
         if (!target.isPrimary) await syncSiblingReminder();
+        await restampMemberHold(target.id);
         continue;
       }
       if (target.isPrimary) {

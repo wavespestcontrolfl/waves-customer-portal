@@ -375,7 +375,11 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
         return false;
       }
     } catch (err) {
-      logger.warn(`[appt-remind] ${kind} hold check failed for ${scheduledServiceId}: ${err.message}`);
+      // FAIL CLOSED (codex r28 P1): this is the last-moment guard for
+      // inline sends and holds stamped after batch selection — an
+      // unverifiable hold must not send. The unmarked notice retries.
+      logger.warn(`[appt-remind] ${kind} hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+      return false;
     }
   }
   const ch = apptChannel(channel);
@@ -2272,7 +2276,22 @@ const AppointmentReminders = {
             // mid-sweep skips silently (the next sweep won't select it).
             const lockedVisit = await trx('scheduled_services')
               .where({ id: svc.id }).forUpdate()
-              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status');
+              .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at', 'status', 'visit_id');
+            // A healed row for a member of a HELD grouped visit inherits the
+            // active unit-move hold (codex #3609 r28 P1): the mover claimed
+            // the rows that existed; a row born after the claim must not
+            // text a mid-move or partially-moved stop.
+            const inheritMoveHold = async (rec) => {
+              if (!rec || !lockedVisit.visit_id) return;
+              const heldSibling = await trx('appointment_reminders as ar')
+                .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+                .where('ss.visit_id', lockedVisit.visit_id)
+                .where('ar.move_hold_until', '>', new Date())
+                .first('ar.move_hold_until');
+              if (heldSibling) {
+                await trx('appointment_reminders').where({ id: rec.id }).update({ move_hold_until: heldSibling.move_hold_until });
+              }
+            };
             if (!lockedVisit || !lockedVisit.customer_id) return { skip: 'vanished' };
             if (SELF_HEAL_TERMINAL_STATUSES.has(String(lockedVisit.status || '').toLowerCase())) {
               return { skip: 'terminal' };
@@ -2303,6 +2322,7 @@ const AppointmentReminders = {
                 // Same booking-time preservation as the armed arm below.
                 createdAt: lockedVisit.created_at,
               });
+              await inheritMoveHold(record);
               return { record };
             }
             const record = await AppointmentReminders.registerVisitReminderInTx(trx, {
@@ -2316,6 +2336,7 @@ const AppointmentReminders = {
               // row stamped with the cron time would wrongly skip that reminder.
               createdAt: lockedVisit.created_at,
             });
+            await inheritMoveHold(record);
             return { record };
           });
           if (res && res.skip) continue;

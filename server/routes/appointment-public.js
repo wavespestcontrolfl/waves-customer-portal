@@ -429,7 +429,12 @@ async function confirmGroupedSiblings(trx, svc) {
 // ended while the stop is still upcoming); ungrouped ⇒ the row's quoted
 // window (calendarIcsAvailable).
 function calendarEligible(svc, visitInfo, now = new Date()) {
-  return visitInfo?.visit ? pageStateForGroup(svc, visitInfo, now).state === 'upcoming' : calendarIcsAvailable(svc, now);
+  // Grouped: the STOP's state AND a real aggregate start (codex r28 P2) —
+  // an all-windowless stop has no DTSTART to file; the ungrouped rule
+  // (calendarIcsAvailable) already requires the row's own start.
+  return visitInfo?.visit
+    ? (pageStateForGroup(svc, visitInfo, now).state === 'upcoming' && !!(visitInfo.visit.windowStart || hhmm(svc?.window_start)))
+    : calendarIcsAvailable(svc, now);
 }
 
 // The calendar file's DTSTART: the visit's shared start when grouped (the

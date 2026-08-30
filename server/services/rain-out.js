@@ -1873,15 +1873,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
         coverMoved(moveResult, job);
         if (moveResult?.visitMove?.visitStart) unitVisitStart = String(moveResult.visitMove.visitStart);
-        if (Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) {
-          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: moveResult.visitMove.failed.map((f) => f.id) };
+        if ((Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) || moveResult?.visitMove?.parentRetargetFailed === true) {
+          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id) };
           // Stragglers stay OUT of the rest of this batch (codex #3609 r27
           // P1): a queued sibling job retried individually could succeed and
           // text the customer even though this stop's result says nobody was
           // notified and staff repair is required. needsAttention carries
           // the ids; nothing else in this run touches them.
           for (const sid of unitMovePartial.memberIds) partialStragglers.add(String(sid));
-          logger.error(`[rain-out] grouped move of visit ${unitMovePartial.visitId} for ${job.id} is INCOMPLETE — ${unitMovePartial.memberIds.length} member(s) still at the old stop (${unitMovePartial.memberIds.join(', ')}); customer NOT texted`);
+          logger.error(`[rain-out] grouped move of visit ${unitMovePartial.visitId} for ${job.id} is INCOMPLETE — ${unitMovePartial.memberIds.length ? `${unitMovePartial.memberIds.length} member(s) still at the old stop (${unitMovePartial.memberIds.join(', ')})` : 'the visit record could not be retargeted'}; customer NOT texted`);
         }
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —

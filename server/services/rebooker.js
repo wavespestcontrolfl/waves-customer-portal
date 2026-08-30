@@ -1206,9 +1206,18 @@ class SmartRebooker {
           }
           throw lockErr;
         }
-        const visit = await trx('service_visits').where({ id: service.visit_id }).first('status');
+        // The row's CURRENT visit under the lock, never the stale pre-read
+        // (codex #3609 r28 P1): a split-and-rejoin lands the row in visit B
+        // while service.visit_id still names A — counting A would let this
+        // single move rip the row out of B.
+        const lockedSolo = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
+        const currentVisitId = lockedSolo ? lockedSolo.visit_id : service.visit_id;
+        if (String(currentVisitId || '') !== String(service.visit_id || '')) {
+          throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+        }
+        const visit = currentVisitId ? await trx('service_visits').where({ id: currentVisitId }).first('status') : null;
         if (visit && String(visit.status) === 'open') {
-          const members = await vg.openMembers(trx, service.visit_id);
+          const members = await vg.openMembers(trx, currentVisitId);
           if (members.some((m) => String(m.id) !== String(serviceId))) {
             throw Object.assign(new Error('Cannot reschedule — another service joined this visit concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
           }

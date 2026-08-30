@@ -423,7 +423,8 @@ describe('moveVisitAsUnit', () => {
     AppointmentReminders.handleReschedule.mockResolvedValueOnce({ id: 'rem-b', confirmation_sent: false });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(AppointmentReminders.handleReschedule.mock.calls[0][2]).toMatchObject({ sendNotification: false, keepPendingConfirmation: true });
-    expect(db.__calls.some((c) => c.table === 'appointment_reminders' && c.op === 'update')).toBe(false);
+    // the only reminder writes are the move-hold stamp/re-stamp/release — never a confirmation supersede/re-arm
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && !('move_hold_until' in c.values)).length).toBe(0);
   });
 
   test('each member\'s own CAS carries its planned visit membership and technician', async () => {
@@ -792,26 +793,27 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b' })]);
     let rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rem.length).toBe(1);
+    expect(rem.length).toBe(2); // claim + the moved member a's re-stamp (a late row inherits the quiet) — NO release on a partial
     expect(rem[0].values.move_hold_until instanceof Date).toBe(true);
     expect(rem[0].values.move_hold_until.getTime()).toBeGreaterThan(Date.now() + 23 * 3600 * 1000); // self-expiring ~24h stamp
     expect(rem[0].ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['rem-a', 'rem-b']]]));
-    // FULL success: stamp then release, fenced on OUR stamp
+    expect(rem[1].ops).toEqual(expect.arrayContaining([['where', { scheduled_service_id: 'a' }]])); // re-stamp
+    expect(rem[1].values).toEqual({ move_hold_until: rem[0].values.move_hold_until });
+    // FULL success: claim + per-member re-stamps, then ONE release fenced on OUR stamp, keyed on the members
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rem.length).toBe(2);
-    expect(rem[1].values).toEqual({ move_hold_until: null });
-    const fence = rem[1].ops.find((o) => o[0] === 'where' && o[1] && o[1].move_hold_until);
-    expect(fence[1].move_hold_until).toEqual(rem[0].values.move_hold_until);
+    expect(rem.length).toBe(4); // claim + 2 re-stamps + release
+    const release = rem[rem.length - 1];
+    expect(release.values).toEqual({ move_hold_until: null });
+    expect(release.ops).toEqual(expect.arrayContaining([['whereIn', 'scheduled_service_id', ['a', 'b']], ['where', { move_hold_until: rem[0].values.move_hold_until }]]));
     // ABORT (primary never moved): the hold is released before rethrow
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rem.length).toBe(2);
-    expect(rem[1].values).toEqual({ move_hold_until: null });
+    expect(rem[rem.length - 1].values).toEqual({ move_hold_until: null });
     // an ACTIVE foreign hold (another mover mid-move / awaiting repair) is never overwritten — the move refuses (lease, codex r30)
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 3600000) }] } };
@@ -822,7 +824,7 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() - 60000) }] : []) } };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(1);
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(3); // claim over the expired hold + 2 per-member re-stamps
     // an unclaimable hold ABORTS before anything moves
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => { throw new Error('ledger down'); } } };

@@ -15060,7 +15060,8 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // hard needsAttention so the board surfaces it for repair, not a
     // soft warning. Reminder sync runs with willNotify=false so the
     // stranded sweep owns the (corrected) text once the stop is whole.
-    const partialVisitMove = Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0;
+    const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
+      || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
     const willNotify = notifyCustomer !== false && !partialVisitMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify });
     try {
@@ -15078,7 +15079,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
     }
     if (partialVisitMove) {
-      const stuck = result.visitMove.failed.map((f) => f.id);
+      const stuck = (result.visitMove.failed || []).map((f) => f.id);
       logger.error(`[dispatch] grouped move of visit ${result.visitMove.visitId} for ${req.params.serviceId} is INCOMPLETE — ${stuck.length} member(s) still at the old stop (${stuck.join(', ')}); customer NOT notified`);
       return res.json({
         ...result,
@@ -15086,7 +15087,9 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notificationError: 'grouped move incomplete — customer NOT notified',
         needsAttention: {
           code: 'VISIT_MOVE_INCOMPLETE',
-          message: `Only part of this stop moved — ${stuck.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`,
+          message: stuck.length
+            ? `Only part of this stop moved — ${stuck.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`
+            : 'The services moved but the visit record could not be retargeted — re-save the stop from the board, then text the customer.',
           memberIds: stuck,
         },
       });
