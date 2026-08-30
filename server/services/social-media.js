@@ -1331,9 +1331,20 @@ async function blogHeroSocialImageUrl(link) {
     // and redirects are refused outright so a trusted host can never 302 the
     // server to a private/metadata address. A page whose og:image points
     // anywhere else simply gets no hero (card fallback), never a fetch.
-    const pageUrl = new URL(String(link || ''));
+    let pageUrl = new URL(String(link || ''));
     if (!isTrustedImageHost(pageUrl.href)) return null;
-    const pageRes = await fetch(pageUrl.href, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    // Blog-share lanes pass normalizeUrl'd links (trailing slash stripped) and
+    // the hub 301s those to its canonical slash form — allow exactly ONE
+    // redirect hop, and only to a trusted host, validated before it is
+    // fetched; a second hop or an off-host Location is a miss (no hero).
+    let pageRes = await fetch(pageUrl.href, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if ([301, 302, 307, 308].includes(pageRes.status)) {
+      const location = pageRes.headers?.get?.('location');
+      const hop = location ? new URL(location, pageUrl) : null;
+      if (!hop || !isTrustedImageHost(hop.href)) return null;
+      pageUrl = hop;
+      pageRes = await fetch(pageUrl.href, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    }
     if (pageRes.status !== 200) return null;
     const html = await pageRes.text();
     const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)

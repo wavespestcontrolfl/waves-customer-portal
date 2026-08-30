@@ -851,13 +851,24 @@ async function heroImageForLink(link) {
 // The legacy SVG card is the fallback of last resort, not a design choice —
 // surface every publish that fell back to it so the owner sees it (ops
 // convention: FIX: subject, contact@). Never throws.
-async function alertLegacyCardFallback(plan = {}, { link, creativeEnabled }) {
+// creative: { enabled, eligible, produced } — the engine's ACTUAL state on
+// this run, so the diagnosis never sends the owner after a phantom provider
+// failure when the engine was simply off, skipped (GBP-only run), or did
+// produce the Meta image while GBP needed a card.
+function creativeStateSummary({ enabled, eligible, produced } = {}) {
+  if (!enabled) return 'SOCIAL_CREATIVE_ENGINE_ENABLED is not true (engine off)';
+  if (!eligible) return 'creative engine enabled but not eligible for this run (GBP-only, or no publish-ready non-GBP channel)';
+  if (produced) return 'creative engine produced the Meta image; the GBP card was the fallback (GBP never posts AI imagery)';
+  return 'creative engine attempted and returned no image (provider/upload failure)';
+}
+
+async function alertLegacyCardFallback(plan = {}, { link, creative }) {
   try {
     const sendgrid = require('./sendgrid-mail');
     const to = process.env.SOCIAL_STUDIO_ALERT_EMAIL || 'contact@wavespestcontrol.com';
     const fromEmail = process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
     const why = [
-      creativeEnabled ? 'creative engine returned no image (provider/upload failure)' : 'SOCIAL_CREATIVE_ENGINE_ENABLED is not true',
+      creativeStateSummary(creative),
       link ? `linked page hero unavailable (${link})` : 'no live page matched the topic, so no hero to use',
     ].join('; ');
     await sendgrid.sendOne({
@@ -2309,7 +2320,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     if (!SOCIAL_FLAGS.dryRun && legacyCardShipped(publishResult.platforms, legacyCardUrls, imageUrl)) {
       await alertLegacyCardFallback(plan, {
         link: finalPreview.suggestedLink,
-        creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+        creative: {
+          enabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+          eligible: creativeEligible,
+          produced: creativeVariants.length > 0,
+        },
       });
     }
 
@@ -3438,6 +3453,7 @@ module.exports = {
   contentRowMatchesCity,
   liveUrlForRow,
   linkIsLive,
+  creativeStateSummary,
   rowMatchesIntentKeywords,
   legacyCardShipped,
   firstLivePage,

@@ -40,8 +40,9 @@ function mockFetch(routes) {
     const route = routes[String(url)];
     if (!route) throw new Error(`unexpected fetch: ${url}`);
     return {
-      ok: route.ok !== false,
-      status: route.ok !== false ? 200 : 404,
+      ok: route.ok !== false && !route.redirectTo,
+      status: route.redirectTo ? 301 : route.ok !== false ? 200 : 404,
+      headers: { get: (h) => (h.toLowerCase() === 'location' ? route.redirectTo || null : null) },
       text: async () => route.text || '',
       arrayBuffer: async () => (route.bytes || Buffer.alloc(0)).buffer.slice(0),
     };
@@ -99,8 +100,28 @@ describe('blogHeroSocialImageUrl', () => {
     await expect(social.blogHeroSocialImageUrl(PAGE)).resolves.toBeNull();
     const fetched = global.fetch.mock.calls.map(([u]) => String(u));
     expect(fetched).toEqual([PAGE]); // the metadata URL was never requested
-    expect(global.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'error' });
+    expect(global.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' }); // page: one validated hop max, never auto-followed
     expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
+  test('one same-host canonical hop (normalized link → trailing slash) is followed; off-host or chained hops are not', async () => {
+    const STRIPPED = PAGE.replace(/\/$/, '');
+    mockFetch({ [STRIPPED]: { redirectTo: PAGE }, [PAGE]: { text: HTML }, [HERO]: { bytes: Buffer.from('img') } });
+    await expect(social.blogHeroSocialImageUrl(STRIPPED)).resolves.toMatch(/blog-hero-dangerous-ants-in-florida-/);
+    expect(global.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+    expect(global.fetch.mock.calls[1][1]).toMatchObject({ redirect: 'error' });
+
+    mockFetch({ [STRIPPED]: { redirectTo: 'https://evil.example.com/' } });
+    await expect(social.blogHeroSocialImageUrl(STRIPPED)).resolves.toBeNull();
+    expect(global.fetch.mock.calls.map(([u]) => String(u))).toEqual([STRIPPED]);
+
+    // A second redirect is refused by redirect:'error' on the hop fetch (mock throws like undici).
+    global.fetch = jest.fn(async (url, opts) => {
+      if (String(url) === STRIPPED) return { ok: false, status: 301, headers: { get: () => PAGE }, text: async () => '' };
+      if (opts.redirect === 'error') throw new Error('redirect refused');
+      return { ok: true, status: 200, headers: { get: () => null }, text: async () => '' };
+    });
+    await expect(social.blogHeroSocialImageUrl(STRIPPED)).resolves.toBeNull();
   });
 
   test('page without og:image, non-200 page, and empty image body all return null (card fallback)', async () => {

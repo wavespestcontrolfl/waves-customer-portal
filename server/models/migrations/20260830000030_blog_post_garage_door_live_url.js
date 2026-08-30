@@ -19,8 +19,12 @@ const PUBLISHED_AT = '2026-05-26T00:00:00Z';
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('blog_posts'))) return;
   if (!(await knex.schema.hasColumn('blog_posts', 'astro_live_url'))) return;
+  // Exact observed state only (status=published, astro_status=draft, no
+  // live URL). If the row was republished (pr_open), failed, or unpublished
+  // before this deploys, that newer lifecycle state wins and nothing is
+  // touched — pages-poll owns those transitions.
   await knex('blog_posts')
-    .where({ slug: SLUG })
+    .where({ slug: SLUG, status: 'published', astro_status: 'draft' })
     .whereNull('astro_live_url')
     .update({
       astro_live_url: LIVE_URL,

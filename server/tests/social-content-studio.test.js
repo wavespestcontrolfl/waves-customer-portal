@@ -692,6 +692,13 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.rowMatchesIntentKeywords({ title: 'Approaching hurricane season lawn prep' }, kws)).toBe(false);
   });
 
+  test('creativeStateSummary names the actual engine state, never a phantom provider failure', () => {
+    expect(Studio.creativeStateSummary({ enabled: false })).toMatch(/engine off/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: false })).toMatch(/not eligible/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: true, produced: true })).toMatch(/produced the Meta image/);
+    expect(Studio.creativeStateSummary({ enabled: true, eligible: true, produced: false })).toMatch(/returned no image/);
+  });
+
   test('legacyCardShipped is true only for a successful platform result that retained a card URL', () => {
     const card = 'https://cdn.example.com/social-media/parrish-card.jpg';
     const gbpCard = 'https://cdn.example.com/social-media/parrish-card-gbp.jpg';
