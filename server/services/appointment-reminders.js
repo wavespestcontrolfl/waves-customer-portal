@@ -3151,11 +3151,35 @@ const AppointmentReminders = {
       if (record.move_hold_until && syncedRows > 0 && options.preserveMoveHold !== true
         && new Date(record.move_hold_until).getTime() > Date.now()) {
         try {
-          const released = await db('appointment_reminders')
-            .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
-            .update({ move_hold_until: null, updated_at: new Date() });
-          if (released > 0) {
-            logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its partial-move cohort`);
+          // The release fires ONLY when the cohort's LIVE services now form
+          // ONE quiet stop (one date, one technician, connected windows —
+          // the same one-stop invariant visit-groups enforces): a partial
+          // move's own post-move primary sync reaches here too (the
+          // dispatch routes sync unconditionally after moveVisitAsUnit
+          // returns), and with siblings still split across conflicting
+          // slots the stop is NOT repaired — the hold must survive (codex
+          // r34/local gate). A genuine repair lands every member back on
+          // one stop and passes.
+          const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
+          const cohort = await db('appointment_reminders as ar')
+            .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+            .where({ 'ar.move_hold_until': record.move_hold_until, 'ar.customer_id': record.customer_id })
+            .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id');
+          const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].includes(String(r.status || '').toLowerCase()));
+          const oneStop = liveRows.length < 2 || (
+            new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
+            && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
+            && require('./visit-groups').windowedMembersConnected(liveRows)
+          );
+          if (oneStop) {
+            const released = await db('appointment_reminders')
+              .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
+              .update({ move_hold_until: null, updated_at: new Date() });
+            if (released > 0) {
+              logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its repaired partial-move cohort`);
+            }
+          } else {
+            logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} kept the retained move hold — its cohort does not yet form one stop`);
           }
         } catch (holdErr) {
           logger.warn(`[appt-remind] retained move-hold release failed after rescheduling ${scheduledServiceId}: ${holdErr.message}`);

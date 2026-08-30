@@ -863,6 +863,9 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(resched).toMatch(/record\.move_hold_until && syncedRows > 0/);
     expect(resched).toMatch(/\.where\(\{ move_hold_until: record\.move_hold_until, customer_id: record\.customer_id \}\)/);
     expect(resched).toMatch(/options\.preserveMoveHold !== true/);
+    // one-stop verification before release (local gate P1): a partial move's
+    // own post-move primary sync must keep the hold while siblings sit split
+    expect(resched).toMatch(/windowedMembersConnected\(liveRows\)/);
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {
