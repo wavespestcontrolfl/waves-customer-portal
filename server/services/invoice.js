@@ -4983,21 +4983,43 @@ const InvoiceService = {
    * no-op. Re-stamped onto a NULL stamp only — a live or mid-mint claim is
    * never overwritten. Returns the restored descriptor or null.
    */
-  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db) {
+  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null } = {}) {
     if (!prepayInvoiceId) return null;
     const claim = await conn("setup_fee_claims")
       .where({ invoice_id: prepayInvoiceId })
       .first("id", "scheduled_service_id", "amount");
-    if (!claim || !claim.scheduled_service_id) return null;
+    if (!claim) return null;
     const amount = Math.round(Number(claim.amount) * 100) / 100;
     if (!(amount > 0)) return null;
+    // An ANCHOR-LESS record (codex #3591 r39 P1): the estimate-accept prepay
+    // billed the setup before any series existed (manual Mark Won seeds the
+    // series later). Resolve the rodent root NOW from the term's source
+    // estimate; with no root to carry the obligation the record is kept and
+    // a human is paged — the fee is owed and nothing else re-stamps it.
+    let anchorId = claim.scheduled_service_id || null;
+    if (!anchorId) {
+      if (!sourceEstimateId) return null;
+      const { authoritativeServiceKey } = require("./secure-appointment-plans");
+      const roots = await conn("scheduled_services")
+        .where({ source_estimate_id: sourceEstimateId })
+        .whereNull("recurring_parent_id")
+        .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+        .select("id", "service_type", "service_id");
+      for (const root of roots || []) {
+        if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+      }
+      if (!anchorId) {
+        logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} (estimate ${sourceEstimateId}) has no rodent series root to restore onto — $${amount.toFixed(2)} bait-station setup is owed again; bill it manually or re-run once the series is booked (record kept)`);
+        return null;
+      }
+    }
     // The record itself is the provenance (codex #3591 r37 P1): only the
     // prepay mints that billed the setup as their own line write one (switch,
     // secure-plan, prepay-on-book, estimate-accept prepay), so an
     // estimate-origin parent restores exactly like a direct one — a standard
     // accept never writes a record and never lands here.
     const parent = await conn("scheduled_services")
-      .where({ id: claim.scheduled_service_id })
+      .where({ id: anchorId })
       .first("id", "source_estimate_id", "pending_setup_fee");
     if (!parent) return null;
     const restored = await conn("scheduled_services")

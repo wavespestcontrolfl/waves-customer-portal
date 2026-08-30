@@ -8253,33 +8253,63 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenRecurring = replayShapes.some((shape) => truthyRecurringFlag(shape.recurringCustomer)
       || truthyRecurringFlag(shape.isRecurringCustomer)
       || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
-      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0)
-      || (Array.isArray(estData.setupWaiverPriorQualifyingServices) && estData.setupWaiverPriorQualifyingServices.length > 0);
-    if (!frozenSnapshot && !frozenRecurring) return;
-    if (await isActivePlanCustomer(db, estimate.customer_id)) return;
-    // Drop every frozen artifact derived from the stale "existing customer"
-    // classification, not just the snapshot: priorQualifyingServices is
-    // re-injected by extractEngineInputs() on every recompute (keeping the
-    // combined-tier discount), the recurring flags in the stored replay
-    // shapes re-grant the member perk the same way, and
-    // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
-    // the runtime cache (returning the old bundle with no waivable setup
-    // fee). Leaving any behind lets the lead keep member pricing /
-    // undercharge even after the snapshot is gone.
-    delete estData.membershipSnapshot;
-    delete estData.priorQualifyingServices;
-    // The account-wide setup-waiver list is member evidence too — a lapsed
-    // member's replay must re-add the rodent setup (codex #3591 r34 P1).
-    delete estData.setupWaiverPriorQualifyingServices;
-    for (const shape of replayShapes) {
-      delete shape.recurringCustomer;
-      delete shape.isRecurringCustomer;
-      delete shape.setupWaiverPriorQualifyingServices;
-      // A prior-service list NESTED in a replay shape (legacy rows predate
-      // the save-time sanitizer) replays straight through extractEngineInputs
-      // and restores the combined-tier discount the top-level delete just
-      // removed.
-      delete shape.priorQualifyingServices;
+      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
+    // The account-wide rodent setup-waiver evidence (top-level or nested in a
+    // replay shape) arms the trigger on its own.
+    const hasSetupWaiverEvidence = (obj) => Array.isArray(obj?.setupWaiverPriorQualifyingServices)
+      && obj.setupWaiverPriorQualifyingServices.length > 0;
+    const frozenSetupWaiver = hasSetupWaiverEvidence(estData) || replayShapes.some(hasSetupWaiverEvidence);
+    if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver) return;
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    // The rodent setup waiver is re-validated INDEPENDENTLY of plan
+    // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
+    // family (e.g. pest) and rodent bait never self-waives, so a still-active
+    // rodent-only member whose pest plan was cancelled must not replay the
+    // stale pest evidence and accept without the $99 setup. Re-read the
+    // canonical families; when nothing but rodent_bait remains — or the
+    // read fails (FAIL CLOSED: unprovable evidence never waives a fee) — the
+    // evidence is dropped and the quote repriced.
+    let setupWaiverStale = false;
+    if (frozenSetupWaiver) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+        const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id) || [];
+        setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
+      } catch (probeErr) {
+        logger.warn(`[estimate-public] setup-waiver evidence re-check failed for estimate ${estimate.id}: ${probeErr.message} — evidence dropped (fail closed)`);
+        setupWaiverStale = true;
+      }
+    }
+    if (activeMember && !setupWaiverStale) return;
+    if (setupWaiverStale) {
+      delete estData.setupWaiverPriorQualifyingServices;
+      for (const shape of replayShapes) delete shape.setupWaiverPriorQualifyingServices;
+    }
+    if (!activeMember) {
+      // Drop every frozen artifact derived from the stale "existing customer"
+      // classification, not just the snapshot: priorQualifyingServices is
+      // re-injected by extractEngineInputs() on every recompute (keeping the
+      // combined-tier discount), the recurring flags in the stored replay
+      // shapes re-grant the member perk the same way, and
+      // sendSnapshot.pricingBundle is consulted by buildPricingBundle() before
+      // the runtime cache (returning the old bundle with no waivable setup
+      // fee). Leaving any behind lets the lead keep member pricing /
+      // undercharge even after the snapshot is gone.
+      delete estData.membershipSnapshot;
+      delete estData.priorQualifyingServices;
+      // The account-wide setup-waiver list is member evidence too — a lapsed
+      // member's replay must re-add the rodent setup (codex #3591 r34 P1).
+      delete estData.setupWaiverPriorQualifyingServices;
+      for (const shape of replayShapes) {
+        delete shape.recurringCustomer;
+        delete shape.isRecurringCustomer;
+        delete shape.setupWaiverPriorQualifyingServices;
+        // A prior-service list NESTED in a replay shape (legacy rows predate
+        // the save-time sanitizer) replays straight through extractEngineInputs
+        // and restores the combined-tier discount the top-level delete just
+        // removed.
+        delete shape.priorQualifyingServices;
+      }
     }
     // Clearing the flags alone is not enough: the discount is already BAKED
     // INTO the stored result/totals from save-time, and buildPricingBundle's

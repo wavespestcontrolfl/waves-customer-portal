@@ -7,6 +7,18 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { qualifyingKeysForRow } = require('../services/waveguard-existing-services');
+
+// Portal coverage flag for one upcoming row — the SAME guard chain the tier
+// evidence loaders run (codex #3591 r39 P2): a commercial row or a NON-bait
+// rodent-led row (trapping/exclusion — catalog identity first, label only for
+// unlinked rows) is never plan coverage, even when its stale/canonical
+// service_type ("Rodent Pest Control") would classify as pest_control on the
+// combined text. Only then does the family classifier decide.
+function portalRowQualifiesForWaveGuard(row) {
+  const { isCommercialServiceRow, isNonBaitRodentServiceRow } = require('../services/self-booking-plan-sync');
+  if (isCommercialServiceRow(row) || isNonBaitRodentServiceRow(row)) return false;
+  return qualifyingKeysForRow(row).length > 0;
+}
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
 
@@ -154,11 +166,11 @@ router.get('/', async (req, res, next) => {
         // (the same classifier alignment uses, which follows the LIVE
         // rodent_waveguard.tier_qualifier flag) — the portal reads this
         // instead of re-deriving coverage from the label (codex #3591 r19 P1).
-        waveguardQualifying: qualifyingKeysForRow({
+        waveguardQualifying: portalRowQualifiesForWaveGuard({
           service_type: s.service_type,
           service_key: s.catalog_service_key,
           service_name: s.catalog_service_name,
-        }).length > 0,
+        }),
         // Self-serve deep link (same page the reminder texts link) — the
         // portal's Reschedule buttons open this instead of drafting an SMS
         // to the office. Same-customer row, so exposing the token here adds

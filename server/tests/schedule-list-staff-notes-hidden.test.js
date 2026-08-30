@@ -66,7 +66,12 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
     // Stale label on a row repointed to the bait program: the CATALOG
     // identity decides (codex #3591 r23 P1).
     const staleLabelRow = { ...row, id: 'svc-s', service_type: 'Rodent Trapping', catalog_service_key: 'rodent_bait_quarterly', catalog_service_name: 'Quarterly Rodent Bait Station Service' };
-    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow]));
+    // NON-bait rodent catalog identity under a canonical "Rodent Pest
+    // Control" label: the combined text reads as pest_control, but the
+    // non-bait guard runs first (codex #3591 r39 P2). Commercial rows too.
+    const trapCatalogRow = { ...row, id: 'svc-tc', service_type: 'Rodent Pest Control', catalog_service_key: 'rodent_trapping', catalog_service_name: 'Rodent Trapping' };
+    const commercialRow = { ...row, id: 'svc-c', service_type: 'Commercial Pest Control' };
+    db.mockReturnValueOnce(listChain([row, rodentRow, trapRow, staleLabelRow, trapCatalogRow, commercialRow]));
     await withServer(async (baseUrl) => {
       const body = await (await fetch(`${baseUrl}/schedule`)).json();
       const byId = Object.fromEntries(body.upcoming.map((v) => [v.id, v]));
@@ -74,6 +79,8 @@ describe('GET /schedule hides staff notes from the customer payload', () => {
       expect(byId['svc-r'].waveguardQualifying).toBe(true);
       expect(byId['svc-t'].waveguardQualifying).toBe(false);
       expect(byId['svc-s'].waveguardQualifying).toBe(true);
+      expect(byId['svc-tc'].waveguardQualifying).toBe(false);
+      expect(byId['svc-c'].waveguardQualifying).toBe(false);
     });
     // Live flag off → rodent bait no longer qualifies on the portal payload.
     const constants = require('../services/pricing-engine/constants');

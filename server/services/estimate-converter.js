@@ -5979,14 +5979,19 @@ const EstimateConverter = {
         for (const root of roots || []) {
           if ((await authoritativeServiceKey(database, root)) === 'rodent_bait') { rodentRoot = root; break; }
         }
-        if (rodentRoot) {
-          await recordSetupFeeClaimForInvoice(database, {
-            invoiceId: draftInvoiceId,
-            anchorId: rodentRoot.id,
-            amount: frozenRodentBaitSetupAmount(estimateData),
-          });
-        } else {
-          logger.warn(`[estimate-converter] Estimate ${estimateId}: prepay billed a rodent setup but no rodent series root was scheduled — setup claim not ledgered`);
+        // No root yet (manual Mark Won runs skipAutoSchedule — the series is
+        // seeded by the operator afterwards): the record is still written,
+        // anchor-less, keyed to the prepay invoice (codex #3591 r39 P1). The
+        // term-cancel restore resolves the anchor THEN, from the term's
+        // source estimate, so a refund of this prepay can still put the
+        // setup obligation back on the series that was booked later.
+        await recordSetupFeeClaimForInvoice(database, {
+          invoiceId: draftInvoiceId,
+          anchorId: rodentRoot ? rodentRoot.id : null,
+          amount: frozenRodentBaitSetupAmount(estimateData),
+        });
+        if (!rodentRoot) {
+          logger.info(`[estimate-converter] Estimate ${estimateId}: prepay billed the rodent setup before any series root exists — claim ledgered anchor-less; the restore resolves the root from the estimate`);
         }
       }
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {

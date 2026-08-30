@@ -171,6 +171,31 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     expect(c.writes.map((w) => w.op)).toEqual(['update', 'delete']);
   });
 
+  test('an ANCHOR-LESS record (prepay accept before any series existed) restores onto the rodent root resolved from the term\'s source estimate; with no root the record is kept (codex #3591 r39 P1)', async () => {
+    const anchorless = { id: 'claim-1', scheduled_service_id: null, amount: '99.00' };
+    const c = conn({
+      claim: anchorless,
+      scheduledService: { id: 'root-rb', source_estimate_id: 'est-1', pending_setup_fee: null },
+      rootsForCoverage: [
+        { id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null },
+        { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null },
+      ],
+    });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c, { sourceEstimateId: 'est-1' }))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+    expect(c.writes).toEqual([
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb' }, whereNull: 'pending_setup_fee' }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'delete', where: { id: 'claim-1' } }),
+    ]);
+    // No rodent root yet / no estimate to resolve from → nothing written, record kept.
+    const noRoot = conn({ claim: anchorless, rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }] });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', noRoot, { sourceEstimateId: 'est-1' })).toBeNull();
+    expect(noRoot.writes).toEqual([]);
+    const noEstimate = conn({ claim: anchorless });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', noEstimate)).toBeNull();
+    expect(noEstimate.writes).toEqual([]);
+  });
+
   test('no record for the prepay (nothing was billed) / no prepay id → nothing happens', async () => {
     const c = conn({ claim: null, scheduledService: { id: 'svc-parent', source_estimate_id: null, pending_setup_fee: null } });
     expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c)).toBeNull();
@@ -222,7 +247,10 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('the estimate-accept prepay ledgers the billed rodent setup on the scheduled rodent root, inside the accept transaction (codex #3591 r37 P1)', () => {
     expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\) \{/);
-    expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot\.id,/);
+    expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot \? rodentRoot\.id : null,/);
+    // …and the restore resolves an anchor-less record from the term's source estimate (codex #3591 r39 P1).
+    const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
+    expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, conn, \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null \}\)/g) || []).length).toBe(2);
     // …and the restore no longer refuses an estimate-origin parent.
     expect(invoice).not.toMatch(/if \(!parent \|\| parent\.source_estimate_id\) return null;/);
   });
@@ -243,11 +271,14 @@ describe('source contracts — where the lifecycle is wired', () => {
   const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
 
   test('BOTH term-cancel branches (true void/refund AND decided-lapse refund) restore the claim right after the superseded-invoice restore', () => {
-    const calls = [...renewals.matchAll(/restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, conn\)/g)].map((m) => m[1]);
+    // Each branch hands the term's source estimate along so an anchor-less
+    // record can resolve its rodent root at restore time (codex #3591 r39 P1).
+    const CALL_RE = /restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, conn, \{ sourceEstimateId: \1\.source_estimate_id \|\| null \}\)/g;
+    const calls = [...renewals.matchAll(CALL_RE)].map((m) => m[1]);
     expect(calls.sort()).toEqual(['decided', 'updated']);
     for (const who of ['updated', 'decided']) {
       const superseded = renewals.indexOf(`restoreSwitchSupersededInvoicesForPrepay(${who}.prepay_invoice_id, conn)`);
-      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, conn)`);
+      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, conn, { sourceEstimateId: ${who}.source_estimate_id || null })`);
       expect(superseded).toBeGreaterThan(-1);
       expect(claim).toBeGreaterThan(superseded);
     }
