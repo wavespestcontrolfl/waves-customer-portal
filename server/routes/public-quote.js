@@ -1250,8 +1250,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // because the parcel-scale figure (and any silent substitute) is not a
     // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
     // flag keep today's synthetic-lot pricing.
+    // Lot consumers on this path: mosquito's treatable area, rodent bait's
+    // 12k/20k brackets, and tree & shrub's lot-derived bed area
+    // (estimateTreeShrubBedAreaFromLot) — a rejected condo lot substituting
+    // sqft×4 must not hand any of them a customer-ready price (codex P0 r4).
     const lotFlagForcesSiteQuote = lotVerifyFlagged && !lotSizeMeasured
-      && !!(services.mosquito || services.rodentBait);
+      && !!(services.mosquito || services.rodentBait || services.treeShrub);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
