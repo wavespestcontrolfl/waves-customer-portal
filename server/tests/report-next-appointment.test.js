@@ -28,6 +28,9 @@ function makeKnex(fixtures) {
       },
       andWhere(column, op, value) {
         if (op === '>=') rows = rows.filter((row) => String(row[column]) >= String(value));
+        // date-window comparisons the cockroach program resolver relies on
+        if (op === '<') rows = rows.filter((row) => String(row[column]) < String(value));
+        if (op === '>') rows = rows.filter((row) => String(row[column]) > String(value));
         return query;
       },
       whereIn(column, values) {
@@ -733,18 +736,18 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-program', makeKnex(fixtures()), LIVE_V2);
     // one earlier visit on estimate A → this is treatment 2 (the est-OLD visit is another program;
     // the customer-wide gauge visitSequence of 3 is NOT the treatment number)
-    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2 });
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2, laterCompleted: 0 });
     // only the est-A german_roach row counts: not the est-B visit that lands first, not the
     // cockroach_control package sold on the same estimate
     expect(data.cockroachUpcomingRoachVisits).toBe(1);
     expect(data.cockroachNextTreatmentVisit).toEqual({ serviceType: 'German Roach Cleanout', scheduledDate: '2999-01-05', windowStart: '10:00:00' });
     // the state the payload carries is stamped for the PDF store key
-    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-p2u1');
+    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-p2u1l0');
   });
 
   test('pdf/static builds carry the program position and the upcoming count, never the date', async () => {
     const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-program-pdf', makeKnex(fixtures()), { mode: 'pdf' });
-    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2 });
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2, laterCompleted: 0 });
     expect(data.cockroachUpcomingRoachVisits).toBe(1);
     expect(data).not.toHaveProperty('cockroachNextTreatmentVisit');
   });
@@ -767,6 +770,15 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     // bounded same-key pick: the first same-key booking inside the window
     expect(data.cockroachNextTreatmentVisit?.scheduledDate).toBeUndefined();
     expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-px');
+  });
+
+  test('a treatment completed AFTER this one counts toward the total (an earlier report never shrinks)', async () => {
+    const fx = fixtures();
+    fx.scheduled_services.push({ id: 'scheduled-later-a', customer_id: 'customer-1', scheduled_date: '2026-06-01', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', source_estimate_id: 'est-A' });
+    fx.service_records.push({ id: 'rec-later-a', customer_id: 'customer-1', status: 'completed', service_date: '2026-06-01', service_type: 'German Roach Cleanout', scheduled_service_id: 'scheduled-later-a', service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: {} } }) });
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-later', makeKnex(fx), LIVE_V2);
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2, laterCompleted: 1 });
+    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-p2u1l1');
   });
 
   test('gate off → no program fields at all', async () => {

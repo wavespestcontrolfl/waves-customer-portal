@@ -1025,7 +1025,7 @@ export default function ServiceReportDocument({ data, token }) {
             {/* Termite V2 owns the reconciled activity reading (map pins may
                 escalate a frozen "None observed") — the frozen gauge bullet
                 would contradict it (codex P2 #3600 r10). */}
-            {activity && activity.levelWord && !termiteV2Primary && !cockroachV2?.statusReconciled && (
+            {activity && activity.levelWord && !termiteV2Primary && !cockroachV2 && (
               <Bullet>
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>

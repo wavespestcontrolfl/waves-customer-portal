@@ -64,7 +64,10 @@ export function activityTrendLine(activity) {
 export function CockroachStatusHero({ status, statusSummary, metrics, narrative = null, activityTrend = null, program = null }) {
   if (!status) return null;
   const t = tone(status.tone);
-  const trendLine = activityTrendLine(activityTrend);
+  // The headline already carries the comparison on a trend visit
+  // (improving / worsening / stable) — the sentence stays for the baseline
+  // and the plain-level cases only (codex P2 #3613 r4).
+  const trendLine = ['improving', 'worsening', 'stable'].includes(status.key) ? null : activityTrendLine(activityTrend);
   const position = program?.treatmentNumber
     ? ` · Treatment ${program.treatmentNumber}${program.treatmentsTotal ? ` of ${program.treatmentsTotal}` : ''}`
     : '';

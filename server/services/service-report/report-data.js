@@ -4590,7 +4590,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : null });
       if (program && !program.failed) {
         cockroachProgramPosition = program.treatmentNumber != null
-          ? { treatmentNumber: program.treatmentNumber }
+          ? { treatmentNumber: program.treatmentNumber, laterCompleted: program.laterCompleted || 0 }
           : { treatmentNumber: null, reason: program.positionReason || 'no_lineage' };
         cockroachUpcomingRoachVisits = program.upcoming;
         if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);

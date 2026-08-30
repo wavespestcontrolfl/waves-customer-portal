@@ -205,19 +205,23 @@ function buildHelp({ prepChips, species, baitRecorded = false }) {
  * (live view only) extend it, and a program with no upcoming visit past
  * treatment 1 is complete.
  */
-function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachVisits = null }) {
+function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachVisits = null, laterCompleted = 0 }) {
   // Position UNKNOWN (lineage lookup failed → fail closed, codex P1): no
   // treatment number, no total, never "complete".
-  if (treatmentNumber == null) return { treatmentNumber: null, treatmentsTotal: null, complete: false };
+  if (treatmentNumber == null) return { treatmentNumber: null, treatmentsTotal: null, complete: false, laterCompleted: 0 };
   const number = Math.max(1, Number(treatmentNumber) || 1);
+  const later = Math.max(0, Number(laterCompleted) || 0);
   const packageTotal = PACKAGE_TREATMENTS_BY_KEY[String(serviceKey || '')] || null;
   let total = packageTotal;
   if (!total && upcomingRoachVisits != null) {
-    total = upcomingRoachVisits > 0 ? number + upcomingRoachVisits : (number > 1 ? number : null);
+    // treatments after this one = still scheduled + already completed later
+    const after = upcomingRoachVisits + later;
+    total = after > 0 ? number + after : (number > 1 ? number : null);
   }
-  if (total != null && total < number) total = number;
+  if (total != null && total < number + later) total = number + later;
+  // "complete" describes THIS treatment: it is the program's last one.
   const complete = total != null ? number >= total : false;
-  return { treatmentNumber: number, treatmentsTotal: total, complete };
+  return { treatmentNumber: number, treatmentsTotal: total, complete, laterCompleted: later };
 }
 
 function programTitle(program) {
@@ -271,12 +275,26 @@ function betweenVisitsCopy({ german, large, rw }) {
     : 'Activity usually tapers over the first week after treatment. Text us if it gets worse rather than better.';
 }
 
-function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, work = [], nextStep = null, positionReason = null }) {
+// A tech's required next-step chip that promises a follow-up ("Follow-up
+// recommended", "Follow-up in 10–14 days") is dropped when the program
+// state already answers it — the program is complete, a next treatment is
+// booked (the date line is authoritative), or a later treatment has since
+// happened (codex P2 #3613 r4).
+const FOLLOWUP_STEP_RE = /follow-?up/i;
+function nextStepFits({ nextStep, program, nextVisit, laterCompleted = 0 }) {
+  if (!nextStep) return null;
+  if (FOLLOWUP_STEP_RE.test(nextStep) && (program.complete || nextVisit || laterCompleted > 0)) return null;
+  return nextStep;
+}
+
+function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, work = [], nextStep: rawNextStep = null, positionReason = null }) {
   const german = isGerman(species);
   const large = isLargeRoach(species);
   const rw = recordedWork(work);
   const lines = [];
   let nextVisitMissing = false;
+  const laterCompleted = program.laterCompleted || 0;
+  const nextStep = nextStepFits({ nextStep: rawNextStep, program, nextVisit, laterCompleted });
   if (program.treatmentNumber == null) {
     // Unknown position: no numbering, no badge, no completion claim. The
     // next booked treatment still references its date (owner ruling) when
@@ -289,7 +307,11 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
     if (nextStep) lines.push({ label: 'From your technician', text: nextStep });
     return { title: programTitle(program), badge: null, lines, nextVisitMissing: false };
   }
-  if (!program.complete) {
+  if (!program.complete && laterCompleted > 0) {
+    // This report is being read after a later treatment already happened:
+    // no date to reference, nothing missing — the program moved on.
+    lines.push({ label: 'Since this visit', text: `${laterCompleted === 1 ? 'A later treatment in this program has' : `${laterCompleted} later treatments in this program have`} since been completed — each has its own report.` });
+  } else if (!program.complete) {
     if (scheduleResolved) {
       if (nextVisit) {
         lines.push({ label: 'Next treatment', kind: 'next_visit' });
@@ -300,7 +322,8 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
     }
     lines.push({ label: 'What we will do', text: nextVisitPlan(rw) });
     lines.push({ label: 'Between now and then', text: betweenVisitsCopy({ german, large, rw }) });
-  } else {
+  }
+  if (program.complete) {
     lines.push({
       label: 'What to expect',
       text: rw.bait
@@ -362,6 +385,7 @@ function buildCockroachReportV2({
   nextVisit = null,
   scheduleResolved = false,
   upcomingRoachVisits = null,
+  laterCompleted = 0,
   positionReason = null,
 } = {}) {
   if (typedReportType !== COCKROACH_TYPED_TYPE) return null;
@@ -378,7 +402,7 @@ function buildCockroachReportV2({
   const status = resolveCockroachStatus({ activityLevel, species, activity, visitSequence, evidence });
   const statusReconciled = Boolean(status.reconciled);
   delete status.reconciled;
-  const program = resolveProgram({ serviceKey, treatmentNumber, upcomingRoachVisits });
+  const program = resolveProgram({ serviceKey, treatmentNumber, upcomingRoachVisits, laterCompleted });
   const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, work, nextStep, positionReason });
 
   const metrics = [
@@ -409,7 +433,7 @@ function buildCockroachReportV2({
     program,
     whatsNext,
     nextVisit: nextVisit || null,
-    nextStep: nextStep || null,
+    nextStep: nextStepFits({ nextStep, program, nextVisit, laterCompleted: program.laterCompleted }),
     visitSequence: Math.max(1, Number(visitSequence) || 1),
   };
 }
@@ -495,6 +519,9 @@ function attachCockroachReportV2(data, service = {}) {
   const positionReason = positionResolved && treatmentNumber == null
     ? (data.cockroachProgramPosition && data.cockroachProgramPosition.reason) || 'failed'
     : null;
+  const laterCompleted = positionResolved && data.cockroachProgramPosition
+    ? Math.max(0, Number(data.cockroachProgramPosition.laterCompleted) || 0)
+    : 0;
   delete data.cockroachNextTreatmentVisit;
   delete data.cockroachUpcomingRoachVisits;
   delete data.cockroachProgramPosition;
@@ -521,6 +548,7 @@ function attachCockroachReportV2(data, service = {}) {
       nextVisit,
       scheduleResolved,
       upcomingRoachVisits,
+      laterCompleted,
       positionReason,
     });
     if (built) {
@@ -629,12 +657,35 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
         .select('id', 'source_estimate_id', 'followup_source_service_id');
       for (const row of (Array.isArray(scheduledRows) ? scheduledRows : [])) scheduledById.set(String(row.id), row);
     }
-    const prior = (Array.isArray(priorList) ? priorList : []).filter((row) => {
+    const sameProgramRecord = (row) => {
       if (!sameKey(row)) return false;
       if (!lineage.known) return true;
       const sched = row?.scheduled_service_id ? scheduledById.get(String(row.scheduled_service_id)) : null;
       return sched ? lineage.matches(sched) : false;
-    }).length;
+    };
+    const prior = (Array.isArray(priorList) ? priorList : []).filter(sameProgramRecord).length;
+
+    // ── later treatments already completed (codex P2 #3613 r4) ──
+    // An earlier report's total must not shrink as the program progresses:
+    // a treatment completed AFTER this one is neither "prior" nor "still
+    // scheduled", so it is counted here and folded into the total.
+    let laterCompleted = 0;
+    if (lineage.known && serviceDay) {
+      const laterList = (await knex('service_records')
+        .where('customer_id', service.customer_id)
+        .whereIn('status', ['completed', 'complete'])
+        .andWhere('service_date', '>', serviceDay)
+        .modify((qb) => { if (service.id) qb.whereNot('id', service.id); })
+        .select('id', 'service_type', 'service_data', 'scheduled_service_id')) || [];
+      const laterIds = (Array.isArray(laterList) ? laterList : []).map((row) => row?.scheduled_service_id).filter(Boolean);
+      if (laterIds.length) {
+        const laterSched = await knex('scheduled_services')
+          .whereIn('id', laterIds)
+          .select('id', 'source_estimate_id', 'followup_source_service_id');
+        for (const row of (Array.isArray(laterSched) ? laterSched : [])) scheduledById.set(String(row.id), row);
+      }
+      laterCompleted = (Array.isArray(laterList) ? laterList : []).filter(sameProgramRecord).length;
+    }
 
     // ── treatments still ahead ──
     let rows = upcomingRows;
@@ -685,6 +736,7 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
       treatmentNumber: lineage.known ? prior + 1 : null,
       positionReason: lineage.known ? null : 'no_lineage',
       upcoming,
+      laterCompleted,
       nextRow,
       lineageKnown: lineage.known,
     };
@@ -707,7 +759,7 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
  */
 function cockroachProgramSignature(program) {
   const state = program && !program.failed && program.treatmentNumber != null
-    ? `${program.treatmentNumber}u${program.upcoming}`
+    ? `${program.treatmentNumber}u${program.upcoming}l${program.laterCompleted || 0}`
     : 'x';
   return `-roachv2a-p${state}`;
 }
@@ -768,4 +820,5 @@ module.exports = {
   buildWork,
   recordedWork,
   dedupedNarrative,
+  nextStepFits,
 };

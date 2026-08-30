@@ -20,6 +20,7 @@ const {
   buildHelp,
   buildWork,
   dedupedNarrative,
+  nextStepFits,
   cockroachReportV2RenderedSignature,
   COCKROACH_V2_DASHBOARD_FIELD_KEYS,
 } = require('../services/service-report/cockroach-report-v2');
@@ -53,7 +54,7 @@ describe('buildCockroachReportV2 — assembly and guards', () => {
     ]);
     // built summary names only what was recorded
     expect(out.statusSummary).toMatch(/Live roaches, Droppings, Egg cases were found in 4 areas/);
-    expect(out.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(out.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 });
     expect(out.whatsNext.title).toBe('Treatment 1 of 2 complete');
     expect(out.whatsNext.badge).toBe('IN PROGRESS');
   });
@@ -150,18 +151,18 @@ describe('buildHelp — the German cooperation language is mandatory', () => {
 
 describe('resolveProgram — honest about what the catalog and calendar say', () => {
   it('packaged keys fix the total; the calendar fills in for the severity-priced cleanout', () => {
-    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
-    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
-    expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0 });
+    expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 0 });
     // german_roach: 1 upcoming roach visit → 2 total
-    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
-    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0 });
     // treatment 1 with nothing on the calendar: total UNKNOWN, not complete
-    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 1, treatmentsTotal: null, complete: false });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 0 })).toEqual({ treatmentNumber: 1, treatmentsTotal: null, complete: false, laterCompleted: 0 });
     // pdf/static (calendar not resolved): total unknown, never "complete"
-    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: null, complete: false });
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: null, complete: false, laterCompleted: 0 });
     // a package never reads "3 of 2"
-    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 3 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 3, complete: true });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 3 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 3, complete: true, laterCompleted: 0 });
   });
 });
 
@@ -216,7 +217,7 @@ describe('cockroachReportV2RenderedSignature — the store key describes the ren
 describe('unknown program position (lineage lookup failed) → no program claims', () => {
   it('builder: no number, no badge, no next-visit plan; attach: null position field means unknown, absent field means treatment 1', () => {
     const out = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: null, scheduleResolved: true, nextVisit: { scheduledDate: '2999-01-01' } });
-    expect(out.program).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
+    expect(out.program).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false, laterCompleted: 0 });
     expect(out.whatsNext.title).toBe("Today's treatment");
     expect(out.whatsNext.title).not.toMatch(/complete/i);
     expect(out.whatsNext.badge).toBeNull();
@@ -227,7 +228,40 @@ describe('unknown program position (lineage lookup failed) → no program claims
     const failed = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: null, positionReason: 'failed', scheduleResolved: true, nextVisit: null });
     expect(failed.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then', 'Your program']);
     expect(out.whatsNext.nextVisitMissing).toBe(false);
-    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: null })).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: null })).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false, laterCompleted: 0 });
+  });
+});
+
+describe('later completed treatments and follow-up next steps (codex P2 #3613 r4)', () => {
+  it('a later completed same-program visit keeps the total: a treatment-1 report never shrinks from 1 of 3 to 1 of 2', () => {
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 1, upcomingRoachVisits: 1, laterCompleted: 1 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 3, complete: false, laterCompleted: 1 });
+    // treatment 2's report after treatment 3 happened: not "2 of 2 complete"
+    expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2, upcomingRoachVisits: 0, laterCompleted: 1 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 1 });
+    // packaged total still honest when a later visit exists beyond the package size
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1, laterCompleted: 2 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 3, complete: false, laterCompleted: 2 });
+  });
+
+  it('an earlier report read after later treatments references none, claims nothing missing, and says the program moved on', () => {
+    const out = buildWhatsNext({ program: { treatmentNumber: 1, treatmentsTotal: 3, complete: false, laterCompleted: 2 }, species: 'German', scheduleResolved: true, nextVisit: null, nextStep: 'Follow-up in 10–14 days' });
+    expect(out.badge).toBe('IN PROGRESS');
+    expect(out.nextVisitMissing).toBe(false);
+    expect(out.lines[0].label).toBe('Since this visit');
+    expect(out.lines[0].text).toMatch(/2 later treatments in this program have since been completed/);
+    expect(out.lines.map((l) => l.label)).not.toContain('Next treatment');
+    expect(out.lines.map((l) => l.label)).not.toContain('From your technician');
+  });
+
+  it('follow-up-oriented next steps are dropped when the program is complete or a next date is booked; other steps pass', () => {
+    const done = { treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0 };
+    const open = { treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 };
+    expect(nextStepFits({ nextStep: 'Follow-up recommended', program: done, nextVisit: null })).toBeNull();
+    expect(nextStepFits({ nextStep: 'Follow-up in 10–14 days', program: open, nextVisit: { scheduledDate: '2999-01-01' } })).toBeNull();
+    expect(nextStepFits({ nextStep: 'Follow-up in 10–14 days', program: open, nextVisit: null })).toBe('Follow-up in 10–14 days');
+    expect(nextStepFits({ nextStep: 'Keep bait undisturbed.', program: done, nextVisit: null })).toBe('Keep bait undisturbed.');
+    const built = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: 2, nextStep: 'Follow-up recommended' });
+    expect(built.program.complete).toBe(true);
+    expect(built.nextStep).toBeNull();
+    expect(JSON.stringify(built.whatsNext)).not.toMatch(/follow-?up/i);
   });
 });
 
@@ -315,7 +349,7 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     process.env.COCKROACH_REPORT_V2 = 'true';
     // an older roach job put the gauge at visit 3; this package is on its first treatment
     const data = attachCockroachReportV2({ ...payload(), typedReport: { ...payload().typedReport, visitSequence: 3 }, cockroachProgramPosition: { treatmentNumber: 1 } }, service);
-    expect(data.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(data.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 });
     expect(data.cockroachReportV2.whatsNext.title).toBe('Treatment 1 of 2 complete');
     // …and without a position (legacy / lookup failed) the builder falls back to treatment 1, not the gauge
     const noPos = payload(); delete noPos.cockroachProgramPosition; noPos.typedReport.visitSequence = 3;
@@ -345,13 +379,13 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     expect(pdf.cockroachReportV2.whatsNext.nextVisitMissing).toBe(false);
     expect(pdf.cockroachReportV2.whatsNext.lines.map((l) => l.label)).not.toContain('Next treatment');
     // the packaged total still prints on the PDF (catalog fact, not calendar)
-    expect(pdf.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false });
+    expect(pdf.cockroachReportV2.program).toEqual({ treatmentNumber: 1, treatmentsTotal: 2, complete: false, laterCompleted: 0 });
     // a severity-priced cleanout's COMPLETION STATE reaches the PDF too: the
     // same-program upcoming count is passed in every mode, only the date is
     // not (codex P1 #3613 r1)
     const cleanout = { service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: GERMAN_MODERATE } }) };
     const finalPdf = attachCockroachReportV2({ ...pdfPayload, cockroachProgramPosition: { treatmentNumber: 2 }, cockroachUpcomingRoachVisits: 0 }, cleanout);
-    expect(finalPdf.cockroachReportV2.program).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true });
+    expect(finalPdf.cockroachReportV2.program).toEqual({ treatmentNumber: 2, treatmentsTotal: 2, complete: true, laterCompleted: 0 });
     expect(finalPdf.cockroachReportV2.whatsNext.badge).toBe('COMPLETE');
     expect(finalPdf.cockroachReportV2.whatsNext.lines.map((l) => l.label)).not.toContain('What we will do');
   });
@@ -415,7 +449,7 @@ describe('cockroachReportV2PdfSignature / snapshot helpers', () => {
         let rows = [...(tables[table] || [])];
         const q = {
           where(c, v) { if (typeof c === 'object') rows = rows.filter((r) => Object.entries(c).every(([k, x]) => r[k] === x)); else rows = rows.filter((r) => r[c] === v); return q; },
-          andWhere(c, op, v) { if (op === '>=') rows = rows.filter((r) => String(r[c]) >= String(v)); if (op === '<') rows = rows.filter((r) => String(r[c]) < String(v)); return q; },
+          andWhere(c, op, v) { if (op === '>=') rows = rows.filter((r) => String(r[c]) >= String(v)); if (op === '<') rows = rows.filter((r) => String(r[c]) < String(v)); if (op === '>') rows = rows.filter((r) => String(r[c]) > String(v)); return q; },
           whereIn(c, vs) { rows = rows.filter((r) => vs.includes(r[c])); return q; },
           whereNot(c, v) { rows = rows.filter((r) => r[c] !== v); return q; },
           whereRaw() { return q; }, modify(fn) { fn(q); return q; }, limit: () => q, orderBy: () => q, select: () => q, leftJoin: () => q,
@@ -428,10 +462,10 @@ describe('cockroachReportV2PdfSignature / snapshot helpers', () => {
       return knex;
     };
     const sig = await cockroachReportV2PdfSignature(record, fake(false));
-    expect(sig).toBe('-roachv2a-p2u1');
+    expect(sig).toBe('-roachv2a-p2u1l0');
     // the calendar changes → different key → cache miss → re-render
     tables.scheduled_services = tables.scheduled_services.filter((r) => r.id !== 'sch-3');
-    expect(await cockroachReportV2PdfSignature(record, fake(false))).toBe('-roachv2a-p2u0');
+    expect(await cockroachReportV2PdfSignature(record, fake(false))).toBe('-roachv2a-p2u0l0');
     // lineage lookup fails → unknown key, and the resolver reports failure (render fails closed)
     expect(await cockroachReportV2PdfSignature(record, fake(true))).toBe('-roachv2a-px');
   });
