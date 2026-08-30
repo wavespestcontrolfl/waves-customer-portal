@@ -475,6 +475,24 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flag.reason).toMatch(/mosquito/i);
   });
 
+  test('untrusted AI web-search "Multifamily" cannot fire the unit-lot flag', () => {
+    const flags = buildFieldVerifyFlags(untrustedAiRecord(), null, null);
+    const flag = flags.find((f) => f.field === 'lotSize' && /parcel, not one unit/i.test(f.reason || ''));
+    expect(flag).toBeUndefined();
+  });
+
+  test('technician-verified lot on a condo is the unit’s own area — no flag', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '6 Example Condo Way Unit 2, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 900,
+      _source: 'county',
+      _fieldEvidence: { lotSize: { value: 900, sourceType: 'verified' } },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
   test('aggregated multifamily association record → no unit-lot flag (whole-property workflow)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '5 Example Complex Dr, Testville, FL 00000',

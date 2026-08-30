@@ -3211,10 +3211,16 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // master-parcel guidance flag below covers that workflow (codex P1 ×2).
   // The wording stays scope-aware, not prescriptive — a whole-property
   // request keeps the parcel basis.
+  // Provenance rides the EXISTING trusted-record mechanism (codex P1): the
+  // type string is read off commercialSignalRecord — an unverified AI
+  // web-search "Multifamily" is stripped there and cannot fire this — and a
+  // technician-VERIFIED lot is the unit's own treatable area, not a parcel.
+  const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
   if (rc && rc.lotSize
+    && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
     && !rc._parcel?.aggregated && !rc._parcel?.association
-    && !/hoa\s*common/i.test(String(rc.propertyType || ''))
-    && /condo|apartment|multifamily/i.test(String(rc.propertyType || ''))) {
+    && !/hoa\s*common/i.test(String(unitLotSignalRc?.propertyType || ''))
+    && /condo|apartment|multifamily/i.test(String(unitLotSignalRc?.propertyType || ''))) {
     flags.push({
       field: 'lotSize',
       reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
