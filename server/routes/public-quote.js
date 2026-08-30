@@ -935,6 +935,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? Number(lotSqFt)
       : sqft * 4;
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
+    // DB-safe measured value for the customers.lot_sqft writes below — a
+    // public confirmed value like 1e100 would overflow the integer column
+    // and fail the insert, dropping the quote's customer linkage (codex
+    // P1). Synthetic fallbacks still persist as null.
+    const persistLotSqFt = realLotSqFt != null
+      ? Math.round(Math.max(500, Math.min(LOT_CAP, realLotSqFt)))
+      : null;
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water) flow into the
@@ -1521,7 +1528,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // customers.lot_sqft as authoritative before the lookup, so a
           // persisted fabrication would auto-price later quotes past the
           // review this request was routed to (GH codex P1).
-          lot: realLotSqFt,
+          lot: persistLotSqFt,
           landingForCustomer,
           utm: attr?.utm,
         });
@@ -1557,7 +1564,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           property_sqft: sqft,
           // Measured/confirmed only — never the engine's synthetic fallback
           // (GH codex P1, same rule as the existing-customer update above).
-          lot_sqft: realLotSqFt ?? null,
+          lot_sqft: persistLotSqFt,
           pipeline_stage: 'new_lead',
           pipeline_stage_changed_at: new Date(),
           lead_source: 'website_quote',
