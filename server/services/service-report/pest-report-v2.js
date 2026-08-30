@@ -259,16 +259,19 @@ function buildPestReportV2({
   // or the weather call keeps the dashboard — on a complaint visit those
   // are exactly the customer-issue content. Regular visits keep the
   // original predicate unchanged.
-  const emptyByOriginalPredicate = !defense && !primaryMove && !bugFiles.length
-    && !supportingMetric && !forecastCard;
-  // Only fields the composed section actually MOUNTS count as content
-  // (codex P2 r4): PestReportV2Section renders the hero (statusSummary +
-  // aiSummary) and the concern card; bug files, the receipt, and the
-  // weather call were removed from the composed section 2026-07-09 and the
-  // weather facts already render in HeroConditions — counting them kept an
-  // empty shell alive that also suppressed the legacy summary/coverage.
-  const suppressedCallbackContent = suppressDefense && Boolean(aiSummary || concernCard);
-  if (emptyByOriginalPredicate && !suppressedCallbackContent) {
+  if (suppressDefense) {
+    // Callback emptiness counts ONLY fields the composed section MOUNTS
+    // (codex P2 r4 + r5): the hero (supportingMetric + aiSummary), the
+    // primary move, and the concern card. Bug files, the forecast, the
+    // receipt, and the weather call were removed from the composed section
+    // 2026-07-09 — counting them kept an empty status-hero shell alive
+    // that also suppressed the legacy summary/coverage sections.
+    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard) {
+      return null;
+    }
+  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+    // Nothing meaningful to show → don't render an empty V2 shell
+    // (regular visits keep the original predicate unchanged).
     return null;
   }
 

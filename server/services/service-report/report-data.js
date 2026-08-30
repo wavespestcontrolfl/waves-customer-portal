@@ -4943,12 +4943,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // 72 hours before today's treatment" is a description, not a directive —
   // only imperative hold verbs qualify, and a "no irrigation for 48 hours"
   // phrasing simply keeps its card row (the keep-bias direction).
-  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+(?:['’\w]+\s+){0,3}?(?:irrigat|water)/i;
+  // NOUN forms only — irrigation/irrigating/watering, never bare
+  // "water <object>" (codex P1 r12): "Do not water the flower beds for 48
+  // hours" is a NARROWER hold than the lawn-wide irrigation instruction
+  // and must not fold it away.
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+(?:['’\w]+\s+){0,3}?(?:irrigat\w+|watering)\b/i;
+  // Scope-narrowing belt (same finding): a clause that names a non-lawn
+  // target never covers the property-wide instruction, whatever its verbs.
+  const NARROWED_SCOPE_RE = /\b(?:beds?|flowers?|gardens?|shrubs?|plants?|trees?|pots?|planters?)\b/i;
   // An irrigation-hold instruction's duration in hours, or null when the
   // text is not one (no tied hold phrase, or no duration).
-  const irrigationHoldHours = (text) => {
+  const irrigationHoldHours = (text, { rejectNarrowedScope = false } = {}) => {
     const s = String(text || '');
     if (!IRRIGATION_HOLD_PHRASE_RE.test(s)) return null;
+    if (rejectNarrowedScope && NARROWED_SCOPE_RE.test(s)) return null;
     const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
     return m ? Number(m[1]) : null;
   };
@@ -4964,7 +4972,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         // conjunct as the tied hold phrase.
         .split(/[,;]|\bbut\b|\bhowever\b|\band\b|\bthen\b/i)
         .some((clause) => {
-          const clauseHours = irrigationHoldHours(clause);
+          const clauseHours = irrigationHoldHours(clause, { rejectNarrowedScope: true });
           return clauseHours != null && clauseHours >= recHours;
         }));
   };
@@ -4984,6 +4992,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     && service.is_callback === true
     && serviceLine === 'lawn'
     && visitSummarySource === 'technician_report';
+
+  // Composed ahead of the payload so the traced-map decision below can read
+  // the outcome. A NON-PERFORMED callback (inspection_only /
+  // customer_declined) must not replay a spray/coverage trace beside copy
+  // saying no application was made (codex P1 r12): a trace captured before
+  // the tech selected that outcome would otherwise render as "where we
+  // sprayed" on web, hero, and PDF. 'incomplete' keeps its trace — partial
+  // treatment is still treatment (#3617 r11). The rs2 signature already
+  // carries the outcome key, so cached PDFs re-render once.
+  const reserviceReportBlock = await buildReserviceReport(
+    service,
+    { serviceLine, knex, visitOutcome: protocol.visitOutcome || null },
+  );
+  const callbackNonPerformed = Boolean(reserviceReportBlock)
+    && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
 
   return {
     reportVersion: 'service_report_v1',
@@ -5061,7 +5084,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Re-service hero/PDF copy (reservice-report.js) — null while
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
-    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || null }),
+    reserviceReport: reserviceReportBlock,
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.
@@ -5139,7 +5162,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         label: 'Schematic view of inspected and treated zones. Service zones are approximate.',
       },
       satellite: satelliteMap,
-      traced: tracedTreatmentZone,
+      // Non-performed callbacks never replay a treatment trace (codex P1
+      // r12) — the copy says no application was made, and one payload
+      // decision covers the hero, the coverage card, and the PDF.
+      traced: callbackNonPerformed ? null : tracedTreatmentZone,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,

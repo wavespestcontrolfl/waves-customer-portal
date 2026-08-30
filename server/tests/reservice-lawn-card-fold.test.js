@@ -6,6 +6,13 @@
 // Suppression requires ALL of: gate on, callback record, lawn line, and the
 // technician_report summary source — any miss keeps every card.
 
+// Stub presigning so a fixture treatment_zone_maps row can materialize as a
+// traced map (the non-performed-outcome suppression test needs one).
+jest.mock('../services/photos', () => ({
+  getViewUrl: jest.fn(async (key) => `https://example.test/${key}`),
+  CUSTOMER_DWELL_TTL_SECONDS: 3600,
+}));
+
 const { buildReportV1Data } = require('../services/service-report/report-data');
 
 // Minimal fixture knex — same shape as report-lawn-next-visit.test.js.
@@ -209,6 +216,58 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     // Neither the pooled-token sentence nor the descriptive "No irrigation
     // occurred…" history (codex P1 r10) is a directive — the hold stays.
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
+  });
+
+  test('narrowed-scope watering holds never cover: "hold off on watering the flower beds" (codex P1 r12)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      technician_notes: [
+        'WHAT WE DID',
+        '',
+        'Weed control was applied across the turf today.',
+        '',
+        'WHAT WE FOUND',
+        '',
+        'Hold off on watering the flower beds for 48 hours. Do not water the shrubs for 48 hours either.',
+      ].join('\n'),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-10', makeKnex());
+    expect(data.summarySource).toBe('technician_report');
+    // Both narrative holds are NARROWER than the lawn-wide instruction —
+    // the property-wide hold stays on the card.
+    expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
+  });
+
+  test('non-performed callback outcomes suppress the traced map (codex P1 r12)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const tracedFixtures = {
+      treatment_zone_maps: [{
+        scheduled_service_id: 'ss-cb-1',
+        snapshot_s3_key: 'service-photos/treatment-zones/x/map.png',
+        mask_s3_key: null,
+        linear_ft: 200,
+        closed_loop: true,
+        capture_mode: 'lawn',
+        path_points: '[]',
+        created_at: '2026-08-30T17:00:00Z',
+        updated_at: '2026-08-30T17:00:00Z',
+      }],
+    };
+    const declined = lawnCallbackService();
+    {
+      const parsed = JSON.parse(declined.service_data);
+      parsed.typedReportSnapshot.values = { visit_outcome: 'Customer declined service' };
+      declined.service_data = JSON.stringify(parsed);
+      declined.structured_notes = JSON.stringify({ visitOutcome: 'customer_declined' });
+    }
+    const data = await buildReportV1Data(declined, 'tok-fold-11', makeKnex(tracedFixtures));
+    expect(data.reserviceReport?.outcome).toBe('customer_declined');
+    expect(data.treatmentMap.traced).toBeNull();
+    // A PERFORMED callback keeps its trace — the suppression is
+    // outcome-scoped, never callback-wide.
+    const performed = await buildReportV1Data(lawnCallbackService(), 'tok-fold-12', makeKnex(tracedFixtures));
+    expect(performed.reserviceReport?.outcome).toBe('treated');
+    expect(performed.treatmentMap.traced?.snapshotUrl).toBeTruthy();
   });
 
   test('callback with NO reviewed narrative keeps every card — removal never loses the sole record', async () => {

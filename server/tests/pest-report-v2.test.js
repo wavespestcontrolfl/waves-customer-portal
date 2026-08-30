@@ -83,6 +83,15 @@ describe('buildPestReportV2 — callback defense suppression (owner 2026-08-30)'
     });
     expect(receiptOnly).toBeNull();
 
+    // Bug files and the forecast are unmounted too (codex P2 r5) — alone
+    // they must not keep a suppressed callback's shell alive either.
+    const bugFilesOnly = buildPestReportV2({
+      premiumExperience: premium({ primaryMove: null, pressureReceipt: null, weatherCall: null }),
+      suppressDefense: true,
+      forecast: { monthKey: '2026-08', pests: [] },
+    });
+    expect(bugFilesOnly).toBeNull();
+
     const concernOnly = buildPestReportV2({
       premiumExperience: premium({
         primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null,
