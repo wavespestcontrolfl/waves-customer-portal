@@ -261,7 +261,7 @@ describe('parseOpportunities (intake normalize, pure)', () => {
     ]));
     // the email's host never became a candidate on its own line either
     expect(parseOpportunities('bob@lonely.example').candidates).toEqual([]);
-    expect(parseOpportunities('')).toEqual({ candidates: [], unresolved: [], dropped: [] });
+    expect(parseOpportunities('')).toEqual({ candidates: [], unresolved: [], unresolvedNotes: {}, dropped: [] });
     expect(parseOpportunities(null).candidates).toEqual([]);
   });
   test('an upper/mixed-case scheme is recognized and lower-cased in the hint (never https://HTTPS://…)', () => {

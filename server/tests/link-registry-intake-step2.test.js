@@ -195,6 +195,24 @@ describe('resolveIntakeItems — sweep', () => {
     expect(r.candidates).toEqual([expect.objectContaining({ domain: 'academia.edu', url: 'https://academia.edu/upload', note: 'Add website to profile | Upload a paper' })]);
   });
 
+  test('a CSV row whose reference is a shortener / X post keeps its note: parsed, persisted on the pending item, carried onto the resolved touch', async () => {
+    const csv = 'Website,Primary Action\nhttps://x.com/waves/status/1,Reply with our link\nbit.ly/abc,Claim the listing\nbit.ly/abc,Add address\n';
+    const parsed = parseOpportunities(csv);
+    expect(parsed.unresolved).toEqual(['https://x.com/waves/status/1', 'bit.ly/abc']);
+    expect(parsed.unresolvedNotes).toEqual({ 'https://x.com/waves/status/1': 'Reply with our link', 'bit.ly/abc': 'Claim the listing | Add address' });
+    const db = makeDb({ 'seo_link_intake_items.returning': [{ id: 'i' }] });
+    await intake(db, { text: csv, sourceDetail: 'backlinks_csv' });
+    const inserts = db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'insert').map((c) => c.args[0]);
+    expect(inserts.map((r) => [r.raw_url, r.source_detail])).toEqual([
+      ['https://x.com/waves/status/1', 'backlinks_csv note:Reply with our link'],
+      ['bit.ly/abc', 'backlinks_csv note:Claim the listing | Add address'],
+    ]);
+    // resolver: the item's source_detail (with the note) + final URL become the domain touch
+    const dbr = dbWith([{ id: 'i1', raw_url: 'bit.ly/abc', source: 'list_import', source_detail: 'backlinks_csv note:Claim the listing | Add address', source_ref: null, attempts: 0 }]);
+    await resolveIntakeItems(dbr, { now, fetchPage: async () => ({ status: 200, finalUrl: 'https://listing.example/claim', blocked: false, error: null }) });
+    expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'listing.example', sourceDetail: 'backlinks_csv note:Claim the listing | Add address https://listing.example/claim' }));
+  });
+
   test('dryRun reports what the sweep WOULD claim: no hold, no fetch, no writes', async () => {
     const db = makeDb({ 'seo_link_intake_items.limit': [
       { id: 'i1', raw_url: 'bit.ly/abc' }, { id: 'i2', raw_url: 'https://x.com/waves/status/123' },

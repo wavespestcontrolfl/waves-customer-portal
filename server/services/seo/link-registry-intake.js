@@ -91,7 +91,7 @@ function parseCsvOpportunities(text) {
 
 /**
  * parseOpportunities(text)
- *   → { candidates: [{ domain, url, raws: [raw], note }], unresolved: [raw], dropped: [{ token, reason, dropReason }] }
+ *   → { candidates: [{ domain, url, raws: [raw], note }], unresolved: [raw], unresolvedNotes: { raw: note }, dropped: [{ token, reason, dropReason }] }
  * Pure. `url` is a submission-url HINT (kept only when the token carried a path).
  * `unresolved` = references that must be resolved before they name a host
  * (X posts, shortener links). `dropped` carries the §3.4d drop_reason.
@@ -101,12 +101,20 @@ function parseOpportunities(text) {
   const inputs = csv ? csv.rows : [{ raw: String(text || '').replace(EMAIL_RE, ' '), note: null }];
   const seen = new Map();
   const unresolved = [];
+  const unresolvedNotes = {}; // raw reference → its CSV context (distinct notes, ' | '-joined)
   const dropped = [];
   for (const input of inputs) {
     const src = csv ? input.raw : input.raw; // csv rows are already one reference each
     for (const rawMatch of src.match(TOKEN_RE) || []) {
       const token = rawMatch.replace(/[.,;:!?)]+$/, '');
-      if (isReferenceToken(token)) { if (!unresolved.includes(token)) unresolved.push(token); continue; }
+      if (isReferenceToken(token)) {
+        if (!unresolved.includes(token)) unresolved.push(token);
+        if (input.note) {
+          const parts = unresolvedNotes[token] ? unresolvedNotes[token].split(' | ') : [];
+          if (!parts.includes(input.note)) unresolvedNotes[token] = [...parts, input.note].join(' | ').slice(0, 160);
+        }
+        continue;
+      }
       const domain = canonicalProspectDomain(token);
       if (!domain || !domain.includes('.')) { dropped.push({ token, reason: 'not_a_host', dropReason: 'invalid_url' }); continue; }
       if (isOwnHost(domain)) { dropped.push({ token, reason: 'own_domain', dropReason: 'own_domain' }); continue; }
@@ -124,7 +132,7 @@ function parseOpportunities(text) {
       }
     }
   }
-  return { candidates: [...seen.values()], unresolved, dropped };
+  return { candidates: [...seen.values()], unresolved, unresolvedNotes, dropped };
 }
 
 // The persisted hint is bounded (a pasted URL can carry an arbitrary query string).
@@ -208,7 +216,10 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
       out.push({ ...c, id: r.id, existing: !r.created, touched: r.touched });
     }
     for (const raw of parsed.unresolved) {
-      const it = await upsertItem(trx, { source, sourceDetail, sourceRef, rawUrl: raw, state: 'pending' });
+      // The reference's CSV context rides on the item's source_detail, so the
+      // resolver's touch (touchDetail(item.source_detail, finalUrl)) carries it
+      // onto the resolved domain exactly like a directly named host's note.
+      const it = await upsertItem(trx, { source, sourceDetail: touchDetail(sourceDetail, null, parsed.unresolvedNotes[raw]), sourceRef, rawUrl: raw, state: 'pending' });
       base.items[it.created ? 'created' : 'seen'] += 1;
     }
     for (const d of parsed.dropped) {
