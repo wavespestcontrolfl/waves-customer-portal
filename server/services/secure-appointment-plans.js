@@ -217,10 +217,18 @@ async function loadAuthoritativeSetupVisit(database, visit) {
 // disclosure (codex #3591 r40 P1). A persisted child resolves to its parent's
 // stamp; a draft fragment (no row) has none. A negative stamp is a completion
 // mid-claim, not an accepted figure — callers that retire it refuse.
+// Both bait-program identities owe the one-time setup (codex #3591 r47
+// P1): the engine emits rodent_bait_setup for priced commercial programs
+// too (commercial coverage is never a WaveGuard member). Commercial stays
+// OUT of tier qualification — only the setup lifecycle is shared.
+function isRodentBaitProgramKey(key) {
+  return key === 'rodent_bait' || key === 'commercial_rodent_bait';
+}
+
 async function loadSeriesAnchor(database, row) {
   if (!row || !row.id) return null;
   if (!row.recurring_parent_id) return row;
-  return database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee', 'created_at');
+  return database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee', 'created_at', 'source_estimate_id');
 }
 function frozenAnchorSetupStamp(anchor) {
   const stamp = anchor && anchor.pending_setup_fee != null ? Number(anchor.pending_setup_fee) : NaN;
@@ -229,7 +237,8 @@ function frozenAnchorSetupStamp(anchor) {
 
 async function directRodentSetupForRow(database, row) {
   if (!row || !row.customer_id) return 0;
-  if ((await authoritativeServiceKey(database, row)) !== 'rodent_bait') return 0;
+  const programKey = await authoritativeServiceKey(database, row);
+  if (!isRodentBaitProgramKey(programKey)) return 0;
   const anchor = await loadSeriesAnchor(database, row);
   // An accepted/RESTORED frozen claim outranks everything (codex #3591 r40
   // P1, r44 P1): the stamp is what the retirement path clears, so it is
@@ -239,7 +248,11 @@ async function directRodentSetupForRow(database, row) {
   // settled).
   const frozen = frozenAnchorSetupStamp(anchor);
   if (frozen != null) return frozen;
-  if (row.source_estimate_id) return 0;
+  // Estimate provenance lives on the ROOT (codex #3591 r47 local P0): a
+  // series child carries no source_estimate_id of its own, so the anchor's
+  // decides too — an estimate-origin series made its setup decision at
+  // accept and never re-prices as a direct booking.
+  if (row.source_estimate_id || anchor?.source_estimate_id) return 0;
   // Provenance (codex #3591 r42 P1): only a POST-rollout direct series can
   // owe the live fee — a grandfathered series booked before the realignment
   // (no estimate, no stamp: the old recurring signup waived setup) must not
@@ -254,10 +267,15 @@ async function directRodentSetupForRow(database, row) {
     const createdMs = new Date(anchor?.created_at ?? NaN).getTime();
     if (!(rolloutMs > 0) || !Number.isFinite(createdMs) || createdMs < rolloutMs) return 0;
   }
-  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
-  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
-    .filter((key) => key !== 'rodent_bait');
-  if (otherQualifiers.length > 0) return 0;
+  // The qualifying-family waiver is RESIDENTIAL-only: commercial coverage
+  // is never a WaveGuard member (owner ruling 2026-08-29), so its setup is
+  // never waived by the account's other families.
+  if (programKey === 'rodent_bait') {
+    const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+    const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
+      .filter((key) => key !== 'rodent_bait');
+    if (otherQualifiers.length > 0) return 0;
+  }
   return cents(Math.max(0, Number(RODENT.baitSetupFee) || 0));
 }
 
@@ -312,6 +330,7 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // P1): a bait-program root wearing a stale "Pest Control" label still IS
   // the rodent coverage; only unlinked legacy rows match on the label.
   const coverageKey = recurringServiceKey({ name: coverageServiceType });
+  const coverageIsBait = isRodentBaitProgramKey(coverageKey);
   let sawMatchingRoot = false;
   for (const root of roots || []) {
     const matches = root.service_id
@@ -338,6 +357,11 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
     if (owed > 0) return { anchorId: root.id, amount: owed };
   }
   if (sawMatchingRoot) return null;
+  if (coverageIsBait && coverageKey === 'commercial_rodent_bait') {
+    // A NEW commercial bait prepay before any series exists: never waived
+    // (commercial is never a member) — always owed, anchor-less.
+    return { anchorId: null, amount: cents(Math.max(0, Number(RODENT.baitSetupFee) || 0)) };
+  }
   // NO root yet (codex #3591 r41 P1): the Customer 360 dialog can sell a
   // NEW rodent prepay before any series exists — annual-prepay-renewals
   // seeds the covered series afterwards, without a stamp, so the setup
@@ -1014,6 +1038,7 @@ module.exports = {
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,
   retireCoverageOnlySetupClaim,
+  isRodentBaitProgramKey,
   buildSecurePlanContext,
   deriveSecurePlanContext,
   prepaySelectionState,

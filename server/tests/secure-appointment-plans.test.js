@@ -207,6 +207,20 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
   });
 
+  test('a CHILD of an ESTIMATE-origin root owes nothing — provenance resolves at the anchor (codex #3591 r47 local P0)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' } });
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: null, created_at: '2026-09-01T12:00:00.000Z', source_estimate_id: 'est-1' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // …but a restored positive stamp on that estimate-origin root still bills (r44).
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: '99.00', created_at: '2026-09-01T12:00:00.000Z', source_estimate_id: 'est-1' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(99);
+  });
+
   test('a PRE-rollout direct series (grandfathered signup: no estimate, no stamp) owes nothing; an unreadable rollout or root date fails closed to nothing (codex #3591 r42 P1)', async () => {
     mockQualifyingKeys = async () => [];
     setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', created_at: '2026-03-01T12:00:00.000Z' } });

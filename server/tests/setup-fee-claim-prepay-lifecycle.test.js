@@ -265,10 +265,10 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
       const live = conn({ claim, scheduledService: doneParent, liveVisitProbe: { id: 'child-live' } });
       expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', live)).toEqual({ scheduledServiceId: 'svc-parent', amount: 99 });
       expect(createSpy).not.toHaveBeenCalled();
-      // A failed re-bill mint keeps the record for a human.
+      // A failed re-bill mint FAILS the reversal so it retries (codex #3591 r47 local P0).
       createSpy.mockRejectedValueOnce(new Error('mint down'));
       const failed = conn({ claim, scheduledService: doneParent, liveVisitProbe: null });
-      expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', failed)).toBeNull();
+      await expect(InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', failed)).rejects.toThrow('mint down');
       expect(failed.writes).toEqual([]);
     } finally {
       createSpy.mockRestore();
@@ -578,9 +578,10 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     const marker = InvoiceService.rodentSetupRebillMarker('inv-prepay');
     const draft = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(draft, 'inv-prepay')).toMatchObject({ retired: false });
+    // The marker sweep runs FIRST (r47: independent of a live anchor).
     expect(draft.writes).toEqual([
-      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert' }),
       expect.objectContaining({ table: 'invoices', op: 'update', where: { id: 'inv-rebill', status: 'draft' }, patch: expect.objectContaining({ status: 'void' }) }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert' }),
     ]);
     expect(marker).toBe('[rodent-setup-rebill:inv-prepay]');
     const sent = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'sent', sent_at: '2026-08-30', paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
@@ -620,5 +621,112 @@ describe('compact mirrors persist EXPLICIT rodent posture (codex #3591 r45 local
       expect(lead).toMatch(/tierQualifier: !nonQualifying,/);
       expect(lead).toMatch(/waveGuardDiscountEligible: !pctExcluded,/);
     }
+  });
+});
+
+describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund retires the refunded-transition side effects (codex #3591 r47 local P0)', () => {
+  const stdInvoice = (over = {}) => ({
+    id: 'inv-std', customer_id: 'cust-1', scheduled_service_id: null,
+    line_items: [
+      { description: 'Bait Station Setup — one-time setup fee', unit_price: 99, amount: 99 },
+      { description: 'First service application', unit_price: 128, amount: 128 },
+    ],
+    ...over,
+  });
+  const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
+  function reinstConn({ stamp = '99.00', invoiceRow = stdInvoice(), claimRow = null, rebills = [] } = {}) {
+    const inner = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp }, claim: claimRow });
+    const wrapped = (table) => {
+      const q = inner(table);
+      if (table === 'invoices') {
+        q.first = async () => invoiceRow;
+        q.select = async () => rebills;
+      }
+      return q;
+    };
+    wrapped.writes = inner.writes;
+    return wrapped;
+  }
+
+  test('an exact-value restored stamp is CAS-cleared; a different stamp is left and paged; a draft re-bill is voided', async () => {
+    const c = reinstConn();
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(c, 'inv-std')).toEqual({ retired: true, voidedRebills: 0 });
+    expect(c.writes).toEqual([
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
+    ]);
+    const other = reinstConn({ stamp: '79.00' });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(other, 'inv-std')).toEqual({ retired: false, voidedRebills: 0 });
+    expect(other.writes.filter((w) => w.table === 'scheduled_services')).toEqual([]);
+    const withRebill = reinstConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(withRebill, 'inv-std')).toEqual({ retired: false, voidedRebills: 1 });
+    expect(withRebill.writes).toEqual([
+      expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
+    ]);
+  });
+
+  test('a prepay invoice (claims-ledger row) and a no-setup-line invoice are no-ops', async () => {
+    const prepay = reinstConn({ claimRow: { id: 'claim-1' } });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(prepay, 'inv-std')).toBeNull();
+    expect(prepay.writes).toEqual([]);
+    const plain = reinstConn({ invoiceRow: stdInvoice({ line_items: [{ description: 'First service application', amount: 128 }] }) });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(plain, 'inv-std')).toBeNull();
+    expect(plain.writes).toEqual([]);
+  });
+
+  test('wired into every webhook flip that LEAVES refunded (source contract)', () => {
+    const webhookSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    expect((webhookSrc.match(/retireRodentSetupObligationForReinstatedInvoice\(trx, /g) || []).length).toBe(3);
+  });
+});
+
+describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid retire (codex #3591 r47 P1)', () => {
+  const plansMod = require('../services/secure-appointment-plans');
+
+  test('commercial bait programs are setup-bearing (never member-waived); tier qualification untouched', async () => {
+    expect(plansMod.isRodentBaitProgramKey('rodent_bait')).toBe(true);
+    expect(plansMod.isRodentBaitProgramKey('commercial_rodent_bait')).toBe(true);
+    expect(plansMod.isRodentBaitProgramKey('rodent_trapping')).toBe(false);
+    // A commercial bait root owes even when the account has other families.
+    mockQualifyingKeys = async () => ['pest_control'];
+    const commercialRoot = { id: 'root-crb', customer_id: 'cust-1', service_type: 'Commercial Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
+    const c = conn({ scheduledService: commercialRoot });
+    expect(await plansMod.resolveDirectRodentSetupObligation(c, { id: 'root-crb' })).toBe(99);
+    // New commercial coverage with no root → owed anchor-less too.
+    const none = conn({ rootsForCoverage: [] });
+    expect(await findDirectRodentSetupObligationForCoverage(none, { customerId: 'cust-1', coverageServiceType: 'Commercial Rodent Bait Stations' }))
+      .toEqual({ anchorId: null, amount: 99 });
+  });
+
+  test('a revived prepay with NO live anchor (cancelled series) still sweeps + voids the replacement draft and re-ledgers anchor-less', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    const prepayInvoiceRow = {
+      id: 'inv-prepay', customer_id: 'cust-1', scheduled_service_id: null,
+      line_items: [{ description: 'Bait Station Setup — one-time setup fee', unit_price: 99, amount: 99 }],
+    };
+    const inner = conn({ rootsForCoverage: [], scheduledService: null });
+    const wrapped = (table) => {
+      const q = inner(table);
+      if (table === 'invoices') {
+        q.first = async () => prepayInvoiceRow;
+        q.select = async () => [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }];
+      }
+      return q;
+    };
+    wrapped.writes = inner.writes;
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(wrapped, 'inv-prepay'))
+      .toEqual({ scheduledServiceId: null, amount: 99, retired: false });
+    expect(wrapped.writes).toEqual([
+      expect.objectContaining({ table: 'invoices', op: 'update', patch: expect.objectContaining({ status: 'void' }) }),
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99 } }),
+    ]);
+  });
+
+  test('unvoid retires the restored setup state, gated on the setup line (source contract)', () => {
+    const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+    const unvoidAt = invoiceSrc.indexOf('async unvoidInvoice(id) {');
+    const gateAt = invoiceSrc.indexOf('Bait Station Setup — one-time setup fee', unvoidAt);
+    const callAt = invoiceSrc.indexOf('retireRodentSetupObligationForReinstatedInvoice(trx, id)', unvoidAt);
+    expect(gateAt).toBeGreaterThan(unvoidAt);
+    expect(callAt).toBeGreaterThan(gateAt);
   });
 });
