@@ -192,6 +192,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
             { service: 'flea_package', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
+            // Unpriced manual-quote rows never become $0 lines.
+            { service: 'commercial_pest', name: 'Commercial Pest', quoteRequired: true, monthly: null, price: null },
+            { service: 'ghost_row', name: 'Ghost', monthly: null, annual: null, price: null, total: null },
             // Commercial rows: authoritative annual COGS rides costs.total.
             { service: 'commercial_lawn', name: 'Commercial Turf Program', monthly: 400, annual: 4800, costs: { total: 1900 } },
             // MAPPED residential rows also expose costs.total — inventory
@@ -210,7 +213,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
-    expect(audit.lines).toHaveLength(10);
+    expect(audit.lines).toHaveLength(10); // quote-required + witness-less rows excluded
+    expect(audit.lines.some((l) => /commercial_pest|ghost/.test(l.serviceKey))).toBe(false);
     expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
     const adj = audit.lines.find((l) => l.serviceKey === 'rodent_bundle_discount');
     expect(adj.cogs.status).toBe('not_applicable'); // adjustment rows never mint missing-COGS risk

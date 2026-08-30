@@ -574,6 +574,13 @@ function normalizeEngineLineItems(result) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   for (const item of items) {
+    // A quote-required row was never PRICED — it goes to manual quoting,
+    // so a $0 line would mint phantom zero-revenue/COGS entries (codex
+    // pre-push P1). No priced witness at all = same skip.
+    if (item.quoteRequired === true) continue;
+    if (pickNum(item.monthlyAfterDiscount, item.monthly, item.manualFinalAnnual, item.annualAfterDiscount, item.annual,
+      item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) === undefined
+      && !Number.isFinite(numOrNaN(item.installation?.price))) continue;
     // Engine service IDs are not all SERVICE_MAP keys. VERIFIED aliases
     // map to their COGS family; everything else keeps its RAW id — an
     // honest unmapped warning beats keyFromName's broad label patterns,
