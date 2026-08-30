@@ -710,9 +710,20 @@ describe('deprecated client estimator pricing drift guards', () => {
       const at = src.indexOf('const qualifyingRecurringKeys = [');
       expect(at).toBeGreaterThan(0);
       const list = src.slice(at, src.indexOf('];', at));
-      expect(list).toContain('...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : [])');
       expect(list).not.toMatch(/^\s*"svcRodentBait",\s*$/m);
       expect(src).toMatch(/rodentBaitWaveguardFlags,\n/);
+      if (src === legacyAdminSource) {
+        expect(list).toContain('...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : [])');
+      } else {
+        // V2 reads the SAME flags through a state mirror so the memoized
+        // preview re-runs once the live rows land (codex #3591 r34 P1) —
+        // the mirror must be seeded from, and refreshed by, the shared
+        // rodentBaitWaveguardFlags() reader after the live row applies.
+        expect(list).toContain('...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : [])');
+        expect(src).toContain('useState(() => rodentBaitWaveguardFlags())');
+        expect(src).toMatch(/applyServerRodentWaveguardPricingConfig\(waveguardRow\.data\);[\s\S]{0,200}setRodentWaveguardPosture\(rodentBaitWaveguardFlags\(\)\);/);
+        expect(src).toMatch(/\}, \[form, rodentWaveguardPosture\]\);/);
+      }
     }
   });
 
