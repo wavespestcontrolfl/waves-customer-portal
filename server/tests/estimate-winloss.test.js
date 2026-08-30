@@ -312,16 +312,37 @@ describe('winLossSlices — audit slices', () => {
 
     const { sentCohorts } = await winLossSlices({ days: 30 });
 
-    expect(sentCohorts.sentTotal).toBe(6);
-    expect(sentCohorts.viewedTotal).toBe(2);
+    // Base-window stats cover sends in the last 30d: l(20d), o(3d), d(10d),
+    // p(25d). w(40d) and a(50d) are history — cohort fuel, not recent stats.
+    expect(sentCohorts.sentTotal).toBe(4);
+    expect(sentCohorts.viewedTotal).toBe(1); // only o among base-window rows
     expect(sentCohorts.cohorts.map((c) => c.maturityDays)).toEqual([7, 14, 30]); // ≤ window only
     const at = (m) => sentCohorts.cohorts.find((c) => c.maturityDays === m);
-    // 7d cohort: w won, a won(1d), l lost, d open, p lost(5d after send)
-    expect(at(7)).toMatchObject({ sent: 5, won: 2, lost: 2, open: 1, winRatePct: 40 });
-    expect(at(14)).toMatchObject({ sent: 4, won: 2, lost: 2, open: 0 });
+    // Each maturity M covers the shifted window [now-(30+M), now-M]:
+    // 7d → sends 7–37d ago: l lost(7d), p lost(5d), d open (declined at 9d).
+    expect(at(7)).toMatchObject({ sent: 3, won: 0, lost: 2, open: 1, winRatePct: 0 });
+    // 14d → sends 14–44d ago: w won(3d), l lost, p lost.
+    expect(at(14)).toMatchObject({ sent: 3, won: 1, lost: 2, open: 0 });
+    // 30d → sends 30–60d ago: w and a — both won.
     expect(at(30)).toMatchObject({ sent: 2, won: 2, lost: 0, open: 0, winRatePct: 100 });
-    expect(sentCohorts.medianHoursToFirstView).toBe(12); // 0.5d for both viewed rows
-    expect(sentCohorts.medianDaysToDecision).toBe(3); // 3d (w), 9d (d), 1d (a)
+    expect(sentCohorts.medianHoursToFirstView).toBe(12); // o's 0.5d
+    expect(sentCohorts.medianDaysToDecision).toBe(9); // d's decline, the only base-window decision
+  });
+
+  test('the longest maturity bucket has a real population (shifted window, not the base window)', async () => {
+    // days=7: the 7d bucket must cover rows sent 7–14 days ago.
+    const sent = [
+      row({ id: 'old-win', sent_at: daysAgo(10), accepted_at: daysAgo(8) }),
+      row({ id: 'old-loss', status: 'expired', accepted_at: null, sent_at: daysAgo(12), expires_at: daysAgo(4) }),
+      row({ id: 'young', status: 'sent', accepted_at: null, sent_at: daysAgo(2) }),
+    ];
+    mockDbHandler = estimatesTable([], sent);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    const bucket = sentCohorts.cohorts.find((c) => c.maturityDays === 7);
+    // old-win: won 2d after send → won at 7d. old-loss: expired 8d after send → still open at 7d.
+    expect(bucket).toMatchObject({ sent: 2, won: 1, lost: 0, open: 1, winRatePct: 50 });
+    // Base-window stats stay recent: only the 2d-old row was sent inside 7d.
+    expect(sentCohorts.sentTotal).toBe(1);
   });
 
   test('no sent rows → empty cohorts with null rates', async () => {

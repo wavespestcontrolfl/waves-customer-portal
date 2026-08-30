@@ -78,7 +78,11 @@ export default function WinLossSlicesCard() {
   const leadSources = (data?.byLeadSource || []).slice(0, 8);
   const tiers = data?.byWaveguardTier || [];
   const cohorts = data?.sentCohorts;
-  const lossTotal = dispositions.reduce((sum, d) => sum + d.count, 0);
+  // Headline counts REAL losses only — dead leads / converted-elsewhere
+  // rows stay listed below with a null percentage (mirrors the server).
+  const lossTotal = dispositions
+    .filter((d) => d.group === "lost")
+    .reduce((sum, d) => sum + d.count, 0);
 
   return (
     <Card className="mb-4 p-4">

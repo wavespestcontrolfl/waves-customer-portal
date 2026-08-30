@@ -168,9 +168,12 @@ function keyedToList(map, labelFor = (k) => k, sortByTotal = true) {
   return sortByTotal ? list.sort((a, b) => b.total - a.total) : list;
 }
 
-// Sent-cohort funnel: for each maturity M (≤ window), every estimate SENT at
-// least M days ago and inside the window is won / lost / still open AS OF
-// M days after send. Timing medians come from the whole sent window.
+// Sent-cohort funnel: each maturity M reports every estimate sent in the
+// M-days-shifted window [now-(days+M), now-M] — a full `days`-wide cohort
+// that has had exactly M days to resolve, so even the M=days bucket has a
+// real population (codex pre-push P1: filtering to the base window made
+// the longest bucket structurally empty). Sent-volume/view/timing stats
+// come from the unshifted base window (the recent story).
 function sentCohorts(rows, { days, nowMs }) {
   const maturities = COHORT_MATURITY_DAYS.filter((m) => m <= days);
   const cohorts = maturities.map((maturityDays) => ({
@@ -181,6 +184,7 @@ function sentCohorts(rows, { days, nowMs }) {
   let sentTotal = 0;
   let viewedTotal = 0;
 
+  const baseCutoff = nowMs - days * DAY_MS;
   for (const row of rows) {
     const sentAt = ms(row.sent_at);
     if (sentAt == null) continue;
@@ -191,11 +195,14 @@ function sentCohorts(rows, { days, nowMs }) {
     // P1, survivorship bias). Only an archived live row with no
     // classification at all is skipped: it has no outcome to report.
     if (row.archived_at && !disposition && !RESOLVED_STATUSES.includes(row.status)) continue;
-    sentTotal += 1;
+    const inBaseWindow = sentAt >= baseCutoff;
     const firstView = ms(row.viewed_at) ?? ms(row.last_viewed_at);
-    const opened = (Number(row.view_count) || 0) > 0 || firstView != null || row.status === 'viewed';
-    if (opened) viewedTotal += 1;
-    if (firstView != null && firstView >= sentAt) hoursToFirstView.push((firstView - sentAt) / 3600000);
+    if (inBaseWindow) {
+      sentTotal += 1;
+      const opened = (Number(row.view_count) || 0) > 0 || firstView != null || row.status === 'viewed';
+      if (opened) viewedTotal += 1;
+      if (firstView != null && firstView >= sentAt) hoursToFirstView.push((firstView - sentAt) / 3600000);
+    }
 
     const wonAt = row.status === 'accepted' ? (ms(row.accepted_at) ?? sentAt) : null;
     let lostAt = null;
@@ -203,11 +210,12 @@ function sentCohorts(rows, { days, nowMs }) {
     else if (row.status === 'expired') lostAt = ms(row.expires_at) ?? ms(row.updated_at) ?? sentAt;
     else if (row.archived_at && disposition) lostAt = ms(row.disposition_at) ?? ms(row.archived_at) ?? sentAt;
     const decidedAt = wonAt ?? (row.status === 'declined' ? lostAt : null);
-    if (decidedAt != null && decidedAt >= sentAt) daysToDecision.push((decidedAt - sentAt) / DAY_MS);
+    if (inBaseWindow && decidedAt != null && decidedAt >= sentAt) daysToDecision.push((decidedAt - sentAt) / DAY_MS);
 
     for (const cohort of cohorts) {
       const horizon = sentAt + cohort.maturityDays * DAY_MS;
       if (horizon > nowMs) continue; // not mature yet for this age
+      if (sentAt < nowMs - (days + cohort.maturityDays) * DAY_MS) continue; // outside this bucket's shifted window
       cohort.sent += 1;
       if (wonAt != null && wonAt <= horizon) cohort.won += 1;
       else if (lostAt != null && lostAt <= horizon) cohort.lost += 1;
@@ -263,10 +271,13 @@ async function winLossSlices({ days = 90 } = {}) {
   // Second, status-agnostic read for the sent-cohort funnel: everything sent
   // inside the window, open offers included (they are the "open" bar).
   // Archived rows deliberately INCLUDED — sentCohorts keeps their
-  // historical outcome (see the survivorship note there).
+  // historical outcome (see the survivorship note there). The read reaches
+  // back days + the longest applicable maturity so every cohort bucket has
+  // its full shifted window (codex pre-push P1).
+  const maxMaturity = COHORT_MATURITY_DAYS.filter((m) => m <= days).pop() || 0;
   const sentRows = await db('estimates')
     .whereNotNull('sent_at')
-    .where('sent_at', '>=', cutoff)
+    .where('sent_at', '>=', new Date(cutoffMs - maxMaturity * DAY_MS))
     .select(...SLICE_COLUMNS);
 
   const totals = emptyCell();
