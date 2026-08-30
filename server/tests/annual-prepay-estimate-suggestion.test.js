@@ -182,6 +182,31 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.amount).toBeUndefined();
   });
 
+  test('call-linked engine drafts fail closed unless their linkage verifies clean', async () => {
+    const engineDraft = pestEstimate({
+      estimate_data: {
+        estimatorEngine: { callLogId: 'c-1' },
+        result: { recurring: { services: [PEST_LINE] } },
+      },
+    });
+    // No connection to verify against → no amount.
+    const noDb = await buildAnnualPrepayEstimateSuggestion([engineDraft], { resolveLineCadence: (line) => line?.frequency || null });
+    expect(noDb.blocked).toBe(true);
+    expect(noDb.amount).toBeUndefined();
+    // A durable call-side quarantine verdict → no amount.
+    const quarantinedDb = () => ({
+      where: () => ({
+        first: async () => ({ metadata: { estimator_draft_block: { reason: 'wrong_identity' } } }),
+      }),
+    });
+    const quarantined = await buildAnnualPrepayEstimateSuggestion([engineDraft], {
+      resolveLineCadence: (line) => line?.frequency || null,
+      db: quarantinedDb,
+    });
+    expect(quarantined.blocked).toBe(true);
+    expect(quarantined.amount).toBeUndefined();
+  });
+
   test('quote-required estimates never auto-price (review-lane guard)', async () => {
     const managerApproval = pestEstimate({
       estimate_data: {

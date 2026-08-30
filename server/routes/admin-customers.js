@@ -3259,6 +3259,7 @@ router.get('/:id', async (req, res, next) => {
               // Estimates already consumed by ANY term priced a PRIOR year.
               excludeEstimateIds: consumedEstimateIds,
               resolveLineCadence: cadenceFromEstimateLine,
+              db,
             });
         } catch (e) {
           logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
@@ -4910,6 +4911,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion(estimateRows, {
           excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
           resolveLineCadence: cadenceFromEstimateLine,
+          db,
         });
         if (suggestion && !suggestion.blocked
           && String(suggestion.estimateId).toLowerCase() === sourceEstimateIdRaw.toLowerCase()
@@ -4992,6 +4994,22 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
 
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      // Close the quote the cash paid for: a sent/viewed estimate linked to
+      // this paid term must not stay publicly acceptable (the standard accept
+      // lane runs no annual-prepay overlap guard and would mint fresh
+      // scheduling/invoice obligations on an already-paid year), and the
+      // follow-up cron keeps chasing sent/viewed rows. A guarded status flip
+      // is the whole finalization ON PURPOSE — the term, invoice, and
+      // payment are created by THIS transaction, so running the manual-
+      // acceptance converter here would double-mint them. Accept-side comms
+      // fire only from the accept routes, never from a status sweep.
+      if (linkEstimateId) {
+        await trx('estimates')
+          .where({ id: linkEstimateId })
+          .whereIn('status', ['sent', 'viewed'])
+          .update({ status: 'accepted', accepted_at: trx.fn.now(), updated_at: trx.fn.now() });
+      }
+
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         sourceEstimateId: linkEstimateId,

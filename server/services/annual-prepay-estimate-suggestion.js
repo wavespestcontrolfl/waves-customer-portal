@@ -89,7 +89,7 @@ function suggestionCoverageMatches(suggestion, coverageCadence, visitCount) {
   return Number(visitCount) === Number(suggestion.coverageVisitCount);
 }
 
-async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null } = {}) {
+async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null, db = null } = {}) {
   const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
   const base = {
@@ -109,6 +109,22 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   } = require('../routes/estimate-public');
 
   const estData = parseEstimateData(estimate.estimate_data);
+
+  // Durable call-side quarantine (same gate the manual-acceptance route
+  // runs): an engine-drafted estimate whose linked call carries a
+  // wrong-identity or rejected-linkage verdict must never drive money.
+  // Fail closed when the linkage can't be checked (no connection, read
+  // error) — non-engine estimates carry no callLogId and skip this.
+  if (estData?.estimatorEngine?.callLogId) {
+    if (!db) return blocked('estimate call linkage could not be verified');
+    try {
+      const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+      const callBlock = await callSideBlockForEstimateData(db, estData);
+      if (callBlock) return blocked('estimate is quarantined by a call-linkage correction');
+    } catch {
+      return blocked('estimate call linkage could not be verified');
+    }
+  }
 
   // Review-lane pricing never auto-applies (estimator-authority rule): the
   // same quote-requirement guard the public accept path enforces — manager
