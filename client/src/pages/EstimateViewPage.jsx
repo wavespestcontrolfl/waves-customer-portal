@@ -345,6 +345,11 @@ function displayServiceLabel(label) {
 
 function serviceKeysForEstimateSection(section = {}) {
   const keys = new Set();
+  // A structural rodent row the server flagged NON-qualifying wins over any
+  // earlier string match (the section's raw memberKeys still list
+  // 'rodent_bait' when rodent_waveguard.tier_qualifier is off) — codex
+  // #3591 r41 P2: the row-level verdict decides, never token order.
+  let rodentFlaggedNonQualifying = false;
 
   const collectText = (value) => {
     if (!value) return;
@@ -377,6 +382,7 @@ function serviceKeysForEstimateSection(section = {}) {
       const rowKey = String(value.service || value.serviceKey || value.service_key || value.key || '').toLowerCase();
       if (rowKey === 'rodent_bait'
         && (value.countsTowardWaveGuardTier === false || value.tierQualifier === false)) {
+        rodentFlaggedNonQualifying = true;
         return;
       }
       [
@@ -408,6 +414,7 @@ function serviceKeysForEstimateSection(section = {}) {
     collectText(frequency.included);
     collectText(frequency.addOns);
   });
+  if (rodentFlaggedNonQualifying) keys.delete('rodent_bait');
 
   return keys;
 }

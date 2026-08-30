@@ -4983,19 +4983,19 @@ const InvoiceService = {
    * no-op. Re-stamped onto a NULL stamp only — a live or mid-mint claim is
    * never overwritten. Returns the restored descriptor or null.
    */
-  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null } = {}) {
+  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
     if (!prepayInvoiceId) return null;
     // Re-stamp + record consume run in ONE transaction with the record
     // locked (codex #3591 r40 P1): an autocommitted re-stamp followed by a
     // failed delete would leave a live fee AND a live record, and the next
     // re-entry (a repeated refund sync) would restore — and bill — it again.
-    const run = async (trx) => this._restoreRetiredSetupFeeClaimLocked(trx, prepayInvoiceId, sourceEstimateId);
+    const run = async (trx) => this._restoreRetiredSetupFeeClaimLocked(trx, prepayInvoiceId, { sourceEstimateId, customerId, coverageServiceType });
     return typeof conn.transaction === "function" && !conn.isTransaction
       ? conn.transaction(run)
       : run(conn);
   },
 
-  async _restoreRetiredSetupFeeClaimLocked(conn, prepayInvoiceId, sourceEstimateId) {
+  async _restoreRetiredSetupFeeClaimLocked(conn, prepayInvoiceId, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
     const claim = await conn("setup_fee_claims")
       .where({ invoice_id: prepayInvoiceId })
       .forUpdate()
@@ -5010,18 +5010,34 @@ const InvoiceService = {
     // a human is paged — the fee is owed and nothing else re-stamps it.
     let anchorId = claim.scheduled_service_id || null;
     if (!anchorId) {
-      if (!sourceEstimateId) return null;
       const { authoritativeServiceKey } = require("./secure-appointment-plans");
-      const roots = await conn("scheduled_services")
-        .where({ source_estimate_id: sourceEstimateId })
-        .whereNull("recurring_parent_id")
-        .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
-        .select("id", "service_type", "service_id");
-      for (const root of roots || []) {
-        if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+      if (sourceEstimateId) {
+        const roots = await conn("scheduled_services")
+          .where({ source_estimate_id: sourceEstimateId })
+          .whereNull("recurring_parent_id")
+          .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+          .select("id", "service_type", "service_id");
+        for (const root of roots || []) {
+          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+        }
+      }
+      // A Customer 360 prepay sold before any series existed (codex #3591
+      // r41 P1): the term's coverage names the DIRECT series the renewals
+      // seeding created afterwards.
+      if (!anchorId && customerId && coverageServiceType) {
+        const { serviceMatchesCoverage } = require("./annual-prepay-renewals");
+        const roots = await conn("scheduled_services")
+          .where({ customer_id: customerId })
+          .whereNull("recurring_parent_id")
+          .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+          .select("id", "service_type", "service_id", "source_estimate_id");
+        for (const root of roots || []) {
+          if (root.source_estimate_id || !serviceMatchesCoverage(root, coverageServiceType)) continue;
+          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+        }
       }
       if (!anchorId) {
-        logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} (estimate ${sourceEstimateId}) has no rodent series root to restore onto — $${amount.toFixed(2)} bait-station setup is owed again; bill it manually or re-run once the series is booked (record kept)`);
+        logger.error(`[invoice] FIX: anchor-less setup-fee claim for prepay ${prepayInvoiceId} (estimate ${sourceEstimateId || 'none'}, coverage ${coverageServiceType || 'n/a'}) has no rodent series root to restore onto — $${amount.toFixed(2)} bait-station setup is owed again; bill it manually or re-run once the series is booked (record kept)`);
         return null;
       }
     }

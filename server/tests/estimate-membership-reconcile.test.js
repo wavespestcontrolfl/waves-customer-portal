@@ -334,15 +334,27 @@ describe('reconcileFrozenMembershipSnapshot — the rodent setup waiver is re-va
     expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
   });
 
-  test('a failed family re-read drops the evidence (fail closed — unprovable evidence never waives the setup)', async () => {
+  test('a failed family re-read keeps the frozen evidence UNTOUCHED, reprices nothing, and marks the estimate quote-required (codex #3591 r41 P1)', async () => {
     isActivePlanCustomer.mockResolvedValue(true);
     loadExistingQualifyingServiceKeys.mockRejectedValue(new Error('db down'));
     const estimate = estimateRow(waivedRodentEstData());
     await reconcileFrozenMembershipSnapshot(estimate);
     const estData = JSON.parse(estimate.estimate_data);
-    expect(estData.setupWaiverPriorQualifyingServices).toBeUndefined();
-    expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
-    expect(serverRecomputeFromEstimateData).toHaveBeenCalledTimes(1);
+    expect(estData.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(estData.engineInputs.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(estData.membershipSnapshot).toEqual({ isExistingCustomer: true });
+    expect(estData.setupWaiverUnverifiedRequote).toBe(true);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+    expect(clearEstimatePricingCache).toHaveBeenCalledWith('est-1');
+    const state = resolveEstimateQuoteRequirement(null, estData);
+    expect(state.quoteRequired).toBe(true);
+    expect(state.reason).toBe('setup_waiver_unverified_requote');
+    // A lapsed (non-member) row with an unverifiable waiver fails the same way — no fabricated non-member reprice.
+    isActivePlanCustomer.mockResolvedValue(false);
+    const lapsed = estimateRow(waivedRodentEstData());
+    await reconcileFrozenMembershipSnapshot(lapsed);
+    expect(JSON.parse(lapsed.estimate_data).setupWaiverUnverifiedRequote).toBe(true);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
   });
 
   test('evidence nested ONLY in a replay shape still arms the trigger', async () => {

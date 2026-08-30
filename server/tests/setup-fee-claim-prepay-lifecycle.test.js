@@ -38,7 +38,7 @@ const fs = require('fs');
 const path = require('path');
 const InvoiceService = require('../services/invoice');
 const plans = require('../services/secure-appointment-plans');
-const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePrepayOnBookSetupClaim, findDirectRodentSetupObligationForCoverage } = plans;
+const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePrepayOnBookSetupClaim, findDirectRodentSetupObligationForCoverage, retireCoverageOnlySetupClaim } = plans;
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
@@ -207,6 +207,19 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     const noEstimate = conn({ claim: anchorless });
     expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', noEstimate)).toBeNull();
     expect(noEstimate.writes).toEqual([]);
+    // A Customer 360 prepay sold before any series existed: the term's
+    // coverage names the direct series renewals seeded afterwards (codex #3591 r41 P1).
+    const byCoverage = conn({
+      claim: anchorless,
+      scheduledService: { id: 'root-rb', source_estimate_id: null, pending_setup_fee: null },
+      rootsForCoverage: [
+        { id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null, source_estimate_id: null },
+        { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null },
+      ],
+    });
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', byCoverage, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+    expect(byCoverage.writes.map((w) => w.op)).toEqual(['update', 'delete']);
   });
 
   test('re-stamp and record consume run inside ONE transaction on a plain connection, with the record locked (codex #3591 r40 P1)', async () => {
@@ -251,6 +264,34 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: null, coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
   });
 
+  test('NO series root yet: a rodent coverage on a non-member account owes the setup ANCHOR-LESS; a pest coverage, a member account, or an existing estimate-origin rodent root → null (codex #3591 r41 P1)', async () => {
+    const none = conn({ rootsForCoverage: [] });
+    expect(await findDirectRodentSetupObligationForCoverage(none, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ anchorId: null, amount: 99 });
+    expect(await findDirectRodentSetupObligationForCoverage(none, { customerId: 'cust-1', coverageServiceType: 'Quarterly Pest Control' })).toBeNull();
+    mockQualifyingKeys = async () => ['pest_control'];
+    expect(await findDirectRodentSetupObligationForCoverage(none, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    const estimateRoot = conn({ rootsForCoverage: [{ ...rodentRoot, source_estimate_id: 'est-1' }] });
+    expect(await findDirectRodentSetupObligationForCoverage(estimateRoot, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+  });
+
+  test('retireCoverageOnlySetupClaim re-derives under the mint, refuses drift (anchor appeared / amount moved / waived), and ledgers the claim anchor-less', async () => {
+    const c = conn({ rootsForCoverage: [] });
+    expect(await retireCoverageOnlySetupClaim(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 99 }))
+      .toEqual({ recorded: true, retired: false });
+    expect(c.writes).toEqual([
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: null, amount: 99 } }),
+    ]);
+    await expect(retireCoverageOnlySetupClaim(conn({ rootsForCoverage: [] }), { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 79 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/changed since the preview/) });
+    await expect(retireCoverageOnlySetupClaim(conn({ rootsForCoverage: [rodentRoot] }), { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/series now exists/) });
+    mockQualifyingKeys = async () => ['pest_control'];
+    await expect(retireCoverageOnlySetupClaim(conn({ rootsForCoverage: [] }), { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/no longer owed/) });
+  });
+
   test('a failing lookup propagates (the mint refuses retryably, never reads it as a waiver)', async () => {
     const c = conn({ rootsForCoverage: [rodentRoot] });
     mockQualifyingKeys = async () => { throw new Error('db down'); };
@@ -278,7 +319,7 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot \? rodentRoot\.id : null,/);
     // …and the restore resolves an anchor-less record from the term's source estimate (codex #3591 r39 P1).
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
-    expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, conn, \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null \}\)/g) || []).length).toBe(2);
+    expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, conn, \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null, customerId: [a-z]+\.customer_id \|\| null, coverageServiceType: [a-z]+\.coverage_service_type \|\| null \}\)/g) || []).length).toBe(2);
     // …and the restore no longer refuses an estimate-origin parent.
     expect(invoice).not.toMatch(/if \(!parent \|\| parent\.source_estimate_id\) return null;/);
   });
@@ -301,12 +342,12 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('BOTH term-cancel branches (true void/refund AND decided-lapse refund) restore the claim right after the superseded-invoice restore', () => {
     // Each branch hands the term's source estimate along so an anchor-less
     // record can resolve its rodent root at restore time (codex #3591 r39 P1).
-    const CALL_RE = /restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, conn, \{ sourceEstimateId: \1\.source_estimate_id \|\| null \}\)/g;
+    const CALL_RE = /restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, conn, \{ sourceEstimateId: \1\.source_estimate_id \|\| null, customerId: \1\.customer_id \|\| null, coverageServiceType: \1\.coverage_service_type \|\| null \}\)/g;
     const calls = [...renewals.matchAll(CALL_RE)].map((m) => m[1]);
     expect(calls.sort()).toEqual(['decided', 'updated']);
     for (const who of ['updated', 'decided']) {
       const superseded = renewals.indexOf(`restoreSwitchSupersededInvoicesForPrepay(${who}.prepay_invoice_id, conn)`);
-      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, conn, { sourceEstimateId: ${who}.source_estimate_id || null })`);
+      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, conn, { sourceEstimateId: ${who}.source_estimate_id || null, customerId: ${who}.customer_id || null, coverageServiceType: ${who}.coverage_service_type || null })`);
       expect(superseded).toBeGreaterThan(-1);
       expect(claim).toBeGreaterThan(superseded);
     }
@@ -314,8 +355,11 @@ describe('source contracts — where the lifecycle is wired', () => {
 
   test('the Customer 360 mint requires the anchor whenever a setup is billed, runs the service step under its transaction, maps conflicts to 409, and never writes the ledger itself', () => {
     const customers = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
-    expect(customers).toMatch(/if \(setupFeeAmount > 0 && !setupScheduledServiceId\) \{\s*\n\s*return res\.status\(400\)/);
-    expect(customers).toMatch(/if \(setupFeeAmount > 0\) \{\s*\n\s*await require\('\.\.\/services\/secure-appointment-plans'\)\.retirePrepayOnBookSetupClaim\(trx, \{/);
+    // Anchored → the anchored retire; anchor-less (new rodent prepay, no
+    // series yet — codex #3591 r41 P1) → the coverage-derived retire.
+    expect(customers).toMatch(/if \(setupScheduledServiceId\) \{\s*\n\s*await plans\.retirePrepayOnBookSetupClaim\(trx, \{/);
+    expect(customers).toMatch(/\} else \{[\s\S]{0,400}await plans\.retireCoverageOnlySetupClaim\(trx, \{\s*\n\s*customerId: customer\.id,\s*\n\s*coverageServiceType,/);
+    expect(customers).not.toMatch(/setupFeeAmount requires scheduledServiceId/);
     const mintAt = customers.indexOf("router.post('/:id/annual-prepay-invoice'");
     const claimAt = customers.indexOf('retirePrepayOnBookSetupClaim(trx', mintAt);
     const conflictAt = customers.indexOf('if (err && err.switchConflict) return res.status(409)', claimAt);

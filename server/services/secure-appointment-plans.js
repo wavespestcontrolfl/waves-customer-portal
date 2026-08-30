@@ -277,19 +277,55 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   const roots = await database('scheduled_services')
     .where({ customer_id: customerId })
     .whereNull('recurring_parent_id')
-    .whereNull('source_estimate_id')
     .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'completed', 'skipped', 'no_show'])
     .where(function recurringRoots() {
       this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
     })
     .orderBy('scheduled_date', 'asc')
     .select(...SETUP_VISIT_COLUMNS);
+  let sawMatchingRoot = false;
   for (const root of roots || []) {
     if (!serviceMatchesCoverage(root, coverageServiceType)) continue;
+    sawMatchingRoot = true;
+    // An ESTIMATE-origin series made its setup decision at accept — never
+    // re-derive one here (it would bill the accept's setup a second time).
+    if (root.source_estimate_id) return null;
     const owed = await directRodentSetupForRow(database, root);
     if (owed > 0) return { anchorId: root.id, amount: owed };
   }
-  return null;
+  if (sawMatchingRoot) return null;
+  // NO root yet (codex #3591 r41 P1): the Customer 360 dialog can sell a
+  // NEW rodent prepay before any series exists — annual-prepay-renewals
+  // seeds the covered series afterwards, without a stamp, so the setup
+  // must ride THIS invoice or it is lost. Derive it from the requested
+  // coverage family and the account's other qualifying families; the
+  // claim is ledgered anchor-less and the restore resolves the seeded root
+  // from the term's coverage later.
+  if (recurringServiceKey({ name: coverageServiceType }) !== 'rodent_bait') return null;
+  const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+  const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, customerId) || [])
+    .filter((key) => key !== 'rodent_bait');
+  if (otherQualifiers.length > 0) return null;
+  return { anchorId: null, amount: cents(Math.max(0, Number(RODENT.baitSetupFee) || 0)) };
+}
+
+// Customer 360 mint of a NEW rodent prepay with no series root yet (codex
+// #3591 r41 P1): re-derive the coverage obligation under the mint's
+// transaction, refuse on drift (an anchor appeared, the amount moved, or the
+// account gained a waiving family), then ledger the claim anchor-less against
+// the prepay. Errors carry `switchConflict` (→ 409) like the anchored path.
+async function retireCoverageOnlySetupClaim(trx, { customerId, coverageServiceType, invoiceId, amount }) {
+  const fee = cents(Math.max(0, Number(amount) || 0));
+  if (!(fee > 0)) return { recorded: false, retired: false };
+  const conflict = (message) => { const err = new Error(message); err.switchConflict = true; return err; };
+  const owed = await module.exports.findDirectRodentSetupObligationForCoverage(trx, { customerId, coverageServiceType });
+  if (!owed) throw conflict('The bait-station setup is no longer owed for this coverage — refresh and retry');
+  if (owed.anchorId) throw conflict('A series now exists for this coverage — refresh so the setup is billed against it');
+  if (Math.round(owed.amount * 100) !== Math.round(fee * 100)) {
+    throw conflict(`The bait-station setup changed since the preview (previewed $${fee.toFixed(2)}, now $${Number(owed.amount).toFixed(2)}) — refresh and retry`);
+  }
+  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId: null, amount: fee });
+  return { recorded: true, retired: false };
 }
 
 // Customer 360 / prepay-on-book mint (codex #3591 r36 P1): the modal relays
@@ -933,6 +969,7 @@ module.exports = {
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
   findDirectRodentSetupObligationForCoverage,
+  retireCoverageOnlySetupClaim,
   buildSecurePlanContext,
   deriveSecurePlanContext,
   prepaySelectionState,

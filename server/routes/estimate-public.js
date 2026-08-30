@@ -8276,8 +8276,19 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
         const liveKeys = await loadExistingQualifyingServiceKeys(db, estimate.customer_id) || [];
         setupWaiverStale = liveKeys.filter((key) => key !== 'rodent_bait').length === 0;
       } catch (probeErr) {
-        logger.warn(`[estimate-public] setup-waiver evidence re-check failed for estimate ${estimate.id}: ${probeErr.message} — evidence dropped (fail closed)`);
-        setupWaiverStale = true;
+        // Validity UNKNOWN (codex #3591 r41 P1): neither keep the waiver
+        // (could under-bill) nor drop it and reprice (fabricates non-member
+        // terms — no tier deps reach the recompute, so a multi-property
+        // member would lose tier AND waiver). Fail CLOSED to a manual
+        // quote: the frozen evidence stays as sent and
+        // setupWaiverUnverifiedRequote makes resolveEstimateQuoteRequirement
+        // refuse self-serve accept until a request can verify it.
+        logger.warn(`[estimate-public] setup-waiver evidence re-check failed for estimate ${estimate.id}: ${probeErr.message} — quote-required until verifiable`);
+        estData.setupWaiverUnverifiedRequote = true;
+        invalidateSendSnapshotPricingBundle(estData);
+        estimate.estimate_data = isString ? JSON.stringify(estData) : estData;
+        clearEstimatePricingCache(estimate.id);
+        return;
       }
     }
     if (activeMember && !setupWaiverStale) return;
@@ -16043,6 +16054,11 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
   const membershipLapsedRequote = (
     estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
   )?.membershipLapsedRequote === true;
+  // The account-wide rodent setup-waiver evidence could not be verified on
+  // this request (codex #3591 r41 P1) — never self-serve accept on it.
+  const setupWaiverUnverifiedRequote = (
+    estData || pricingBundle?.estimateData || pricingBundle?.estimate_data
+  )?.setupWaiverUnverifiedRequote === true;
   const quoteRequired = pricingBundle?.quoteRequired === true
     || breakdown?.quoteRequired === true
     || quoteRequiredItems.length > 0
@@ -16052,7 +16068,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
     || commercialLowConfidenceSiteQuote
     || retiredLawnRequote
     || retiredTreeShrubRequote
-    || membershipLapsedRequote;
+    || membershipLapsedRequote
+    || setupWaiverUnverifiedRequote;
 
   return {
     quoteRequired,
@@ -16064,7 +16081,8 @@ function resolveEstimateQuoteRequirement(pricingBundle = null, estData = null) {
         || (commercialLowConfidenceSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
         || (retiredLawnRequote ? 'retired_lawn_cadence_requote' : null)
         || (retiredTreeShrubRequote ? 'retired_tree_shrub_cadence_requote' : null)
-        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)),
+        || (membershipLapsedRequote ? 'membership_lapsed_requote' : null)
+        || (setupWaiverUnverifiedRequote ? 'setup_waiver_unverified_requote' : null)),
     items: quoteRequiredItems,
   };
 }

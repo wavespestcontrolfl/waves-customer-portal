@@ -4455,10 +4455,11 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // preview's mintPayload). Required whenever a setup is billed — the mint
     // re-derives the fee from this row and ledgers the claim against the
     // prepay so a void/refund restores it (codex #3591 r36 P1).
+    // Absent ONLY for a NEW rodent prepay with no series root yet (codex
+    // #3591 r41 P1) — the mint then re-derives the obligation from the
+    // coverage family under its transaction (retireCoverageOnlySetupClaim)
+    // and ledgers the claim anchor-less; any other omission drifts → 409.
     const setupScheduledServiceId = cleanOptionalText(req.body?.scheduledServiceId) || null;
-    if (setupFeeAmount > 0 && !setupScheduledServiceId) {
-      return res.status(400).json({ error: 'setupFeeAmount requires scheduledServiceId (the committed series the bait-station setup belongs to)' });
-    }
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -4486,7 +4487,9 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
           error: `This customer's ${coverageServiceType} series owes a $${owed.amount.toFixed(2)} bait-station setup (non-member) — it must ride the prepay invoice as its own line.`,
           setupFeeRequired: true,
           setupFeeAmount: owed.amount,
-          scheduledServiceId: String(owed.anchorId),
+          // null when no series exists yet — the dialog re-submits the
+          // amount alone and the mint derives from the coverage family.
+          scheduledServiceId: owed.anchorId ? String(owed.anchorId) : null,
         });
       }
     }
@@ -4708,12 +4711,24 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // parent's per-application claim retired — the same service step the
       // on-site switch and the secure-plan prepay run (codex #3591 r36 P1).
       if (setupFeeAmount > 0) {
-        await require('../services/secure-appointment-plans').retirePrepayOnBookSetupClaim(trx, {
-          customerId: customer.id,
-          scheduledServiceId: setupScheduledServiceId,
-          invoiceId: invoice.id,
-          amount: setupFeeAmount,
-        });
+        const plans = require('../services/secure-appointment-plans');
+        if (setupScheduledServiceId) {
+          await plans.retirePrepayOnBookSetupClaim(trx, {
+            customerId: customer.id,
+            scheduledServiceId: setupScheduledServiceId,
+            invoiceId: invoice.id,
+            amount: setupFeeAmount,
+          });
+        } else {
+          // No root yet (new rodent prepay, codex #3591 r41 P1): derive from
+          // the coverage family under this transaction; ledgered anchor-less.
+          await plans.retireCoverageOnlySetupClaim(trx, {
+            customerId: customer.id,
+            coverageServiceType,
+            invoiceId: invoice.id,
+            amount: setupFeeAmount,
+          });
+        }
       }
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
       // The setup line's share of the GROSS year (invoice.total is already

@@ -4104,7 +4104,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
       });
     } catch (err) {
       const refusal = err?.body;
-      if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0 && refusal.scheduledServiceId) {
+      // scheduledServiceId is null for a NEW rodent prepay with no series
+      // yet — the mint derives the setup from the coverage family then.
+      if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0) {
         const ok = window.confirm(
           `${refusal.error}\n\nAdd the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup line to this invoice?`,
         );
@@ -4114,7 +4116,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           body: JSON.stringify({
             ...payload,
             setupFeeAmount: Number(refusal.setupFeeAmount),
-            scheduledServiceId: String(refusal.scheduledServiceId),
+            ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
           }),
         });
       }
