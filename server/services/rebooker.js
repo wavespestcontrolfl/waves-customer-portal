@@ -976,6 +976,16 @@ class SmartRebooker {
         rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
       });
       if (unit) return unit;
+      // The caller's DISCLOSURE decision assumed a grouped visit (dispatch
+      // sets seriesPolicy 'single' + expectGroupedVisit on that basis; local
+      // gate r44): if the locked plan found the visit solo — a sibling went
+      // terminal since the caller's count — proceeding single-row would move
+      // a recurring occurrence without the acknowledgement an ungrouped
+      // anchor requires. Surface CHANGED; the client refreshes and
+      // re-submits against the now-ungrouped anchor.
+      if (options.expectGroupedVisit === true) {
+        throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+      }
       soloVisitRecheck = true;
     }
     // Membership fence (codex #3609 r13 P2): the row read above was

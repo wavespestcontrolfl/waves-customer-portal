@@ -652,7 +652,8 @@ async function moveStopsToDay(input) {
     // Advisory overlap note for THIS stop, set inside the trx but reported
     // only after the CAS commits (a missed CAS rolls back and must not warn).
     let stopOverlapped = false;
-    const updatedRows = await db.transaction(async trx => {
+    let groupedSkip = null;
+    const runMoveTrx = async () => db.transaction(async trx => {
       // Rung 1 + tech-blind probe FIRST (occupancy.js ORDERING CONTRACT:
       // the date-wide lock precedes the tech-day fence below). A hit never
       // blocks the move (owner ruling 2026-08-25 — staff saves warn, not
@@ -679,6 +680,10 @@ async function moveStopsToDay(input) {
         { techId: s.technician_id, date: observedDate },
         { techId: s.technician_id, date: dateStr },
       ]);
+      // Grouped/frozen refusal under the stop lock, AFTER the tech-day
+      // fence (lock order; codex #3609 r29 P1): a grouped member moved
+      // alone strands its siblings — the whole stop moves from the board.
+      await require('../visit-groups').assertRowMovableAlone(trx, s.id, s.visit_id);
       return applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', s.id)
@@ -687,6 +692,8 @@ async function moveStopsToDay(input) {
             scheduled_date: observedDate,
             window_start: s.window_start ?? null,
             window_end: s.window_end ?? null,
+            // Observed membership joins the CAS (codex r29): grouped-since ⇒ miss.
+            visit_id: s.visit_id ?? null,
           }),
         // Full observed tracker/lifecycle snapshot in the CAS — any
         // concurrent lifecycle or SMS-guard write must make this miss.
@@ -709,6 +716,20 @@ async function moveStopsToDay(input) {
           updated_at: new Date(),
         });
     });
+    let updatedRows = 0;
+    try {
+      updatedRows = await runMoveTrx();
+    } catch (err) {
+      if (err && (err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
+        groupedSkip = err.code; // grouped/frozen member: skipped per-row, never aborts the batch
+      } else {
+        throw err;
+      }
+    }
+    if (groupedSkip) {
+      skippedConflict.push({ id: s.id, status: `${s.status} (${groupedSkip === 'VISIT_FROZEN_MOVE_UNSUPPORTED' ? 'frozen grouped visit' : 'grouped visit — move the stop from the schedule'})` });
+      continue;
+    }
     if (updatedRows === 0) {
       // Best-effort re-read so the operator sees the status that blocked the
       // move (falls back to the stale one if the row vanished).

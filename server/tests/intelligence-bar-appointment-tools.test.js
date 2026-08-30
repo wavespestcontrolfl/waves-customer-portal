@@ -694,7 +694,7 @@ describe('reschedule_appointment', () => {
     // schedule triple (date + start + END).
     expect(updateChain.where).toHaveBeenCalledWith('status', 'confirmed');
     expect(updateChain.where).toHaveBeenCalledWith({
-      scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00',
+      scheduled_date: '2026-07-01', window_start: '09:00:00', window_end: '10:00:00', visit_id: null,
     });
     // No side effects for a refused move.
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
@@ -722,7 +722,7 @@ describe('reschedule_appointment', () => {
 
     expect(result).toMatchObject({ success: true, new_date: '2099-01-15' });
     expect(updateChain.where).toHaveBeenCalledWith({
-      scheduled_date: '2026-07-01', window_start: null, window_end: null,
+      scheduled_date: '2026-07-01', window_start: null, window_end: null, visit_id: null,
     });
     // The date-only move preserves the (absent) window rather than inventing one.
     expect(updateChain.update.mock.calls[0][0]).toMatchObject({

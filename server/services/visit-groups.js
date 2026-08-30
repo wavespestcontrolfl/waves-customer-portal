@@ -292,6 +292,32 @@ async function frozenVisitVerdict(t, visitId) {
   }
 }
 
+// Shared guard for DIRECT slot writers (IB tools, board movers): under the
+// row's stop lock, a grouped row (≥2 live members) or a member of a
+// frozen/claimed/finalizing visit must not be moved alone (codex #3609
+// r29 P1 — the IB tools wrote the row directly and stranded the parent).
+// Throws the same operational 409s the bulk mover uses; callers surface
+// or per-row-skip them.
+// `observedVisitId` = the caller's own read of the row's visit_id; an
+// ungrouped observation returns immediately (the caller's CAS pins
+// visit_id, so a row grouped SINCE that read misses the write instead) —
+// the locked verification below runs only for rows observed grouped.
+async function assertRowMovableAlone(t, rowId, observedVisitId) {
+  if (!observedVisitId) return;
+  await lockStopForRow(t, rowId);
+  const fresh = await t('scheduled_services').where({ id: rowId }).first('visit_id');
+  const vid = fresh ? fresh.visit_id : observedVisitId;
+  if (!vid) return;
+  const members = await openMembers(t, vid);
+  if (members.length >= 2) {
+    throw Object.assign(new Error('This appointment is grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first.'), { statusCode: 409, code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED', isOperational: true });
+  }
+  const verdict = await frozenVisitVerdict(t, vid);
+  if (verdict.frozen) {
+    throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
+  }
+}
+
 async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
@@ -2448,6 +2474,7 @@ module.exports = {
   visitActivity,
   LIVE_COMPLETION_CLAIM_STATUSES,
   frozenVisitVerdict,
+  assertRowMovableAlone,
   fanOutLiveTransition,
   moveVisitAsUnit,
   claimVisitNotification,

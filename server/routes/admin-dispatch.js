@@ -14990,6 +14990,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // no series acknowledgement is owed. "Reschedule series" (scope
         // 'series') keeps its own refusal for grouped anchors.
         rescheduleOptions.seriesPolicy = 'single';
+        // The grouped assumption itself is fenced (local gate r44): if the
+        // unit mover's locked plan finds the visit solo (a sibling went
+        // terminal since this count), the rebooker surfaces CHANGED instead
+        // of moving the occurrence single-row without the acknowledgement.
+        rescheduleOptions.expectGroupedVisit = true;
         // The observed membership rides in the rebooker's CAS (codex r24 P1):
         // an anchor detached from its visit between this read and the move
         // would otherwise reach the rebooker ungrouped WITH seriesPolicy
