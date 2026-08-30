@@ -441,7 +441,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     // (reservice-report.js): without them this side computes '' while
     // renderAndStore — full record — stores callback PDFs under -rs1m/-rs1n,
     // and every callback PDF would re-render on every lookup.
-    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier');
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_tier_source');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public

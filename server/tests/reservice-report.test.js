@@ -16,7 +16,7 @@ afterEach(() => {
   else process.env.GATE_RESERVICE_REPORT_COPY = ORIGINAL;
 });
 
-const member = { id: 'rec-1', customer_id: 'cust-1', scheduled_service_id: 'visit-1', is_callback: true, service_tier: 'Gold', service_type: 'Pest Control Re-Service' };
+const member = { id: 'rec-1', customer_id: 'cust-1', scheduled_service_id: 'visit-1', is_callback: true, service_tier: 'Gold', service_tier_source: 'manual', service_type: 'Pest Control Re-Service' };
 const nonMember = { ...member, service_tier: null, waveguard_tier: 'One-Time' };
 
 // Minimal knex fake: `visit` = the scheduled row (or null), `invoices` = rows
@@ -156,6 +156,27 @@ describe('reservice-report (gate on)', () => {
     expect(block.billingReason).toBe('non_member');
     expect(knex.calls).toEqual([]);
     expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs1nt');
+  });
+
+  test('incomplete outcome: never claims treatment, distinct cache key', async () => {
+    const knex = fakeKnex();
+    const block = await buildReserviceReport(member, { serviceLine: 'pest', knex, visitOutcome: 'incomplete' });
+    expect(block.outcome).toBe('incomplete');
+    expect(block.result).toMatch(/could not be completed/);
+    expect(`${block.result} ${block.completedFallback}`).not.toMatch(/re-?treated/i);
+    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1mx');
+  });
+
+  test('frozen provenance rules the claim: auto label and pre-freeze NULL both refuse; current row cannot rewrite history', async () => {
+    const knex = fakeKnex();
+    const labelEra = await buildReserviceReport({ ...member, service_tier_source: 'auto' }, { serviceLine: 'pest', knex });
+    expect(labelEra.includedWithWaveGuard).toBe(false);
+    expect(labelEra.billingReason).toBe('tier_label');
+    const preFreeze = await buildReserviceReport({ ...member, service_tier_source: null }, { serviceLine: 'pest', knex });
+    expect(preFreeze.includedWithWaveGuard).toBe(false);
+    expect(preFreeze.billingReason).toBe('tier_provenance_unfrozen');
+    const missing = await buildReserviceReport({ ...member, service_tier_source: undefined }, { serviceLine: 'pest', knex });
+    expect(missing.includedWithWaveGuard).toBe(false);
   });
 
   test('an auto-derived tier LABEL is not a membership — no $0 claim (money-gate fail direction)', async () => {

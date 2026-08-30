@@ -4534,8 +4534,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // pre-migration database (Codex round-9). Guarded once here; absent
     // columns leave svc.cust_billing_mode undefined = legacy behavior.
     let billingModeColumnsExist = false;
+    let customerTierSourceColumnExists = false;
     try {
       billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
+      customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
     } catch { /* keep false — legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -4551,6 +4553,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
+        ...(customerTierSourceColumnExists ? ['customers.waveguard_tier_source as cust_waveguard_tier_source'] : []),
         ...(billingModeColumnsExist
           ? ['customers.billing_mode as cust_billing_mode', 'customers.per_application_fee as cust_per_application_fee']
           : []),
@@ -7103,6 +7106,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (serviceRecordCols.report_template_version && useServiceReportV1) recordInsert.report_template_version = 'service_report_v1';
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
           if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
+          // Freeze the tier's PROVENANCE beside it: a permanent report must be
+          // able to tell a real membership from an auto-derived label AT THE
+          // TIME OF THE VISIT, because the customer's current row changes
+          // later (codex #3617 r3 P1). 'manual' when the customer has a tier
+          // but no recorded source (pre-provenance member rows).
+          if (serviceRecordCols.service_tier_source) {
+            recordInsert.service_tier_source = svc.cust_waveguard_tier
+              ? (svc.cust_waveguard_tier_source || 'manual')
+              : null;
+          }
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,

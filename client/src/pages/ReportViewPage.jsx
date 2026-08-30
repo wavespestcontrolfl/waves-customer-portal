@@ -852,7 +852,11 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     };
   }
 
-  if (context.pressureTrend?.direction === 'down') {
+  // A non-performed callback (inspection_only / customer_declined /
+  // incomplete) maintained nothing — fall through to the outcome-honest
+  // callback branch instead of claiming the treatment plan was maintained
+  // (codex r3 P1).
+  if (context.pressureTrend?.direction === 'down' && !reserviceNotPerformed) {
     return {
       heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',

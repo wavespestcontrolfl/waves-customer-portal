@@ -1161,6 +1161,27 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.completedLine).toBe('Reported activity areas were inspected today.');
   });
 
+  it('a non-performed callback falls through the pressure-down branch to the outcome-honest copy', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        heading: 'we came back to check on it!',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      },
+      dynamicContext: { pressureTrend: { direction: 'down', customerSummary: 'Activity has decreased.' } },
+      applications: [],
+    }, 'static');
+    expect(status.detail || '').not.toMatch(/maintained the protective treatment plan/);
+    expect(status.result).toContain('No application was made on this visit');
+    const treated = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'treated' },
+      dynamicContext: { pressureTrend: { direction: 'down', customerSummary: 'Activity has decreased.' } },
+      applications: [],
+    }, 'static');
+    expect(treated.heading).toBe('pest pressure is trending down!');
+  });
+
   it('isCallback: false on the payload suppresses the legacy name regex', () => {
     const status = smartStatusSummary({
       serviceType: 'Pest Control Re-Service',

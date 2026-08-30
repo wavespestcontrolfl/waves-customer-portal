@@ -22,8 +22,10 @@
  *    ⇒ not proven ⇒ no claim.
  *    Non-member callbacks may bill (owner doctrine 2026-08-27: record-only,
  *    no enforcement), so no money claim is ever made for them. A tier that
- *    is an auto-derived LABEL (tierLabelStatus !== 'not_label') is not a
- *    membership either — same fail direction as the money gates.
+ *    is an auto-derived LABEL is not a membership either — the claim reads
+ *    the provenance FROZEN on the record (service_tier_source; NULL =
+ *    pre-freeze record = unprovable = no claim) AND the current row's
+ *    tierLabelStatus, same fail direction as the money gates.
  *  - inspection_only / customer_declined callbacks performed NO application
  *    (admin-dispatch visitPerformed), so their copy inspects/records — it
  *    never claims areas "were re-treated".
@@ -95,6 +97,12 @@ const COPY = {
       completedFallback: 'No application was made today.',
       expectation: 'If the problem areas are not improving, contact us and we will get back out.',
     },
+    incomplete: {
+      heading: 'about your visit',
+      result: 'We returned for your lawn re-service, but the visit could not be completed.',
+      completedFallback: 'No application was made today.',
+      expectation: 'We will follow up to finish the visit — contact us if the problem areas are getting worse in the meantime.',
+    },
   },
   pest: {
     treated: {
@@ -115,10 +123,16 @@ const COPY = {
       completedFallback: 'No application was made today.',
       expectation: 'If you are still seeing activity, contact us and we will get back out.',
     },
+    incomplete: {
+      heading: 'about your visit',
+      result: 'We returned for your re-service, but the visit could not be completed.',
+      completedFallback: 'No application was made today.',
+      expectation: 'We will follow up to finish the visit — contact us if you are still seeing activity in the meantime.',
+    },
   },
 };
 
-const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined']);
+const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined', 'incomplete']);
 
 // Explicit param (report-data's resolved protocol.visitOutcome) wins; the
 // pre-render signature paths fall back to the protocol frozen in
@@ -197,12 +211,20 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
   const tier = memberTier(service);
   let billing = tier ? await resolveCallbackBilling(service, knex) : { free: false, reason: 'non_member' };
   if (billing.free === true) {
-    // A tier can be an auto-derived LABEL with no paid membership lane —
-    // completion still copies it into service_records.service_tier. Same
-    // fail direction as the money gates: anything except a verified
-    // 'not_label' is not a membership, so no claim.
-    const labelStatus = knex ? await tierLabelStatus(service.customer_id, knex) : 'unknown';
-    if (labelStatus !== 'not_label') billing = { free: false, reason: 'tier_label' };
+    // Membership must hold AT THE TIME OF THE VISIT, and the customer's
+    // current row changes later — so the claim reads the provenance FROZEN
+    // on the record at completion (service_tier_source, migration
+    // 20260830000050): 'auto' was a label, and NULL/absent (a record that
+    // predates the freeze) is unprovable — both refuse (codex r3 P1).
+    const frozenSource = service.service_tier_source;
+    if (frozenSource == null || frozenSource === 'auto') {
+      billing = { free: false, reason: frozenSource === 'auto' ? 'tier_label' : 'tier_provenance_unfrozen' };
+    } else {
+      // Belt and braces: the current row must ALSO resolve 'not_label'
+      // (shared money-gate resolver) — anything else refuses the claim.
+      const labelStatus = knex ? await tierLabelStatus(service.customer_id, knex) : 'unknown';
+      if (labelStatus !== 'not_label') billing = { free: false, reason: 'tier_label' };
+    }
   }
   const includedWithWaveGuard = Boolean(tier) && billing.free === true;
   return {
@@ -223,7 +245,9 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
 
 function signatureFor(block) {
   if (!block) return '';
-  const outcomeKey = block.outcome === 'inspection_only' ? 'i' : block.outcome === 'customer_declined' ? 'd' : 't';
+  const outcomeKey = block.outcome === 'inspection_only' ? 'i'
+    : block.outcome === 'customer_declined' ? 'd'
+      : block.outcome === 'incomplete' ? 'x' : 't';
   return `${block.includedWithWaveGuard ? '-rs1m' : '-rs1n'}${outcomeKey}`;
 }
 
