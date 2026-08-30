@@ -802,6 +802,10 @@ async function linkIsLive(url, fetchImpl = globalThis.fetch) {
     const parsed = new URL(String(url || ''));
     if (!HUB_HOST.test(parsed.hostname)) return false;
     const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(LINK_PROBE_TIMEOUT_MS) });
+    // Only the status is needed — release the body so the pooled socket is
+    // returned instead of held open until GC (undici keeps an unconsumed
+    // body's connection reserved).
+    if (res?.body && typeof res.body.cancel === 'function') await res.body.cancel().catch(() => {});
     // Exactly 200 — `ok` would also accept a 204 blank route as "live".
     return res?.status === 200;
   } catch {

@@ -657,6 +657,10 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
     expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/retired-post/', redirecting)).toBe(false);
     expect(calls).toEqual(['manual']);
     expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200 }))).toBe(true);
+    // The response body is released (socket returned to the pool) once the status is read.
+    const cancel = jest.fn(async () => {});
+    expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200, body: { cancel } }))).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 });
 
