@@ -28,25 +28,36 @@ function pestEstimate(overrides = {}) {
 }
 
 describe('pickAnnualPrepayEstimate', () => {
-  test('status precedence: accepted > viewed > sent; draft/declined/expired/archived never suggest', () => {
-    const accepted = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', status: 'accepted', accepted_at: '2026-08-05T00:00:00Z' });
-    const viewed = pestEstimate({ id: '22222222-2222-4222-8222-222222222222' });
-    const sent = pestEstimate({ id: '33333333-3333-4333-8333-333333333333', status: 'sent', viewed_at: null });
+  test('latest activity wins regardless of status; draft/declined/expired/archived never suggest', () => {
+    const oldAccepted = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', status: 'accepted', accepted_at: '2025-09-01T00:00:00Z' });
+    const freshViewed = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-25T00:00:00Z' });
+    const staleSent = pestEstimate({ id: '33333333-3333-4333-8333-333333333333', status: 'sent', viewed_at: null, sent_at: '2026-07-01T00:00:00Z' });
     const draft = pestEstimate({ id: '44444444-4444-4444-8444-444444444444', status: 'draft' });
     const declined = pestEstimate({ id: '55555555-5555-4555-8555-555555555555', status: 'declined' });
     const archived = pestEstimate({ id: '66666666-6666-4666-8666-666666666666', archived_at: '2026-08-21T00:00:00Z' });
 
-    expect(pickAnnualPrepayEstimate([sent, viewed, accepted]).id).toBe(accepted.id);
-    expect(pickAnnualPrepayEstimate([sent, viewed]).id).toBe(viewed.id);
-    expect(pickAnnualPrepayEstimate([draft, sent]).id).toBe(sent.id);
+    // A year-old accepted estimate must not outrank the re-quote the customer
+    // just looked at (re-quotes follow price changes).
+    expect(pickAnnualPrepayEstimate([oldAccepted, freshViewed, staleSent]).id).toBe(freshViewed.id);
+    expect(pickAnnualPrepayEstimate([draft, staleSent]).id).toBe(staleSent.id);
     expect(pickAnnualPrepayEstimate([draft, declined, archived])).toBeNull();
     expect(pickAnnualPrepayEstimate([])).toBeNull();
   });
 
-  test('same status ties break to the latest activity', () => {
-    const older = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-08-10T00:00:00Z' });
-    const newer = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-25T00:00:00Z' });
-    expect(pickAnnualPrepayEstimate([older, newer]).id).toBe(newer.id);
+  test('exact-timestamp ties break by status: accepted > viewed > sent', () => {
+    const t = '2026-08-25T00:00:00Z';
+    const accepted = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', status: 'accepted', accepted_at: t });
+    const viewed = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: t });
+    const sent = pestEstimate({ id: '33333333-3333-4333-8333-333333333333', status: 'sent', viewed_at: null, sent_at: t });
+    expect(pickAnnualPrepayEstimate([sent, viewed, accepted]).id).toBe(accepted.id);
+    expect(pickAnnualPrepayEstimate([sent, viewed]).id).toBe(viewed.id);
+  });
+
+  test('estimates already consumed by a term are excluded', () => {
+    const consumed = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', status: 'accepted', accepted_at: '2026-08-29T00:00:00Z' });
+    const open = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-20T00:00:00Z' });
+    expect(pickAnnualPrepayEstimate([consumed, open], { excludeIds: [consumed.id] }).id).toBe(open.id);
+    expect(pickAnnualPrepayEstimate([consumed], { excludeIds: [consumed.id] })).toBeNull();
   });
 });
 

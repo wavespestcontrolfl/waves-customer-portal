@@ -12,20 +12,28 @@
 // (non-discountable lines and the lawn program-minimum floor included).
 
 // Cash/verbal accepts leave the estimate at `viewed` (the customer never
-// clicks Accept), so precedence can't be accepted-only. Draft, declined,
+// clicks Accept), so eligibility can't be accepted-only. Draft, declined,
 // expired, and archived estimates never suggest.
-const SUGGESTION_STATUS_RANK = { accepted: 3, viewed: 2, sent: 1 };
+const SUGGESTION_STATUSES = { accepted: 3, viewed: 2, sent: 1 };
 
 function suggestionActivityStamp(estimate = {}) {
   return estimate.accepted_at || estimate.viewed_at || estimate.sent_at || estimate.created_at || 0;
 }
 
-function pickAnnualPrepayEstimate(estimates = []) {
+// Latest customer activity wins; status ranks only break exact-timestamp
+// ties. Recency-primary (not status-primary) because re-quotes happen after
+// price changes: an old accepted estimate must not permanently outrank the
+// fresh viewed quote the operator just sent. Estimates already consumed by a
+// term (source_estimate_id link) are excluded outright — their price belongs
+// to a prior year.
+function pickAnnualPrepayEstimate(estimates = [], { excludeIds = [] } = {}) {
+  const excluded = new Set((excludeIds || []).filter(Boolean).map(String));
   const ranked = (Array.isArray(estimates) ? estimates : [])
-    .filter((e) => e && SUGGESTION_STATUS_RANK[String(e.status)] && !e.archived_at);
+    .filter((e) => e && SUGGESTION_STATUSES[String(e.status)] && !e.archived_at
+      && !excluded.has(String(e.id)));
   ranked.sort((a, b) => (
-    (SUGGESTION_STATUS_RANK[String(b.status)] - SUGGESTION_STATUS_RANK[String(a.status)])
-    || (new Date(suggestionActivityStamp(b)) - new Date(suggestionActivityStamp(a)))
+    (new Date(suggestionActivityStamp(b)) - new Date(suggestionActivityStamp(a)))
+    || (SUGGESTION_STATUSES[String(b.status)] - SUGGESTION_STATUSES[String(a.status)])
   ));
   return ranked[0] || null;
 }
@@ -45,8 +53,8 @@ function parseEstimateData(raw) {
   return {};
 }
 
-function buildAnnualPrepayEstimateSuggestion(estimates = []) {
-  const estimate = pickAnnualPrepayEstimate(estimates);
+function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [] } = {}) {
+  const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
   const base = {
     estimateId: estimate.id,

@@ -3237,7 +3237,12 @@ router.get('/:id', async (req, res, next) => {
       annualPrepayEstimateSuggestion: (() => {
         try {
           return require('../services/annual-prepay-estimate-suggestion')
-            .buildAnnualPrepayEstimateSuggestion(estimates);
+            .buildAnnualPrepayEstimateSuggestion(estimates, {
+              // Estimates already consumed by a term priced a PRIOR year.
+              excludeEstimateIds: (annualPrepayTerms || [])
+                .map((term) => term.source_estimate_id)
+                .filter(Boolean),
+            });
         } catch (e) {
           logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
           return null;

@@ -3694,6 +3694,10 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   const [amountTouched, setAmountTouched] = useState(false);
   const cadenceTouchedRef = useRef(false);
   const visitCountTouchedRef = useRef(false);
+  // True while the (untouched) amount value came from the estimate prefill —
+  // a service change away from the estimate's service must CLEAR it, never
+  // let the old service's quoted year get recorded against the new one.
+  const amountFromEstimateRef = useRef(estimateFallbackAmount > 0);
 
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
   const count = Number.parseInt(visitCount, 10);
@@ -3725,9 +3729,16 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
       prepaidPlans,
     );
     if (nextSuggested > 0) {
+      amountFromEstimateRef.current = false;
       setAmount(nextSuggested.toFixed(2));
     } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType)) {
+      amountFromEstimateRef.current = true;
       setAmount(Number(estimateSuggestion.amount).toFixed(2));
+    } else if (amountFromEstimateRef.current) {
+      // The standing amount was the estimate's quoted year for a DIFFERENT
+      // service — clear rather than silently record it against this one.
+      amountFromEstimateRef.current = false;
+      setAmount("");
     }
   };
 
@@ -3763,6 +3774,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   };
 
   const handleAmountChange = (value) => {
+    amountFromEstimateRef.current = false;
     setAmountTouched(true);
     setAmount(value);
   };
