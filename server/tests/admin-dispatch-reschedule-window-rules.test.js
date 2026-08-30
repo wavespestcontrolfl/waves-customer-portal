@@ -117,6 +117,21 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
+  test('gate on: a GROUPED recurring anchor moves as one visit (seriesPolicy single) — never widened, no series ack owed (local audit r26)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = { ...recurringRow(), visit_id: '11111111-1111-4111-8111-111111111111' };
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
+    expect(status).toBe(200);
+    expect(SmartRebooker.previewSeriesMove).not.toHaveBeenCalled();
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ seriesPolicy: 'single' });
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expectOccurrenceIds');
+    // an UNGROUPED recurring anchor keeps the disclosure contract (no seriesPolicy override)
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), visit_id: null };
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+  });
+
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = { ...recurringRow(), is_recurring: false };

@@ -13722,7 +13722,7 @@ function rescheduleExpectPredicate(observed) {
 async function ensureObservedAnchor(serviceId, observed) {
   if (!observed || observed.read) return observed;
   const row = await db('scheduled_services').where({ id: serviceId })
-    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring');
+    .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'is_recurring', 'visit_id');
   if (row) Object.assign(observed, row, { read: true });
   return observed;
 }
@@ -14968,11 +14968,20 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     if (collectiveMoveGateOn()) {
       // The observed anchor (read above, or by the resolution) answers the
       // recurrence + date questions — one read, one snapshot.
-      const job = observedForMove.is_recurring !== undefined
+      const job = observedForMove.is_recurring !== undefined && observedForMove.visit_id !== undefined
         ? observedForMove
-        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+        : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date', 'visit_id');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
-      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0] && job.visit_id) {
+        // A GROUPED recurring anchor is never widened to its series from
+        // this surface (scope ruling, codex #3609 r3; local audit r26): the
+        // unit mover refuses the widening (VISIT_SERIES_MOVE_UNSUPPORTED)
+        // and points at "move this visit only" — this is that path. The
+        // whole stop moves as one visit, the series stays where it is, so
+        // no series acknowledgement is owed. "Reschedule series" (scope
+        // 'series') keeps its own refusal for grouped anchors.
+        rescheduleOptions.seriesPolicy = 'single';
+      } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
         let preview = null;
         try {
           preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
