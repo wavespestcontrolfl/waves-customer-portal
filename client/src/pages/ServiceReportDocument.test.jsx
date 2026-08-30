@@ -1345,3 +1345,136 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/Where we treated/);
   });
 });
+
+describe('ServiceReportDocument — re-service (callback) block', () => {
+  const reservice = {
+    serviceLine: 'pest',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: true,
+    billingLine: 'This re-service was included with your WaveGuard Gold membership — $0.00 billed.',
+  };
+
+  it('prints the Billing row and leads the summary with the re-service framing', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service', reserviceReport: reservice }} token="tok123" />);
+    expect(screen.getByText('Included with WaveGuard — $0.00 billed')).toBeInTheDocument();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+    expect(screen.getByText(reservice.expectation)).toBeInTheDocument();
+  });
+
+  it('non-member callback: no Billing row, no money claim', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: { ...reservice, includedWithWaveGuard: false, billingLine: null } }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+  });
+
+  it('a Pest V2 attention status or a needs-attention snapshot leads the summary; the re-service framing follows', () => {
+    const { container, unmount } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: reservice,
+      pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' }, statusSummary: 'Ant pressure is still high at the kitchen slider.' },
+    }} token="tok123" />);
+    const text = container.textContent;
+    const actionAt = text.indexOf('Action needed.');
+    expect(actionAt).toBeGreaterThan(-1);
+    expect(actionAt).toBeLessThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
+    expect(actionAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+    expect(text.indexOf(reservice.result)).toBeGreaterThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
+    unmount();
+    const lawn = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reserviceReport: { ...reservice, serviceLine: 'lawn', result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.' },
+      reportV2: { snapshot: { status: 'needs_attention', statusHeadline: 'Fungus noted in the back lawn.' }, todaysResult: 'We noted fungus in the back lawn and treated it today.' },
+    }} token="tok123" />);
+    const lawnText = lawn.container.textContent;
+    const fungusAt = lawnText.indexOf('Fungus noted in the back lawn.');
+    expect(fungusAt).toBeGreaterThan(-1);
+    expect(fungusAt).toBeLessThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
+    expect(lawnText.indexOf('Lawn re-service completed')).toBeGreaterThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
+  });
+
+  it('non-performed outcome: legacy treatment-claiming summary copy is suppressed', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      summary: 'We treated the kitchen and perimeter today.',
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    // BASE_DATA's typed headline and the legacy summary both claim a
+    // performed visit — neither may print on a non-performed callback.
+    expect(text).not.toContain('We treated the kitchen and perimeter today.');
+    expect(text).not.toContain('Cockroach activity was moderate today.');
+  });
+
+  it('non-performed outcome: cockroach V2 program copy never leads the summary either', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { label: 'Treatment 2 of 3 complete — activity moderate.' },
+        statusSummary: 'We completed today\u2019s treatment in your program.',
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'customer_declined',
+        result: 'We returned for your re-service; treatment was not performed at this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('treatment was not performed at this visit');
+    expect(text).not.toContain('We completed today\u2019s treatment in your program.');
+  });
+
+  it('no-application outcome: the cockroach program DASHBOARD sections are suppressed, not just the summary', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { key: 'watching', label: 'Treatment 2 of 3 complete — activity moderate.' },
+        work: ['Bait placement', 'Crack & crevice'],
+        whatsNext: { title: 'Treatment 2 of 3 complete', badge: 'IN_PROGRESS', lines: [{ label: 'next', text: 'Next visit booked.' }] },
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    expect(text).not.toContain('Your cockroach treatment program');
+    expect(text).not.toContain('Treatment 2 of 3 complete');
+  });
+
+  it('incomplete outcome: the caveat LEADS but truthful partial-treatment content is kept', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: {
+        ...reservice,
+        outcome: 'incomplete',
+        result: 'We returned for your re-service, but the visit could not be completed.',
+        expectation: 'We will follow up to finish the visit — contact us if you are still seeing activity in the meantime.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    const caveatAt = text.indexOf('could not be completed');
+    expect(caveatAt).toBeGreaterThan(-1);
+    // The typed partial-visit content survives, below the caveat.
+    expect(text).toContain('Cockroach activity was moderate today.');
+    expect(caveatAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+  });
+
+  it('no block (gate dark): the document is unchanged', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.queryByText(reservice.result)).toBeNull();
+  });
+});

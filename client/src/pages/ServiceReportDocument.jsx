@@ -515,13 +515,31 @@ export default function ServiceReportDocument({ data, token }) {
   // Primary-source only: a companion dashboard (combined visit) never
   // replaces the PRIMARY service's summary — it replaces the bait companion
   // block below instead.
-  const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
-  const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  // Callback block first: a NO-APPLICATION callback must suppress the
+  // treatment-PROGRAM dashboards below (cockroach/termite "Work completed",
+  // "Treatment N of M complete") — a permanent PDF cannot say no
+  // application was made and then claim a treatment completed
+  // (codex GH-r4 P1). 'incomplete' keeps them (partial work is real work).
+  const reserviceEarly = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  const suppressProgramDashboards = Boolean(reserviceEarly && ['inspection_only', 'customer_declined'].includes(reserviceEarly.outcome));
+  const termiteV2Primary = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
+  const termiteV2Companion = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
   const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   // Cockroach treatment-program dashboard (cockroach-report-v2.js): the
   // headline + body + reviewed narrative are the document's summary, and
   // the program position prints as its own line.
-  const cockroachV2 = data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
+  const cockroachV2 = !suppressProgramDashboards && data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
+  // Callback (re-service) block from reservice-report.js — the same copy the
+  // web hero prints, so the archived document keeps the re-service framing
+  // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
+  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  // A non-performed callback (inspection_only / customer_declined /
+  // incomplete) applied nothing — legacy/typed summary copy written for a
+  // performed visit can claim treatment, so it is suppressed below and the
+  // outcome-honest re-service copy is the document's summary (codex r5 P1).
+  const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
+  const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
+  const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
   const summaryParagraphs = [];
   if (cockroachV2) {
     summaryParagraphs.push(String(cockroachV2.status.label).replace(/\.$/, '') + '.');
@@ -533,7 +551,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
     const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
     if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
-  } else if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
+  } else if (result?.headline && !reserviceNoApplication) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
@@ -542,9 +560,51 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = (termiteV2Summary || cockroachV2) ? '' : (reconciledResult
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
+  if (reservice) {
+    // Same precedence as the web hero (smartStatusSummary): an honest
+    // warning — cockroach/termite V2 status, a Pest V2 "recommended"/
+    // "action" status, or a lawn/T&S needs_attention/watch/urgent snapshot
+    // — leads and the re-service framing follows it. Otherwise the
+    // re-service sentence leads the summary.
+    const pestStatus = data.pestReportV2?.status;
+    const pestAttention = ['recommended', 'action'].includes(String(pestStatus?.key || ''));
+    const snapshot = data.reportV2?.snapshot;
+    const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(snapshot?.status || ''));
+    const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
+    const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
+    if (reserviceNoApplication) {
+      // No application happened: every other summary source — the cockroach/
+      // termite program copy pushed above, typed headlines, legacy bodies,
+      // dashboard leads — was written for a performed visit and can claim
+      // treatment (codex r7 P1). The outcome-honest callback copy IS the
+      // summary; findings and dashboards keep their own sections below.
+      summaryParagraphs.length = 0;
+      summaryParagraphs.push(...lines);
+    } else if (reserviceIncomplete) {
+      // Partial application possible: LEAD with the could-not-complete
+      // caveat but keep truthful partial-treatment content below it
+      // (codex r11 P1 — discarding it hid real work; claiming nothing
+      // about applications is the module's incomplete contract).
+      summaryParagraphs.unshift(...fresh);
+    } else if (cockroachV2 || termiteV2Summary) {
+      summaryParagraphs.push(...fresh);
+    } else if (pestAttention || snapshotAttention) {
+      // The honest status must LEAD the document, not merely precede the
+      // callback copy inside the summary: put its label/headline (and the
+      // Pest V2 status summary) first, the callback paragraphs last.
+      const lead = pestAttention
+        ? [pestStatus.label ? String(pestStatus.label).replace(/\.$/, '') + '.' : null, data.pestReportV2?.statusSummary || null]
+        : [snapshot.peaceOfMind || snapshot.statusHeadline || null];
+      const leadFresh = lead.filter((line) => typeof line === 'string' && line.trim() && !summaryParagraphs.includes(line));
+      summaryParagraphs.unshift(...leadFresh);
+      summaryParagraphs.push(...fresh);
+    } else {
+      summaryParagraphs.unshift(...fresh);
+    }
+  }
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
   // status/insights the live report leads with. Reading only typedReport
@@ -554,7 +614,7 @@ export default function ServiceReportDocument({ data, token }) {
   const mosquitoV2 = data.mosquitoReportV2 || null;
   // termite bait-station dashboard (termite-report-v2.js) — same status /
   // defense / primaryMove contract as pest and mosquito.
-  const termiteV2 = data.termiteReportV2 || null;
+  const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
 
@@ -860,6 +920,12 @@ export default function ServiceReportDocument({ data, token }) {
           <div>
             <SectionHeader>Service</SectionHeader>
             <InfoRow label="Service">{data.serviceDisplayName || data.serviceType}</InfoRow>
+            {/* Member callbacks: the completion panel tells the tech this
+                visit "will be noted as included with WaveGuard membership on
+                the customer's report" — this row is where that promise is
+                kept on the document. Non-member callbacks print nothing
+                (they may bill; no money claim without a member tier). */}
+            {reservice?.includedWithWaveGuard ? <InfoRow label="Billing">Included with WaveGuard — $0.00 billed</InfoRow> : null}
             <InfoRow label="Technician">{data.technicianName}</InfoRow>
             <InfoRow label="Time in">{fmtTime(data.visitTiming?.arrivedAt)}</InfoRow>
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>

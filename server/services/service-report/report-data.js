@@ -49,6 +49,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
@@ -4981,6 +4982,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // sentence links to the authenticated portal Schedule tab in the live
     // view. Boolean only; the standing token never rides the public report.
     reserviceEligible,
+    // Callback (re-service) identity, frozen on the record at completion —
+    // the authoritative flag billing/pressure/cross-sell already use. Plain
+    // data at every gate setting; the copy block below is what's gated.
+    isCallback: service.is_callback === true,
+    // Re-service hero/PDF copy (reservice-report.js) — null while
+    // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
+    // the client then keeps its legacy name-regex headline unchanged.
+    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || null }),
+    // True when the gated composer ran: a null reserviceReport on a callback
+    // is then a deliberate withholding (unsupported line), and the client
+    // must not fall back to the legacy name-regex copy.
+    reserviceGateOn: reserviceReportCopyGateOn(),
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

@@ -757,7 +757,22 @@ export function visitWorkSummary(data = {}, fallback = '') {
   return parts.length ? parts.join(' · ') : fallback;
 }
 
+// Every status branch — high-priority findings, re-entry, the honest V2
+// statuses, the callback branch itself — flows through the billing-line
+// wrapper below, so an eligible member callback keeps its "$0 — included
+// with WaveGuard" line no matter which summary wins (codex r5 P1: the
+// earlier branches silently dropped it while the PDF printed it).
 export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now()) {
+  const summary = statusSummaryCore(data, mode, nowMs);
+  const billingLine = data.reserviceReport && typeof data.reserviceReport === 'object'
+    ? data.reserviceReport.billingLine : null;
+  if (typeof billingLine === 'string' && billingLine && !String(summary.detail || '').includes(billingLine)) {
+    summary.detail = [summary.detail || '', billingLine].filter(Boolean).join(' ');
+  }
+  return summary;
+}
+
+function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
   const completedItems = coverageItems.filter((item) => isCompletedCoverageStatus(item.status));
@@ -780,20 +795,85 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   });
   const importantFindings = highPriorityFindings(data);
   const primaryFinding = importantFindings[0];
+  // Callback (re-service) block from the server — declared before EVERY
+  // branch because the earlier summaries must also honor a non-performed
+  // outcome: an inspection_only / customer_declined callback performed no
+  // application, so no branch may claim "we treated" (codex r2 P1).
+  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  // Two distinct non-treated classes (codex r11): the no-application
+  // outcomes may claim "no application"; 'incomplete' can include a PARTIAL
+  // application, so it claims nothing either way and KEEPS the re-entry
+  // drying/keep-off warnings (safety info for whatever was applied).
+  const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
+  const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
+  const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
+  const reserviceStatus = () => ({
+    heading: reservice.heading || 'we came back and took care of it!',
+    status: allReady ? 'Ready now' : 'Service complete',
+    statusTone: 'neutral',
+    result: reservice.result || 'Re-service completed.',
+    completedLine: completedAreas
+      ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
+      : (reservice.completedFallback || 'Reported areas were re-treated today.'),
+    detail: [
+      data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+      reservice.expectation || null,
+      reservice.billingLine || null,
+    ].filter(Boolean).join(' '),
+  });
 
   if (primaryFinding) {
+    // A NO-APPLICATION callback applied nothing, so the pending re-entry
+    // arm ("still drying", "keep off treated zones") can never be true for
+    // it — force the non-pending, outcome-honest arm (codex GH-r3 P1). An
+    // INCOMPLETE callback may have a partial application drying: keep the
+    // safety warning (codex r11 P1).
+    const pendingText = reserviceNoApplication ? null : pendingReadyText;
     return {
       heading: 'we found activity that needs attention!',
-      status: pendingReadyText || 'Follow-up recommended',
-      statusTone: pendingReadyText ? 'pending' : 'warning',
-      result: pendingReadyText
+      status: pendingText || 'Follow-up recommended',
+      statusTone: pendingText ? 'pending' : 'warning',
+      result: pendingText
         ? `${pendingTarget.label || 'Treated'} areas are still drying. ${primaryFinding.title || 'Activity was noted'} still needs attention.`
         : `${primaryFinding.title || 'Activity was noted'}${primaryFinding.recommendation ? ` ${primaryFinding.recommendation}` : ''}`,
-      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas completed today.',
-      detail: pendingReadyText
+      completedLine: completedAreas
+        ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
+        : (reserviceNotPerformed ? (reservice.completedFallback || 'No application was made today.') : 'Service areas completed today.'),
+      detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
-        : 'We treated the documented area today and included the recommended next step below.',
+        : (reserviceNotPerformed
+          // 'incomplete' can include a PARTIAL application — only the two
+          // genuinely non-performed outcomes may claim none (codex r10 P1).
+          ? (reservice.outcome === 'incomplete'
+            ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
+            : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
+          : 'We treated the documented area today and included the recommended next step below.'),
     };
+  }
+
+  // A non-performed callback (inspection_only / customer_declined /
+  // incomplete) applied nothing — every remaining branch below can claim
+  // areas were serviced/treated/drying or lead with treatment-program copy
+  // (codex r7 P1), so the outcome-honest callback summary returns here.
+  // High-priority findings above still outrank it (their copy is already
+  // outcome-honest); the dashboards keep rendering as cards below.
+  if (reserviceNoApplication) {
+    return reserviceStatus();
+  }
+  if (reserviceIncomplete) {
+    // Partial application possible: the standalone re-entry warning stays
+    // (safety), everything else yields to the claim-nothing callback copy.
+    if (pendingTarget && !allReady) {
+      return {
+        heading: reservice.heading || 'about your visit',
+        status: pendingReadyText,
+        statusTone: 'pending',
+        result: `${pendingTarget.label || 'Treated'} areas are still drying.`,
+        completedLine: reservice.completedFallback || 'The visit was not completed.',
+        detail: ['Keep pets and people away from treated zones until they are ready.', reservice.expectation || null, reservice.billingLine || null].filter(Boolean).join(' '),
+      };
+    }
+    return reserviceStatus();
   }
 
   if (actionNeededItems.length) {
@@ -841,7 +921,20 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   // Re-service visits are follow-ups on reported activity — "routine
   // service completed" undersells the entire point of the visit (owner
   // dry-run review 2026-07-21). Name what the visit was.
-  if (/re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // LEGACY position + name regex: only while the server sends no
+  // `reserviceReport` block (GATE_RESERVICE_REPORT_COPY dark, or an older
+  // cached payload). With the block present the callback branch moves
+  // BELOW the honest V2 status branches — see `reservice` further down.
+  // `data.isCallback === false` is the authoritative record saying this is
+  // NOT a callback — an editable display name containing "Re-Service" must
+  // not override it (codex r2 P1). Only a payload without the field at all
+  // (gate-dark/legacy cache) still trusts the name.
+  // When the gated composer RAN (reserviceGateOn) and still sent no block,
+  // the server deliberately withheld the copy (unsupported service line —
+  // e.g. a mosquito/termite callback whose name contains "Re-Service");
+  // the legacy pest wording would be false there (codex GH-r2 P1). The
+  // regex remains only for payloads from before the gate / while dark.
+  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -914,6 +1007,34 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
         ? ''
         : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
     };
+  }
+
+  // Callback (re-service) record, keyed on the server's is_callback-derived
+  // block rather than the editable service name (audit 2026-08-30 G3/G4):
+  // sits BELOW every honest-status branch above so a needs-attention gauge
+  // or a program dashboard headline is never overwritten by "took care of
+  // it", and carries the lawn-vs-pest wording plus the "$0 — included with
+  // WaveGuard" line the tech completion panel promises the customer.
+  if (reservice) {
+    // Pest V2 carries its own honest status ("One step recommended" /
+    // "Action needed") — same rule as the cockroach/termite/snapshot
+    // branches above: it must not be overwritten by "took care of it!".
+    const pestStatus = data.pestReportV2?.status;
+    if (pestStatus?.label && ['recommended', 'action'].includes(String(pestStatus.key || ''))) {
+      return {
+        heading: 'your service is complete!',
+        status: allReady ? 'Ready now' : 'Service complete',
+        statusTone: 'neutral',
+        result: pestStatus.label,
+        completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : (reservice.completedFallback || 'Reported areas were re-treated today.'),
+        detail: [
+          data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+          reservice.expectation || null,
+          reservice.billingLine || null,
+        ].filter(Boolean).join(' '),
+      };
+    }
+    return reserviceStatus();
   }
 
   return {
