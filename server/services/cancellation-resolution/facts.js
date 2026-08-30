@@ -123,7 +123,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
 
   const [
     visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
-    findings, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families,
+    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families,
   ] = await Promise.all([
     leg('visitCounts', () => db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -176,8 +176,15 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
       .orderBy([{ column: 'r.service_date', order: 'desc' }, { column: 'f.created_at', order: 'desc' }])
-      .limit(50)
+      .limit(5)
       .select('f.title', 'f.detail', 'f.category', 'f.severity', 'r.service_date', 'r.service_line'), []),
+    // The OLDEST finding queried separately — the "your first visit found"
+    // card must never quote a merely-less-recent finding as the first one.
+    leg('earliestFinding', () => db('service_findings as f')
+      .join('service_records as r', 'r.id', 'f.service_record_id')
+      .where('r.customer_id', customerId)
+      .orderBy([{ column: 'r.service_date', order: 'asc' }, { column: 'f.created_at', order: 'asc' }])
+      .first('f.title', 'f.detail', 'r.service_date', 'r.service_line'), null),
     leg('complaintRequest', () => db('service_requests')
       .where({ customer_id: customerId })
       .whereIn('category', COMPLAINT_CATEGORIES)
@@ -197,16 +204,20 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
       .first('granted_at'), 'error'),
-    // Latest manual/admin rate write — explicit allowlist of the sources a
-    // HUMAN drives (admin-customers edit/create, IB update tools). System
-    // provenance (estimate_accept, legacy_scalar, plan_sync,
-    // gate_off_divergence, unsliced_accept, grouped_accept, cancellation)
-    // must never trip the manual-override cooldown.
-    leg('manualOverride', () => db('customer_plan_rates')
-      .where({ customer_id: customerId })
-      .whereIn('source', ['admin_edit', 'admin_create', 'ib_update', 'ib_bulk_update'])
-      .orderBy('updated_at', 'desc')
-      .first('updated_at'), 'error'),
+    // Latest manual/admin rate write, from the PERMANENT audit_log trail
+    // (customer_plan_rates is mutable current state — later syncs delete or
+    // replace its rows, which would erase the cooldown evidence). Events are
+    // written by plan-rate-ledger for the human-driven sources only
+    // (admin_edit, admin_create, ib_update, ib_bulk_update); system
+    // provenance never trips the cooldown.
+    leg('manualOverride', async () => {
+      const { MANUAL_RATE_AUDIT_ACTION } = require('../plan-rate-ledger');
+      const row = await db('audit_log')
+        .where({ action: MANUAL_RATE_AUDIT_ACTION, resource_type: 'customer', resource_id: customerId })
+        .orderBy('created_at', 'desc')
+        .first('created_at');
+      return row ? { updated_at: row.created_at } : null;
+    }, 'error'),
     leg('shownCases', () => db('cancellation_cases')
       .where({ customer_id: customerId })
       .whereNotNull('resolution_template_id')
@@ -236,7 +247,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     date: dateOnly(row.service_date),
   } : null);
   const lastFinding = toFinding(findingRows[0]);
-  const firstFinding = toFinding(findingRows[findingRows.length - 1]);
+  const firstFinding = toFinding(earliestFinding && earliestFinding !== 'error' ? earliestFinding : null);
 
   const complaintMsg = (Array.isArray(lastComplaint) ? lastComplaint : []).find((m) => COMPLAINT_KEYWORDS.test(String(m.body || '')));
 
@@ -279,7 +290,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     openCallbackLanes: openLanes,
     moneyFactsDegraded,
     lastFinding,
-    firstFinding: firstFinding && lastFinding && firstFinding.text === lastFinding.text && findingRows.length === 1 ? lastFinding : firstFinding,
+    firstFinding,
     lastComplaint: complaintMsg
       ? { date: dateOnly(complaintMsg.created_at), quote: String(complaintMsg.body).trim().slice(0, 140) }
       : null,

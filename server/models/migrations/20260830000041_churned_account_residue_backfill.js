@@ -58,7 +58,13 @@ exports.up = async function up(knex) {
       knex('scheduled_services')
         .where({ customer_id: customer.id })
         .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
-        .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+        .where(function dateOrRescheduled() {
+          // 'rescheduled' rows keep their ORIGINAL (often past) date while
+          // remaining live rebook intents (cancellation-eligibility.js) —
+          // they are date-exempt here exactly as in the eligibility gate.
+          this.whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+            .orWhere('status', 'rescheduled');
+        })
         .first('id'),
       // A tech actively working the property (any date) is live state too.
       knex('scheduled_services')

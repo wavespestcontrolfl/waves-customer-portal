@@ -90,14 +90,27 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }
       if (existing) return existing;
     }
     const now = new Date();
+    const floor = cooldownFloor(now);
     const recent = await trx('retention_offers')
       .where({ customer_id: customerId })
-      .whereRaw("(granted_at AT TIME ZONE 'America/New_York')::date > ?", [cooldownFloor(now)])
+      .whereRaw("(granted_at AT TIME ZONE 'America/New_York')::date > ?", [floor])
       .first('id', 'granted_at');
     if (recent) {
       const err = new Error('retention_offer_cooldown');
       err.code = 'retention_offer_cooldown';
       err.existingOfferId = recent.id;
+      throw err;
+    }
+    // Manual-override cooldown re-enforced at the money boundary, from the
+    // durable audit trail (facts are advisory; this check is authoritative).
+    const { MANUAL_RATE_AUDIT_ACTION } = require('../plan-rate-ledger');
+    const manual = await trx('audit_log')
+      .where({ action: MANUAL_RATE_AUDIT_ACTION, resource_type: 'customer', resource_id: customerId })
+      .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date > ?", [floor])
+      .first('id');
+    if (manual) {
+      const err = new Error('manual_override_cooldown');
+      err.code = 'manual_override_cooldown';
       throw err;
     }
     const [row] = await trx('retention_offers')

@@ -531,6 +531,14 @@ async function seedLedgerComponents(database, customerId, components = {}, { sou
 // throws, failing the caller's write, because committing a new scalar over
 // stale authoritative components lets the next accept resurrect the old
 // sum. Pass rate null/0 to clear (offboarding).
+// Human-driven scalar writers (admin edit/create, IB single/bulk update).
+// These get a PERMANENT audit_log event — customer_plan_rates is mutable
+// current state (rows are deleted/replaced by later syncs), so the
+// cancellation engine's manual-override cooldown reads audit_log, not this
+// table (PR E, codex 2026-08-30).
+const MANUAL_RATE_SOURCES = new Set(['admin_edit', 'admin_create', 'ib_update', 'ib_bulk_update']);
+const MANUAL_RATE_AUDIT_ACTION = 'customer.rate_manual_override';
+
 async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {
   try {
     await database.transaction((sp) => resetLedgerToScalar(sp, customerId, rate, { source }));
@@ -540,6 +548,23 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
       throw syncErr;
     }
     logger.warn(`[plan-rate-ledger] advisory sync failed for customer ${customerId} (${source}): ${syncErr.message}`);
+  }
+  if (MANUAL_RATE_SOURCES.has(source)) {
+    // Fire-and-forget on the base handle, NOT the caller's trx: a failed
+    // audit insert inside a Postgres transaction aborts it even when JS
+    // catches, and this secondary record must never fail an admin edit.
+    try {
+      const { recordAuditEvent } = require('./audit-log');
+      await recordAuditEvent({
+        actor_type: 'system',
+        action: MANUAL_RATE_AUDIT_ACTION,
+        resource_type: 'customer',
+        resource_id: customerId,
+        metadata: { source, monthly_rate: rate == null ? null : Number(rate) },
+      });
+    } catch (auditErr) {
+      logger.warn(`[plan-rate-ledger] manual-rate audit write failed for ${customerId}: ${auditErr.message}`);
+    }
   }
 }
 
@@ -553,5 +578,7 @@ module.exports = {
   applyAcceptToLedger,
   resetLedgerToScalar,
   syncScalarWriteToLedger,
+  MANUAL_RATE_SOURCES,
+  MANUAL_RATE_AUDIT_ACTION,
   seedLedgerComponents,
 };
