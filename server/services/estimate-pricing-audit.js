@@ -296,6 +296,9 @@ function quoteProvenanceFrom(estimate, data, result) {
         : (Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null),
     },
     marginWarnings: result?.marginWarnings || recurring.marginWarnings || null,
+    // Authored proposals are the authoritative customer quote — frozen
+    // verbatim (GH codex P1).
+    proposal: data?.proposal ?? null,
     // The price-bearing REQUEST choices, verbatim (codex pre-push P1):
     // admin V2 rows keep cadence/ownership/add-on selections in
     // engineRequest.options + selectedServices, and v1 rows in data.inputs
@@ -317,20 +320,38 @@ function quoteProvenanceFrom(estimate, data, result) {
   };
 }
 
+// Nullish-aware numeric helpers shared by every line normalizer:
+// Number(null) is a finite 0 and must never fabricate a price.
+function numOrNaN(v) {
+  return v === null || v === undefined || v === '' ? NaN : Number(v);
+}
+function pickNum(...vals) {
+  return vals.map(numOrNaN).find((v) => Number.isFinite(v));
+}
+
 function normalizeRecurringLines(result) {
   const discount = Number(result?.recurring?.discount || 0);
   const lines = [];
   for (const svc of result?.recurring?.services || []) {
     const monthly = Number(svc.monthly ?? svc.mo ?? 0);
     const serviceKey = keyFromName(svc.name);
+    // The mapper preserves the AUTHORITATIVE net on the row itself
+    // (manualFinalAnnual / annualAfterDiscount — manual and floor-capped
+    // discounts land ONLY there); recomputing from the generic tier
+    // discount misstated those lines (GH codex P1).
+    const netAnnual = pickNum(svc.manualFinalAnnual, svc.annualAfterDiscount);
+    const grossAnnual = monthly * 12;
+    const priceNet = Number.isFinite(netAnnual) ? money(netAnnual) : money(grossAnnual * (1 - discount));
     const line = {
       serviceKey,
       label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'recurring',
-      price: money(monthly * 12 * (1 - discount)),
-      monthly: money(monthly * (1 - discount)),
-      priceBeforeDiscount: money(monthly * 12),
-      discount,
+      price: priceNet,
+      monthly: Number.isFinite(netAnnual) ? money(netAnnual / 12) : money(monthly * (1 - discount)),
+      priceBeforeDiscount: money(grossAnnual),
+      discount: grossAnnual > 0 && grossAnnual > priceNet
+        ? Math.round((1 - priceNet / grossAnnual) * 1000) / 1000
+        : 0,
       priceSource: 'saved_estimate.result.recurring.services',
     };
     if (serviceKey === 'mosquito') {
@@ -379,15 +400,19 @@ function normalizeOneTimeLines(result) {
   for (const item of result?.oneTime?.items || []) {
     const serviceKey = item.service || keyFromName(item.name);
     const quoted = quotedFieldsFrom(item);
+    // Net witnesses first (manual/discounted one-time amounts) — gross
+    // survives as priceBeforeDiscount (GH codex P1).
+    const net = pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price) ?? 0;
+    const gross = pickNum(item.priceBeforeDiscount, item.price) ?? net;
     const line = {
       ...(quoted ? { quoted } : {}),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
-      price: money(item.price),
+      price: money(net),
       monthly: null,
-      priceBeforeDiscount: money(item.price),
-      discount: 0,
+      priceBeforeDiscount: money(gross),
+      discount: gross > 0 && gross > net ? Math.round((1 - net / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.items',
     };
     if (serviceKey === 'one_time_mosquito') {
@@ -400,15 +425,17 @@ function normalizeOneTimeLines(result) {
   for (const item of result?.oneTime?.specItems || []) {
     const serviceKey = item.service || keyFromName(item.name);
     const quoted = quotedFieldsFrom(item);
+    const net = pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price) ?? 0;
+    const gross = pickNum(item.priceBeforeDiscount, item.price) ?? net;
     lines.push({
       ...(quoted ? { quoted } : {}),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
-      price: money(item.price),
+      price: money(net),
       monthly: null,
-      priceBeforeDiscount: money(item.price),
-      discount: 0,
+      priceBeforeDiscount: money(gross),
+      discount: gross > 0 && gross > net ? Math.round((1 - net / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.specItems',
     });
   }
@@ -562,10 +589,7 @@ function normalizeEngineLineItems(result) {
       ? item.service
       : (ENGINE_ID_ALIASES[item.service] || item.service || keyFromName(item.name));
     const quoted = quotedFieldsFrom(item);
-    // Number(null) is a finite 0 — nullish values must fall through, not
-    // zero out revenue or cadence (codex pre-push P1 x2).
-    const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
-    const pickNum = (...vals) => vals.map(num).find((v) => Number.isFinite(v));
+    const num = numOrNaN;
     // TWO persisted shapes reach this normalizer (GH codex P1):
     // - the quote-wizard PROJECTION: annual/monthly/price are already NET,
     //   with *BeforeDiscount originals alongside;
@@ -606,6 +630,23 @@ function normalizeEngineLineItems(result) {
     const mosquitoExtras = /mosquito/.test(String(serviceKey))
       ? mosquitoCogs(item.program ?? item.selectedProgram ?? item.tier, item.addOns || {})
       : null;
+    // Hybrid engine lines (termite bait) carry a one-time installation
+    // beside the recurring monitoring — the canonical mapper emits it as
+    // its own one-time row; silently dropping it understated one-time
+    // revenue (GH codex P1).
+    const installPrice = num(item.installation?.price);
+    if (Number.isFinite(installPrice) && installPrice > 0) {
+      lines.push({
+        serviceKey: `${item.service || serviceKey}_installation`,
+        label: `${item.name || serviceKey} Installation`,
+        cadence: 'one_time',
+        price: money(installPrice),
+        monthly: null,
+        priceBeforeDiscount: money(installPrice),
+        discount: 0,
+        priceSource: 'saved_estimate.engineResult.lineItems.installation',
+      });
+    }
     // Synthetic adjustment rows (bundle discounts, credits) are not
     // services — costing them minted a false missing-COGS risk (codex
     // pre-push P2).
@@ -633,13 +674,61 @@ function normalizeEngineLineItems(result) {
   return lines;
 }
 
+// An AUTHORED proposal is the authoritative customer quote — its building
+// line items, service programs, and corrective work replace the engine
+// lines entirely (GH codex P1). Unmapped keys keep honest unmapped COGS.
+function normalizeProposalLines(proposal) {
+  if (!proposal || proposal.enabled !== true) return [];
+  const lines = [];
+  const push = (name, cadence, amount, extra = {}) => {
+    const amt = numOrNaN(amount);
+    if (!Number.isFinite(amt)) return;
+    const serviceKey = keyFromName(name);
+    lines.push({
+      serviceKey,
+      label: name || serviceKey,
+      cadence,
+      price: money(amt),
+      monthly: cadence === 'recurring' ? money(amt / 12) : null,
+      priceBeforeDiscount: money(amt),
+      discount: 0,
+      priceSource: 'saved_estimate.proposal',
+      ...extra,
+    });
+  };
+  for (const building of proposal.buildings || []) {
+    for (const item of building.lineItems || []) {
+      if (item.frequency === 'one_time') push(item.name || building.name, 'one_time', item.amount);
+      else {
+        const annual = pickNum(item.annual) ?? (numOrNaN(item.amount) * (pickNum(item.frequencyPerYear) || 12));
+        push(item.name || building.name, 'recurring', annual);
+      }
+    }
+  }
+  for (const program of proposal.programs || []) {
+    push(program.name || program.serviceType, 'recurring', program.annual, {
+      quoted: {
+        pricePerApplication: program.pricePerApplication,
+        visitsPerYear: program.frequencyPerYear,
+      },
+      ...(pickNum(program.frequencyPerYear) ? { visitsPerYear: Number(program.frequencyPerYear) } : {}),
+    });
+  }
+  for (const work of proposal.correctiveWork || []) {
+    push(work.name || work.description || 'Corrective work', 'one_time', work.amount);
+  }
+  return lines;
+}
+
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
   let result = data.result || data.engineResult || {};
-  let rawLines = [
-    ...normalizeRecurringLines(result),
-    ...normalizeOneTimeLines(result),
-  ];
+  let rawLines = data.proposal?.enabled === true
+    ? normalizeProposalLines(data.proposal)
+    : [
+      ...normalizeRecurringLines(result),
+      ...normalizeOneTimeLines(result),
+    ];
   // Quote-wizard rows persist their priced services ONLY at
   // engineResult.lineItems (no recurring/oneTime blocks) — without this
   // fallback such snapshots had empty lines, zero cost, and a falsely
@@ -648,7 +737,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // the one with priced lines, it becomes THE result for the whole audit
   // (dimensions, visit counts, provenance), not just the lines (codex
   // pre-push P1).
-  if (!rawLines.length) {
+  if (!rawLines.length && data.proposal?.enabled !== true) {
     rawLines = normalizeEngineLineItems(result);
     if (!rawLines.length && data.engineResult && data.engineResult !== result) {
       const alt = normalizeEngineLineItems(data.engineResult);

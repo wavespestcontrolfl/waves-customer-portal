@@ -249,6 +249,60 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => l.serviceKey === 'lawn_care')).toMatchObject({ cadence: 'recurring', price: 0 });
   });
 
+  test('an authored proposal replaces engine lines and freezes verbatim', async () => {
+    const proposal = {
+      enabled: true,
+      taxRate: 0.07,
+      buildings: [{ name: 'Warehouse A', lineItems: [{ name: 'Exterior pest program', frequency: 'monthly', amount: 200, annual: 2400, taxable: false }] }],
+      programs: [{ name: 'Turf Treatment Program', pricePerApplication: 300, frequencyPerYear: 6, annual: 1800, taxable: true }],
+      correctiveWork: [{ description: 'Door sweep install', amount: 450, taxable: true }],
+    };
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-prop', status: 'sent', monthly_total: '350.00', annual_total: '4200.00', onetime_total: '450.00',
+      estimate_data: {
+        proposal,
+        result: { recurring: { services: [{ name: 'Stale Engine Line', mo: 999 }] } },
+      },
+    });
+    // Proposal itemization is authoritative — the stale engine line is gone.
+    expect(audit.lines.some((l) => /stale/i.test(l.label))).toBe(false);
+    expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 1800, visitsPerYear: 6 });
+    expect(audit.lines.find((l) => /door sweep/i.test(l.label))).toMatchObject({ cadence: 'one_time', price: 450 });
+    expect(audit.quote.proposal).toEqual(proposal);
+  });
+
+  test('net row witnesses beat the generic tier discount; hybrid installation splits out', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-net', status: 'sent', monthly_total: '100.00', annual_total: '1200.00', onetime_total: '350.00',
+      estimate_data: {
+        result: {
+          recurring: {
+            discount: 0.1,
+            services: [
+              // Floor-capped: the row's own net outranks 12*mo*(1-discount).
+              { name: 'Lawn Care', mo: 50, annualAfterDiscount: 570 },
+            ],
+          },
+          oneTime: { items: [{ service: 'flea', name: 'Flea Treatment', price: 200, manualFinalOneTime: 150 }] },
+        },
+      },
+    });
+    const lawn = audit.lines.find((l) => l.serviceKey === 'lawn_care');
+    expect(lawn).toMatchObject({ price: 570, monthly: 47.5, priceBeforeDiscount: 600, discount: 0.05 });
+    const flea = audit.lines.find((l) => l.serviceKey === 'flea');
+    expect(flea).toMatchObject({ price: 150, priceBeforeDiscount: 200, discount: 0.25 });
+
+    const hybrid = await buildEstimatePricingAudit({
+      id: 'est-hy', status: 'sent', monthly_total: '30.00', annual_total: '360.00', onetime_total: '900.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [{ service: 'termite_bait', name: 'Termite Bait', monthly: 30, annual: 360, installation: { price: 900 } }],
+        },
+      },
+    });
+    expect(hybrid.lines.find((l) => l.serviceKey === 'termite_bait_installation')).toMatchObject({ cadence: 'one_time', price: 900 });
+  });
+
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,

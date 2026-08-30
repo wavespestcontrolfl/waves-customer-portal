@@ -1566,16 +1566,23 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // accepted-mid-publication sibling). Fail-soft.
     try {
       const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-      const terminalAnchor = await db('estimates').where({ id: estimate.id }).first();
-      if (terminalAnchor) {
-        let terminalData = terminalAnchor.estimate_data;
-        if (typeof terminalData === 'string') { try { terminalData = JSON.parse(terminalData); } catch { terminalData = {}; } }
-        terminalData = terminalData || {};
-        const auditRow = terminalData.sendSnapshot || !builtSendSnapshot
-          ? terminalAnchor
-          : { ...terminalAnchor, estimate_data: { ...terminalData, sendSnapshot: builtSendSnapshot } };
-        await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'send', sendMethod });
-      }
+      // Build from the PRE-ACCEPT row (freshForSnapshot): the accept
+      // handler rewrites estimate_data.result and the totals for the
+      // customer's chosen frequency, so a post-accept re-read would audit
+      // the accepted state, not the quote that was handed off — and THIS
+      // delivery's freshly built bundle outranks any stale sendSnapshot a
+      // prior send left behind (GH codex P1).
+      let preAcceptData = freshForSnapshot.estimate_data;
+      if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
+      preAcceptData = preAcceptData || {};
+      const auditRow = {
+        ...freshForSnapshot,
+        status: freshForSnapshot.viewed_at ? 'viewed' : 'sent',
+        estimate_data: builtSendSnapshot
+          ? { ...preAcceptData, sendSnapshot: builtSendSnapshot }
+          : preAcceptData,
+      };
+      await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'send', sendMethod });
     } catch (auditErr) {
       logger.warn(`[admin-estimates] superseded-send pricing audit snapshot failed (state stands): ${auditErr.message}`);
     }
@@ -1661,21 +1668,19 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // update above. Snapshot the terminal row too (GH codex P2).
             try {
               const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              const terminalSibling = await db('estimates').where({ id: sibling.id }).first();
-              if (terminalSibling) {
-                // The zero-row update never persisted the freshly built
-                // sendSnapshot — graft it in for the AUDIT ONLY (no row
-                // write) so the frozen pricingBundle isn't lost; a
-                // snapshot the accept path already persisted wins (GH
-                // codex P1).
-                let terminalData = terminalSibling.estimate_data;
-                if (typeof terminalData === 'string') { try { terminalData = JSON.parse(terminalData); } catch { terminalData = {}; } }
-                terminalData = terminalData || {};
-                const auditRow = terminalData.sendSnapshot
-                  ? terminalSibling
-                  : { ...terminalSibling, estimate_data: { ...terminalData, sendSnapshot: snapshot.sendSnapshot } };
-                await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'group_send', sendMethod });
-              }
+              // Build from the PRE-ACCEPT sibling row + THIS delivery's
+              // freshly built bundle — an accept rewrites result/totals,
+              // and a stale prior sendSnapshot must not outrank the bundle
+              // that was just handed to the customer (GH codex P1). Status
+              // reflects the delivered state, not the pre-claim draft.
+              let preAcceptData = sibling.estimate_data;
+              if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
+              preAcceptData = preAcceptData || {};
+              await saveEstimatePricingAuditSnapshot({
+                ...sibling,
+                status: sibling.viewed_at ? 'viewed' : 'sent',
+                estimate_data: { ...preAcceptData, sendSnapshot: snapshot.sendSnapshot },
+              }, { trigger: 'group_send', sendMethod });
             } catch (auditErr) {
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
             }
