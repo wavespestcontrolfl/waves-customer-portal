@@ -221,6 +221,13 @@ function quoteProvenanceFrom(estimate, data, result) {
     renderedAt: data?.sendSnapshot?.renderedAt || null,
     source: estimate.source || null,
     leadSource: estimate.lead_source || null,
+    // The CUSTOMER-SHOWN truth, verbatim: the frozen pricing bundle applies
+    // frequency/tier pricing, floor clamps, manual-discount netting, and
+    // setup-fee rules that can diverge from the raw engine result — so the
+    // audit freezes the bundle itself rather than re-deriving it (codex
+    // pre-push P1). The engine-side fields below are pricing PROVENANCE
+    // (why the price came out this way), not a substitute for it.
+    pricingBundle: bundle,
     discount: {
       waveguardTier: estimate.waveguard_tier || recurring.tier || recurring.waveGuardTier || result?.waveGuard?.tier || null,
       rate: number(recurring.discount) ?? 0,

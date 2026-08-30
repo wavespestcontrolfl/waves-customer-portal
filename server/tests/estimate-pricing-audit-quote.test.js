@@ -119,6 +119,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         propertyDataQuality: 'high',
       },
     });
+    // The customer-shown bundle is frozen VERBATIM — never re-derived.
+    expect(audit.quote.pricingBundle).toEqual(fixtureEstimate().estimate_data.sendSnapshot.pricingBundle);
     expect(audit.quote.property.fieldVerifyFlags).toEqual([{ field: 'pool', priority: 'LOW', reason: 'x' }]);
     expect(audit.quote.marginWarnings).toEqual([{ service: 'lawn_care', message: 'thin' }]);
   });
@@ -146,6 +148,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.discount.rate).toBe(0);
     expect(audit.quote.setupFee.waived).toBe(false);
     expect(audit.quote.property.fieldVerifyFlags).toBeNull();
+    expect(audit.quote.pricingBundle).toBeNull();
     expect(audit.lines).toEqual([]);
   });
 
