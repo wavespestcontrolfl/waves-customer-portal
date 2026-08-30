@@ -17014,7 +17014,7 @@ export function CompletionPanel({
                     ? (isMosquitoTrace ? "Outline the treated yard" : "Outline the treated lawn")
                     : "Trace where we sprayed"}
                 </button>
-                <span style={{ fontSize: 12, color: D.muted }}>
+                <span style={{ fontSize: 14, color: D.muted }}>
                   {traceOutlineMode
                     ? "Optional — outlines the treated area on the customer report."
                     : "Optional — replays the traced perimeter on the customer report."}
@@ -17029,6 +17029,7 @@ export function CompletionPanel({
                   lng={service.lng ?? service.customer_longitude}
                   onClose={() => setZoneMapOpen(false)}
                   onSaved={applyTracedTreatmentZone}
+                  appearance="light"
                   lawnMode={traceOutlineMode}
                   yardMode={isMosquitoTrace}
                 />
