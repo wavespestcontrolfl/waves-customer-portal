@@ -679,6 +679,19 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.rowMatchesIntentKeywords({ title: 'anything' }, [])).toBe(false);
   });
 
+  test('serviceIntentKeywords is boundary-aware on the REQUESTED topic and covers unlisted-until-now pests', () => {
+    // False positive: 'important' / 'plant' must not activate the ant group.
+    expect(Studio.serviceIntentKeywords({ topic: 'important plant care update', service: 'general pest' })).toEqual([]);
+    // Previously-unlisted intents now resolve, so an exact live post can be linked.
+    expect(Studio.serviceIntentKeywords({ topic: 'black widow vs brown widow', service: 'general pest' })).toEqual(expect.arrayContaining(['spider']));
+    expect(Studio.serviceIntentKeywords({ topic: 'wasps nesting under eaves' })).toEqual(expect.arrayContaining(['wasp', 'hornet']));
+    expect(Studio.serviceIntentKeywords({ topic: 'palmetto bugs in the garage' })).toEqual(expect.arrayContaining(['roach']));
+    // End-to-end: the resolved keywords select the right row and reject the look-alike.
+    const kws = Studio.serviceIntentKeywords({ topic: 'summer roaches moving indoors', service: 'general pest' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'How to get rid of German cockroaches' }, kws)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Approaching hurricane season lawn prep' }, kws)).toBe(false);
+  });
+
   test('legacyCardShipped is true only for a successful platform result that retained a card URL', () => {
     const card = 'https://cdn.example.com/social-media/parrish-card.jpg';
     const gbpCard = 'https://cdn.example.com/social-media/parrish-card-gbp.jpg';

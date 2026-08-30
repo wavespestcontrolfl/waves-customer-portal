@@ -755,20 +755,13 @@ async function getCampaignContext({ topic, city, service }) {
   return context;
 }
 
-// Intent keywords match as WHOLE WORDS with the usual English suffixes
-// ('ant' → ant, ants, ant-proof; 'fertil' → fertilizer, fertilization;
-// 'roach' → roaches) — never as bare substrings or open prefixes, which
-// matched plant / important / antenna and picked an unrelated city-matched
-// row as the link page.
-const INTENT_SUFFIX = '(?:s|es|ed|er|ers|ing|ize|izer|izers|izing|ization)?';
+// A content row is relevant when any intent keyword appears as a whole word
+// in its title/keyword/tag/meta (same boundary rule as the requested topic).
 function rowMatchesIntentKeywords(row = {}, keywords = []) {
   if (!keywords.length) return false;
   const text = [row.title, row.keyword, row.tag, row.meta_description]
     .map((v) => String(v || '').toLowerCase()).join(' ');
-  return keywords.some((kw) => {
-    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`\\b${escaped}${INTENT_SUFFIX}\\b`).test(text);
-  });
+  return keywords.some((kw) => textHasIntentKeyword(text, kw));
 }
 
 // Did a legacy brand card actually reach a network? True only for a
@@ -1534,17 +1527,30 @@ const SERVICE_INTENT_KEYWORDS = [
   { match: ['termite', 'swarm', 'swarming', 'wdo', 'wood destroying'] },
   { match: ['mosquito', 'standing water'] },
   { match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
-  { match: ['roach', 'cockroach'] },
+  { match: ['roach', 'cockroach', 'palmetto bug'] },
   { match: ['ant', 'ants'] },
   { match: ['flea', 'fleas'] },
   { match: ['bed bug', 'bedbug'] },
-  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub'] },
+  { match: ['spider', 'spiders', 'black widow', 'brown widow'] },
+  { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees'] },
+  { match: ['silverfish', 'earwig', 'millipede', 'centipede'] },
+  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect'] },
 ];
+
+// Boundary-aware keyword test shared by the requested topic/service and the
+// content rows: whole words plus the usual English suffixes ('ant' → ant,
+// ants, ant-proof; 'fertil' → fertilizer; 'roach' → roaches) — never bare
+// substrings ('important' is not an ant campaign; 'plant' is not).
+const INTENT_SUFFIX = '(?:s|es|ed|er|ers|ing|ize|izer|izers|izing|ization)?';
+function textHasIntentKeyword(text, kw) {
+  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`\\b${escaped}${INTENT_SUFFIX}\\b`).test(text);
+}
 
 function serviceIntentKeywords(input = {}) {
   const requested = `${input.service || ''} ${input.topic || ''}`.toLowerCase();
   const matches = SERVICE_INTENT_KEYWORDS
-    .filter((group) => group.match.some((keyword) => requested.includes(keyword)))
+    .filter((group) => group.match.some((keyword) => textHasIntentKeyword(requested, keyword)))
     .flatMap((group) => group.match);
   return Array.from(new Set(matches));
 }
