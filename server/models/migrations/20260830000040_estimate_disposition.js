@@ -123,6 +123,14 @@ exports.up = async function up(knex) {
     WHERE e.status IN ('sent', 'viewed')
       AND e.archived_at IS NOT NULL
       AND e.disposition IS NULL
+      -- Mechanically superseded click-mints are NOT losses (GH codex P1):
+      -- the mint flow archives every prior lineage row solely to prevent
+      -- two live prices, recording the ids on the replacement. Those rows
+      -- keep a NULL disposition and stay out of the loss story entirely.
+      AND NOT EXISTS (
+        SELECT 1 FROM estimates o
+        WHERE o.estimate_data #> '{reportCtaMint,supersededEstimateIds}' @> to_jsonb(e.id::text)
+      )
   `);
 };
 

@@ -350,6 +350,18 @@ describe('winLossSlices — audit slices', () => {
       // Resent yesterday, but first VIEWED 10d ago — the anchor is the
       // earliest delivery evidence, so the row stays in its mature cohort.
       row({ id: 'resent', status: 'viewed', accepted_at: null, sent_at: daysAgo(1), viewed_at: daysAgo(10), view_count: 2 }),
+      // Resent yesterday, NEVER opened — the durable firstDeliveredAt stamp
+      // is the only witness to the real age; it must win over sent_at.
+      row({
+        id: 'resent-unopened', status: 'sent', accepted_at: null, sent_at: daysAgo(1),
+        estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(11) } },
+      }),
+      // Accept won the in-flight sending claim: sent_at NULL, delivery
+      // witnessed only by the durable stamp + accepted_at.
+      row({
+        id: 'race-win', status: 'accepted', accepted_at: daysAgo(8), sent_at: null,
+        estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(9) } },
+      }),
       // CTA mint stamped sent_at with nothing delivered → not a cohort row.
       row({ id: 'mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta', estimate_data: {} }),
       // CTA mint an operator later really delivered → anchored on that handoff.
@@ -365,9 +377,10 @@ describe('winLossSlices — audit slices', () => {
     // the 7d recent window, and the undelivered mint has no anchor at all.
     expect(sentCohorts.sentTotal).toBe(0);
     const bucket = sentCohorts.cohorts.find((c) => c.maturityDays === 7);
-    // resent (anchor 10d) and mint-sent (8d) sit in the 7d bucket's shifted
-    // window [now-14, now-7]; the undelivered mint never appears.
-    expect(bucket).toMatchObject({ sent: 2, won: 0, lost: 0, open: 2 });
+    // resent (anchor 10d), resent-unopened (11d), race-win (9d, won 1d
+    // later), and mint-sent (8d) sit in the 7d bucket's shifted window
+    // [now-14, now-7]; the undelivered mint never appears.
+    expect(bucket).toMatchObject({ sent: 4, won: 1, lost: 0, open: 3 });
   });
 
   test('no sent rows → empty cohorts with null rates', async () => {

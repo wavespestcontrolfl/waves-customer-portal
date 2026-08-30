@@ -245,12 +245,13 @@ function sentCohorts(rows, { days, nowMs }) {
 // or drop out entirely. Generic rows anchor on the EARLIEST surviving
 // delivery evidence (a view or accept cannot precede first delivery).
 function sentAnchorMs(row) {
-  if (String(row.source || '') === 'service_report_cta') {
-    const data = parseEstimateData(row.estimate_data);
-    return ms(data?.deliveryState?.firstDeliveredAt);
-  }
-  if (row.sent_at == null) return null;
-  const candidates = [ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
+  const data = parseEstimateData(row.estimate_data);
+  // sendEstimateNow persists the FIRST handoff durably at
+  // deliveryState.firstDeliveredAt — the one witness a resend can't move
+  // (GH codex P1: an unopened resend must keep its original cohort age).
+  const firstDelivered = ms(data?.deliveryState?.firstDeliveredAt);
+  if (String(row.source || '') === 'service_report_cta') return firstDelivered;
+  const candidates = [firstDelivered, ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
     .filter((ts) => ts != null);
   return candidates.length ? Math.min(...candidates) : null;
 }
@@ -293,9 +294,24 @@ async function winLossSlices({ days = 90 } = {}) {
   // back days + the longest applicable maturity so every cohort bucket has
   // its full shifted window (codex pre-push P1).
   const maxMaturity = COHORT_MATURITY_DAYS.filter((m) => m <= days).pop() || 0;
+  const cohortWindowStart = new Date(cutoffMs - maxMaturity * DAY_MS);
   const sentRows = await db('estimates')
-    .whereNotNull('sent_at')
-    .where('sent_at', '>=', new Date(cutoffMs - maxMaturity * DAY_MS))
+    // Delivery evidence, not just sent_at (GH codex P1): a customer accept
+    // that wins the in-flight 'sending' claim finalizes WITHOUT sent_at but
+    // persists deliveryState.firstDeliveredAt — same evidence set
+    // estimate-source-performance uses. Superset prefilter; sentAnchorMs
+    // does the precise anchoring in JS.
+    .where((q) => q
+      .whereNotNull('sent_at')
+      .orWhereNotNull('accepted_at')
+      .orWhereIn('status', ['sent', 'viewed', 'accepted'])
+      .orWhereRaw("estimate_data #>> '{deliveryState,firstDeliveredAt}' IS NOT NULL"))
+    .where((q) => q
+      .where('sent_at', '>=', cohortWindowStart)
+      .orWhere('viewed_at', '>=', cohortWindowStart)
+      .orWhere('accepted_at', '>=', cohortWindowStart)
+      .orWhere('updated_at', '>=', cohortWindowStart)
+      .orWhere('created_at', '>=', cohortWindowStart))
     .select(...SLICE_COLUMNS);
 
   const totals = emptyCell();
