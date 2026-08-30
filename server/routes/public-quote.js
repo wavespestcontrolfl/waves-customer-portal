@@ -21,7 +21,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
-const { normalizeLeadAddress, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, splitStreetLineUnit, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
@@ -960,11 +960,24 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // fields would re-grade as a plain vision measurement downstream and
     // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
     // number — the exact over-claim the source mapping exists to prevent.
+    // The cache key is the SAME normalized street-only parcel address step 1
+    // used (public-property-lookup's parcelLookupAddress), rebuilt from THIS
+    // request's normalizedAddress — never the raw `address` field alone,
+    // which a crafted request could point at a different cached property
+    // than the structured fields the quote stores (pre-push codex P0 r2).
+    const parcelLookupAddress = normalizedAddress.line2
+      ? formatAddress({
+        line1: normalizedAddress.line1,
+        city: normalizedAddress.city,
+        state: normalizedAddress.state,
+        zip: normalizedAddress.zip,
+      })
+      : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
-    if (address) {
+    if (parcelLookupAddress) {
       try {
         const { performPropertyLookup } = require('./property-lookup-v2');
-        const serverLookup = await performPropertyLookup(address, { cacheOnly: true, persist: false });
+        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
         trustedTurf = serverLookup?.enriched || {};
       } catch (turfErr) {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
