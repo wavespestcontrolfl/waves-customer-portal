@@ -941,6 +941,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
         completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : (reservice.completedFallback || 'Reported areas were re-treated today.'),
         detail: [
           data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+          reservice.expectation || null,
           reservice.billingLine || null,
         ].filter(Boolean).join(' '),
       };

@@ -555,12 +555,27 @@ export default function ServiceReportDocument({ data, token }) {
     // "action" status, or a lawn/T&S needs_attention/watch/urgent snapshot
     // — leads and the re-service framing follows it. Otherwise the
     // re-service sentence leads the summary.
-    const pestAttention = ['recommended', 'action'].includes(String(data.pestReportV2?.status?.key || ''));
-    const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(data.reportV2?.snapshot?.status || ''));
+    const pestStatus = data.pestReportV2?.status;
+    const pestAttention = ['recommended', 'action'].includes(String(pestStatus?.key || ''));
+    const snapshot = data.reportV2?.snapshot;
+    const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(snapshot?.status || ''));
     const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
     const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
-    if (cockroachV2 || termiteV2Summary || pestAttention || snapshotAttention) summaryParagraphs.push(...fresh);
-    else summaryParagraphs.unshift(...fresh);
+    if (cockroachV2 || termiteV2Summary) {
+      summaryParagraphs.push(...fresh);
+    } else if (pestAttention || snapshotAttention) {
+      // The honest status must LEAD the document, not merely precede the
+      // callback copy inside the summary: put its label/headline (and the
+      // Pest V2 status summary) first, the callback paragraphs last.
+      const lead = pestAttention
+        ? [pestStatus.label ? String(pestStatus.label).replace(/\.$/, '') + '.' : null, data.pestReportV2?.statusSummary || null]
+        : [snapshot.peaceOfMind || snapshot.statusHeadline || null];
+      const leadFresh = lead.filter((line) => typeof line === 'string' && line.trim() && !summaryParagraphs.includes(line));
+      summaryParagraphs.unshift(...leadFresh);
+      summaryParagraphs.push(...fresh);
+    } else {
+      summaryParagraphs.unshift(...fresh);
+    }
   }
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the

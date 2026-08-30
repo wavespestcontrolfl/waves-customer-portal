@@ -1113,6 +1113,7 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     }, 'static');
     expect(status.heading).toBe('your service is complete!');
     expect(status.result).toBe('Action needed');
+    expect(status.detail).toContain('two weeks');
     expect(status.detail).toContain('$0.00 billed');
     const watching = smartStatusSummary({
       reserviceReport: reservicePest,

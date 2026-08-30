@@ -1377,7 +1377,11 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
       pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' }, statusSummary: 'Ant pressure is still high at the kitchen slider.' },
     }} token="tok123" />);
     const text = container.textContent;
-    expect(text.indexOf(reservice.result)).toBeGreaterThan(text.indexOf('Cockroach activity was moderate today.'));
+    const actionAt = text.indexOf('Action needed.');
+    expect(actionAt).toBeGreaterThan(-1);
+    expect(actionAt).toBeLessThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
+    expect(actionAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+    expect(text.indexOf(reservice.result)).toBeGreaterThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
     unmount();
     const lawn = render(<ServiceReportDocument data={{
       ...BASE_DATA,
@@ -1386,6 +1390,9 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
       reportV2: { snapshot: { status: 'needs_attention', statusHeadline: 'Fungus noted in the back lawn.' }, todaysResult: 'We noted fungus in the back lawn and treated it today.' },
     }} token="tok123" />);
     const lawnText = lawn.container.textContent;
+    const fungusAt = lawnText.indexOf('Fungus noted in the back lawn.');
+    expect(fungusAt).toBeGreaterThan(-1);
+    expect(fungusAt).toBeLessThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
     expect(lawnText.indexOf('Lawn re-service completed')).toBeGreaterThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
   });
 
