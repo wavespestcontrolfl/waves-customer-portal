@@ -16988,6 +16988,53 @@ export function CompletionPanel({
               />
             </div>
           )}
+          {/* Desktop parity with the mobile render (codex P1 r2): the
+              tracer was mobile-only, so a desktop completion could never
+              capture the trace — the one artifact the customer report
+              can't recover without. Same eligibility belts, both flows. */}
+          {!isBedBugVisit && !isRodentTrappingVisit
+            && service.traceEligible !== false && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Treatment zone map</label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setZoneMapOpen(true)}
+                  style={{
+                    ...btnBase,
+                    width: "auto",
+                    height: 36,
+                    padding: "0 14px",
+                    background: "transparent",
+                    color: D.text,
+                    border: `1px solid ${D.border}`,
+                  }}
+                >
+                  {traceOutlineMode
+                    ? (isMosquitoTrace ? "Outline the treated yard" : "Outline the treated lawn")
+                    : "Trace where we sprayed"}
+                </button>
+                <span style={{ fontSize: 12, color: D.muted }}>
+                  {traceOutlineMode
+                    ? "Optional — outlines the treated area on the customer report."
+                    : "Optional — replays the traced perimeter on the customer report."}
+                </span>
+              </div>
+              {zoneMapOpen && (
+                <TechTreatmentZoneModal
+                  serviceId={service.id}
+                  customerName={service.customerName || "Customer"}
+                  address={service.address || ""}
+                  lat={service.lat ?? service.customer_latitude}
+                  lng={service.lng ?? service.customer_longitude}
+                  onClose={() => setZoneMapOpen(false)}
+                  onSaved={applyTracedTreatmentZone}
+                  lawnMode={traceOutlineMode}
+                  yardMode={isMosquitoTrace}
+                />
+              )}
+            </div>
+          )}
           {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Lawn Care Protocol</label>
