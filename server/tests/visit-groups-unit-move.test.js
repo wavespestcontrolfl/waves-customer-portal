@@ -798,7 +798,8 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(rem[0].values.move_hold_until.getTime()).toBeGreaterThan(Date.now() + 23 * 3600 * 1000); // self-expiring ~24h stamp
     expect(rem[0].ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['rem-a', 'rem-b']]]));
     expect(rem[1].ops).toEqual(expect.arrayContaining([['where', { scheduled_service_id: 'a' }]])); // re-stamp
-    expect(rem[1].values).toEqual({ move_hold_until: rem[0].values.move_hold_until });
+    expect(rem[1].values).toEqual({ move_hold_until: rem[0].values.move_hold_until, move_hold_token: rem[0].values.move_hold_token });
+    expect(rem[0].values.move_hold_token).toMatch(/^[0-9a-f]{32}$/); // unique cohort token (codex r35)
     // FULL success: claim + per-member re-stamps, then ONE release fenced on OUR stamp, keyed on the members
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
@@ -806,14 +807,14 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
     expect(rem.length).toBe(4); // claim + 2 re-stamps + release
     const release = rem[rem.length - 1];
-    expect(release.values).toEqual({ move_hold_until: null });
-    expect(release.ops).toEqual(expect.arrayContaining([['whereIn', 'scheduled_service_id', ['a', 'b']], ['where', { move_hold_until: rem[0].values.move_hold_until }]]));
+    expect(release.values).toEqual({ move_hold_until: null, move_hold_token: null });
+    expect(release.ops).toEqual(expect.arrayContaining([['whereIn', 'scheduled_service_id', ['a', 'b']], ['where', { move_hold_token: rem[0].values.move_hold_token }]]));
     // ABORT (primary never moved): the hold is released before rethrow
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rem[rem.length - 1].values).toEqual({ move_hold_until: null });
+    expect(rem[rem.length - 1].values).toEqual({ move_hold_until: null, move_hold_token: null });
     // a PARENT-RETARGET failure keeps the hold too (codex r29): the members landed but the visit record describes the old stop
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
@@ -860,8 +861,8 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // carries a newer mover's stamp) whose service is UNGROUPED. Runs only
     // after the guarded sync committed.
     const resched = src.slice(src.indexOf('async handleReschedule'), src.indexOf('if (!sendNotification)'));
-    expect(resched).toMatch(/record\.move_hold_until && syncedRows > 0/);
-    expect(resched).toMatch(/\.where\(\{ move_hold_until: record\.move_hold_until, customer_id: record\.customer_id \}\)/);
+    expect(resched).toMatch(/record\.move_hold_until && record\.move_hold_token && syncedRows > 0/);
+    expect(resched).toMatch(/\.where\(\{ 'ar\.move_hold_token': record\.move_hold_token \}\)/);
     expect(resched).toMatch(/options\.preserveMoveHold !== true/);
     // one-stop verification before release (local gate P1): a partial move's
     // own post-move primary sync must keep the hold while siblings sit split

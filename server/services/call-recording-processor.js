@@ -13072,6 +13072,29 @@ const CallRecordingProcessor = {
                           } catch (queueErr) {
                             logger.error(`[call-proc] held contact-confirmation requeue failed for ${contact.role} (customer ${customerId}): ${queueErr.message}`);
                           }
+                        } else if (!contactResult.sent && contactResult.code === 'MOVE_HOLD' && confirmationRearmed) {
+                          // Primary held by the same move and the sweep was
+                          // re-armed — its canonical send fans out to every
+                          // appointment contact once the hold clears.
+                          logger.info(`[call-proc] held ${contact.role} confirmation NOT queued — re-armed sweep owns delivery to all contacts (grouped move)`);
+                        } else if (!contactResult.sent && contactResult.code === 'MOVE_HOLD') {
+                          // Grouped move stamped the hold AFTER the primary
+                          // delivered (local gate P1): re-arming the whole
+                          // confirmation would double-text the primary, and
+                          // a frozen queued body could carry the pre-move
+                          // time — hand THIS contact durably to the office
+                          // lane instead (same exception rail as the held
+                          // email-only leg).
+                          try {
+                            await require('./notification-service').notifyAdmin(
+                              'comms',
+                              'Held confirmation text needs a manual send',
+                              `The appointment confirmation text to the ${contact.role || 'service'} contact was held by an in-progress visit move after the primary was already delivered — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                            );
+                            logger.info(`[call-proc] held ${contact.role} confirmation handed to the office lane (grouped move)`);
+                          } catch (notifyErr) {
+                            logger.error(`[call-proc] held ${contact.role} confirmation hand-off failed for ${scheduledServiceId}: ${notifyErr.message}`);
+                          }
                         } else if (!contactResult.sent) {
                           logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
                         } else {
@@ -13150,19 +13173,25 @@ const CallRecordingProcessor = {
                             });
                             if (!emailRetried?.held) break;
                           }
-                          if (emailRetried?.held) {
-                            logger.warn(`[call-proc] email-only confirmation for ${scheduledServiceId} still held after retries — handing to the office lane`);
+                          // Only ok === true is delivery (codex r35): a
+                          // retry can come back blocked/skipped/errored —
+                          // merely "not held" must not read as sent, or the
+                          // email-only contact silently misses the
+                          // confirmation with no hand-off.
+                          if (emailRetried?.ok === true) {
+                            logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId} (after move-hold retry)`);
+                          } else {
+                            const why = emailRetried?.held ? 'still held by an in-progress visit move' : `not delivered (${emailRetried?.reason || emailRetried?.error || 'unknown'})`;
+                            logger.warn(`[call-proc] email-only confirmation for ${scheduledServiceId} ${why} after retries — handing to the office lane`);
                             try {
                               await require('./notification-service').notifyAdmin(
                                 'comms',
                                 'Held confirmation email needs a manual send',
-                                `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was held by an in-progress visit move and could not be retried through — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                                `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was ${why} — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
                               );
                             } catch (notifyErr) {
                               logger.error(`[call-proc] held-email admin notification failed for ${scheduledServiceId}: ${notifyErr.message}`);
                             }
-                          } else {
-                            logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId} (after move-hold retry)`);
                           }
                         } else {
                           logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);

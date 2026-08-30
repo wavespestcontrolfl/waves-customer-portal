@@ -668,12 +668,21 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           .where('ss.visit_id', visit.id)
           .where('ar.move_hold_until', '>', new Date())
           .orderBy('ar.move_hold_until', 'desc')
-          .first('ar.move_hold_until');
+          .first('ar.move_hold_until', 'ar.move_hold_token');
         if (heldSibling) {
+          // A joiner with NO reminder row gets one CREATED held (codex r35):
+          // booking/seeding can group rows before registerAppointment runs,
+          // and that later registration would arrive unheld mid-move.
+          const existing = (await t('appointment_reminders')
+            .whereIn('scheduled_service_id', unattachedIds)
+            .select('scheduled_service_id')).map((r) => String(r.scheduled_service_id));
+          for (const missingId of unattachedIds.map(String).filter((id) => !existing.includes(id))) {
+            await ensureMemberReminderRowInTx(t, missingId);
+          }
           await t('appointment_reminders')
             .whereIn('scheduled_service_id', unattachedIds)
             .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', heldSibling.move_hold_until); })
-            .update({ move_hold_until: heldSibling.move_hold_until });
+            .update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
         }
       } catch (holdErr) {
         require('./logger').warn(`[visit-groups] join hold-inherit for visit ${visit.id} failed: ${holdErr.message}`);
@@ -1635,6 +1644,35 @@ function visitSummariesForRows(rows, {
 }
 
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// Ensure a member has a reminder row a hold can live on (shared by the
+// unit-move claim and createOrJoinVisit's join-inherit — codex r35): a
+// WINDOWED member gets an ARMED registration (normal 72h/24h once any hold
+// clears), a windowless one the pre-closed 08:00 placeholder. Returns the
+// row (or null when the member has no usable schedule).
+async function ensureMemberReminderRowInTx(t, memberId) {
+  const row = await t('scheduled_services').where({ id: memberId })
+    .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at');
+  if (!row || !row.customer_id || !row.scheduled_date) return null;
+  const AppointmentReminders = require('./appointment-reminders');
+  if (row.window_start) {
+    return AppointmentReminders.registerVisitReminderInTx(t, {
+      scheduledServiceId: memberId,
+      customerId: row.customer_id,
+      appointmentTime: `${dateOnly(row.scheduled_date)}T${String(row.window_start).slice(0, 5)}`,
+      serviceType: row.service_type || 'service',
+      source: 'unit_move_hold',
+      createdAt: row.created_at,
+    });
+  }
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
+  if (!stubTime || Number.isNaN(stubTime.getTime())) return null;
+  return AppointmentReminders.insertPreClosedPlaceholderRowInTx(t, {
+    scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
+    serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
+  });
+}
+
 // Durable reminder send hold for grouped unit moves. TTL is the
 // self-expiry (a forgotten repair can never silence a customer forever);
 // the takeover grace is the lease window inside which an ACTIVE stamp is
@@ -1994,16 +2032,31 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // staff repair the stop — and it expires on its own in 24h so a
   // forgotten repair can never silence a customer forever. The stamp
   // itself failing ABORTS the move before anything is written.
-  // The stamp doubles as the COHORT IDENTITY for the repair-release
-  // (handleReschedule clears every row carrying this exact value — codex
-  // r34): a random sub-second jitter makes two moves started in the same
-  // millisecond produce distinct stamps, so one repair can never release
-  // another move's cohort. The jitter is invisible to the lease math (the
-  // takeover grace is 5 minutes; expiry moves by <1s).
-  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS + require('crypto').randomInt(0, 1000));
+  // COHORT IDENTITY is a cryptographically unique token written with the
+  // stamp (codex r35 — a jittered expiry is NOT unique: two same-customer
+  // moves inside one second can collide): the repair-release keys on the
+  // token; the senders' hold checks and the lease/takeover math keep
+  // reading move_hold_until alone.
+  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS);
+  const reminderHoldToken = require('crypto').randomBytes(16).toString('hex');
   let reminderHoldIds = [];
+  let reminderHoldMemberIds = [];
   try {
     await db.transaction(async (t) => {
+      // The claim runs under the STOP LOCK with a fresh membership read
+      // (local codex gate P1): the plan's own trx (and its stop lock)
+      // committed before this one, so a row can JOIN the visit in the gap
+      // — it is missing from plan.memberIds, no held sibling existed for
+      // the join-inherit to copy, and a partial move would leave it
+      // texting while the planned cohort is held. The hold covers the
+      // UNION of the plan and the live membership: the late joiner stays
+      // quiet with the cohort (the retarget detaches it with a warning —
+      // that established contract is unchanged) and members that left are
+      // fenced by the plan's own per-member checks.
+      await lockStopForRow(t, serviceId);
+      const membershipNow = (await openMembers(t, plan.visitId)).map((m) => String(m.id));
+      const holdMemberIds = [...new Set([...plan.memberIds.map(String), ...membershipNow])];
+      reminderHoldMemberIds = holdMemberIds;
       // EVERY represented member's row is held — including members already
       // at the target (codex r30 P1): they stay part of the whole-visit
       // quiet invariant while another member is mid-move or stranded.
@@ -2014,7 +2067,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // Cancelled rows are held too (codex r28): the schedule-change
       // trigger can reactivate one mid-move and it must inherit the quiet.
       const holdRows = await t('appointment_reminders')
-        .whereIn('scheduled_service_id', plan.memberIds)
+        .whereIn('scheduled_service_id', holdMemberIds)
         .forUpdate()
         .select('id', 'scheduled_service_id', 'move_hold_until');
       // Foreign-hold refusal is a LEASE with a takeover grace (codex r30
@@ -2049,48 +2102,27 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // row instead of inserting a rival.
       const coveredMemberIds = new Set(holdRows.map((r) => String(r.scheduled_service_id)));
       const stubIds = [];
-      for (const memberId of plan.memberIds.map(String).filter((id) => !coveredMemberIds.has(id))) {
-        const row = await t('scheduled_services').where({ id: memberId })
-          .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at');
-        if (!row || !row.customer_id || !row.scheduled_date) continue;
-        const AppointmentReminders = require('./appointment-reminders');
-        let rec = null;
-        if (row.window_start) {
-          // A member with a REAL window gets an ARMED registration, not the
-          // pre-closed 08:00 stub (codex r30 P2): a tech-only / same-slot
-          // move never fires the trigger's time_changed promotion and the
-          // reminder sync excludes windows_preclosed rows, so a stub here
-          // would stay permanently silent after the hold clears. The
-          // registration path arms 72h/24h for the row's actual slot (and
-          // handles same-slot sibling dedupe); the hold stamp below keeps
-          // it quiet until release/expiry.
-          rec = await AppointmentReminders.registerVisitReminderInTx(t, {
-            scheduledServiceId: memberId,
-            customerId: row.customer_id,
-            appointmentTime: `${dateOnly(row.scheduled_date)}T${String(row.window_start).slice(0, 5)}`,
-            serviceType: row.service_type || 'service',
-            source: 'unit_move_hold',
-            createdAt: row.created_at,
-          });
-        } else {
-          const { parseETDateTime } = require('../utils/datetime-et');
-          const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
-          if (!stubTime || Number.isNaN(stubTime.getTime())) continue;
-          rec = await AppointmentReminders.insertPreClosedPlaceholderRowInTx(t, {
-            scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
-            serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
-          });
-        }
+      for (const memberId of holdMemberIds.filter((id) => !coveredMemberIds.has(id))) {
+        const rec = await ensureMemberReminderRowInTx(t, memberId);
         if (rec && rec.id) stubIds.push(rec.id);
       }
       const allIds = [...holdRows.map((r) => r.id), ...stubIds];
       if (!allIds.length) return;
       await t('appointment_reminders').whereIn('id', allIds)
-        .update({ move_hold_until: reminderHoldUntil });
+        .update({ move_hold_until: reminderHoldUntil, move_hold_token: reminderHoldToken });
       reminderHoldIds = allIds;
     });
   } catch (err) {
     reminderHoldIds = [];
+    reminderHoldMemberIds = [];
+    // A membership change (or the stop moving) during the claim is a
+    // PLAN-STALE abort, not a hold failure — surface it unwrapped so the
+    // caller replans instead of retrying a 503 (local gate P1).
+    if (err && (err.code === 'VISIT_MEMBERSHIP_CHANGED' || err.code === 'VISIT_STOP_MOVED')) {
+      throw err.code === 'VISIT_STOP_MOVED'
+        ? Object.assign(new Error('Cannot move this stop — it changed while the move was being prepared; reload and try again'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true })
+        : err;
+    }
     throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true, ...(err.code === 'VISIT_MOVE_HOLD_ACTIVE' ? { reason: 'hold_active' } : {}) });
   }
   // Release the hold (fenced on our own stamp so a newer mover's hold is
@@ -2102,9 +2134,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // Keyed on the MEMBERS + our stamp (codex r28): a reminder row
       // created or re-stamped mid-move carries the same stamp and is
       // released with the rest; a newer mover's stamp is never touched.
-      await db('appointment_reminders').whereIn('scheduled_service_id', plan.memberIds)
-        .where({ move_hold_until: reminderHoldUntil })
-        .update({ move_hold_until: null });
+      await db('appointment_reminders').whereIn('scheduled_service_id', reminderHoldMemberIds.length ? reminderHoldMemberIds : plan.memberIds)
+        .where({ move_hold_token: reminderHoldToken })
+        .update({ move_hold_until: null, move_hold_token: null });
     } catch (err) {
       onFailure(err);
     }
@@ -2117,7 +2149,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     try {
       await db('appointment_reminders').where({ scheduled_service_id: memberId })
         .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', reminderHoldUntil); })
-        .update({ move_hold_until: reminderHoldUntil });
+        .update({ move_hold_until: reminderHoldUntil, move_hold_token: reminderHoldToken });
     } catch (err) {
       logger.warn(`[visit-groups] reminder hold re-stamp for ${memberId} failed: ${err.message}`);
     }

@@ -1312,6 +1312,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     ? sendOptions.sendOutcome
     : {};
   const heldContacts = [];
+  const moveHeldRoles = [];
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
@@ -1328,12 +1329,31 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
     }
+    // A move-hold block mid-fan-out (codex r30/r35): before anything was
+    // accepted the whole notice defers (sticky blockedCode, caller leaves
+    // its flags open and retries everything). AFTER an accepted contact,
+    // the caller will finalize 'sent' — so a held later contact would
+    // silently lose its copy: record it and hand the remainder to the
+    // office lane below (the quiet-hours partial rail can't carry it — a
+    // frozen queued body could announce the pre-move slot).
+    if (!sent && sharedOutcome.lastCode === 'MOVE_HOLD') {
+      if (!sentAny) break;
+      moveHeldRoles.push(contact.role || 'service');
+      continue;
+    }
     sentAny = sentAny || sent;
-    // A move-hold block covers the whole VISIT, not one recipient — stop
-    // the fan-out (each remaining contact would just re-read the same
-    // hold and write another blocked audit row). Sticky blockedCode above
-    // carries the deferral out to the caller.
-    if (!sent && sharedOutcome.lastCode === 'MOVE_HOLD') break;
+  }
+  if (sentAny && moveHeldRoles.length) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'comms',
+        'Held appointment notice needs a manual send',
+        `A ${messageType} text to ${moveHeldRoles.length} appointment contact(s) (${moveHeldRoles.join(', ')}) was held by an in-progress visit move after another contact was already texted — send it from the composer once the stop settles.`,
+      );
+      logger.info(`[appt-remind] ${messageType}: ${moveHeldRoles.length} move-held contact(s) handed to the office lane (partial fan-out)`);
+    } catch (notifyErr) {
+      logger.error(`[appt-remind] move-held contact hand-off failed for customer ${customer.id}: ${notifyErr.message}`);
+    }
   }
   // Partial fan-out across the 20:00 boundary (codex r20): one accepted
   // contact makes callers finalize 'sent', so a later held contact would
@@ -3168,7 +3188,8 @@ const AppointmentReminders = {
       // un-hold the very move the stamp protects. Best-effort after the
       // committed sync — a failed release leaves rows quiet until the TTL,
       // the safe direction, and the senders' own checks stay authoritative.
-      if (record.move_hold_until && syncedRows > 0 && options.preserveMoveHold !== true
+      if (record.move_hold_until && record.move_hold_token && syncedRows > 0
+        && options.preserveMoveHold !== true
         && new Date(record.move_hold_until).getTime() > Date.now()) {
         try {
           // The release fires ONLY when the cohort's LIVE services now form
@@ -3181,9 +3202,12 @@ const AppointmentReminders = {
           // r34/local gate). A genuine repair lands every member back on
           // one stop and passes.
           const dayOf = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10));
+          // Cohort identity = the move's unique token (codex r35 — the lease
+          // expiry is not unique across moves); rows stamped without one
+          // (legacy) are left to the TTL backstop.
           const cohort = await db('appointment_reminders as ar')
             .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-            .where({ 'ar.move_hold_until': record.move_hold_until, 'ar.customer_id': record.customer_id })
+            .where({ 'ar.move_hold_token': record.move_hold_token })
             .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
           // A 'rescheduled' cohort member is UNRESOLVED, not ignorable
           // (local gate P1): it is a failed sibling awaiting its
@@ -3220,8 +3244,8 @@ const AppointmentReminders = {
           }
           if (oneStop) {
             const released = await db('appointment_reminders')
-              .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
-              .update({ move_hold_until: null, updated_at: new Date() });
+              .where({ move_hold_token: record.move_hold_token })
+              .update({ move_hold_until: null, move_hold_token: null, updated_at: new Date() });
             if (released > 0) {
               logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its repaired partial-move cohort`);
             }
