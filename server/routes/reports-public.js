@@ -1330,14 +1330,25 @@ function cockroachRecapRetired(service) {
   } catch { return false; }
 }
 
+// One retirement verdict for every public recap surface (codex P1 r4 on the
+// no-schematic PR): callback recaps joined the cockroach family — the video
+// tells the routine-visit barrier/celebration story a complaint re-visit
+// must not carry, and an ALREADY-approved one must stop serving on
+// permanent links, not just stop being rebuilt. Rides the same kill switch
+// as the report-side suppression (unset GATE_RESERVICE_REPORT_COPY).
+function recapRetired(service) {
+  if (cockroachRecapRetired(service)) return true;
+  return reserviceReportCopyGateOn() && service.is_callback === true;
+}
+
 // GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
 // recap the tech has APPROVED (ready-but-unapproved stays private).
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
-    if (cockroachRecapRetired(service)) return res.json({ ready: false, durationMs: null });
+    if (recapRetired(service)) return res.json({ ready: false, durationMs: null });
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
@@ -1349,9 +1360,9 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).end();
-    if (cockroachRecapRetired(service)) return res.status(404).end();
+    if (recapRetired(service)) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
@@ -2221,6 +2232,9 @@ router.get('/:token/data', async (req, res, next) => {
         // on permanent links either (codex P1 #3007 r11; the recap builder
         // stopped producing new ones in r10).
         && !require('../services/service-report/pest-report-v2').isCockroachTypedReportType(v1Data.typedReport?.type)
+        // Callback recaps are retired the same way (codex P1 r4) — don't
+        // advertise a player the /recap endpoints will now 404.
+        && !(reserviceReportCopyGateOn() && v1Data.isCallback === true)
       ) {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');
