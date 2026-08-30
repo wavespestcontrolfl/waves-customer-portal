@@ -26,6 +26,8 @@ const SUGGESTION = {
   baseAnnual: 384,
   discount: 0,
   serviceLabel: 'Quarterly Pest Control Service',
+  coverageCadence: 'quarterly',
+  coverageVisitCount: 4,
 };
 
 function renderModal(props = {}) {
@@ -43,20 +45,25 @@ function renderModal(props = {}) {
 }
 
 describe('estimateSuggestionMatchesService', () => {
-  it('matches on exact identity across cadence and filler words — never substring', () => {
-    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control')).toBe(true);
-    expect(estimateSuggestionMatchesService(SUGGESTION, 'Monthly Pest Control Plan')).toBe(true);
-    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Mosquito Service')).toBe(false);
+  it('requires exact label identity (cadence words kept), cadence, and visit count', () => {
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'quarterly', 4)).toBe(true);
+    // Cadence is part of the identity — a monthly label, cadence, or count
+    // never receives the quarterly quote.
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Monthly Pest Control Plan', 'quarterly', 4)).toBe(false);
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'monthly', 12)).toBe(false);
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'quarterly', 6)).toBe(false);
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Mosquito Service', 'quarterly', 4)).toBe(false);
     // "Pest Control" must NOT match "Commercial Pest Control" on money.
-    expect(estimateSuggestionMatchesService(SUGGESTION, 'Commercial Pest Control')).toBe(false);
-    // Unlabeled suggestions fail closed.
-    expect(estimateSuggestionMatchesService({ ...SUGGESTION, serviceLabel: '' }, 'Quarterly Pest Control')).toBe(false);
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Commercial Pest Control', 'quarterly', 4)).toBe(false);
+    // Unlabeled or cadence-less suggestions fail closed.
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, serviceLabel: '' }, 'Quarterly Pest Control', 'quarterly', 4)).toBe(false);
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, coverageCadence: null }, 'Quarterly Pest Control', 'quarterly', 4)).toBe(false);
   });
 
   it('never matches blocked or zero-amount suggestions', () => {
-    expect(estimateSuggestionMatchesService({ ...SUGGESTION, blocked: true }, 'Quarterly Pest Control')).toBe(false);
-    expect(estimateSuggestionMatchesService({ ...SUGGESTION, amount: 0 }, 'Quarterly Pest Control')).toBe(false);
-    expect(estimateSuggestionMatchesService(null, 'Quarterly Pest Control')).toBe(false);
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, blocked: true }, 'Quarterly Pest Control', 'quarterly', 4)).toBe(false);
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, amount: 0 }, 'Quarterly Pest Control', 'quarterly', 4)).toBe(false);
+    expect(estimateSuggestionMatchesService(null, 'Quarterly Pest Control', 'quarterly', 4)).toBe(false);
   });
 });
 

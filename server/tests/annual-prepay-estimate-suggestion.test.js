@@ -7,10 +7,11 @@ const {
   pickAnnualPrepayEstimate,
   shortEstimateRef,
   suggestionServiceMatches,
+  suggestionCoverageMatches,
 } = require('../services/annual-prepay-estimate-suggestion');
 const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
-const PEST_LINE = { service: 'pest', name: 'Quarterly Pest Control Service' };
+const PEST_LINE = { service: 'pest', name: 'Quarterly Pest Control Service', frequency: 'quarterly' };
 
 function pestEstimate(overrides = {}) {
   return {
@@ -75,7 +76,7 @@ describe('pickAnnualPrepayEstimate', () => {
 describe('buildAnnualPrepayEstimateSuggestion', () => {
   test('single-recurring-line pest estimate suggests the resolver amount off monthly × 12', async () => {
     const estimate = pestEstimate();
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([estimate]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([estimate], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.estimateId).toBe(estimate.id);
     expect(suggestion.baseAnnual).toBe(384);
@@ -90,10 +91,29 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.amount).toBe(parity.amount);
     expect(suggestion.discount).toBe(parity.discount);
     expect(suggestion.amount).toBeGreaterThan(0);
+    // The quoted annual is only valid for the quoted schedule — the
+    // suggestion must carry the estimate's own cadence and visit count.
+    expect(suggestion.coverageCadence).toBe('quarterly');
+    expect(suggestion.coverageVisitCount).toBe(4);
+  });
+
+  test('unsupported cadence never auto-prices (fail closed)', async () => {
+    const seasonal = pestEstimate({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest', name: 'Pest Control Service', frequency: 'seasonal_feb_oct' }] } },
+      },
+    });
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([seasonal], { resolveLineCadence: (line) => line?.frequency || null });
+    expect(suggestion.blocked).toBe(true);
+    expect(suggestion.amount).toBeUndefined();
+    // No cadence reader at all → same fail-closed result.
+    const noReader = await buildAnnualPrepayEstimateSuggestion([pestEstimate()]);
+    expect(noReader.blocked).toBe(true);
+    expect(noReader.amount).toBeUndefined();
   });
 
   test('stored annual_total wins over monthly × 12', async () => {
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.baseAnnual).toBe(400);
   });
 
@@ -107,7 +127,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([bundle]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([bundle], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
     expect(suggestion.shortRef).toBe(shortEstimateRef(bundle.id));
@@ -119,7 +139,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
       onetime_total: 368,
       estimate_data: { result: { oneTime: { items: [{ service: 'cockroach', name: 'German Roach Cleanout', price: 368 }] } } },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([oneTime]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([oneTime], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -133,7 +153,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([managerApproval]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([managerApproval], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -145,7 +165,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         result: { recurring: { services: [PEST_LINE] } },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([existing]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([existing], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -157,15 +177,28 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
 });
 
 describe('suggestionServiceMatches', () => {
-  test('exact identity after cadence/filler stripping — never substring', () => {
+  test('exact identity, cadence words retained — never substring, never cross-cadence', () => {
     expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Quarterly Pest Control')).toBe(true);
-    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Monthly Pest Control Plan')).toBe(true);
+    // Cadence words are part of the identity: a monthly quote must not match
+    // a quarterly label.
+    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Monthly Pest Control Plan')).toBe(false);
     // "Pest Control" must NOT match "Commercial Pest Control" on money.
     expect(suggestionServiceMatches('Quarterly Pest Control', 'Commercial Pest Control')).toBe(false);
     expect(suggestionServiceMatches('Quarterly Pest Control', 'Quarterly Mosquito Service')).toBe(false);
     // Empty keys fail closed.
     expect(suggestionServiceMatches('', 'Quarterly Pest Control')).toBe(false);
     expect(suggestionServiceMatches('Quarterly Pest Control', '')).toBe(false);
+  });
+});
+
+describe('suggestionCoverageMatches', () => {
+  test('requires the estimate cadence AND visit count to agree exactly', () => {
+    const suggestion = { coverageCadence: 'quarterly', coverageVisitCount: 4 };
+    expect(suggestionCoverageMatches(suggestion, 'quarterly', 4)).toBe(true);
+    expect(suggestionCoverageMatches(suggestion, 'monthly', 12)).toBe(false);
+    expect(suggestionCoverageMatches(suggestion, 'quarterly', 6)).toBe(false);
+    expect(suggestionCoverageMatches({ coverageVisitCount: 4 }, 'quarterly', 4)).toBe(false);
+    expect(suggestionCoverageMatches(null, 'quarterly', 4)).toBe(false);
   });
 });
 

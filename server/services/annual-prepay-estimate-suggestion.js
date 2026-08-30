@@ -60,13 +60,17 @@ function parseEstimateData(raw) {
 }
 
 // Exact-identity service matching for the prefill and the provenance link:
-// cadence words and service/plan/program filler drop out, everything else
-// must be identical. NEVER substring — "Pest Control" must not match
-// "Commercial Pest Control" on a money prefill. Empty keys fail closed.
+// service/plan/program filler drops out, everything else — CADENCE WORDS
+// INCLUDED — must be identical. NEVER substring — "Pest Control" must not
+// match "Commercial Pest Control", and "Monthly Pest Control" must not match
+// "Quarterly Pest Control", on a money prefill. Empty keys fail closed.
+// Label identity is necessary but not sufficient: callers must also require
+// the suggestion's coverageCadence/coverageVisitCount to agree with what is
+// being recorded (see suggestionCoverageMatches).
 function suggestionLabelKey(value) {
   return String(value || '')
     .toLowerCase()
-    .replace(/\b(every|monthly|bimonthly|bi-monthly|quarterly|triannual|semiannual|semi-annual|annual|yearly|six|weeks?|days?|service|plan|program)\b/g, ' ')
+    .replace(/\b(service|plan|program)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, '')
     .trim();
 }
@@ -77,7 +81,15 @@ function suggestionServiceMatches(serviceLabel, serviceType) {
   return !!labelKey && !!typeKey && labelKey === typeKey;
 }
 
-async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [] } = {}) {
+// The quoted annual is only valid for the quoted schedule: recording it
+// against a different cadence or visit count would credit the wrong coverage.
+function suggestionCoverageMatches(suggestion, coverageCadence, visitCount) {
+  if (!suggestion || !suggestion.coverageCadence) return false;
+  if (String(suggestion.coverageCadence) !== String(coverageCadence || '')) return false;
+  return Number(visitCount) === Number(suggestion.coverageVisitCount);
+}
+
+async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null } = {}) {
   const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
   const base = {
@@ -121,6 +133,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   // and overrides a stale stored total. Bundle failures also fail closed:
   // an unverifiable option set must never prefill money.
   let optionAnnuals = [];
+  let singleOptionKey = null;
   try {
     const { buildPricingBundle } = require('../routes/estimate-public');
     const bundle = await buildPricingBundle(estimate);
@@ -145,6 +158,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     if (pricedRows.length === 1 && pricedRows[0]?.annualPrepayEligible === false) {
       return blocked('estimate is not annual-prepay eligible');
     }
+    if (pricedRows.length === 1) singleOptionKey = pricedRows[0]?.key || null;
   } catch {
     return blocked('estimate pricing options could not be verified');
   }
@@ -167,12 +181,31 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   if (!(resolved.amount > 0)) return blocked('estimate prepay total resolved to zero');
 
   const line = recurring[0] || {};
+
+  // The quoted annual is only valid for the quoted schedule. Cadence comes
+  // from the bundle's single priced option key first (what accept would
+  // invoice), else the caller's line-cadence reader (admin-customers'
+  // cadenceFromEstimateLine — the full shared frequency vocabulary). Both
+  // normalize through prepayCoverageCadenceForPattern, which rejects
+  // unsupported schedules (seasonal mosquito, nth-weekday) — no supported
+  // cadence, no amount.
+  const { prepayCoverageCadenceForPattern, visitsPerYearForCadence } = require('./prepay-cadence');
+  const lineCadence = typeof resolveLineCadence === 'function' ? resolveLineCadence(line, null) : null;
+  const coverageCadence = prepayCoverageCadenceForPattern(singleOptionKey)
+    || prepayCoverageCadenceForPattern(lineCadence);
+  const coverageVisitCount = visitsPerYearForCadence(coverageCadence);
+  if (!coverageCadence || !coverageVisitCount) {
+    return blocked('estimate cadence is not prepay-supported');
+  }
+
   return {
     ...base,
     amount: resolved.amount,
     baseAnnual,
     discount: resolved.discount,
     serviceLabel: String(line.name || line.service || '').trim(),
+    coverageCadence,
+    coverageVisitCount,
   };
 }
 
@@ -181,4 +214,5 @@ module.exports = {
   pickAnnualPrepayEstimate,
   shortEstimateRef,
   suggestionServiceMatches,
+  suggestionCoverageMatches,
 };

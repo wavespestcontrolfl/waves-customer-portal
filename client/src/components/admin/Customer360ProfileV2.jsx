@@ -3633,19 +3633,29 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
   );
 }
 
-// Does the server's estimate-derived prefill apply to the service the
-// operator is recording? EXACT identity after stripping cadence words (via
-// normalizeAnnualPrepayLabelKey) plus service/plan/program filler, so
-// "Quarterly Pest Control Service" (estimate line) matches "Quarterly Pest
-// Control" (modal default) but "Commercial Pest Control" does NOT — never
-// substring-match a money prefill. Empty keys fail closed. The server runs
-// the same exact-identity check before persisting provenance.
+// Does the server's estimate-derived prefill apply to what the operator is
+// recording? Three checks, all required, all fail-closed (the server repeats
+// them before persisting provenance):
+// 1. Label: EXACT identity after stripping only service/plan/program filler —
+//    cadence words are KEPT, so "Quarterly Pest Control Service" matches
+//    "Quarterly Pest Control" but neither "Commercial Pest Control" nor
+//    "Monthly Pest Control" does. Never substring-match a money prefill.
+// 2. Cadence: the modal's coverage cadence must equal the estimate's own.
+// 3. Visit count: ditto — the quoted annual is only valid for the quoted
+//    schedule.
 function annualPrepaySuggestionLabelKey(value) {
-  return normalizeAnnualPrepayLabelKey(value).replace(/service|plan|program/g, "").trim();
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\b(service|plan|program)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
 }
 
-export function estimateSuggestionMatchesService(suggestion, serviceType) {
+export function estimateSuggestionMatchesService(suggestion, serviceType, coverageCadence, visitCount) {
   if (!suggestion || suggestion.blocked || !(Number(suggestion.amount) > 0)) return false;
+  if (!suggestion.coverageCadence
+    || String(suggestion.coverageCadence) !== String(coverageCadence || "")) return false;
+  if (Number.parseInt(visitCount, 10) !== Number(suggestion.coverageVisitCount)) return false;
   const suggestionKey = annualPrepaySuggestionLabelKey(suggestion.serviceLabel);
   const serviceKey = annualPrepaySuggestionLabelKey(serviceType);
   return !!suggestionKey && !!serviceKey && suggestionKey === serviceKey;
@@ -3669,7 +3679,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   // plans, and the profile rate all speak to money actually agreed with this
   // customer and win over a quote.
   const estimateFallbackAmount = !suggestedAmount
-    && estimateSuggestionMatchesService(estimateSuggestion, defaultServiceType)
+    && estimateSuggestionMatchesService(estimateSuggestion, defaultServiceType, defaultCoverageCadence, defaultVisitCount)
     ? Number(estimateSuggestion.amount)
     : 0;
   const [amount, setAmount] = useState(
@@ -3717,7 +3727,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     if (value) setTermEnd(addMonthsInput(value, 12));
   };
 
-  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence) => {
+  const updateSuggestedAmount = (nextServiceType, nextCoverageCadence, nextVisitCount) => {
     if (amountTouched) return;
     const nextSuggested = inferAnnualPrepaySuggestedAmount(
       { ...customer, prepaidPlans, annualPrepayTerms },
@@ -3729,12 +3739,12 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     if (nextSuggested > 0) {
       amountFromEstimateRef.current = false;
       setAmount(nextSuggested.toFixed(2));
-    } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType)) {
+    } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType, nextCoverageCadence, nextVisitCount)) {
       amountFromEstimateRef.current = true;
       setAmount(Number(estimateSuggestion.amount).toFixed(2));
     } else if (amountFromEstimateRef.current) {
       // The standing amount was the estimate's quoted year for a DIFFERENT
-      // service — clear rather than silently record it against this one.
+      // service or schedule — clear rather than silently record it here.
       amountFromEstimateRef.current = false;
       setAmount("");
     }
@@ -3743,14 +3753,16 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
   const handleServiceTypeChange = (value) => {
     setServiceType(value);
     const inferredCadence = inferAnnualPrepayCadenceFromLabel(value);
+    let nextVisitCount = visitCount;
     if (inferredCadence && !cadenceTouchedRef.current) {
       setCoverageCadence(inferredCadence);
       const inferredVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[inferredCadence];
       if (inferredVisitCount && !visitCountTouchedRef.current) {
         setVisitCount(inferredVisitCount);
+        nextVisitCount = inferredVisitCount;
       }
     }
-    updateSuggestedAmount(value, inferredCadence || coverageCadence);
+    updateSuggestedAmount(value, inferredCadence || coverageCadence, nextVisitCount);
   };
 
   const handleServiceOptionChange = (value) => {
@@ -3762,8 +3774,9 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     cadenceTouchedRef.current = true;
     setCoverageCadence(value);
     const nextVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[value];
+    const effectiveVisitCount = nextVisitCount && !visitCountTouchedRef.current ? nextVisitCount : visitCount;
     if (nextVisitCount && !visitCountTouchedRef.current) setVisitCount(nextVisitCount);
-    updateSuggestedAmount(serviceType, value);
+    updateSuggestedAmount(serviceType, value, effectiveVisitCount);
   };
 
   const handleVisitCountChange = (value) => {
@@ -3797,7 +3810,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
           // Provenance: the term covers the service this estimate quoted,
           // even when the operator overrode the amount. The server re-checks
           // ownership and skips the link rather than failing the recording.
-          sourceEstimateId: estimateSuggestionMatchesService(estimateSuggestion, serviceType)
+          sourceEstimateId: estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount)
             ? estimateSuggestion.estimateId
             : undefined,
         }),
@@ -3926,7 +3939,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
                 {fmtCurrency(perVisit)} per application
               </div>
             )}
-            {estimateSuggestionMatchesService(estimateSuggestion, serviceType) && (
+            {estimateSuggestionMatchesService(estimateSuggestion, serviceType, coverageCadence, visitCount) && (
               <div className="text-11 text-ink-secondary mt-1">
                 From estimate #{estimateSuggestion.shortRef} — quoted prepay
                 year {fmtCurrency(Number(estimateSuggestion.amount))}

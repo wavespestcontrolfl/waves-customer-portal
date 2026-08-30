@@ -3258,6 +3258,7 @@ router.get('/:id', async (req, res, next) => {
             .buildAnnualPrepayEstimateSuggestion(estimates, {
               // Estimates already consumed by ANY term priced a PRIOR year.
               excludeEstimateIds: consumedEstimateIds,
+              resolveLineCadence: cadenceFromEstimateLine,
             });
         } catch (e) {
           logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
@@ -4908,10 +4909,14 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
         const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion(estimateRows, {
           excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
+          resolveLineCadence: cadenceFromEstimateLine,
         });
         if (suggestion && !suggestion.blocked
           && String(suggestion.estimateId).toLowerCase() === sourceEstimateIdRaw.toLowerCase()
-          && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)) {
+          && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
+          // The quoted annual is only valid for the quoted schedule — the
+          // recorded cadence and visit count must be the estimate's own.
+          && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)) {
           sourceEstimateId = suggestion.estimateId;
         }
       } catch (e) {
