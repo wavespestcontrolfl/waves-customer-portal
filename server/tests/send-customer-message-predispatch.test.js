@@ -9,6 +9,7 @@
  * legacy pipeline untouched.
  */
 
+jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/validators/consent', () => ({
   loadContactState: jest.fn(async () => ({})),
@@ -94,4 +95,46 @@ test('no hook — the legacy pipeline is untouched', async () => {
   const result = await sendCustomerMessage(BASE_INPUT);
   expect(result.sent).toBe(true);
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+});
+
+describe('grouped unit-move hold (MOVE_HOLD) at the canonical chokepoint (codex #3609 r30)', () => {
+  const db = require('../models/db');
+  const APPT_INPUT = {
+    ...BASE_INPUT,
+    audience: 'customer',
+    customerId: 'c1',
+    purpose: 'appointment_confirmation',
+    appointmentId: 'svc-1',
+  };
+  const wireHold = (value) => {
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn(async () => value),
+    }));
+  };
+
+  test('a live move_hold_until blocks the send — no provider call, audited as move_hold', async () => {
+    wireHold({ move_hold_until: new Date(Date.now() + 3600000) });
+    const result = await sendCustomerMessage(APPT_INPUT);
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'MOVE_HOLD' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+    expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({ validatorsFailed: ['move_hold'] }));
+  });
+
+  test('an unreadable hold fails CLOSED — the notice is held, never sent on a blip', async () => {
+    db.mockImplementation(() => { throw new Error('ledger down'); });
+    const result = await sendCustomerMessage(APPT_INPUT);
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'MOVE_HOLD' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
+  test('no hold / expired hold / non-appointment purpose all dispatch normally', async () => {
+    wireHold({ move_hold_until: new Date(Date.now() - 1000) });
+    expect((await sendCustomerMessage(APPT_INPUT)).sent).toBe(true);
+    wireHold(undefined);
+    expect((await sendCustomerMessage(APPT_INPUT)).sent).toBe(true);
+    db.mockImplementation(() => { throw new Error('never read'); });
+    expect((await sendCustomerMessage({ ...BASE_INPUT })).sent).toBe(true);
+    expect((await sendCustomerMessage({ ...APPT_INPUT, appointmentId: undefined })).sent).toBe(true);
+  });
 });

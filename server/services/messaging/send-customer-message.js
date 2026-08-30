@@ -252,6 +252,53 @@ async function sendCustomerMessage(input) {
     };
   }
 
+  // 6.4 Grouped unit-move hold (codex #3609 r30 P1) — an appointment
+  //     notice for a visit whose reminder row carries a live
+  //     move_hold_until must not reach the provider: the visit is
+  //     mid-move (or stranded partial) and the rendered body describes
+  //     the OLD slot. Enforced HERE, in the canonical path every SMS leg
+  //     passes — safeSend closures AND direct sendCustomerMessage callers
+  //     (estimate accept, call pipeline) alike — so a hold stamped during
+  //     any earlier await still blocks. Fail closed on a read error: the
+  //     callers treat MOVE_HOLD as a deferral (flags left unmarked, the
+  //     sweep retries), so a held-on-blip notice is delayed, never lost.
+  const MOVE_HOLD_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
+  if (sendInput.appointmentId && MOVE_HOLD_PURPOSES.includes(sendInput.purpose)) {
+    let held = false;
+    try {
+      const db = require('../../models/db');
+      const holdRow = await db('appointment_reminders')
+        .where({ scheduled_service_id: sendInput.appointmentId })
+        .first('move_hold_until');
+      held = !!(holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now());
+    } catch (err) {
+      logger.warn(`[send-customer-message] move-hold check failed for appointment ${sendInput.appointmentId} — send held: ${err.message}`);
+      held = true;
+    }
+    if (held) {
+      const blocked = { code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held' };
+      const audit = await persistAudit({
+        input: sendInput,
+        policy,
+        segmentMeta,
+        validatorsPassed,
+        validatorsFailed: ['move_hold'],
+        blockedBy: blocked,
+        identityTrust: resolvedTrust,
+        providerOutcome: null,
+      });
+      return {
+        sent: false,
+        blocked: true,
+        code: blocked.code,
+        reason: blocked.reason,
+        auditLogId: audit.id,
+        segmentCount: segmentMeta.segmentCount,
+        encoding: segmentMeta.encoding,
+      };
+    }
+  }
+
   // 6.5 Caller-supplied final recheck — the last caller-visible abort point
   //     before dispatch (only the provider-internal send-window boundary
   //     re-check runs later), so callers with race-sensitive sends (clarify

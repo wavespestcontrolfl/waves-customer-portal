@@ -286,7 +286,6 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
 // The notice kinds a grouped unit move's durable send hold governs — the
 // same set deliverAppointmentNotice's entry check covers.
 const MOVE_HOLD_KINDS = new Set(['confirmation', '72h', '24h']);
-const MOVE_HOLD_PURPOSES = new Set(['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h']);
 
 // Is the visit's reminder row under a grouped unit-move hold RIGHT NOW?
 // Read fresh at every provider handoff (codex #3609 r30 P1: the entry-point
@@ -1160,21 +1159,10 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
-  // Grouped-move hold at the SMS handoff (codex #3609 r30 P1): composed
-  // into the canonical path's pre-dispatch recheck — the last
-  // caller-visible abort before the provider — so a hold stamped during
-  // the template/link/contact awaits still blocks the send. The blocked
-  // result's MOVE_HOLD code reaches the callers via sendOutcome.blockedCode,
-  // which they already treat as "leave the flags, retry later".
-  let dispatchCheck = preDispatchCheck;
-  if (metaExtra.scheduled_service_id && MOVE_HOLD_PURPOSES.has(purpose)) {
-    dispatchCheck = async () => {
-      if (await moveHoldActive(metaExtra.scheduled_service_id)) {
-        return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress' };
-      }
-      return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
-    };
-  }
+  // (The grouped-move hold for appointment notices is enforced inside
+  // sendCustomerMessage itself — the canonical path every SMS leg passes,
+  // direct callers included — keyed on purpose + appointmentId. Its
+  // MOVE_HOLD block reaches callers via sendOutcome.blockedCode below.)
 
   let result;
   try {
@@ -1201,9 +1189,8 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
-    // the appointment moved or went terminal while validators ran. The
-    // move-hold recheck above composes onto it for hold-governed notices.
-    ...(typeof dispatchCheck === 'function' ? { preDispatchCheck: dispatchCheck } : {}),
+    // the appointment moved or went terminal while validators ran.
+    ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
   });
   } catch (sendErr) {
     // Only a throw AFTER the provider handoff began is dispatch-uncertain
