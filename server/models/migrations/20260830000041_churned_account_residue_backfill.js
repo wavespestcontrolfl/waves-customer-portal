@@ -81,14 +81,26 @@ exports.up = async function up(knex) {
   const [{ et_today: etToday }] = (await knex.raw("SELECT (now() AT TIME ZONE 'America/New_York')::date::text AS et_today")).rows;
 
   for (const customer of candidates) {
+    // Guard + wind-down are ONE transaction per customer, with the row
+    // locked FIRST and every guard re-run under the lock — a concurrent
+    // booking/reactivation committing between check and write can never
+    // leave a newly re-won customer wound down.
+     
+    await knex.transaction(async (trx) => {
+      await trx.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE', [customer.id]);
+      await windDownIfStillResidue(trx, customer);
+    });
+  }
+
+  async function windDownIfStillResidue(trx, customer) {
     const [liveSeries, upcoming, inProgress, coveredTerm] = await Promise.all([
-      knex('scheduled_services')
+      trx('scheduled_services')
         .where({ customer_id: customer.id, recurring_ongoing: true })
         .whereNot('status', 'cancelled')
         .first('id'),
       // ET calendar date, not UTC (AGENTS.md America/New_York rule): after
       // 8 PM ET a UTC "today" is tomorrow and would skip a same-day visit.
-      knex('scheduled_services')
+      trx('scheduled_services')
         .where({ customer_id: customer.id })
         .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
         .where(function dateOrRescheduled() {
@@ -100,7 +112,7 @@ exports.up = async function up(knex) {
         })
         .first('id'),
       // A tech actively working the property (any date) is live state too.
-      knex('scheduled_services')
+      trx('scheduled_services')
         .where({ customer_id: customer.id })
         .where(function liveWork() {
           this.whereIn('status', ['en_route', 'on_site'])
@@ -112,14 +124,14 @@ exports.up = async function up(knex) {
       // over-skipping is safe, the audit script keeps reporting it; the
       // opposite mistake deactivates a customer with paid coverage).
       hasPrepayTerms
-        ? knex('annual_prepay_terms')
+        ? trx('annual_prepay_terms')
           .where({ customer_id: customer.id })
           .where('term_start', '<=', etToday)
           .where('term_end', '>=', etToday)
           .first('id')
         : Promise.resolve(null),
     ]);
-    if (liveSeries || upcoming || inProgress || coveredTerm) continue; // possibly a mistaken stage-flip — leave for the audit script
+    if (liveSeries || upcoming || inProgress || coveredTerm) return; // possibly a mistaken stage-flip — leave for the audit script
 
     const update = {
       active: false,
@@ -127,36 +139,36 @@ exports.up = async function up(knex) {
       next_charge_date: null,
       waveguard_tier: null,
       monthly_rate: null,
-      updated_at: knex.fn.now(),
+      updated_at: trx.fn.now(),
     };
-    if ((await knex.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
+    if ((await trx.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
     if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
     if (customer.billing_mode === 'per_application') {
       update.billing_mode = null;
       if (hasPerAppFee) update.per_application_fee = null;
     }
-    await knex('customers').where({ id: customer.id }).update(update);
+    await trx('customers').where({ id: customer.id }).update(update);
     // Stale series flag, scoped to THIS wound-down account only: with no
     // live series and no upcoming/in-progress work (guards above), a
     // cancelled row's recurring_ongoing=true is pure residue that could
     // still confuse series-extension sweeps.
-    await knex('scheduled_services')
+    await trx('scheduled_services')
       .where({ customer_id: customer.id, status: 'cancelled', recurring_ongoing: true })
-      .update({ recurring_ongoing: false, updated_at: knex.fn.now() });
+      .update({ recurring_ongoing: false, updated_at: trx.fn.now() });
     // Independent charge rails (mirrors cancellation-processor): Stripe picks
     // a method by payment_methods.autopay_enabled ALONE, and the failed-
     // payment retry ladder never checks active/churn — disarm both.
-    await knex('payment_methods')
+    await trx('payment_methods')
       .where({ customer_id: customer.id })
       .update({ autopay_enabled: false });
-    await knex('payments')
+    await trx('payments')
       .where({ customer_id: customer.id, status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .whereNotNull('next_retry_at')
       .update({ next_retry_at: null });
-    if (hasLedger) await knex('customer_plan_rates').where({ customer_id: customer.id }).del();
+    if (hasLedger) await trx('customer_plan_rates').where({ customer_id: customer.id }).del();
 
-    await knex('customer_interactions').insert({
+    await trx('customer_interactions').insert({
       customer_id: customer.id,
       interaction_type: 'note',
       subject: 'Churn residue backfill (2026-08-30)',
@@ -167,7 +179,7 @@ exports.up = async function up(knex) {
         `${Number(customer.monthly_rate) > 0 ? `rate $${Number(customer.monthly_rate).toFixed(2)}` : ''}` +
         `${customer.billing_mode === 'per_application' ? ' (per-application lane + fee cleared)' : ''}` +
         '. Deactivated, cleared tier/rate/plan-rate components, autopay off. No visits or billing were live; no customer contact.',
-    }).catch(() => {});
+    });
   }
 };
 

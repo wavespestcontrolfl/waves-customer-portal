@@ -208,17 +208,30 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // account to manual review, where the office clears the lane after
         // settling the visit (offboarding's straggler-completion rail).
         if (customer.billing_mode === 'per_application') {
-          const liveWork = await db('scheduled_services')
-            .where({ customer_id: customerId })
-            .where(function liveNow() {
-              this.whereIn('status', ['en_route', 'on_site']).orWhereIn('track_state', LIVE_TRACK_STATES);
+          const unsettledWork = await db('scheduled_services as s')
+            .where('s.customer_id', customerId)
+            .where(function unsettled() {
+              // A visit actually in progress (the sweep never auto-cancels
+              // those) …
+              this.where(function liveNow() {
+                this.whereIn('s.status', ['en_route', 'on_site']).orWhereIn('s.track_state', LIVE_TRACK_STATES);
+              })
+                // … or COMPLETED but not yet invoiced: billing recovery
+                // prices such applications from the customer lane fields
+                // when the row has no price of its own.
+                .orWhere(function completedUninvoiced() {
+                  this.where('s.status', 'completed')
+                    .whereNotExists(function invoiced() {
+                      this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
+                    });
+                });
             })
-            .first('id');
-          if (!liveWork) {
+            .first('s.id');
+          if (!unsettledWork) {
             update.billing_mode = null;
             update.per_application_fee = null;
           } else {
-            logger.warn(`[cancellation-processor] per-application price kept for ${customerId} — visit in progress; office clears the lane after settling it`);
+            logger.warn(`[cancellation-processor] per-application price kept for ${customerId} — unsettled visit (in progress or completed-uninvoiced); office clears the lane after settlement`);
           }
         }
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
