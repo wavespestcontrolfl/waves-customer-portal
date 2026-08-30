@@ -1544,7 +1544,7 @@ function hashtags({ topic, city, service }) {
 }
 
 const SERVICE_INTENT_KEYWORDS = [
-  { match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertil', 'chinch', 'st. augustine'] },
+  { match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine'] },
   { match: ['termite', 'swarm', 'swarming', 'wdo', 'wood destroying'] },
   { match: ['mosquito', 'standing water'] },
   { match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
@@ -1559,13 +1559,18 @@ const SERVICE_INTENT_KEYWORDS = [
 ];
 
 // Boundary-aware keyword test shared by the requested topic/service and the
-// content rows: whole words plus the usual English suffixes ('ant' → ant,
-// ants, ant-proof; 'fertil' → fertilizer; 'roach' → roaches) — never bare
-// substrings ('important' is not an ant campaign; 'plant' is not).
-const INTENT_SUFFIX = '(?:s|es|ed|er|ers|ing|ize|izer|izers|izing|ization)?';
+// content rows: whole words plus the English PLURAL only ('ant' → ant, ants,
+// ant-proof; 'roach' → roaches; 'mosquito' → mosquitoes) — never bare
+// substrings ('important' is not an ant campaign; 'plant' is not) and never
+// derivational suffixes ('top rated' / 'five-star rating' / 'our rates' are
+// not a rodent campaign). Stems that need other forms list them explicitly
+// (fertilizer/fertilizing/fertilization, swarming).
+function intentPluralSuffix(kw) {
+  return /(?:[sxzo]|ch|sh)$/.test(kw) ? '(?:s|es)?' : 's?';
+}
 function textHasIntentKeyword(text, kw) {
   const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\b${escaped}${INTENT_SUFFIX}\\b`).test(text);
+  return new RegExp(`\\b${escaped}${intentPluralSuffix(kw)}\\b`).test(text);
 }
 
 function serviceIntentKeywords(input = {}) {
@@ -1764,8 +1769,15 @@ async function saveCampaignDraft(input) {
   // Preserve an existing visual's identity (photo-card runs pass a preview that
   // already carries variant/templateKey/creative/variants for the approval
   // queue) — only default the legacy campaign card when nothing is set.
+  // previewWithVisual REPLACES preview.visual, so the run's GBP image and its
+  // watermark provenance (gbpImageBranded:false = hero PHOTO, postToGBP
+  // watermarks on approval) must be forwarded or the approved draft posts
+  // GBP text-only / unwatermarked. gbpImageUrl can arrive from req.body —
+  // validate it like imageUrl.
   const finalPreview = previewWithVisual(preview, {
     imageUrl,
+    gbpImageUrl: httpUrlOrNull(preview.visual?.gbpImageUrl),
+    gbpImageBranded: preview.visual?.gbpImageBranded,
     variant: preview.visual?.variant || 'campaign',
     templateKey: preview.visual?.templateKey || 'waves_campaign_square',
     creative: preview.visual?.creative,

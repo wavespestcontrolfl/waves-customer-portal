@@ -677,6 +677,13 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     const lawn = Studio.serviceIntentKeywords({ service: 'lawn care' });
     expect(Studio.rowMatchesIntentKeywords({ title: 'October fertilization for Sarasota lawns' }, lawn)).toBe(true);
     expect(Studio.rowMatchesIntentKeywords({ title: 'anything' }, [])).toBe(false);
+    // Plural only — derivational suffixes never turn marketing words into pests.
+    const rodent = Studio.serviceIntentKeywords({ service: 'rodent' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Rats in a Bradenton attic' }, rodent)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Top rated pest control, five star rating, best rates' }, rodent)).toBe(false);
+    expect(Studio.serviceIntentKeywords({ topic: 'top rated pest control in Parrish' })).not.toContain('rat');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Mosquitoes after the storm' }, Studio.serviceIntentKeywords({ service: 'mosquito' }))).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Spring fertilizer schedule' }, lawn)).toBe(true);
   });
 
   test('serviceIntentKeywords is boundary-aware on the REQUESTED topic and covers unlisted-until-now pests', () => {
