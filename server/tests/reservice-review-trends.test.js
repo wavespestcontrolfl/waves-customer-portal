@@ -134,7 +134,11 @@ describe('reserviceTrendsPdfSignature (codex #3623 r1 P2)', () => {
     expect(one).not.toBe(two);
     expect(one).not.toBe(swapped);
     expect(await reserviceTrendsPdfSignature(svc, knexWith([]))).toBe('');
-    expect(await reserviceTrendsPdfSignature(svc, knexWith('throw'))).toBe('-rstru');
+    const failedA = await reserviceTrendsPdfSignature(svc, knexWith('throw'));
+    const failedB = await reserviceTrendsPdfSignature(svc, knexWith('throw'));
+    expect(failedA).toMatch(/^-rstru-/);
+    // Unique per failure — an uncertain key can never match a stored one.
+    expect(failedA).not.toBe(failedB);
   });
 
   test('gate dark: always empty — existing keys untouched', async () => {

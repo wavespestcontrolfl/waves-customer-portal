@@ -319,7 +319,12 @@ async function reserviceTrendsPdfSignature(service = {}, knex = null) {
     const digest = crypto.createHash('sha1').update(rows.map((row) => String(row.id)).join(',')).digest('hex').slice(0, 8);
     return `-rstr${rows.length}-${digest}`;
   } catch {
-    return '-rstru';
+    // UNIQUE per failure: a shared uncertainty token could be STORED under
+    // a key that a later unrelated failure then matches, serving a stale
+    // chart (codex #3623 GH P2). A unique token never matches any stored
+    // key (lookup re-renders) and trips the render-stability fence on the
+    // store side, so an uncertain render is served without being cached.
+    return `-rstru-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   }
 }
 
