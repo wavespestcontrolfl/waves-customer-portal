@@ -612,8 +612,9 @@ function normalizeEngineLineItems(result) {
     const netMonthly = Number.isFinite(num(item.manualFinalAnnual))
       ? money(num(item.manualFinalAnnual) / 12)
       : (isRecurring ? money(Number.isFinite(monthly) ? monthly : price / 12) : null);
+    const grossMonthly = num(item.monthlyBeforeDiscount);
     const before = isRecurring
-      ? pickNum(item.annualBeforeDiscount, item.annual)
+      ? pickNum(item.annualBeforeDiscount, Number.isFinite(grossMonthly) ? grossMonthly * 12 : undefined, item.annual)
       : pickNum(item.priceBeforeDiscount, item.price, item.totalBeforeDiscount, item.total);
     const priceBeforeDiscount = Number.isFinite(before) && before > 0 ? money(before) : price;
     const discount = priceBeforeDiscount > 0 && priceBeforeDiscount > price
@@ -635,7 +636,16 @@ function normalizeEngineLineItems(result) {
     // its own one-time row; silently dropping it understated one-time
     // revenue (GH codex P1).
     const installPrice = num(item.installation?.price);
-    if (Number.isFinite(installPrice) && installPrice > 0) {
+    const installCostAny = pickNum(
+      item.installation?.totalCost,
+      item.installation?.materialCost,
+      item.installation?.laborCost,
+    );
+    // Rented stations quote $0 installation while the hardware COST is
+    // real — a zero-revenue explicit-cost row keeps margin honest (codex
+    // pre-push P2/P1).
+    if ((Number.isFinite(installPrice) && installPrice > 0)
+      || (Number.isFinite(installCostAny) && installCostAny > 0)) {
       // The engine persists the installation's OWN costs — use them
       // instead of an unmapped zero-COGS result that overstates profit
       // (GH codex; explicitCogsCost is honored by the audit loop).
@@ -645,13 +655,14 @@ function normalizeEngineLineItems(result) {
           ? (num(item.installation?.materialCost) || 0) + (num(item.installation?.laborCost) || 0)
           : undefined,
       );
+      const installRevenue = Number.isFinite(installPrice) && installPrice > 0 ? installPrice : 0;
       lines.push({
         serviceKey: `${item.service || serviceKey}_installation`,
         label: `${item.name || serviceKey} Installation`,
         cadence: 'one_time',
-        price: money(installPrice),
+        price: money(installRevenue),
         monthly: null,
-        priceBeforeDiscount: money(installPrice),
+        priceBeforeDiscount: money(installRevenue),
         discount: 0,
         priceSource: 'saved_estimate.engineResult.lineItems.installation',
         ...(Number.isFinite(installCost) ? { explicitCogsCost: money(installCost) } : { skipCogs: true }),
