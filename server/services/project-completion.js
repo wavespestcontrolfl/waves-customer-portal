@@ -7,6 +7,7 @@ const { resolveCompletionProfileForScheduledService } = require('./service-compl
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const { etDateString } = require('../utils/datetime-et');
 const { projectReportPathForProject } = require('./project-report-links');
+const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const {
   redactInspectionFeeCuesForType,
   redactSpecificAmounts,
@@ -744,6 +745,40 @@ async function completeProjectBackedService({
         portalAttached,
         reportPath,
       });
+      // Tier/provenance/callback snapshot — the SAME shared builder the
+      // /complete and pest-recap paths use (completion-tier-snapshot.js):
+      // a project-backed completion on a callback-flagged visit must not
+      // create a record with the default false identity and no frozen
+      // membership provenance (codex r11 P1). Customer read inside this
+      // transaction, column-guarded; failure = legacy insert shape.
+      try {
+        const customerCols = await trx('customers').columnInfo();
+        const snapCust = customerCols.waveguard_tier
+          ? await trx('customers').where({ id: scheduledService.customer_id }).first(
+            'waveguard_tier',
+            ...(customerCols.waveguard_tier_source ? ['waveguard_tier_source'] : []),
+            ...(customerCols.monthly_rate ? ['monthly_rate'] : []),
+            ...(customerCols.billing_mode ? ['billing_mode'] : []),
+          )
+          : null;
+        // The LOCKED visit row's flag — scheduledService was read without
+        // FOR UPDATE, and an update-details reclassify racing this insert
+        // would freeze a stale callback identity (codex GH-r4 P2; same rule
+        // as the /complete and recap paths).
+        const lockedVisit = await trx('scheduled_services')
+          .where({ id: scheduledService.id })
+          .forUpdate()
+          .first('id', 'is_callback')
+          .catch(() => null);
+        Object.assign(insert, completionTierSnapshotFields({
+          serviceRecordCols,
+          waveguardTier: snapCust?.waveguard_tier || null,
+          waveguardTierSource: snapCust?.waveguard_tier_source || null,
+          monthlyRate: snapCust?.monthly_rate ?? null,
+          billingMode: snapCust?.billing_mode ?? null,
+          isCallback: (lockedVisit || scheduledService).is_callback === true,
+        }));
+      } catch { /* legacy insert shape — never block a project completion */ }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');
     } else {
       const update = buildServiceRecordProjectCompletionUpdate({

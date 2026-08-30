@@ -46,7 +46,7 @@ const CATALOG = [
   },
 ];
 
-function makeRequest({ existingProducts = [] } = {}) {
+function makeRequest({ existingProducts = [], products = CATALOG } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, options });
@@ -56,7 +56,7 @@ function makeRequest({ existingProducts = [] } = {}) {
         eligible: true,
         service: { id: 'svc-1', customerName: 'Pat Jones', hasPhone: false },
         timeline: [],
-        products: CATALOG,
+        products,
         existingRecord: existingProducts.length
           ? { id: 'rec-1', technician_notes: 'prior note', status: 'completed', products: existingProducts }
           : null,
@@ -67,6 +67,56 @@ function makeRequest({ existingProducts = [] } = {}) {
   request.calls = calls;
   return request;
 }
+
+// Catalog carrying the default pest tank mix (lib/pest-default-mix) plus
+// the LESCO lawn surfactant that must never be substituted for it.
+const MIX_CATALOG = [
+  ...CATALOG,
+  {
+    id: 4,
+    name: 'Taurus SC',
+    category: 'Insecticide',
+    active_ingredient: 'Fipronil',
+    moa_group: null,
+    default_rate: '0.8-1.6',
+    default_unit: 'fl_oz/gal',
+    rate_unit: null,
+    default_rate_per_1000: null,
+  },
+  {
+    id: 5,
+    name: 'Talstar P',
+    category: 'Insecticide',
+    active_ingredient: 'Bifenthrin',
+    moa_group: '3A',
+    default_rate: null,
+    default_unit: null,
+    rate_unit: null,
+    default_rate_per_1000: null,
+  },
+  {
+    id: 6,
+    name: 'LESCO 90/10 Nonionic Surfactant',
+    category: 'Adjuvant',
+    active_ingredient: null,
+    moa_group: null,
+    default_rate: '0.03-0.64',
+    default_unit: 'fl_oz/gal',
+    rate_unit: null,
+    default_rate_per_1000: null,
+  },
+  {
+    id: 7,
+    name: 'Non-ionic Surfactant',
+    category: 'adjuvant',
+    active_ingredient: 'Non-ionic surfactant blend',
+    moa_group: null,
+    default_rate: null,
+    default_unit: null,
+    rate_unit: null,
+    default_rate_per_1000: null,
+  },
+];
 
 describe('ServiceRecapModal application rates', () => {
   test('selecting a product prefills an editable rate from the catalog default', async () => {
@@ -139,5 +189,70 @@ describe('ServiceRecapModal application rates', () => {
     expect(gel.rate_unit).toBe('g/spot');
     expect(trap.application_rate).toBeUndefined();
     expect(trap.rate_unit).toBeUndefined();
+  });
+});
+
+// The default pest tank mix (owner 2026-08-29, lib/pest-default-mix) seeds
+// the primary field-tech completion too (codex P1 on #3611): a FRESH
+// recurring general-pest or pest re-service recap pre-selects Taurus SC,
+// Talstar P, and the non-ionic surfactant, rates prefilled exactly as a
+// manual tap would.
+describe('ServiceRecapModal default pest tank mix', () => {
+  test('a fresh recurring pest recap pre-selects the mix with catalog rate prefills', async () => {
+    const request = makeRequest({ products: MIX_CATALOG });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'Quarterly Pest Control Service' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: '✓ Taurus SC' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '✓ Talstar P' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '✓ Non-ionic Surfactant' })).toBeTruthy();
+    // The LESCO lawn surfactant is never substituted into the mix.
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant' })).toBeTruthy();
+    // Rates seed from the same catalog prefill a manual tap would use —
+    // for Taurus the pest 4-oz house default (it outranks the dilution
+    // band's low bound, same precedence the Adjourn SC test pins). The
+    // adjuvant gets no fabricated rate: isAdjuvantProduct keeps the
+    // insecticide house default off surfactants.
+    expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('4');
+    expect(screen.queryByLabelText('Application rate for Non-ionic Surfactant')).toBeNull();
+  });
+
+  test('a one-time pest recap seeds nothing', async () => {
+    const request = makeRequest({ products: MIX_CATALOG });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'Pest Control Service' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: 'Taurus SC' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^✓ / })).toBeNull();
+  });
+
+  test('a reopened recap keeps the recorded selection — no mix injection', async () => {
+    const request = makeRequest({
+      products: MIX_CATALOG,
+      existingProducts: [
+        { product_name: 'Advion Ant Bait Gel', application_rate: '0.5', rate_unit: 'g/spot' },
+      ],
+    });
+    render(
+      <ServiceRecapModal
+        service={{ id: 'svc-1', serviceType: 'Quarterly Pest Control Service' }}
+        request={request}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole('button', { name: '✓ Advion Ant Bait Gel' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Taurus SC' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '✓ Taurus SC' })).toBeNull();
   });
 });

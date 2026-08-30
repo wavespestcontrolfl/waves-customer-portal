@@ -46,7 +46,88 @@ function customerLabel(customer) {
   return name || customer.phone || 'customer';
 }
 
-async function sendBillingSms(customer, body, metadata = {}) {
+// Machine-initiated off-session PaymentIntents (Codex P1s on PR #3598):
+// the charge fired with no customer at the keyboard — an autopay debit, a
+// card/bank-on-file collection (completion + balance sweeps, admin
+// card-on-file rails via chargeInvoiceWithSavedCard's 'admin_card_on_file'
+// stamp), or a no-show fee — so its payment-lifecycle SMS and receipt stay
+// behind the 8AM-8PM send window like every other schedule-driven send,
+// riding the requeue/receipt-queue rails. Everything else reaching these
+// handlers is the customer's own payment (Pay page, portal,
+// estimate/deposit flows), whose notices carry customerInitiated and send
+// at any hour (owner ruling 2026-08-29). Failure direction: an unlisted
+// future machine flow would text at night, so any new off-session charge
+// mint MUST stamp metadata this recognizes (type, source, or purpose).
+//
+// Explicit `metadata.initiated_by` ('customer' | 'machine') outranks the
+// heuristics (Codex round-3 P1s): the shared mints serve both sides —
+// chargeInvoiceWithSavedCard's 'admin_card_on_file' stamp also carries a
+// customer's accept-time annual-prepay charge (estimate-public), and the
+// billing-cron retry ladder re-mints a customer-looking 'one_time' PI for
+// a machine-scheduled collection. The mint site knows the provenance and
+// stamps it; only unstamped legacy PIs fall through to the heuristics.
+const MACHINE_PI_SOURCES = new Set(['admin_card_on_file']);
+const MACHINE_PI_PURPOSES = new Set(['appointment_card_no_show_fee', 'card_hold_no_show_fee']);
+function isMachineInitiatedPaymentIntent(pi) {
+  const initiatedBy = String(pi?.metadata?.initiated_by || '');
+  if (initiatedBy === 'customer') return false;
+  if (initiatedBy === 'machine') return true;
+  if (pi?.metadata?.type === 'monthly_autopay') return true;
+  if (MACHINE_PI_SOURCES.has(String(pi?.metadata?.source || ''))) return true;
+  return MACHINE_PI_PURPOSES.has(String(pi?.metadata?.purpose || ''));
+}
+
+// Async provenance resolver the notice sites use (Codex round-4 P1):
+// a retry-ladder PI minted BEFORE the initiated_by stamp deployed carries
+// only `type: 'one_time'` and looks customer-initiated to the sync
+// heuristics, yet its processing/failure webhook can land after 8 PM.
+// The ladder leaves its own fingerprint in the ledger the moment
+// charge() returns — the ORIGINAL failed row is superseded by the retry
+// row with metadata.superseded_by_retry / retry_payment_id (or the
+// fallback-path failure_reason) — so an unstamped, customer-looking PI
+// is checked against that linkage before it earns the any-hour send.
+// superseded_by_payment_id ALONE is not the signal: ALREADY_COLLECTED
+// points a failed row at the customer's own pay-page payment.
+// Failure direction: a ledger read error holds the notice for the
+// 8AM-8PM window (fail closed) rather than texting at night.
+async function isCustomerInitiatedPaymentIntent(pi) {
+  if (isMachineInitiatedPaymentIntent(pi)) return false;
+  if (String(pi?.metadata?.initiated_by || '') === 'customer') return true;
+  if (!pi?.id) return true;
+  try {
+    const retryRow = await db('payments')
+      .where({ stripe_payment_intent_id: pi.id })
+      .first('id', 'superseded_by_payment_id');
+    if (!retryRow?.id) return true;
+    // Reverse linkage (Codex round-5 P1): a DECLINED retry attempt's own
+    // row is superseded by the ORIGINAL obligation (billing-cron keeps the
+    // original canonical — it carries the ladder), so a delayed
+    // payment_failed event finds no superseded original below. A failed
+    // row pointing at a different failed row only happens on that path;
+    // the customer's own failed pay-page attempts are never superseded
+    // by another failed row.
+    if (retryRow.superseded_by_payment_id && String(retryRow.superseded_by_payment_id) !== String(retryRow.id)) {
+      const original = await db('payments')
+        .where({ id: retryRow.superseded_by_payment_id, status: 'failed' })
+        .first('id');
+      return !original;
+    }
+    // Forward linkage: the original failed row superseded by this retry
+    // row, stamped by the ladder's success path (superseded_by_retry),
+    // its metadata-write fallback (failure_reason), or its 3DS branch.
+    const supersededOriginal = await db('payments')
+      .where({ superseded_by_payment_id: retryRow.id })
+      .whereNot({ id: retryRow.id })
+      .whereRaw("(metadata->>'superseded_by_retry' = 'true' OR failure_reason LIKE 'Collected by retry payment%' OR failure_reason LIKE 'Customer authentication required (3DS)%')")
+      .first('id');
+    return !supersededOriginal;
+  } catch (err) {
+    logger.warn(`[stripe-webhook] PI provenance ledger check failed for ${pi.id} — holding notice behind the send window: ${err.message}`);
+    return false;
+  }
+}
+
+async function sendBillingSms(customer, body, metadata = {}, { customerInitiated = false } = {}) {
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
@@ -59,6 +140,10 @@ async function sendBillingSms(customer, body, metadata = {}) {
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'stripe_webhook',
+    // Explicit customer-provenance marker (see validators/send-window.js):
+    // the caller verified this notice follows a payment the customer
+    // initiated, so the send window does not hold it.
+    ...(customerInitiated ? { customerInitiated: true } : {}),
     metadata,
   });
   // Send-window hold: a Stripe event (ACH failure, requires-action,
@@ -1970,6 +2055,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       invoiceId: paidInvoice.id,
       stripePaymentIntentId: piId,
       source: 'stripe_webhook',
+      // Receipt provenance from the PI's machine markers: customer
+      // payments' receipts send at any hour; autopay/sweep/no-show
+      // receipts hold for the window (owner ruling 2026-08-29 + Codex P1).
+      customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent),
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
     // Fire-and-forget: a settled invoice may be gating a payment-held WDO
@@ -5159,7 +5248,7 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
           // reused PI's next failure event must not mistake THIS notice
           // for its own.
           ...(eventId ? { stripe_event_id: String(eventId) } : {}),
-        });
+        }, { customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent) });
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] ACH failure SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
@@ -5332,6 +5421,9 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
       .update({ ach_processing_notified_at: new Date() });
   }
 
+  // Resolve provenance on the handler's own turn (the ledger read is
+  // async) so the deferred acknowledgment carries a settled boolean.
+  const combinedCustomerInitiated = await isCustomerInitiatedPaymentIntent(paymentIntent);
   setImmediate(() => {
     dispatchAchProcessingAcknowledgment({
       invoiceId: anchorInvoiceId,
@@ -5339,6 +5431,7 @@ async function handleCombinedPaymentIntentProcessing(paymentIntent, eventCreated
       amount: centsToDollars(actualCents),
       eventCreated,
       eventId,
+      customerInitiated: combinedCustomerInitiated,
     }).catch((err) => {
       logger.error(`[stripe-webhook] Combined ACH processing acknowledgment failed for PI ${piId}: ${err.message}`);
     });
@@ -5596,8 +5689,18 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
   // Fire-and-forget via setImmediate so a Twilio/SendGrid hiccup
   // doesn't make Stripe retry the entire webhook (which would re-run
   // the amount-mismatch + status guards above).
+  // Resolve provenance on the handler's own turn (the ledger read is
+  // async) so the deferred acknowledgment carries a settled boolean.
+  const achCustomerInitiated = await isCustomerInitiatedPaymentIntent(paymentIntent);
   setImmediate(() => {
-    dispatchAchProcessingAcknowledgment({ invoiceId: invoice.id, piId, amount, eventCreated, eventId })
+    dispatchAchProcessingAcknowledgment({
+      invoiceId: invoice.id,
+      piId,
+      amount,
+      eventCreated,
+      eventId,
+      customerInitiated: achCustomerInitiated,
+    })
       .catch((err) => {
         logger.error(`[stripe-webhook] ACH processing acknowledgment failed for PI ${piId}: ${err.message}`, { stack: err.stack });
       });
@@ -5612,7 +5715,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
 // inline run already attempted the email leg (it follows the SMS catch
 // unconditionally, keyed on the Stripe event id), so a swept re-run must
 // not repeat it under a different idempotency key.
-async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, eventCreated, eventId, smsOnly = false }) {
+async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, eventCreated, eventId, smsOnly = false, customerInitiated = false }) {
   const freshInvoice = await db('invoices').where({ id: invoiceId }).first();
   if (!freshInvoice) return;
   if (freshInvoice.ach_processing_notified_at) return;
@@ -5666,7 +5769,7 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
         original_message_type: 'ach_payment_processing',
         stripe_payment_intent_id: piId,
         invoice_id: freshInvoice.id,
-      });
+      }, { customerInitiated });
       if (!smsResult.sent) {
         logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
@@ -5849,6 +5952,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
       eventCreated: null,
       eventId: null,
       smsOnly: !!priorEmailAttempt,
+      customerInitiated: await isCustomerInitiatedPaymentIntent(pi),
     }).catch((err) => {
       logger.error(`[stripe-webhook] ACH ack sweep failed for invoice ${row.id}: ${err.message}`);
     });
@@ -5881,7 +5985,8 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
         const smsResult = await sendBillingSms(
           customer,
           body,
-          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId }
+          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId },
+          { customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent) }
         );
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] Requires-action SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
@@ -7716,7 +7821,11 @@ async function handleSetupIntentFailed(setupIntent) {
             // method reads broken. (sms_log.customer_id exists on the
             // queued row, but the executor hands rechecks METADATA only.)
             waves_customer_id: customer.id,
-          }
+          },
+          // SetupIntents are minted only by the customer's own add/verify
+          // bank flow — no machine mints them — so the notice is always
+          // customer-initiated.
+          { customerInitiated: true }
         );
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] Setup-failed SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
@@ -7740,6 +7849,8 @@ module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucc
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handlePaymentIntentCanceled = handlePaymentIntentCanceled;
 module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
+module.exports._isMachineInitiatedPaymentIntent = isMachineInitiatedPaymentIntent;
+module.exports._isCustomerInitiatedPaymentIntent = isCustomerInitiatedPaymentIntent;
 module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProcessingAcks;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;

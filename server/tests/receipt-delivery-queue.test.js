@@ -160,6 +160,31 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     jest.clearAllMocks();
   });
 
+  test('the drain passes the job\'s persisted payment provenance into sendReceipt (Codex P1, PR #3598)', async () => {
+    // customer_initiated=true (Pay-route enqueues; webhook-computed for
+    // customer PIs) exempts the receipt SMS from the send window; absent /
+    // false (machine charges, legacy rows) keeps it fenced — fail closed.
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: {},
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+
+    await ReceiptDeliveryQueue.processReceiptDeliveryJob({ ...job, customer_initiated: true });
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv1', expect.objectContaining({ customerInitiated: true }));
+
+    jest.clearAllMocks();
+    primeDb({
+      invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
+      prefs: {},
+    });
+    InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
+    await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv1', expect.objectContaining({ customerInitiated: false }));
+  });
+
   test('payment_receipt=false skips the email leg entirely — no email, no receipt_sent_at stamp', async () => {
     // The kill-switch customer opted out of payment receipts on EVERY
     // channel. Before this gate the SMS leg skipped as expected while
@@ -269,8 +294,9 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', { idempotencyKey: 'receipt_email_auto:inv1' });
     // The queue is a paired-legs caller — it must declare the email sidecar
     // so email-only customers get the channel_email_only SMS skip (the flag
-    // is caller-declared now; codex round 5).
-    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
+    // is caller-declared now; codex round 5). customerInitiated rides along
+    // from the job's persisted provenance (false here — no stamp).
+    expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true, customerInitiated: false });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 

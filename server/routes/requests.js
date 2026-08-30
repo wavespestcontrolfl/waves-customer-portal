@@ -11,6 +11,36 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const { etDateString } = require('../utils/datetime-et');
+
+function etDisplayDate(value) {
+  const at = value ? new Date(value) : new Date();
+  const safe = Number.isNaN(at.getTime()) ? new Date() : at;
+  return safe.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+// Shape the portal reads to render the truthful post-submit state (H0).
+// `processed` is true only when the processor reports a clean, churned run;
+// `confirmation` names the channel that actually accepted the confirmation
+// ('sms' | 'email') or null when none was sent from this response.
+// `effectiveDate` is the ET calendar date the cancellation took effect —
+// the ORIGINAL request's date on retries, so a next-day retry never says
+// "as of today".
+function cancellationOutcome(result, confirmation, effectiveAt) {
+  let effectiveDate = null;
+  try {
+    const at = effectiveAt ? new Date(effectiveAt) : new Date();
+    effectiveDate = Number.isNaN(at.getTime()) ? etDateString() : etDateString(at);
+  } catch (err) {
+    effectiveDate = null;
+  }
+  return {
+    processed: !!(result && result.ok && result.churned),
+    visitsPulled: result ? Number(result.cancelledCount) || 0 : 0,
+    confirmation: confirmation || null,
+    effectiveDate,
+  };
+}
 const {
   MAX_PHOTOS,
   MAX_ENCODED_PHOTO_CHARS,
@@ -104,6 +134,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // (already-cancelled visits and an already-churned account are no-ops),
       // so a clean first run makes this a cheap sweep. No new admin alert —
       // the original request's alert already carries the review flag.
+      let retryOutcome = null;
       if (category === 'cancellation') {
         try {
           const retry = await processCancellationRequest({
@@ -111,6 +142,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             reason: `Portal cancellation request ${dupe.id}`,
             requestId: dupe.id,
           });
+          retryOutcome = retry;
           logger.info(
             `Re-ran cancellation processing for deduped request ${dupe.id}: ok=${retry.ok}` +
               (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
@@ -133,6 +165,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: dupe.created_at,
         },
+        // A retry is still a truthful outcome (H0): the sweep above is the
+        // authority on whether the plan is closed. No confirmation is sent
+        // from this branch — the original request's already went out.
+        ...(category === 'cancellation' ? { cancellation: cancellationOutcome(retryOutcome, null, dupe.created_at) } : {}),
       });
     }
 
@@ -152,12 +188,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       if (!priorCancellation) {
         return res.status(401).json({ error: 'Customer not found or inactive' });
       }
+      let retryOutcome = null;
       try {
         const retry = await processCancellationRequest({
           customerId: req.customer.id,
           reason: `Portal cancellation request ${priorCancellation.id}`,
           requestId: priorCancellation.id,
         });
+        retryOutcome = retry;
         logger.info(
           `Re-ran cancellation processing for inactive-account retry ${priorCancellation.id}: ok=${retry.ok}` +
             (retry.ok ? '' : ` (errors: ${retry.errors.join(', ')})`)
@@ -179,6 +217,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           photoCount: 0,
           createdAt: priorCancellation.created_at,
         },
+        cancellation: cancellationOutcome(retryOutcome, null, priorCancellation.created_at),
       });
     }
 
@@ -260,6 +299,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // can report what happened. The durable service_requests row and the alert
     // itself remain even if this fails.
     let cancellationResult = null;
+    let cancellationProcessed = false;
     if (isCancellation) {
       try {
         cancellationResult = await processCancellationRequest({
@@ -270,6 +310,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (cancelErr) {
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
+      cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
     }
 
     // Internal admin alert only. Service requests should surface in the admin
@@ -342,12 +383,24 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // gets a dedicated template with cancellation-specific next steps.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
     let confirmationSmsSent = false;
+    let confirmationEmailSent = false;
     try {
+      // Truth gate (H0, 2026-08-30): the processor runs synchronously above,
+      // so the customer's text must say what actually happened. A fully
+      // processed cancel gets the "done as of today" confirmation; a partial
+      // one (in-progress visit, processor error) gets the "closing out by
+      // hand" copy so nobody is told their plan is gone while an office
+      // follow-up is still owed.
       const smsTemplateKey = isCancellation
-        ? 'service_cancellation_confirmation'
+        ? (cancellationProcessed ? 'service_cancellation_confirmation' : 'service_cancellation_received')
         : 'service_request_confirmation';
       const smsVars = isCancellation
-        ? { first_name: req.customer.first_name || 'there' }
+        ? {
+            first_name: req.customer.first_name || 'there',
+            // ET date of the request — a quiet-hours hold delivers this text
+            // the next morning, so the body never says "today".
+            effective_date: etDisplayDate(request.created_at),
+          }
         : {
             first_name: req.customer.first_name || 'there',
             category: categoryLabel,
@@ -374,47 +427,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         },
       });
       confirmationSmsSent = !!smsResult.sent;
-      if (!smsResult.sent && smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
-        // Send-window hold: a portal/web action is not an SMS reply, so the
-        // text defers — queued on the scheduled-SMS rail for 8:00 AM.
-        try {
-          const TWILIO_NUMBERS = require('../config/twilio-numbers');
-          await db('sms_log').insert({
-            customer_id: req.customer.id,
-            direction: 'outbound',
-            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-            to_phone: req.customer.phone,
-            message_body: body,
-            status: 'scheduled',
-            scheduled_for: new Date(smsResult.nextAllowedAt),
-            message_type: smsTemplateKey,
-            metadata: JSON.stringify({
-              entry_point: 'customer_service_request_deferred',
-              original_block_code: smsResult.code,
-              replay_purpose: 'support_resolution',
-              refresh_customer_phone: true,
-              resolve_from_by_customer: true,
-              // Terminal-replay linkage: a cancellation confirmation that
-              // dies on the replay rail (phone removed overnight, opt-out,
-              // retries exhausted) must still run the cancellation-safe
-              // email fallback below — the account is already deactivated,
-              // so the customer can't see the request in the portal and
-              // this queued row was their only confirmation.
-              service_request_id: request.id,
-              is_cancellation: isCancellation,
-              waves_customer_id: req.customer.id,
-            }),
-          });
-          logger.info(`[requests] confirmation SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-          // The queued row durably owns the confirmation — count it as
-          // sent for the route's SMS-or-fallback contract, or the
-          // cancellation email fallback below would fire tonight AND the
-          // text would follow at 8:00 AM (duplicate confirmations).
-          confirmationSmsSent = true;
-        } catch (queueErr) {
-          logger.error(`[requests] confirmation held-SMS requeue failed: ${queueErr.message}`);
-        }
-      } else if (!smsResult.sent) {
+      // No quiet-hours requeue: customer_service_request is a
+      // customer-action entry point (owner ruling 2026-08-29) — the
+      // confirmation answers the customer's own portal submit immediately,
+      // at any hour, so QUIET_HOURS_HOLD cannot surface here.
+      if (!smsResult.sent) {
         logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
     } catch (smsErr) {
@@ -438,12 +455,19 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         logger.warn(`Failed to send confirmation email for request ${request.id}: ${emailErr.message}`);
       });
     } else if (!confirmationSmsSent) {
-      void AccountMembershipEmail.sendCancellationReceived({
-        customerId: req.customer.id,
-        request,
-      }).catch((emailErr) => {
+      // Awaited (not fire-and-forget) so the response can say which channel
+      // actually accepted the confirmation — a skipped/failed email must not
+      // become "an email is on its way" on the customer's screen.
+      try {
+        const emailResult = await AccountMembershipEmail.sendCancellationReceived({
+          customerId: req.customer.id,
+          request,
+          processed: cancellationProcessed,
+        });
+        confirmationEmailSent = !!(emailResult && emailResult.ok);
+      } catch (emailErr) {
         logger.warn(`Failed to send cancellation confirmation email for request ${request.id}: ${emailErr.message}`);
-      });
+      }
     }
 
     res.status(201).json({
@@ -459,6 +483,17 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         photoCount: photoData.length,
         createdAt: request.created_at,
       },
+      // Lets the portal render the truthful post-submit state (H0): the
+      // account is already churned when `processed` is true.
+      ...(isCancellation
+        ? {
+            cancellation: cancellationOutcome(
+              cancellationResult,
+              confirmationSmsSent ? 'sms' : (confirmationEmailSent ? 'email' : null),
+              request.created_at
+            ),
+          }
+        : {}),
     });
   } catch (err) {
     next(err);

@@ -1307,7 +1307,7 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['serviceReportNotifyBilling', 'service_report_notify_billing'],
 ];
 
-const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
@@ -4016,19 +4016,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         .catch(() => {});
     }
 
-    // Fire-and-forget: trigger cancellation save when deactivating a customer
-    if (updates.active === false) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          cancellationSave.initiate(req.params.id, 'default').catch(err =>
-            logger.error(`[customers] Cancellation save on deactivation failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // The automated cancellation-save SMS sequence no longer fires on
+    // deactivation (owner ruling 2026-08-29: it promised a "retention offer"
+    // and a waived setup fee that were never defined; win-back is a manual
+    // send by the owner). The workflow module and its templates stay for
+    // sequences already in flight.
 
     // Contact change events for the 360 timeline — post-commit, best-effort
     // (the recorder never throws). Compaction above puts every slot column in
@@ -4126,20 +4118,8 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Fire-and-forget: trigger cancellation save workflow when moving to churned or at_risk
-    if (stage === 'churned' || (stage === 'at_risk' && oldStage !== 'at_risk')) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          const cancelReason = req.body.churnReason || 'default';
-          cancellationSave.initiate(req.params.id, cancelReason).catch(err =>
-            logger.error(`[customers] Cancellation save failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // Stage moves to churned / at_risk no longer start the cancellation-save
+    // SMS sequence (owner ruling 2026-08-29 — see the deactivation note above).
 
     // Fire-and-forget: update health score on stage change
     try {
@@ -5110,7 +5090,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // Body: {
 //   amount: number    — non-zero; negative deducts
 //   kind:   string     — 'prepayment' | 'goodwill' | 'adjustment'
-//   method?: string    — cash/check/zelle/card/other (prepayment only)
+//   method?: string    — cash/check/zelle/venmo/paypal/other (prepayment only)
 //   note?:  string
 // }
 //
@@ -5125,7 +5105,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // also applies the required card surcharge); booking it as a manual cash-
 // style payments row here would grant spendable credit + paid revenue
 // without actually collecting the card.
-const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 
 router.post('/:id/credits', requireAdmin, async (req, res, next) => {
   try {

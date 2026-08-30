@@ -83,6 +83,8 @@ function resetMockState() {
     emailAttemptRow: null,
     piRow: null,
     piRetrieveError: null,
+    paymentsFirst: [], // queued responses for db('payments').first()
+    paymentsFirstError: null,
     updates: [], // { table, wheres, patch }
   });
 }
@@ -105,6 +107,10 @@ function mockMakeBuilder(table) {
     if (table === 'invoices') return mockState.invoiceRow;
     if (table === 'customers') return mockState.customer;
     if (table === 'email_messages') return mockState.emailAttemptRow || null;
+    if (table === 'payments') {
+      if (mockState.paymentsFirstError) throw mockState.paymentsFirstError;
+      return mockState.paymentsFirst.length ? mockState.paymentsFirst.shift() : null;
+    }
     return null;
   };
   b.update = async (patch) => {
@@ -163,6 +169,94 @@ test('happy path: claim stamped, SMS + email sent, no release', async () => {
   expect(claimUpdates()).toHaveLength(1);
   expect(releaseUpdates()).toHaveLength(0);
   expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
+});
+
+test('customerInitiated provenance threads through to the send; absent by default (Codex P1, PR #3598)', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck({ ...WORKER_INPUT, customerInitiated: true });
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ customerInitiated: true }));
+
+  jest.clearAllMocks();
+  resetMockState();
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck(WORKER_INPUT);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.not.objectContaining({ customerInitiated: true }));
+});
+
+test('machine-initiated PI discriminator: autopay, card-on-file and no-show charges are machine; pay-page PIs are not', () => {
+  const { _isMachineInitiatedPaymentIntent: isMachine } = require('../routes/stripe-webhook');
+  expect(isMachine({ metadata: { type: 'monthly_autopay' } })).toBe(true);
+  // chargeInvoiceWithSavedCard's stamp — completion/balance sweeps and the
+  // admin card-on-file rails (Codex round-2 P1).
+  expect(isMachine({ metadata: { source: 'admin_card_on_file' } })).toBe(true);
+  expect(isMachine({ metadata: { purpose: 'appointment_card_no_show_fee' } })).toBe(true);
+  expect(isMachine({ metadata: { purpose: 'card_hold_no_show_fee' } })).toBe(true);
+  expect(isMachine({ metadata: { waves_invoice_id: 'inv-1', save_card_opt_in: 'true' } })).toBe(false);
+  expect(isMachine({})).toBe(false);
+  expect(isMachine(null)).toBe(false);
+});
+
+test('explicit initiated_by outranks the heuristics both ways (Codex #3598 round-3 P1s)', () => {
+  const { _isMachineInitiatedPaymentIntent: isMachine } = require('../routes/stripe-webhook');
+  // Accept-time annual-prepay charge rides chargeInvoiceWithSavedCard's
+  // 'admin_card_on_file' stamp but is the customer's own action.
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'customer' } })).toBe(false);
+  // Billing-cron retry re-mints a customer-looking 'one_time' PI for a
+  // scheduled collection.
+  expect(isMachine({ metadata: { type: 'one_time', initiated_by: 'machine' } })).toBe(true);
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'machine' } })).toBe(true);
+  // Unknown values fall through to the heuristics — never a blanket pass.
+  expect(isMachine({ metadata: { source: 'admin_card_on_file', initiated_by: 'bogus' } })).toBe(true);
+  expect(isMachine({ metadata: { type: 'one_time', initiated_by: '' } })).toBe(false);
+});
+
+describe('legacy unstamped retry PIs resolve provenance from the ledger (Codex #3598 round-4 P1)', () => {
+  const { _isCustomerInitiatedPaymentIntent: isCustomer } = require('../routes/stripe-webhook');
+  const legacyRetryPi = { id: 'pi_legacy_retry', metadata: { type: 'one_time' } };
+
+  beforeEach(() => resetMockState());
+
+  test('explicit stamps and sync heuristics short-circuit without a ledger read', async () => {
+    const db = require('../models/db');
+    db.mockClear();
+    await expect(isCustomer({ id: 'pi_a', metadata: { type: 'one_time', initiated_by: 'machine' } })).resolves.toBe(false);
+    await expect(isCustomer({ id: 'pi_b', metadata: { source: 'admin_card_on_file', initiated_by: 'customer' } })).resolves.toBe(true);
+    await expect(isCustomer({ id: 'pi_c', metadata: { type: 'monthly_autopay' } })).resolves.toBe(false);
+    expect(db).not.toHaveBeenCalledWith('payments');
+  });
+
+  test('an in-flight pre-deploy retry PI (original row superseded_by_retry) is machine', async () => {
+    mockState.paymentsFirst = [{ id: 'pay-retry' }, { id: 'pay-original' }];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(false);
+  });
+
+  test('an unstamped one_time PI with no retry linkage stays customer-initiated', async () => {
+    mockState.paymentsFirst = [{ id: 'pay-paypage' }, null];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(true);
+    mockState.paymentsFirst = [null];
+    await expect(isCustomer({ id: 'pi_unknown', metadata: { type: 'one_time' } })).resolves.toBe(true);
+  });
+
+  test('a DECLINED pre-deploy retry (retry row superseded by the failed original) is machine — Codex r5', async () => {
+    mockState.paymentsFirst = [
+      { id: 'pay-retry-failed', superseded_by_payment_id: 'pay-original' },
+      { id: 'pay-original' }, // status:'failed' is in the WHERE — a hit means the original is a failed obligation
+    ];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(false);
+  });
+
+  test('a row superseded by something that is NOT a failed obligation stays customer-initiated', async () => {
+    mockState.paymentsFirst = [{ id: 'pay-x', superseded_by_payment_id: 'pay-other' }, null];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(true);
+    // Self-superseded (parked/ambiguous) rows take the forward path, not the reverse one.
+    mockState.paymentsFirst = [{ id: 'pay-self', superseded_by_payment_id: 'pay-self' }, null];
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(true);
+  });
+
+  test('a ledger read error fails closed — the notice holds for the send window', async () => {
+    mockState.paymentsFirstError = new Error('db down');
+    await expect(isCustomer(legacyRetryPi)).resolves.toBe(false);
+  });
 });
 
 test('window-held SMS whose rail enqueue fails releases the claim AND still emails', async () => {

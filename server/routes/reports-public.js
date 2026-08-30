@@ -164,6 +164,9 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
+const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
+const { reserviceReportPdfSignature, reserviceReportRenderedSignature } = require('../services/service-report/reservice-report');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -537,6 +540,15 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
   }
+
+  // Termite Report V2 — station-protection dashboard for termite BAIT
+  // STATION visits (flag-gated). ONE composer shared with the queued PDF
+  // renderer (pdf-queue.js) — see attachTermiteReportV2.
+  attachTermiteReportV2(data, service);
+
+  // Cockroach Report V2 — treatment-program dashboard for cockroach typed
+  // primaries (flag-gated). Same ONE-composer contract as termite.
+  attachCockroachReportV2(data, service);
 
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1
@@ -1833,6 +1845,15 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // TERMITE_REPORT_V2 — same contract as the mosquito component: a gate
+      // flip must re-render cached termite bait-station PDFs.
+      const termiteV2Signature = termiteReportV2PdfSignature(service);
+      // COCKROACH_REPORT_V2 — same contract (cockroach-report-v2.js).
+      const cockroachV2Signature = await cockroachReportV2PdfSignature(service, db);
+      // GATE_RESERVICE_REPORT_COPY — callback copy + "$0 — included with
+      // WaveGuard" line (reservice-report.js); a flip or billing change
+      // must re-render the cached document.
+      const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1850,7 +1871,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1868,6 +1889,8 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      let cockroachRenderedSignature = cockroachV2Signature;
+      let reserviceRenderedSignature = reserviceV2Signature;
       // The canonical snapshot the render is pinned to. Declared out here so
       // the storage block below keys the object by what was RENDERED, not by
       // the cache-lookup value; assigned inside the try so an unreadable
@@ -1891,6 +1914,8 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
+          reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
           renderedData = data;
           const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
@@ -1969,7 +1994,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

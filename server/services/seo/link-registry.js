@@ -28,6 +28,10 @@ const LINK_SOURCES = Object.freeze([
   'lost_recovery', 'local_opportunity', 'legacy_unknown',
 ]);
 
+// §3.4d — intake items (step 2): raw references parked before resolution.
+const INTAKE_ITEM_STATES = Object.freeze(['pending', 'unresolved', 'resolved', 'dropped']);
+const INTAKE_DROP_REASONS = Object.freeze(['never_a_target', 'retry_exhausted', 'invalid_url', 'own_domain']);
+
 // §3.1 — aggregate over the domain's placements; step 1 only ever writes `new`
 // (intake) and leaves the rest to the investigator / bridge (steps 3–4).
 const AGENT_STATES = Object.freeze([
@@ -158,6 +162,39 @@ function normalizeSubmissionUrl(url) {
     if (u.pathname === '/' && !u.search) s = s.replace(/\/$/, '');
     return s.replace(/\/+$/, '');
   } catch { return raw.toLowerCase().replace(/#.*$/, '').replace(/\/+$/, ''); }
+}
+
+/**
+ * §3.4d item identity: trim; lowercase scheme + host; strip fragment and the
+ * trailing slash; keep path + query verbatim (case-significant); prefix
+ * https:// when no scheme. Pure — no DNS, no fetch.
+ */
+function normalizeRawUrl(url) {
+  const raw = String(url == null ? '' : url).trim();
+  if (!raw) return '';
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const u = new URL(withScheme);
+    // Trailing slashes come off the PATH only; the query stays verbatim
+    // (`?next=/` and `?next=` are different references).
+    const path = u.pathname.replace(/\/+$/, '');
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${path}${u.search}`;
+  } catch {
+    const s = withScheme.replace(/#.*$/, '');
+    return s.includes('?') ? s : s.replace(/\/+$/, '');
+  }
+}
+
+/**
+ * `${source}:${normalizeRawUrl(rawUrl)}` — the UNIQUE seo_link_intake_items.item_key.
+ * A very long reference (multi-KB query strings) is keyed by its sha256 instead:
+ * the B-tree UNIQUE index has a per-entry limit and raw_url keeps the full text.
+ */
+const ITEM_KEY_MAX = 512;
+function intakeItemKey(source, rawUrl) {
+  const n = normalizeRawUrl(rawUrl);
+  if (n.length <= ITEM_KEY_MAX) return `${source}:${n}`;
+  return `${source}:sha256:${crypto.createHash('sha256').update(n).digest('hex')}`;
 }
 
 function pathKey(acquisitionType, submissionUrl) {
@@ -296,14 +333,19 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
       ...(seenAt ? { seen_at: seenAt } : {}),
     })
     .onConflict(['domain_id', 'touch_key']).ignore().returning(['id']);
+  const touched = !!(touch && touch.length);
+  // The touch row this call landed on (new or already there): what a resolved
+  // intake item records as source_row_id.
+  const touchRow = touched ? touch[0] : await q('seo_link_domain_sources').where({ domain_id: row.id, touch_key: touchKey(source, sourceRef, sourceDetail) }).first('id');
 
-  return { id: row.id, domain: key, created, touched: !!(touch && touch.length) };
+  return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
 module.exports = {
   LINK_SOURCES, AGENT_STATES, DISCOVERY_PRIORITIES, ACQUISITION_TYPES, PAID_ACQUISITION_TYPES, OUTREACH_ACQUISITION_TYPES,
   EXPECTED_REL, EXPECTED_INDEXABILITY, EXPECTED_PERSISTENCE, RENEWAL_PERIODS, PATH_LINK_TYPES,
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
+  INTAKE_ITEM_STATES, INTAKE_DROP_REASONS, normalizeRawUrl, intakeItemKey,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
   acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,

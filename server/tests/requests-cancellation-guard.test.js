@@ -161,6 +161,37 @@ describe('POST /api/requests cancellation guard', () => {
     expect(processCancellationRequest).toHaveBeenCalledTimes(1);
   }));
 
+  test('truth gate: a fully processed cancel confirms "done"; a partial one says the office is finishing by hand', () => withServer(async (baseUrl) => {
+    const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    processCancellationRequest.mockResolvedValueOnce({ ok: true, churned: true, cancelledCount: 2, recurrenceStopped: 1, errors: [] });
+    renderRequiredSmsTemplate.mockClear();
+    let res = await postCancellation(baseUrl);
+    let body = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 2, confirmation: null }));
+    expect(body.cancellation.effectiveDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_confirmation');
+
+    processCancellationRequest.mockResolvedValueOnce({ ok: false, churned: true, cancelledCount: 0, recurrenceStopped: 0, errors: ['in_progress_visit:svc-9'] });
+    renderRequiredSmsTemplate.mockClear();
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: false, visitsPulled: 0, confirmation: null }));
+    const { sendCancellationReceived } = require('../services/account-membership-email');
+    expect(sendCancellationReceived).toHaveBeenLastCalledWith(expect.objectContaining({ processed: false }));
+    expect(renderRequiredSmsTemplate.mock.calls[0][0]).toBe('service_cancellation_received');
+
+    // Channel reporting is truthful: 'email' only when the fallback was accepted.
+    processCancellationRequest.mockResolvedValueOnce({ ok: true, churned: true, cancelledCount: 1, recurrenceStopped: 1, errors: [] });
+    sendCancellationReceived.mockResolvedValueOnce({ ok: true });
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, visitsPulled: 1, confirmation: 'email' }));
+  }));
+
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {
     mockState.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: null, next_charge_date: null }];
     const res = await postCancellation(baseUrl);

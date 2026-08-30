@@ -12260,6 +12260,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         try {
           const StripeService = require('../services/stripe');
           const prepayChargeResult = await chargeUnderJobFence(() => StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {
+            // Customer-at-keyboard provenance (Codex #3598 r3 P1): the
+            // customer just accepted — the PI's lifecycle SMS and receipt
+            // answer their own action and send at any hour (owner ruling
+            // 2026-08-29). Only this site opts in; every other saved-method
+            // caller keeps the machine default.
+            customerInitiated: true,
             // EXACT-equality freeze to the acknowledged quote (pre-push
             // Codex P0 r2): the in-lock computeChargeAmount result must be
             // the same cents the customer confirmed — any drift (a credit
@@ -12676,83 +12682,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 entryPoint: 'estimate_accept_onetime_booking',
                 metadata: { original_message_type: 'estimate_accepted_onetime' },
               });
-              // Send-window hold: a web acceptance is not an SMS reply, so
-              // the text defers — the page and the acceptance email carry
-              // the moment; the booking-link SMS queues for 8:00 AM.
-              if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
-                try {
-                  const TWILIO_NUMBERS = require('../config/twilio-numbers');
-                  // Shared identity check: a linked estimate's captured
-                  // phone may legitimately differ from the account phone
-                  // (email-matched linkage), and the queued booking link is
-                  // a bearer token — refresh only when they matched.
-                  const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
-                  const recipientStamp = await recipientRefreshStamp({
-                    customerId,
-                    recipientPhone: estimate.customer_phone,
-                    label: 'estimate-accept',
-                  });
-                  const heldRow = {
-                    customer_id: customerId || null,
-                    direction: 'outbound',
-                    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                    to_phone: estimate.customer_phone,
-                    message_body: customerBody,
-                    status: 'scheduled',
-                    scheduled_for: new Date(sendResult.nextAllowedAt),
-                    message_type: 'estimate_accepted_onetime',
-                    metadata: JSON.stringify({
-                      entry_point: 'estimate_accept_onetime_booking_deferred',
-                      estimate_id: estimate.id,
-                      original_block_code: sendResult.code,
-                      replay_purpose: 'estimate_followup',
-                      ...(customerId
-                        ? { ...recipientStamp, resolve_from_by_customer: true }
-                        : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
-                    }),
-                  };
-                  // The queued row is the ONLY delivery obligation this
-                  // text has (codex r25): the acceptance is already
-                  // committed, a retried /accept explicitly performs no
-                  // sends, and the onboarding email carries the portal URL
-                  // — not this booking URL. So the enqueue itself gets a
-                  // bounded retry, and exhaustion hands the obligation to
-                  // the office lane as a durable admin notification (the
-                  // repo's exception rail) instead of a log line nobody is
-                  // obligated to see.
-                  let queued = false;
-                  let lastEnqueueErr = null;
-                  for (let attempt = 1; attempt <= 3 && !queued; attempt += 1) {
-                    try {
-                      await db('sms_log').insert(heldRow);
-                      queued = true;
-                    } catch (enqueueErr) {
-                      lastEnqueueErr = enqueueErr;
-                      if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 250));
-                    }
-                  }
-                  if (queued) {
-                    logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
-                  } else {
-                    logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id} after 3 attempts: ${lastEnqueueErr?.message}`);
-                    await require('../services/notification-service').notifyAdmin(
-                      'comms',
-                      'Held booking-link SMS needs a manual send',
-                      'A one-time estimate acceptance after 8 PM could not queue its booking-link SMS for the morning window, and nothing else retries it — text the customer their booking link from the composer.',
-                      {
-                        link: `/admin/estimates/${estimate.id}`,
-                        metadata: {
-                          estimateId: estimate.id,
-                          reason: 'held_booking_sms_enqueue_failed',
-                          heldForWindowOpen: sendResult.nextAllowedAt,
-                        },
-                      },
-                    );
-                  }
-                } catch (queueErr) {
-                  logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
-                }
-              } else if (sendResult.blocked || sendResult.sent === false) {
+              // No quiet-hours requeue: estimate_accept_onetime_booking is
+              // a customer-action entry point (owner ruling 2026-08-29) —
+              // the booking-link text answers the customer's own web
+              // acceptance immediately, at any hour, so QUIET_HOURS_HOLD
+              // cannot surface here.
+              if (sendResult.blocked || sendResult.sent === false) {
                 throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
               } else {
                 logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
@@ -12856,25 +12791,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   entryPoint: 'estimate_accept_onetime_confirmed',
                   metadata: { original_message_type: 'appointment_confirmation' },
                 });
-                // Send-window hold: hand the confirmation to the
-                // stranded-confirmation sweep instead of dropping it. This
-                // flow registered the reminder with sendConfirmation:false
-                // (it owns the confirmation itself), so nothing else would
-                // retry a held send — re-arming confirmation_sent puts the
-                // row in the 15-minute sweep, whose deliverConfirmation
-                // pre-check defers to the 8:00 AM window open and then
-                // sends the standard confirmation for this visit.
-                // MOVE_HOLD (grouped unit move in flight, codex #3609 r31
-                // P1) is the same shape of deferral: this flow owns the
-                // confirmation, so without the re-arm nothing would retry
-                // after the move completes and the hold clears.
-                if (((sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred) || sendResult.code === 'MOVE_HOLD') && confirmedAppointmentRow?.id) {
+                // No quiet-hours re-arm: estimate_accept_onetime_confirmed
+                // is a customer-action entry point (owner ruling
+                // 2026-08-29) — the appointment confirmation answers the
+                // customer's own web acceptance immediately, at any hour,
+                // so QUIET_HOURS_HOLD cannot surface here. A grouped-move
+                // MOVE_HOLD still can (the hold gate has no entry-point
+                // exemption; codex #3609 r31): this flow owns the
+                // confirmation (registered sendConfirmation:false), so
+                // re-arm for the stranded-confirmation sweep, which sends
+                // the post-move slot once the hold clears.
+                if (sendResult.code === 'MOVE_HOLD' && confirmedAppointmentRow?.id) {
                   try {
                     await db('appointment_reminders')
                       .where({ scheduled_service_id: confirmedAppointmentRow.id })
                       .where({ cancelled: false })
                       .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-                    logger.info(`[estimate-accept] Confirmation SMS held (send window) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
+                    logger.info(`[estimate-accept] Confirmation SMS held (grouped move) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
                   } catch (rearmErr) {
                     logger.error(`[estimate-accept] confirmation re-arm failed for ${confirmedAppointmentRow.id}: ${rearmErr.message}`);
                   }
@@ -12934,43 +12867,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               entryPoint: 'estimate_accept_annual_prepay',
               metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
             });
-            // Send-window hold — same web-acceptance deferral as the
-            // one-time booking SMS above.
-            if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
-              try {
-                const TWILIO_NUMBERS = require('../config/twilio-numbers');
-                // Same bearer-link identity rule as the one-time accept
-                // enqueue above (shared helper, never a second inline copy).
-                const { recipientRefreshStamp } = require('../services/messaging/deferred-recipient-identity');
-                const recipientStamp = await recipientRefreshStamp({
-                  customerId,
-                  recipientPhone: estimate.customer_phone,
-                  label: 'estimate-accept',
-                });
-                await db('sms_log').insert({
-                  customer_id: customerId || null,
-                  direction: 'outbound',
-                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-                  to_phone: estimate.customer_phone,
-                  message_body: customerBody,
-                  status: 'scheduled',
-                  scheduled_for: new Date(sendResult.nextAllowedAt),
-                  message_type: 'estimate_accepted_annual_prepay',
-                  metadata: JSON.stringify({
-                    entry_point: 'estimate_accept_annual_prepay_deferred',
-                    estimate_id: estimate.id,
-                    original_block_code: sendResult.code,
-                    replay_purpose: 'estimate_followup',
-                    ...(customerId
-                      ? { ...recipientStamp, resolve_from_by_customer: true }
-                      : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
-                  }),
-                });
-                logger.info(`[estimate-accept] Annual-prepay SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
-              } catch (queueErr) {
-                logger.error(`[estimate-accept] Held annual-prepay SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
-              }
-            } else if (sendResult.blocked || sendResult.sent === false) {
+            // No quiet-hours requeue: estimate_accept_annual_prepay is a
+            // customer-action entry point (owner ruling 2026-08-29) — the
+            // acceptance text answers the customer's own web acceptance
+            // immediately, at any hour, so QUIET_HOURS_HOLD cannot surface
+            // here.
+            if (sendResult.blocked || sendResult.sent === false) {
               throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
             } else {
               logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);

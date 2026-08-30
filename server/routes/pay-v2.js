@@ -18,7 +18,7 @@ const logger = require('../services/logger');
 const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
-const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
+const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
 
 /**
  * Public pay routes — no auth required.
@@ -253,6 +253,19 @@ async function invoiceCaptureNeeded(invoice) {
 // held-coverage flow (Codex #2507 round-7 P1) a required-save invoice
 // stays collectible until capture completes, so GET/capture-setup can no
 // longer key the capture state off status === 'prepaid' alone.
+// Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
+// as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
+// amount before /setup answers. 0 when the gate is off / opted out / no credit.
+async function invoiceProjectedCreditApplied(invoice) {
+  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
+  if (!invoice?.customer_id || invoice?.payer_id) return 0;
+  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  if (row?.auto_apply_account_credit !== true) return 0;
+  const credit = Number(row?.account_credits) || 0;
+  if (!(credit > 0)) return 0;
+  return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+}
+
 async function invoiceCreditWouldFullyCover(invoice) {
   if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
@@ -357,6 +370,66 @@ router.get('/:token', async (req, res, next) => {
     }
 
     const getSaveRequired = await invoiceRequiresSavedMethod(data);
+    // Off-Stripe tenders are offered only when a transfer is actually the
+    // right thing to do (codex #3610 P1 ×2): never when the invoice must
+    // capture a saved method (a Zelle/Venmo/PayPal transfer creates neither
+    // the Stripe method nor the consent the recurring signup needs), and
+    // never when account credit will settle the whole invoice at /setup
+    // (the customer owes no cash — a transfer of `amountDue` would be an
+    // overpayment).
+    // …nor on a combined-balance session (codex r2 P1): the panel advertises
+    // the COMBINED total but a transfer + record-payment settles only the
+    // anchor — the siblings would stay open while the customer believes
+    // they paid "Total due today". No manual tenders whenever siblings ride.
+    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
+      ? manualPayOptionsFromEnv()
+      : null;
+    if (manualPayOptions) {
+      // Cross-rail fence (codex r5 P1): the SAME guard /setup applies before
+      // minting a public PI. A committed saved-card claim (off-session charge
+      // in flight or awaiting reconciliation) must not be offered a second
+      // rail — the customer could transfer while the attempt also settles.
+      // Read-only here (this GET never parks the invoice); a fenced state
+      // simply withholds the block, the way /setup 409s.
+      try {
+        await StripeService.assertNoInvoiceChargeReconciliationPending(data.id);
+      } catch (err) {
+        if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        manualPayOptions = null;
+      }
+    }
+    if (manualPayOptions && data.stripe_payment_intent_id) {
+      // Attached pay-page PaymentIntent (codex r6 P1): Stripe may already have
+      // moved the stamped PI to succeeded/processing while the row is still
+      // collectible (webhook delayed or failed). Same verdict the off-Stripe
+      // settlement paths use — services/prepaid-pi-guard.js, inspect-only
+      // (this GET cancels nothing): money in flight or unverifiable ⇒ no
+      // second rail. A fresh, still-cancelable PI (the page's own mint) is
+      // fine. Only runs when a PI is stamped, so a fresh link costs nothing.
+      const verdict = await require('../services/prepaid-pi-guard')
+        .guardOpenPaymentIntentForPrepaid(data, { inspectOnly: true })
+        .catch(() => ({ ok: false }));
+      if (!verdict.ok) manualPayOptions = null;
+    }
+    if (manualPayOptions) {
+      // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
+      // Partial account credit is applied only when /setup mints (codex r2
+      // P1 → r3 P1: a projection is not a reservation — if /setup never runs,
+      // the gross is what's owed and what record-payment books). So when
+      // credit WILL apply at /setup, flag it: the client withholds the
+      // transfer links until /setup answers with the post-credit amount, and
+      // never pre-fills either the gross or a projected figure meanwhile.
+      const projectedCredit = await invoiceProjectedCreditApplied(data).catch(() => 0);
+      manualPayOptions = {
+        ...manualPayOptions,
+        amountDue: invoiceAmountDue(data),
+        ...(projectedCredit > 0 ? { creditPending: true } : {}),
+      };
+      // The same row the amount came from, so the client can fence a
+      // pre-filled transfer against a later admin edit (codex r3 P1).
+      manualPayOptions.version = data.updated_at ? new Date(data.updated_at).getTime() : null;
+    }
+
     const getCaptureNeeded = getSaveRequired
       && (data.status === 'prepaid'
         || (isInvoiceCollectibleStatus(data.status) && (await invoiceCreditWouldFullyCover(data))))
@@ -455,6 +528,11 @@ router.get('/:token', async (req, res, next) => {
       // Absent (not null) when the gate is off or there is nothing owed —
       // the gate-off payload stays byte-identical to today.
       ...(previousBalance ? { previousBalance } : {}),
+      // Off-Stripe tenders (Zelle / Venmo / PayPal) shown under checkout.
+      // Absent when no env var is set (kill switch), when the invoice is not
+      // collectible, when it requires a saved method, or when account credit
+      // covers it — see the manualPayOptions comment above.
+      ...(manualPayOptions ? { manualPayOptions } : {}),
     });
   } catch (err) {
     next(err);
@@ -561,8 +639,16 @@ router.post('/:token/setup', async (req, res, next) => {
       includeOpenBalance: true,
     });
     const captureNeeded = !!result.covered_by_credit && holdCoverageForCapture;
+    // Post-mint row version (codex r5 P2): partial account credit applied at
+    // mint advances updated_at, so the pay page's transfer fence must compare
+    // a later click against THIS version, not the GET's — else the first
+    // Open Venmo/PayPal after setup always false-rejects. A failed read
+    // leaves it null (client falls back to the GET version: safe direction).
+    const postMintRow = await db('invoices').where({ id: invoice.id }).first('updated_at').catch(() => null);
+    const postMintVersion = postMintRow?.updated_at ? new Date(postMintRow.updated_at).getTime() : null;
 
     res.json({
+      version: postMintVersion,
       clientSecret: result.clientSecret,
       paymentIntentId: result.paymentIntentId,
       amount: result.amount,
@@ -846,6 +932,9 @@ router.post('/:token/confirm', async (req, res, next) => {
           invoiceId: invoice.id,
           stripePaymentIntentId: paymentIntentId,
           source: 'pay_confirm',
+          // The Pay page is always the customer's own payment — the
+          // receipt sends at any hour (owner ruling 2026-08-29).
+          customerInitiated: true,
         });
         ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
       }

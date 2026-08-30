@@ -107,9 +107,12 @@ function targetPageVariants(url) {
 async function findPlacementRow(q, domain, targetPage, { excludeId = null, location = '-', columns = ['id', 'status', 'target_page'] } = {}) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
-  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
-  const loc = locationKeyOf(location);
-  if (loc !== '-') qb = qb.where('location_key', loc);
+  // Placement identity is (domain, page, location_key) — '-' = the unscoped
+  // row, an identity of its own, never a wildcard: a writer creating the
+  // unscoped work row must not be refused by a GBP-scoped sibling, and vice
+  // versa (the legacy 2-column key is gone since step 2).
+  const qb0 = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
+  let qb = qb0.where('location_key', locationKeyOf(location));
   if (excludeId) qb = qb.whereNot('id', excludeId);
   return (await qb.first(...columns)) || null;
 }

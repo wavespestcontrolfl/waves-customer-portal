@@ -998,7 +998,7 @@ describe('crawlForLink goes through the SSRF-pinned fetcher', () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
 
     fetchFn.mockResolvedValueOnce({ status: 404, ok: false, headers: { get: () => null }, text: async () => '' });
-    await expect(fetchPage('https://public.example/gone', { fetchFn, resolveHostFn: async () => true })).resolves.toEqual({ status: 404, html: null, blocked: false, truncated: false, error: null });
+    await expect(fetchPage('https://public.example/gone', { fetchFn, resolveHostFn: async () => true })).resolves.toEqual({ status: 404, finalUrl: 'https://public.example/gone', redirectHops: 0, html: null, blocked: false, truncated: false, contentType: null, error: null });
 
     // a fetcher that reports a cut body surfaces truncated:true
     fetchFn.mockResolvedValueOnce({ status: 200, ok: true, complete: false, headers: { get: () => null }, text: async () => '<html>partial' });

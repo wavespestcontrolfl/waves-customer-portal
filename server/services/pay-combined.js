@@ -1084,6 +1084,9 @@ async function settleCombinedPaymentIntent(paymentIntent, details, { eventCreate
         invoiceId: invId,
         stripePaymentIntentId: piId,
         source: 'combined_pay',
+        // The combined Pay page is always the customer's own payment — the
+        // receipt sends at any hour (owner ruling 2026-08-29).
+        customerInitiated: true,
       });
     }
     try {

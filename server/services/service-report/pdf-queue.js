@@ -17,6 +17,9 @@ const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-p
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
+const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
+const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
+const { reserviceReportPdfSignature, reserviceReportRenderedSignature } = require('./reservice-report');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -60,6 +63,19 @@ async function ensureReportToken(serviceRecordId, knex = db) {
     report_generated_at: knex.fn.now(),
   });
   return token;
+}
+
+// Cached probe for the rollout window where 20260830000050 has not run yet
+// (new code, old schema): resolves once per process; a probe failure reads
+// as "absent" and only costs the re-service key component until restart.
+let serviceTierSourceColumnPresent = null;
+async function hasServiceTierSourceColumn(knex) {
+  if (serviceTierSourceColumnPresent === true) return true;
+  try {
+    const cols = await knex('service_records').columnInfo();
+    serviceTierSourceColumnPresent = !!cols.service_tier_source;
+  } catch { return false; }
+  return serviceTierSourceColumnPresent;
 }
 
 async function loadServiceRecordForPdf(recordId, knex = db) {
@@ -135,6 +151,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same for PEST_REPORT_V2 — the pest gate predates this key component, so
   // pest PDFs cached pre-dashboard re-render once on next view.
   const pestV2Signature = pestReportV2PdfSignature(service);
+  // Same for TERMITE_REPORT_V2 (termite-report-v2.js) — env + service type
+  // only, immutable per render.
+  const termiteV2Signature = termiteReportV2PdfSignature(service);
+  // Same for COCKROACH_REPORT_V2 (cockroach-report-v2.js).
+  const cockroachV2Signature = await cockroachReportV2PdfSignature(service, knex);
   // Treatment-zone key component: the traced satellite map bakes into the
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
@@ -171,10 +192,19 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
   // lookup sentinel for reports that render no narrative.
   let tnRenderedSignature = '-tn0';
+  // Same contract for the cockroach program state: the store key carries the
+  // state the render actually used (stamped on the payload), so a render
+  // that fell closed is never stored under the lookup's correct-state key.
+  let cockroachRenderedSignature = cockroachV2Signature;
+  // Same contract for the re-service block (reservice-report.js): the store
+  // key carries the billing outcome the render actually printed.
+  let reserviceRenderedSignature = '';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
+    reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
     renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
@@ -192,6 +222,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // direct route would then serve that stale render as current (codex P2
     // #3197 r6).
     applyLawnReportReconciliation(data, data.dynamicContext);
+    // Termite V2 rides the SAME composer the public route uses — this key
+    // carries termiteReportV2PdfSignature, so the render must carry the
+    // dashboard or the direct route would serve a legacy PDF as current
+    // (codex P1 #3600 r11).
+    attachTermiteReportV2(data, service);
+    attachCockroachReportV2(data, service);
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -318,7 +354,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -414,7 +450,15 @@ async function getOrRenderServiceReportPdf(recordId, {
     // side compute "no assessment" while renderAndStore — which uses the
     // full record — computes the real hash. The keys would never match and
     // every lawn PDF would re-render on every lookup.
-    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+    // is_callback + service_tier(+_source) ride along for the re-service
+    // component (reservice-report.js): without them this side computes ''
+    // while renderAndStore — full record — stores callback PDFs under
+    // -rs1m*/-rs1n*, and every callback PDF would re-render on every
+    // lookup. service_tier_source ships in THIS deploy's migration
+    // (20260830000050), so during the Railway rollout overlap the column
+    // may not exist yet — probe once and select it conditionally instead
+    // of failing every PDF lookup (codex r8 P1).
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
@@ -454,7 +498,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

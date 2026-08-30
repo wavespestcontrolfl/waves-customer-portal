@@ -56,12 +56,13 @@ const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
 const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify, LOCATION_MATCH_SQL } = runner._internals;
 
-describe('alreadyPlacedAt location predicate (v2 identity + rolling-deploy fallback)', () => {
-  test('compiles with exactly two bindings (no bare ? eaten by knex) and keeps the legacy quality_signals fallback only for unstamped rows', () => {
+describe('alreadyPlacedAt location predicate (v2 identity)', () => {
+  test('identity is location_key alone — the step-1 rolling-deploy fallback on quality_signals.location is gone (step 2 backfilled it)', () => {
     const knex = require('knex')({ client: 'pg' });
-    const c = knex('seo_link_prospects').whereRaw(LOCATION_MATCH_SQL, ['bradenton', 'bradenton']).toSQL().toNative();
-    expect(c.bindings).toEqual(['bradenton', 'bradenton']);
-    expect(c.sql).toMatch(/location_key = \$1 OR \(location_key = '-' AND COALESCE\(quality_signals->>'location', ''\) = \$2\)/);
+    const c = knex('seo_link_prospects').whereRaw(LOCATION_MATCH_SQL, ['bradenton']).toSQL().toNative();
+    expect(c.bindings).toEqual(['bradenton']);
+    expect(c.sql).toMatch(/location_key = \$1$/);
+    expect(c.sql).not.toMatch(/quality_signals/);
   });
 });
 

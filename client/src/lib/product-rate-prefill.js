@@ -33,6 +33,15 @@ export function isDryFormProduct(product = {}) {
   );
 }
 
+// Adjuvants (surfactants) ride the tank as mix partners, not pest products —
+// the 4-oz pest perimeter house default is an insecticide rate and must not
+// prefill for them; with no catalog rate of their own they start blank.
+export function isAdjuvantProduct(product = {}) {
+  return /adjuvant|surfactant/i.test(
+    `${product.name || ""} ${product.category || product.product_category || ""}`,
+  );
+}
+
 export function normalizeApplicationMethod(value = "") {
   const normalized = String(value || "")
     .trim()
@@ -126,6 +135,7 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
   const usePestSprayDefault =
     catalogRate === "" &&
     !isDryFormProduct(product) &&
+    !isAdjuvantProduct(product) &&
     applicationMethod === "perimeter_spray" &&
     serviceLine === "pest";
   // Per-basis products carry their verified label rate in the legacy

@@ -162,6 +162,42 @@ describe('address normalizer', () => {
     });
   });
 
+  test('does not read a 5-digit house number as the ZIP in comma-free addresses', () => {
+    expect(parseRawAddress('12345 Gulf Drive Bradenton')).toMatchObject({
+      line1: '12345 Gulf Dr',
+      city: 'Bradenton',
+      state: '',
+      zip: '',
+    });
+  });
+
+  test('keeps a trailing ZIP while preserving a 5-digit house number', () => {
+    expect(parseRawAddress('12345 Gulf Drive Bradenton FL 34209')).toMatchObject({
+      line1: '12345 Gulf Dr',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
+  test('house number equal to the ZIP survives in the street line', () => {
+    expect(parseRawAddress('34209 Gulf Drive Bradenton FL 34209')).toMatchObject({
+      line1: '34209 Gulf Dr',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
+  test('trailing punctuation after the ZIP still parses (codex P1)', () => {
+    expect(parseRawAddress('123 Main Street Bradenton FL 34209.')).toMatchObject({
+      line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
   test('raw parser leaves state empty unless an explicit Florida token is present', () => {
     expect(parseRawAddress('123 Main St Parrish')).toMatchObject({
       line1: '123 Main St',
@@ -373,6 +409,14 @@ describe('splitStreetLineUnit', () => {
 
   test('splits a trailing # token', () => {
     expect(splitStreetLineUnit('123 Main St #4')).toEqual({ street: '123 Main St', unit: '#4' });
+    expect(splitStreetLineUnit('123 Main St # 4')).toEqual({ street: '123 Main St', unit: '# 4' });
+    expect(splitStreetLineUnit('123 Main St Apt # 4')).toEqual({ street: '123 Main St', unit: 'Apt # 4' });
+    expect(splitStreetLineUnit('123 Main St Suite 200-A')).toEqual({ street: '123 Main St', unit: 'Suite 200-A' });
+    expect(splitStreetLineUnit('123 Main St Unit 4-B')).toEqual({ street: '123 Main St', unit: 'Unit 4-B' });
+    expect(splitStreetLineUnit('123 Main St Unit PH1')).toEqual({ street: '123 Main St', unit: 'Unit PH1' });
+    expect(splitStreetLineUnit('123 Main St Apt TH12')).toEqual({ street: '123 Main St', unit: 'Apt TH12' });
+    expect(splitStreetLineUnit('123 Main St, FL 34236-1234')).toEqual({ street: '123 Main St', unit: '' });
+    expect(splitStreetLineUnit('123 Winston-Salem Rd')).toEqual({ street: '123 Winston-Salem Rd', unit: '' });
   });
 
   test('drops trailing city/state segments before splitting', () => {
@@ -493,5 +537,19 @@ describe('formatAddress', () => {
   test('coerces non-string zip values', () => {
     expect(formatAddress({ line1: '123 Main St', city: 'Sarasota', state: 'FL', zip: 34231 }))
       .toBe('123 Main St, Sarasota, FL 34231');
+  });
+});
+
+describe('splitStreetLineUnitParts', () => {
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  test('returns the place tail after the street and its unit segments', () => {
+    expect(splitStreetLineUnitParts('100 Main St, Apt 4, Sarasota, FL 34236')).toEqual({ street: '100 Main St', unit: 'Apt 4', tail: 'Sarasota, FL 34236' });
+    expect(splitStreetLineUnitParts('100 Main St Apt 4, Sarasota, FL 34236')).toEqual({ street: '100 Main St', unit: 'Apt 4', tail: 'Sarasota, FL 34236' });
+    expect(splitStreetLineUnitParts('100 Main St, Bldg 2, Apt 4, Sarasota')).toEqual({ street: '100 Main St', unit: 'Bldg 2 Apt 4', tail: 'Sarasota' });
+  });
+  test('no unit: tail is everything after the street', () => {
+    expect(splitStreetLineUnitParts('100 Main St, Sarasota, FL 34236')).toEqual({ street: '100 Main St', unit: '', tail: 'Sarasota, FL 34236' });
+    expect(splitStreetLineUnitParts('100 Main St')).toEqual({ street: '100 Main St', unit: '', tail: '' });
+    expect(splitStreetLineUnitParts('Apt 4, Sarasota')).toEqual({ street: 'Apt 4', unit: '', tail: 'Sarasota' });
   });
 });

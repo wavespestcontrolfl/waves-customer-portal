@@ -575,7 +575,10 @@ class LinkedInService {
     }
     const postId = res.headers.get('x-restli-id') || res.headers.get('x-linkedin-id') || null;
     logger.info(`[linkedin] company post created: ${postId}`);
-    return { platform: 'linkedin', postId, success: true };
+    // imageUrl is present ONLY when the thumbnail upload succeeded — a
+    // best-effort miss posts without a picture, and consumers (studio
+    // legacy-card alert) must not assume the image shipped.
+    return { platform: 'linkedin', postId, success: true, ...(body.content?.article?.thumbnail ? { imageUrl } : {}) };
   }
 }
 

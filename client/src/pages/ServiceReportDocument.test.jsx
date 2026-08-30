@@ -354,6 +354,230 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(hab.container.textContent).toMatch(/Perimeter shield/);
   });
 
+  it('prints the termite V2 status, station network, and primary move', () => {
+    const data = {
+      ...BASE_DATA,
+      termiteReportV2: {
+        status: { key: 'protected', tone: 'good', label: 'No termite activity observed' },
+        statusSummary: 'We inspected all 12 bait stations around your home today.',
+        defense: { summary: 'Your protective ring: 12 inspected.', items: [
+          { key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' },
+        ] },
+        primaryMove: { title: 'Keep mulch off the slab', why: 'Mulch holds moisture.', impact: 'Lowers termite pressure', dueLabel: 'Before your next visit' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/Station protection/);
+    expect(container.textContent).toMatch(/No termite activity observed/);
+    expect(container.textContent).toMatch(/12 inspected/);
+    expect(container.textContent).toMatch(/Keep mulch off the slab/);
+  });
+
+  it('prints the documented serviced count in the termite block (static PDFs draw no map)', () => {
+    const data = {
+      ...BASE_DATA,
+      termiteReportV2: {
+        status: { key: 'protected', tone: 'good', label: 'No termite activity observed' },
+        statusSummary: 'We inspected all 12 bait stations around the property today.',
+        metrics: [{ label: 'Stations inspected', value: '12 of 12' }, { label: 'Termite activity', value: 'None observed' }, { label: 'Stations serviced', value: '3' }],
+        defense: { summary: 'Your protective ring: 12 inspected.', items: [{ key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' }] },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/Stations serviced: 3/);
+    const none = render(<ServiceReportDocument data={{ ...data, termiteReportV2: { ...data.termiteReportV2, metrics: [{ label: 'Stations serviced', value: '0' }] } }} token="t" />);
+    expect(none.container.textContent).not.toMatch(/Stations serviced/);
+  });
+
+  it('termite V2 is the sole result summary — the typed headline/body never print beside it', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      summary: 'Legacy recap that must not print.',
+      typedReport: {
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection',
+        todaysResult: { headline: 'Termite activity was high today.', body: 'We inspected 10 stations (typed).', nextStep: 'Recheck active stations sooner.' },
+        findings: [
+          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '10' },
+          { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+        ],
+      },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        aiSummary: { headline: null, body: 'Both cartridges were replaced.' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text).toMatch(/Termite activity observed at 2 stations/);
+    expect(text).toMatch(/2 of the 12 stations inspected/);
+    expect(text).toMatch(/Both cartridges were replaced/);
+    expect(text).not.toMatch(/Termite activity was high today/);
+    expect(text).not.toMatch(/10 stations \(typed\)/);
+    expect(text).not.toMatch(/Legacy recap/);
+    // dashboard-owned typed tiles (counts / status / bait condition) never
+    // print beside the V2 network; other typed fields still do
+    expect(text).not.toMatch(/Stations checked: 10/);
+    expect(text).toMatch(/Station condition issues: Station obstructed/);
+    // the required next step still prints
+    expect(text).toMatch(/Recheck active stations sooner/);
+    // the summary body prints once (status row carries the label only)
+    expect(text.match(/2 of the 12 stations inspected/g)).toHaveLength(1);
+  });
+
+  it('companion-source termite V2 keeps the primary summary and replaces only the bait companion result', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.', body: 'We treated the kitchen.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        // body FOLDS the next step in (the snapshot builder's normal shape)
+        todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body. Recheck active stations sooner.', nextStep: 'Recheck active stations sooner.' },
+        findings: [
+          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
+          { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+        ],
+      }],
+      // BOTH dashboards on a combined visit (pest_termite_bait_quarterly)
+      pestReportV2: {
+        status: { label: 'Home protected' }, statusSummary: 'Perimeter shield applied.',
+        defense: { summary: 'Perimeter protected.', items: [{ key: 'perimeter_shield', label: 'Perimeter shield', status: 'active', detail: 'Exterior protection was applied today.' }] },
+        primaryMove: { title: 'Clear the mulch bed', why: 'It holds moisture.', impact: 'Cuts harborage.', dueLabel: 'Before next service' },
+      },
+      termiteReportV2: {
+        source: 'companion',
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        defense: { summary: 'Your protective ring: 12 inspected · 2 with activity.', items: [{ key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' }, { key: 'bait', label: 'Bait condition', status: 'watched', detail: 'Moderate bait feeding.' }] },
+        primaryMove: { title: 'Pull mulch back from foundation', why: 'Keeps the ring working.', impact: 'Protects the system', dueLabel: 'Before your next visit' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    // pest dashboard rows AND termite dashboard rows both print
+    expect(text).toMatch(/Protection status: Home protected/);
+    expect(text).toMatch(/Perimeter shield/);
+    expect(text).toMatch(/Clear the mulch bed/);
+    expect(text).toMatch(/Station protection: Termite activity observed at 2 stations/);
+    expect(text).toMatch(/12 inspected · 2 with activity/);
+    expect(text).toMatch(/Moderate bait feeding/);
+    expect(text).toMatch(/Pull mulch back from foundation/);
+    expect(text).toMatch(/Roach activity was light today/);
+    expect(text).toMatch(/We treated the kitchen/);
+    expect(text).toMatch(/Station protection/);
+    expect(text).toMatch(/2 of the 12 stations inspected/);
+    expect(text).not.toMatch(/Termite activity was high today/);
+    expect(text).not.toMatch(/Companion typed body/);
+    // the required next step prints even though the body (which normally
+    // folds it in) is suppressed — the dashboard's reconciled nextStep wins
+    expect(text).toMatch(/Recheck active stations sooner/);
+    expect(text).toMatch(/Station condition issues: Station obstructed/);
+    expect(text).not.toMatch(/Stations checked: 12/);
+  });
+
+  it('companion-source: the companion\'s accepted narrative prints in the PDF companion block', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        todaysResult: { headline: 'x', body: 'Stations 6 and 10 fed heavily; both cartridges replaced.', bodySource: 'technician_report' }, findings: [],
+      }],
+      termiteReportV2: {
+        source: 'companion',
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+        aiSummary: { headline: null, body: 'Stations 6 and 10 fed heavily; both cartridges replaced.' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/both cartridges replaced/);
+  });
+
+  it('a partial station sync suppresses the PDF placement section', () => {
+    const stationMap = { available: true, program: 'termite', image: { url: '/x.png', width: 640, height: 340 }, stations: [{ id: 's1', number: 1, cx: 10, cy: 10, status: 'ok' }], summary: { total: 1, checked: 1, activity: 0, serviced: 0, inaccessible: 0 } };
+    const base = { ...BASE_DATA, serviceLine: 'termite', stationMap, termiteReportV2: { status: { key: 'protected', tone: 'good', label: 'No termite activity observed' }, statusSummary: 'x', stationSyncPartial: false } };
+    expect(render(<ServiceReportDocument data={base} token="t" />).container.textContent).toMatch(/Bait station placement/);
+    cleanup();
+    const partial = { ...base, termiteReportV2: { ...base.termiteReportV2, stationSyncPartial: true } };
+    expect(render(<ServiceReportDocument data={partial} token="t" />).container.textContent).not.toMatch(/Bait station placement/);
+  });
+
+  it('companion-source: the bait companion\'s frozen gauge bullet is suppressed and its current history row is reconciled', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      typedReport: { type: 'cockroach', reportTypeLabel: 'Cockroach Service', todaysResult: { headline: 'Roach activity was light today.' }, findings: [] },
+      companionReports: [{
+        type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', internalOnly: false,
+        todaysResult: { headline: 'No termite activity observed.' }, findings: [],
+        activity: { label: 'Termite Activity', levelWord: 'No active signs observed today', score: 0 },
+        visitTimeline: { visits: [
+          { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+          { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+        ] },
+      }],
+      termiteReportV2: { source: 'companion', status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' }, statusSummary: 'Pins escalated.' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text).not.toMatch(/No active signs observed today/);
+    expect(text.match(/Termite activity observed at 2 stations/g).length).toBeGreaterThanOrEqual(2);
+    expect(text.match(/No termite activity observed/g)).toHaveLength(1);
+  });
+
+  it('primary-source: the PDF prints the reconciled next step, never the frozen no-action one', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      typedReport: { type: 'termite_bait_station', todaysResult: { headline: 'No termite activity observed.', nextStep: 'No action needed.' }, findings: [], nextStepChips: [] },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Pins escalated.',
+        statusReconciled: true,
+        nextStep: 'We will re-check the active stations at your next monitoring visit.',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/re-check the active stations at your next monitoring visit/);
+    expect(container.textContent).not.toMatch(/No action needed/);
+  });
+
+  it('primary-source: the PDF visit-history current row restates the reconciled headline', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      typedReport: { type: 'termite_bait_station', todaysResult: { headline: 'No termite activity observed.' }, findings: [] },
+      typedVisitTimeline: { visits: [
+        { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+        { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+      ] },
+      termiteReportV2: { status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' }, statusSummary: 'Pins escalated.' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    const text = container.textContent;
+    expect(text.match(/No termite activity observed/g)).toHaveLength(1);
+    expect(text.match(/Termite activity observed at 2 stations/g).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('termite V2 suppresses the frozen activity-gauge bullet that could contradict the reconciled status', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      activity: { label: 'Termite Activity', levelWord: 'No active signs observed today', score: 0 },
+      termiteReportV2: {
+        status: { key: 'action', tone: 'watch', label: 'Termite activity observed at 2 stations' },
+        statusSummary: 'Termite activity was observed at 2 of the 12 stations inspected.',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toMatch(/No active signs observed today/);
+    expect(container.textContent).toMatch(/Termite activity observed at 2 stations/);
+  });
+
   it('does not claim treated areas when the only application is a station check', () => {
     // treatment-map.js isRenderableApplication excludes method 'station_check'
     const data = {
@@ -685,6 +909,50 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     };
     const { container } = render(<ServiceReportDocument data={data} token="t" />);
     expect(container.textContent).toContain('Termidor Foam');
+  });
+
+  it('keeps an applied pest bait (Advion gel under bait_placement) as a real application', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'pest',
+      applications: [{ id: 'a1', method: 'bait_placement', totalAmount: '4', amountUnit: 'g', product: { name: 'Advion Ant Bait Gel', category: 'insecticide bait', epa_reg: '100-1498', active_ingredient: 'Indoxacarb' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Advion Ant Bait Gel');
+    expect(container.textContent).toContain('100-1498');
+  });
+
+  it('keeps an EPA-registered mosquito station (In2Care) as a real application — only termite/rodent devices are excluded', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'mosquito',
+      applications: [{ id: 'a1', method: 'station_check', totalAmount: '2', amountUnit: 'ea', product: { name: 'In2Care Mosquito Station', category: 'mosquito station', epa_reg: '91050-1', active_ingredient: 'Pyriproxyfen, Beauveria bassiana' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('In2Care Mosquito Station');
+    expect(container.textContent).toContain('91050-1');
+  });
+
+  it('never lists a bait cartridge recorded under bait_placement (device identity beats the method)', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'bait_placement', totalAmount: '6', amountUnit: 'cartridges', product: { name: 'Trelona Compressed Termite Bait Cartridges', category: 'termite bait', epa_reg: '499-557' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Products applied');
+    expect(container.textContent).not.toContain('Trelona');
+  });
+
+  it('a bait device under bait_placement with zone IDs never heads a "Where we treated" schematic', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      zones: [{ id: 'z1', letter: 'A', label: 'Front', geometry_image: null }],
+      applications: [{ id: 'a1', method: 'bait_placement', zone_ids: ['z1'], totalAmount: '6', amountUnit: 'cartridges', product: { name: 'Trelona Compressed Termite Bait Cartridges', category: 'termite bait', epa_reg: '499-557' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Where we treated');
   });
 
   it('never lists a bait cartridge as an application, even EPA-registered', () => {
@@ -1075,5 +1343,138 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Where we treated/);
     fireEvent.error(container.querySelector('img[src="https://cdn.example.com/wall.jpg"]'));
     expect(container.textContent).not.toMatch(/Where we treated/);
+  });
+});
+
+describe('ServiceReportDocument — re-service (callback) block', () => {
+  const reservice = {
+    serviceLine: 'pest',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: true,
+    billingLine: 'This re-service was included with your WaveGuard Gold membership — $0.00 billed.',
+  };
+
+  it('prints the Billing row and leads the summary with the re-service framing', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service', reserviceReport: reservice }} token="tok123" />);
+    expect(screen.getByText('Included with WaveGuard — $0.00 billed')).toBeInTheDocument();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+    expect(screen.getByText(reservice.expectation)).toBeInTheDocument();
+  });
+
+  it('non-member callback: no Billing row, no money claim', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: { ...reservice, includedWithWaveGuard: false, billingLine: null } }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+  });
+
+  it('a Pest V2 attention status or a needs-attention snapshot leads the summary; the re-service framing follows', () => {
+    const { container, unmount } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: reservice,
+      pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' }, statusSummary: 'Ant pressure is still high at the kitchen slider.' },
+    }} token="tok123" />);
+    const text = container.textContent;
+    const actionAt = text.indexOf('Action needed.');
+    expect(actionAt).toBeGreaterThan(-1);
+    expect(actionAt).toBeLessThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
+    expect(actionAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+    expect(text.indexOf(reservice.result)).toBeGreaterThan(text.indexOf('Ant pressure is still high at the kitchen slider.'));
+    unmount();
+    const lawn = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reserviceReport: { ...reservice, serviceLine: 'lawn', result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.' },
+      reportV2: { snapshot: { status: 'needs_attention', statusHeadline: 'Fungus noted in the back lawn.' }, todaysResult: 'We noted fungus in the back lawn and treated it today.' },
+    }} token="tok123" />);
+    const lawnText = lawn.container.textContent;
+    const fungusAt = lawnText.indexOf('Fungus noted in the back lawn.');
+    expect(fungusAt).toBeGreaterThan(-1);
+    expect(fungusAt).toBeLessThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
+    expect(lawnText.indexOf('Lawn re-service completed')).toBeGreaterThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
+  });
+
+  it('non-performed outcome: legacy treatment-claiming summary copy is suppressed', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      summary: 'We treated the kitchen and perimeter today.',
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    // BASE_DATA's typed headline and the legacy summary both claim a
+    // performed visit — neither may print on a non-performed callback.
+    expect(text).not.toContain('We treated the kitchen and perimeter today.');
+    expect(text).not.toContain('Cockroach activity was moderate today.');
+  });
+
+  it('non-performed outcome: cockroach V2 program copy never leads the summary either', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { label: 'Treatment 2 of 3 complete — activity moderate.' },
+        statusSummary: 'We completed today\u2019s treatment in your program.',
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'customer_declined',
+        result: 'We returned for your re-service; treatment was not performed at this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('treatment was not performed at this visit');
+    expect(text).not.toContain('We completed today\u2019s treatment in your program.');
+  });
+
+  it('no-application outcome: the cockroach program DASHBOARD sections are suppressed, not just the summary', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { key: 'watching', label: 'Treatment 2 of 3 complete — activity moderate.' },
+        work: ['Bait placement', 'Crack & crevice'],
+        whatsNext: { title: 'Treatment 2 of 3 complete', badge: 'IN_PROGRESS', lines: [{ label: 'next', text: 'Next visit booked.' }] },
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    expect(text).not.toContain('Your cockroach treatment program');
+    expect(text).not.toContain('Treatment 2 of 3 complete');
+  });
+
+  it('incomplete outcome: the caveat LEADS but truthful partial-treatment content is kept', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: {
+        ...reservice,
+        outcome: 'incomplete',
+        result: 'We returned for your re-service, but the visit could not be completed.',
+        expectation: 'We will follow up to finish the visit — contact us if you are still seeing activity in the meantime.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    const caveatAt = text.indexOf('could not be completed');
+    expect(caveatAt).toBeGreaterThan(-1);
+    // The typed partial-visit content survives, below the caveat.
+    expect(text).toContain('Cockroach activity was moderate today.');
+    expect(caveatAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+  });
+
+  it('no block (gate dark): the document is unchanged', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.queryByText(reservice.result)).toBeNull();
   });
 });

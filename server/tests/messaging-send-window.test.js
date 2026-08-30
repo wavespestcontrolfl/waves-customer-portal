@@ -138,10 +138,10 @@ describe('checkSendWindow validator', () => {
   });
 
   test('purpose conversational alone is NOT exempt — explicit inbound-reply provenance is', () => {
-    // Cold automated sends (lead-webhook form auto-reply, lead-response
-    // agent) reuse the conversational policy for its consent/trust shape;
-    // only a send marked as an actual inbound reply passes at night.
-    const cold = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint: 'lead_webhook_auto_reply' }, null, null, EVENING_ET);
+    // A machine-timed send reusing the conversational policy for its
+    // consent/trust shape stays fenced; only a send marked as an actual
+    // inbound reply — or a customer-action entry point — passes at night.
+    const cold = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint: 'booking_abandon_recovery_cron' }, null, null, EVENING_ET);
     expect(cold.ok).toBe(false);
     expect(cold.code).toBe('QUIET_HOURS_HOLD');
     expect(checkSendWindow({ ...SMS, purpose: 'conversational', conversationalContext: true }, null, null, EVENING_ET)).toEqual({ ok: true });
@@ -183,13 +183,52 @@ describe('checkSendWindow validator', () => {
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');
     }
-    // Cold conversational-policy automations stay fenced too (no
-    // inbound-reply provenance): form auto-replies, the lead-response
-    // agent, the quote-wizard booking text.
-    for (const entryPoint of ['lead_webhook_auto_reply', 'lead_response_auto_reply', 'public_quote_booking_sms']) {
+    // Purely schedule-driven sends reusing the conversational policy stay
+    // fenced too — a machine, not a person, picks their moment.
+    for (const entryPoint of ['booking_abandon_recovery_cron', 'voicemail_lead_sms', 'dropped_call_sms']) {
       const res = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint }, null, null, EVENING_ET);
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');
+    }
+  });
+
+  test('customer-action entry points pass at night (owner rulings 2026-08-29)', () => {
+    // A send answering an action the customer just took themselves —
+    // self-serve extension, estimate/quote request, acceptance, portal
+    // service request, payment receipts/notices, the lead agent's reply,
+    // referral invites — goes out immediately, at any hour.
+    for (const entryPoint of [
+      'customer_service_request',
+      'estimate_accept_annual_prepay',
+      'estimate_accept_onetime_booking',
+      'estimate_accept_onetime_confirmed',
+      'estimate_deposit_receipt',
+      'lead_response_auto_reply',
+      'lead_webhook_auto_reply',
+      'promotions_upsell_interest',
+      'public_estimate_add_service_request',
+      'public_estimate_extension_request',
+      'public_quote_booking_sms',
+      'referral_engine_invite',
+      'referrals_legacy_invite',
+      'referrals_v2_invite',
+    ]) {
+      expect(checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET)).toEqual({ ok: true });
+    }
+  });
+
+  test('shared payment entry points split on customerInitiated provenance — machine charges stay fenced', () => {
+    // stripe_webhook and invoice_receipt_sms serve both the customer's
+    // own payments and machine-initiated off-session charges (autopay
+    // debits, card-on-file sweeps, no-show fees). Only sends the handler
+    // marked customerInitiated pass at night; unmarked ones — the
+    // machine-charge notices and receipts — hold and ride their retry
+    // rails to the window open.
+    for (const entryPoint of ['stripe_webhook', 'invoice_receipt_sms']) {
+      expect(checkSendWindow({ ...SMS, entryPoint, customerInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
+      const machine = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
+      expect(machine.ok).toBe(false);
+      expect(machine.code).toBe('QUIET_HOURS_HOLD');
     }
   });
 });

@@ -4534,9 +4534,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // pre-migration database (Codex round-9). Guarded once here; absent
     // columns leave svc.cust_billing_mode undefined = legacy behavior.
     let billingModeColumnsExist = false;
+    let customerTierSourceColumnExists = false;
+    // Probe FAILURE is not column ABSENCE: absent means a pre-provenance
+    // schema (every tier genuinely 'manual'); a failed probe means we don't
+    // know, and the tier snapshot must freeze NOTHING rather than 'manual'
+    // — or an auto-derived label could be frozen as a paid membership and
+    // print "$0.00 billed" forever (codex r13 P1).
+    let customerColumnsProbeFailed = false;
     try {
       billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
-    } catch { /* keep false — legacy select shape */ }
+      customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
+    } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -4551,6 +4559,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
+        ...(customerTierSourceColumnExists ? ['customers.waveguard_tier_source as cust_waveguard_tier_source'] : []),
         ...(billingModeColumnsExist
           ? ['customers.billing_mode as cust_billing_mode', 'customers.per_application_fee as cust_per_application_fee']
           : []),
@@ -7102,7 +7111,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
           if (serviceRecordCols.report_template_version && useServiceReportV1) recordInsert.report_template_version = 'service_report_v1';
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
-          if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
+          // Tier + provenance + callback identity frozen via the SHARED
+          // completion snapshot (completion-tier-snapshot.js) — the same
+          // builder the pest-recap path uses, so no completion path can
+          // create a record without them (codex #3617 r3/r4). The customer
+          // fields are RE-READ inside this transaction: the handler-entry
+          // read is minutes stale by insert time, and a concurrent
+          // membership edit would freeze the wrong provenance on a
+          // permanent report (codex r9 P1). Fallback = the entry read.
+          let snapshotCustomer = null;
+          try {
+            snapshotCustomer = await trx('customers').where({ id: svc.customer_id }).first(
+              'waveguard_tier',
+              'monthly_rate',
+              ...(customerTierSourceColumnExists ? ['waveguard_tier_source'] : []),
+              ...(billingModeColumnsExist ? ['billing_mode'] : []),
+            );
+          } catch { snapshotCustomer = null; }
+          Object.assign(recordInsert, completionTierSnapshotFields({
+            serviceRecordCols,
+            waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,
+            waveguardTierSource: snapshotCustomer ? snapshotCustomer.waveguard_tier_source : svc.cust_waveguard_tier_source,
+            monthlyRate: snapshotCustomer ? snapshotCustomer.monthly_rate : svc.cust_monthly_rate,
+            billingMode: snapshotCustomer ? snapshotCustomer.billing_mode : svc.cust_billing_mode,
+            provenanceUnknown: customerColumnsProbeFailed,
+            // The LOCKED completion row's flag — svc was read before the
+            // FOR UPDATE and a concurrent update-details reclassify would
+            // freeze a stale callback identity forever (codex GH-r3 P2;
+            // same rule as the recap path).
+            isCallback: lockedSvcRow ? lockedSvcRow.is_callback === true : !!svc.is_callback,
+          }));
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
@@ -7121,7 +7159,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (isBackfillCompletion) applyBackfillRecordTimingPolicy(recordTimingFields, effectiveTimeOnSite, svc);
           Object.assign(recordInsert, recordTimingFields);
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
-          if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) {
             // Pass the completed-action scopes so an interior treatment keeps
@@ -13149,6 +13186,7 @@ router.get('/products/catalog', async (req, res, next) => {
 // portal reaches these too. See services/pest-recap.js.
 // =========================================================================
 const PestRecap = require('../services/pest-recap');
+const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
 
 function recapActor(req) {
   return {

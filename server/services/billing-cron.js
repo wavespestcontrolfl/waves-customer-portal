@@ -849,6 +849,10 @@ const BillingCron = {
             baseAmount,
             description,
             retryIdempotencyKey,
+            // Machine provenance (Codex #3598 r3 P1): the retry ladder is a
+            // scheduled collection, not the customer's own action — its ACH
+            // lifecycle notices must stay behind the 8AM-8PM send window.
+            { initiated_by: 'machine' },
           );
         }
 

@@ -154,6 +154,7 @@ describe('charge-now already-collected guard', () => {
       expect(res.status).toBe(200);
       expect(chargeMock).toHaveBeenCalledWith('cust-1', 89, expect.any(String), expect.objectContaining({
         billed_month: expect.stringMatching(/^\d{4}-\d{2}$/),
+        initiated_by: 'machine',
       }));
     });
   });
@@ -166,7 +167,7 @@ describe('charge-now already-collected guard', () => {
         body: JSON.stringify({ amount: 25, description: 'One-off flea add-on' }),
       });
       expect(res.status).toBe(200);
-      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on');
+      expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on', null, { initiated_by: 'machine' });
     });
   });
 });

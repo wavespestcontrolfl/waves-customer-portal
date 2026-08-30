@@ -272,3 +272,19 @@ describe('adoptedAppointmentCatalogStamp', () => {
     expect(stamp).toBeNull();
   });
 });
+
+describe('accept-time annual-prepay charge provenance (Codex #3598 r3 P1 — source contract)', () => {
+  test('the prepay saved-method charge passes customerInitiated:true so its lifecycle SMS + receipt bypass the send window', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    const callIdx = src.indexOf('StripeService.chargeInvoiceWithSavedCard(invoiceId, prepayChargePmRowId, {');
+    expect(callIdx).toBeGreaterThan(-1);
+    const optsHead = src.slice(callIdx, src.indexOf('expectedTotal:', callIdx));
+    expect(optsHead).toContain('customerInitiated: true,');
+    // Only this customer-at-keyboard site opts in; every other saved-method
+    // caller keeps the machine default.
+    const count = (src.match(/customerInitiated: true,/g) || []).length;
+    expect(count).toBe(1);
+  });
+});

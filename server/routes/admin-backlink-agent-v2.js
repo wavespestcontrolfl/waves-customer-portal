@@ -72,7 +72,12 @@ router.post('/queue', async (req, res, next) => {
       added++;
     }
 
-    res.json({ added, skipped, duplicates });
+    // Every opportunity that enters the legacy signup queue ALSO enters the
+    // registry (plan v2 §4 step 2: one intake, never two pipelines) — same
+    // dedupe/never-target rules, references parked for the resolver sweep.
+    const registryIntake = await linkIntake.intake(db, { text: urls.join('\n'), source: 'list_import', sourceDetail: `legacy_queue_add:${etDateString()}` });
+
+    res.json({ added, skipped, duplicates, registry: { inserted: registryIntake.inserted, existing: registryIntake.existing, pending: registryIntake.items.pending } });
   } catch (err) { next(err); }
 });
 
@@ -221,9 +226,12 @@ const PARKED_STATUSES = Object.freeze(['awaiting_owner', 'watching']);
 // the owner typed to be investigated first is owner_seed (§3.5).
 const INTAKE_SOURCES = Object.freeze(['list_import', 'owner_seed']);
 
-// POST /api/admin/backlink-agent/opportunities/bulk — intake skeleton (plan v2 §4, step 1):
-// normalize → dedupe → upsert registry domains + touches. No resolvers, no
-// enrichment, no investigation queueing yet (steps 2–3). dryRun reports only.
+// POST /api/admin/backlink-agent/opportunities/bulk — intake (plan v2 §4, step 2):
+// normalize → persist every reference as an intake item → dedupe → upsert
+// registry domains + touches. Accepts a pasted list, free text, or a CSV with a
+// website/domain/url column (CSV upload = same endpoint, §11). References
+// (X posts, shortener links) stay pending for the resolver sweep. dryRun
+// reports only. Investigation queueing is the investigator's (step 3).
 router.post('/opportunities/bulk', async (req, res, next) => {
   try {
     const { text, source = 'list_import', source_detail, dryRun } = req.body || {};
@@ -233,6 +241,55 @@ router.post('/opportunities/bulk', async (req, res, next) => {
     const detail = typeof source_detail === 'string' && source_detail.trim() ? source_detail.trim().slice(0, 200) : `paste:${etDateString()}`; // ET calendar day (Railway runs UTC)
     const result = await linkIntake.intake(db, { text, source, sourceDetail: detail, dryRun: dryRun === true || dryRun === 'true' });
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/intake-items — durable references (§3.4d): what
+// was fed, what resolved, what is waiting or dropped and why.
+const INTAKE_ITEM_STATES = Object.freeze(['pending', 'unresolved', 'resolved', 'dropped']);
+router.get('/intake-items', async (req, res, next) => {
+  try {
+    const { state, source, q, page = 1, limit = 100 } = req.query;
+    if (state && !INTAKE_ITEM_STATES.includes(state)) return res.status(400).json({ error: `invalid state; must be one of ${INTAKE_ITEM_STATES.join(', ')}` });
+    let query = db('seo_link_intake_items');
+    if (state) query = query.where({ state });
+    if (source) query = query.where({ source });
+    if (q) query = query.where((b) => b.whereILike('raw_url', `%${q}%`).orWhereILike('resolved_host', `%${q}%`));
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * lim;
+    const [items, counts] = await Promise.all([
+      query.clone().orderBy('last_seen_at', 'desc').limit(lim).offset(offset),
+      db('seo_link_intake_items').select('state').count('* as c').groupBy('state'),
+    ]);
+    res.json({ items, counts: Object.fromEntries(counts.map((r) => [r.state, Number(r.c)])) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/backlink-agent/registry/jobs/:job — run one step-2 job now
+// (the scheduler runs the same services on its own cadence). Bounded per call;
+// dryRun supported everywhere. `enrich` spends DataForSEO credits and is gated
+// by GATE_SEO_INTELLIGENCE inside the service (reports `gated: true` when off).
+const REGISTRY_JOBS = Object.freeze({
+  resolve: (opts) => require('../services/seo/link-registry-intake').resolveIntakeItems(db, { limit: opts.limit || 50, dryRun: opts.dryRun }),
+  baseline: async (opts) => {
+    const run = () => require('../services/seo/link-registry-baseline').importExistingBacklinks(db, { dryRun: opts.dryRun, limit: opts.limit || null });
+    if (opts.dryRun) return run();
+    // Same lease the Sunday feeders take: never import while a backlink scan is
+    // still transitioning rows. A held lease is reported, not queued.
+    const r = await require('../utils/cron-lock').runExclusive('backlink-scan', run, { recordHealth: false });
+    return r && r.skipped ? { skipped: r.reason || 'lease_held' } : r;
+  },
+  gap: (opts) => require('../services/seo/link-registry-gap-ingest').ingestCompetitorGap(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
+  enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),
+});
+router.post('/registry/jobs/:job', async (req, res, next) => {
+  try {
+    const run = REGISTRY_JOBS[req.params.job];
+    if (!run) return res.status(404).json({ error: `unknown job; must be one of ${Object.keys(REGISTRY_JOBS).join(', ')}` });
+    const { dryRun, limit, force } = req.body || {};
+    const lim = limit == null ? null : Math.min(Math.max(parseInt(limit, 10) || 0, 1), 1000);
+    const result = await run({ dryRun: dryRun === true || dryRun === 'true', limit: lim, force });
+    res.json({ job: req.params.job, ...result });
   } catch (err) { next(err); }
 });
 
@@ -340,7 +397,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -358,10 +415,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // one would 500 on it.
       if ('target_page' in patch && patch.target_page !== current.target_page) {
         await lockProspectDomain(trx, current.target_domain);
-        // Location-AGNOSTIC through the step-1 expand phase: UNIQUE(target_domain,
-        // target_page) is still live, so a row at ANY location owns the page; step 2
-        // (contract) scopes this probe to the row's own location_key.
-        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id });
+        // Placement identity is (target_domain, target_page, location_key) since
+        // step 2 dropped the legacy 2-column key: the probe is scoped to the row's
+        // OWN location ('-' included), so a Venice row may move onto a page a
+        // Sarasota row already holds.
+        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
