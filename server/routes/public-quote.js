@@ -974,9 +974,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       })
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
+    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
     if (parcelLookupAddress) {
       try {
-        const { performPropertyLookup } = require('./property-lookup-v2');
         const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
         trustedTurf = serverLookup?.enriched || {};
       } catch (turfErr) {
@@ -988,6 +988,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
     if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
     if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+    if (num(trustedTurf.countyTurfPriorSf) !== undefined) engineInput.countyTurfPriorSf = num(trustedTurf.countyTurfPriorSf);
+    // The county-derived ceiling clamps a vision estimate that exceeds the
+    // trusted county geometry (computeTurfArea's plausible-max path) — the
+    // pricing-side counterpart to the coarse heuristic max. Same validity
+    // contract as the estimator translator (countyCeilingStillValid): the
+    // ceiling forwards only while THIS request's dimensions still match the
+    // county dimensions it was computed from (pre-push codex P0 r3).
+    if (countyCeilingStillValid(trustedTurf, { homeSqFt: sqft, lotSqFt: lot, stories: engineInput.stories })) {
+      engineInput.countyTurfCeilingSf = trustedTurf.countyTurfCeilingSf;
+    }
     if (commercialDetected) {
       // The commercial auto-pricers additionally price directly from bed /
       // tree / impervious dimensions. Pass those through so the profile
