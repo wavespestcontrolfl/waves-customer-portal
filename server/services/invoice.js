@@ -4623,7 +4623,7 @@ const InvoiceService = {
       let unvoidLines = updated.line_items;
       if (typeof unvoidLines === "string") { try { unvoidLines = JSON.parse(unvoidLines); } catch { unvoidLines = []; } }
       if ((Array.isArray(unvoidLines) ? unvoidLines : []).some((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()))) {
-        await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id);
+        await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true });
       }
       let owningTermNow = null;
       try {
@@ -5027,7 +5027,15 @@ const InvoiceService = {
     const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     if (!setupLine || !(amount > 0)) return null;
     const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
-    if (claimRecord) return null; // prepay lane — restored via the claims ledger
+    if (claimRecord) {
+      // Only TERM-BACKED prepay claims restore through the claims-ledger
+      // sync (codex #3591 r48 P1) — a COMPLETION invoice writes a claim
+      // record too (crash-resume evidence, admin-dispatch), and its
+      // reversal must put the stamp back HERE, consuming the record.
+      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+      if (termBacked) return null; // prepay lane — restored via the claims ledger
+      await conn("setup_fee_claims").where({ id: claimRecord.id }).delete();
+    }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
     let anchorId = null;
     if (invoiceRow.scheduled_service_id) {
@@ -5137,6 +5145,7 @@ const InvoiceService = {
         if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
       }
     }
+    // (sibling-completion retire happens after anchor resolution below)
     // The marker sweep runs regardless of an anchor (codex #3591 r47 P1):
     // a cancelled-root series still minted a replacement draft on the
     // refund, and the revived prepay's own line is live again.
@@ -5147,6 +5156,31 @@ const InvoiceService = {
       await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId: null, amount });
       logger.info(`[invoice] revived prepay ${prepayInvoiceId}: no live rodent anchor (series cancelled?) — claim re-ledgered anchor-less${voidedRebills ? `, ${voidedRebills} replacement draft(s) voided` : ""}`);
       return { scheduledServiceId: null, amount, retired: false };
+    }
+    // A COMPLETION billed this setup while the prepay was dead (the
+    // negative-marker retry path — codex #3591 r48 P1): its claim record
+    // sits on the same anchor. The revived prepay's own line is live again,
+    // so an untouched DRAFT completion setup invoice is voided (claim
+    // consumed); anything sent/paid pages a human.
+    const siblingClaims = await conn("setup_fee_claims")
+      .where({ scheduled_service_id: anchorId })
+      .whereNot({ invoice_id: prepayInvoiceId })
+      .select("id", "invoice_id");
+    for (const sc of siblingClaims || []) {
+      const sib = await conn("invoices")
+        .where({ id: sc.invoice_id })
+        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+      const untouchedDraft = sib && String(sib.status).toLowerCase() === "draft" && !sib.sent_at && !sib.paid_at && !sib.payment_recorded_at && !sib.stripe_payment_intent_id;
+      if (untouchedDraft) {
+        await conn("invoices")
+          .where({ id: sib.id, status: sib.status })
+          .whereNull("sent_at").whereNull("paid_at")
+          .update({ status: "void", updated_at: new Date() });
+        await conn("setup_fee_claims").where({ id: sc.id }).delete();
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup draft ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
+      } else {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: invoice ${sc.invoice_id} also carries this series' setup claim (${sib ? sib.status : "unreadable"}) — reconcile so the setup is not collected twice`);
+      }
     }
     await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
     // SERIALIZED with completion (codex #3591 r46 P1): the parent is read
@@ -5205,7 +5239,7 @@ const InvoiceService = {
     return voided;
   },
 
-  async retireRodentSetupObligationForReinstatedInvoice(conn, invoiceId) {
+  async retireRodentSetupObligationForReinstatedInvoice(conn, invoiceId, { strict = false } = {}) {
     if (!invoiceId) return null;
     const invoiceRow = await conn("invoices")
       .where({ id: invoiceId })
@@ -5217,7 +5251,13 @@ const InvoiceService = {
     const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     if (!setupLine || !(amount > 0)) return null;
     const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
-    if (claimRecord) return null; // prepay lane — the term sync's revival owns it
+    if (claimRecord) {
+      // Term-backed prepay claims are the term sync's revival's job; a
+      // COMPLETION invoice's own claim rides its reinstatement here
+      // (codex #3591 r48 P1 — claims are not prepay-only).
+      const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
+      if (termBacked) return null;
+    }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
     let anchorId = null;
     if (invoiceRow.scheduled_service_id) {
@@ -5243,6 +5283,29 @@ const InvoiceService = {
     if (anchorId) {
       const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
       const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+      if (stamp != null && stamp < 0) {
+        // A completion is mid-claim on this very setup (codex #3591 r48
+        // P1): committing through would leave both charges live. Throwing
+        // aborts a staff unvoid outright; the webhook flip retries after
+        // the completion settles.
+        throw new Error(`invoice ${invoiceRow.id}: series ${anchorId} has a completion mid-claim on the setup — retry after it settles`);
+      }
+      // A SIBLING claim on the same series (another invoice collected the
+      // setup while this one was reversed — codex #3591 r48 P1):
+      // reinstating this invoice would make the fee doubly collectible.
+      // Strict (staff unvoid) refuses; the automated flip pages a human
+      // and proceeds (a poisoned webhook retry loop is worse than a paged
+      // reconcile).
+      const siblingClaim = await conn("setup_fee_claims")
+        .where({ scheduled_service_id: anchorId })
+        .whereNot({ invoice_id: invoiceRow.id })
+        .first("id", "invoice_id");
+      if (siblingClaim) {
+        if (strict) {
+          throw new Error(`Cannot restore invoice ${invoiceRow.id} — invoice ${siblingClaim.invoice_id} already collected this series' bait-station setup; reconcile which invoice carries the fee first`);
+        }
+        logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but invoice ${siblingClaim.invoice_id} also carries this series' setup claim — reconcile so the setup is not collected twice`);
+      }
       if (stamp != null && Math.round(stamp * 100) === Math.round(amount * 100)) {
         retired = await conn("scheduled_services")
           .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })

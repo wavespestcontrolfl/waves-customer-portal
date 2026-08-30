@@ -273,9 +273,19 @@ exports.down = async function down(knex) {
   // holds the migration's exact data (codex #3591 r2 P2: after an up/down/
   // up cycle a stale first-cycle audit must never consume an
   // administrator-authored or admin-edited bracket row).
-  const bracketAudit = await knex('pricing_config_audit')
-    .where({ config_key: 'rodent_bait_brackets', changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .first('id');
+  // Ownership is scoped to the CURRENT cycle (codex #3591 r48 P2): the
+  // LATEST audit row for the key — any author — must be this migration's
+  // up(). After an up/down cycle an admin-authored row writes a later audit
+  // entry, so a stale first-cycle up-audit can never consume it.
+  const latestBracketAudit = await knex('pricing_config_audit')
+    .where({ config_key: 'rodent_bait_brackets' })
+    .orderBy('id', 'desc')
+    .first('id', 'changed_by', 'reason');
+  const bracketAudit = latestBracketAudit
+    && latestBracketAudit.changed_by === MIGRATION_TAG
+    && latestBracketAudit.reason === UP_REASON
+    ? latestBracketAudit
+    : null;
   if (bracketAudit) {
     const bracketRow = await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).first();
     if (bracketRow && jsonDeepEqual(parseData(bracketRow), BRACKETS_DATA)) {

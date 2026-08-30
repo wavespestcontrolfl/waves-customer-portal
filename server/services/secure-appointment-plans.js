@@ -760,7 +760,21 @@ async function selectSecurePlan({ token, plan }) {
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
   const { lockAndAssertNoAnnualPrepayOverlap } = require('../routes/admin-customers')._private;
 
-  const coverageServiceType = visit.service_type;
+  // Coverage identity is CATALOG-first (codex #3591 r48 local P0): a stale
+  // "Pest Control" label on a row linked to the bait program must not seed
+  // pest-labeled coverage — the renewals seeding and the coverage matchers
+  // key on this string. Unlinked legacy rows keep their label; a failed
+  // catalog read fails closed to the label (the mint's own re-derivation
+  // still guards the money).
+  let coverageServiceType = visit.service_type;
+  if (visit.service_id) {
+    try {
+      const catalogRow = await db('services').where({ id: visit.service_id }).first('name');
+      if (catalogRow?.name) coverageServiceType = catalogRow.name;
+    } catch (catalogErr) {
+      logger.warn(`[secure-plans] catalog name read failed for visit ${visit.id} — coverage keeps the row label: ${catalogErr.message}`);
+    }
+  }
   const visitCount = context.visitsPerYear;
   // Coverage money (sliced across the prepaid visits) vs. the unwaived
   // one-time setup that rides the same invoice as its own line — the

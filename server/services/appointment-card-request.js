@@ -524,6 +524,28 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       logger.warn(`[appt-card-request] prior-service check failed — proceeding to request: ${err.message}`);
     }
     let rodentSetupNeedsDisclosure = false;
+    // COMMERCIAL bait obligations never take the /secure rail (codex #3591
+    // r48 P1): deriveSecurePlanContext rejects commercial customers, so the
+    // page could neither disclose nor stamp — staff handle the tax-correct
+    // billing instead. Resolved lazily, only when a setup skip fires.
+    const commercialBaitStaffReview = async (setupFee) => {
+      logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the COMMERCIAL bait-station setup ($${setupFee}) — the /secure page cannot disclose commercial billing; collect it manually`);
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Commercial rodent setup needs manual billing',
+          `A direct commercial rodent bait booking owes its bait-station setup — the secure page cannot disclose commercial billing. Handle it from the schedule (visit ${visit.id}).`,
+          { icon: '🐀', link: '/admin/schedule' },
+        );
+      } catch { /* best-effort page */ }
+      return skip('commercial_rodent_setup_staff_review');
+    };
+    const visitIsCommercialBait = async () => {
+      try {
+        const { authoritativeServiceKey } = require('./secure-appointment-plans');
+        return (await authoritativeServiceKey(db, visit)) === 'commercial_rodent_bait';
+      } catch { return false; }
+    };
     if (savedMethod) {
       const secured = await autoSecureFromSavedMethod({ visit, savedMethod, trigger });
       // An undisclosed rodent setup is the ONE skip that does not end here:
@@ -533,6 +555,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       // existing-customer ask gate (the page is a fee disclosure, not an
       // add-a-card nag), so the fee is never forgone or billed undisclosed.
       if (secured.reason !== 'rodent_setup_undisclosed') return secured;
+      if (await visitIsCommercialBait()) return commercialBaitStaffReview(secured.setupFee);
       rodentSetupNeedsDisclosure = true;
       logger.info(`[appt-card-request] saved-card auto-secure deferred for visit ${visit.id} — direct rodent setup ($${secured.setupFee}) needs the plan-page disclosure`);
     }
@@ -558,6 +581,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           logger.warn(`[appt-card-request] rodent setup probe failed for suppressed-delivery visit ${visit.id}: ${err.message}`);
         }
       }
+      if (rodentOwedHere && (await visitIsCommercialBait())) return commercialBaitStaffReview('owed');
       if (rodentOwedHere) {
         logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the rodent bait-station setup but messaging is suppressed (TCPA) — send the /secure link or collect the setup manually`);
         try {
@@ -591,6 +615,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         }
       }
       if (!rodentSetupOwed) return skip('existing_customer');
+      if (await visitIsCommercialBait()) return commercialBaitStaffReview('owed');
       logger.info(`[appt-card-request] existing-customer gate bypassed for visit ${visit.id} — direct rodent series owes its bait-station setup (owner ruling 2026-08-30)`);
     }
 

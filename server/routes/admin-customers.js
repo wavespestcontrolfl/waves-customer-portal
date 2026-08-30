@@ -4711,6 +4711,20 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // this customer's), ledgered against this prepay, and the series
       // parent's per-application claim retired — the same service step the
       // on-site switch and the secure-plan prepay run (codex #3591 r36 P1).
+      if (!(setupFeeAmount > 0)) {
+        // TOCTOU guard (codex #3591 r48 local P0): the zero/omitted-setup
+        // derivation ran BEFORE this transaction — a refund restoring a
+        // claim, or the account losing its waiving family, in the gap would
+        // mint the prepaid year without the required setup. Re-derive under
+        // the mint and abort on drift (409, like the positive path).
+        const owedNow = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType });
+        if (owedNow) {
+          const driftErr = new Error(`This customer's ${coverageServiceType} series now owes a $${owedNow.amount.toFixed(2)} bait-station setup — refresh and retry so it rides the prepay invoice.`);
+          driftErr.switchConflict = true;
+          throw driftErr;
+        }
+      }
       if (setupFeeAmount > 0) {
         const plans = require('../services/secure-appointment-plans');
         if (setupScheduledServiceId) {

@@ -42,18 +42,20 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null, liveVisitProbe = undefined, siblingClaim = null, prepayTerm = null } = {}) {
   if (liveVisitProbe === undefined) liveVisitProbe = scheduledService;
   const writes = [];
   const trx = (table) => {
     const q = { _where: null };
     q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = w; return q; };
+    q.whereNot = () => q;
     q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
     q.forUpdate = () => q;
     q.first = async () => {
       if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : scheduledService;
-      if (table === 'setup_fee_claims') return claim;
+      if (table === 'setup_fee_claims') return q._where && 'scheduled_service_id' in q._where ? siblingClaim : claim;
+      if (table === 'annual_prepay_terms') return prepayTerm;
       if (table === 'services') return catalog;
       // The realignment rollout instant — every root fixture below was
       // created AFTER it (post-rollout direct series owe the live fee).
@@ -483,7 +485,7 @@ describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded S
     const noLine = conn({ rootsForCoverage: [rodentRoot], claim: null });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(noLine, setupInvoice({ line_items: [{ description: 'First service application', amount: 128 }] }))).toBeNull();
     expect(noLine.writes).toEqual([]);
-    const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' } });
+    const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' }, prepayTerm: { id: 'term-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, setupInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);
     const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0, scheduledService: { id: 'root-rb', status: 'confirmed' } });
@@ -634,8 +636,8 @@ describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund r
     ...over,
   });
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function reinstConn({ stamp = '99.00', invoiceRow = stdInvoice(), claimRow = null, rebills = [] } = {}) {
-    const inner = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp }, claim: claimRow });
+  function reinstConn({ stamp = '99.00', invoiceRow = stdInvoice(), claimRow = null, rebills = [], prepayTerm = null } = {}) {
+    const inner = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp }, claim: claimRow, prepayTerm });
     const wrapped = (table) => {
       const q = inner(table);
       if (table === 'invoices') {
@@ -665,7 +667,7 @@ describe('retireRodentSetupObligationForReinstatedInvoice — a bounced refund r
   });
 
   test('a prepay invoice (claims-ledger row) and a no-setup-line invoice are no-ops', async () => {
-    const prepay = reinstConn({ claimRow: { id: 'claim-1' } });
+    const prepay = reinstConn({ claimRow: { id: 'claim-1' }, prepayTerm: { id: 'term-1' } });
     expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(prepay, 'inv-std')).toBeNull();
     expect(prepay.writes).toEqual([]);
     const plain = reinstConn({ invoiceRow: stdInvoice({ line_items: [{ description: 'First service application', amount: 128 }] }) });
@@ -725,8 +727,111 @@ describe('r47 wiring — commercial bait, anchor-less revival sweep, unvoid reti
     const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
     const unvoidAt = invoiceSrc.indexOf('async unvoidInvoice(id) {');
     const gateAt = invoiceSrc.indexOf('Bait Station Setup — one-time setup fee', unvoidAt);
-    const callAt = invoiceSrc.indexOf('retireRodentSetupObligationForReinstatedInvoice(trx, id)', unvoidAt);
+    const callAt = invoiceSrc.indexOf('retireRodentSetupObligationForReinstatedInvoice(trx, id, { strict: true })', unvoidAt);
     expect(gateAt).toBeGreaterThan(unvoidAt);
     expect(callAt).toBeGreaterThan(gateAt);
+  });
+});
+
+describe('r48 local audit — catalog-first coverage identity + fee-free mint TOCTOU (codex #3591 r48 local P0)', () => {
+  test('selectSecurePlan mints coverage from the CATALOG name; the fee-free mint re-derives under the transaction (source contracts)', () => {
+    const plansSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
+    const covAt = plansSrc.indexOf('let coverageServiceType = visit.service_type;');
+    const catalogAt = plansSrc.indexOf("await db('services').where({ id: visit.service_id }).first('name')", covAt);
+    expect(covAt).toBeGreaterThan(-1);
+    expect(catalogAt).toBeGreaterThan(covAt);
+    const customersSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    const trxAt = customersSrc.indexOf('await db.transaction(async (trx) => {', customersSrc.indexOf("router.post('/:id/annual-prepay-invoice'"));
+    const guardAt = customersSrc.indexOf('.findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType })', trxAt);
+    expect(trxAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeGreaterThan(trxAt);
+    expect(customersSrc.slice(guardAt - 600, guardAt)).toMatch(/if \(!\(setupFeeAmount > 0\)\) \{/);
+  });
+});
+
+describe('r48 — completion claims restore, in-flight/sibling reconciliation, commercial staff routing (codex #3591 r48 P1)', () => {
+  const stdInvoice = (over = {}) => ({
+    id: 'inv-completion', customer_id: 'cust-1', scheduled_service_id: null,
+    line_items: [{ description: 'Bait Station Setup — one-time setup fee', unit_price: 99, amount: 99 }],
+    ...over,
+  });
+  const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
+  function revConn({ stamp = null, claimRow = { id: 'claim-c' }, termBacked = null, siblings = [], invoiceRow = stdInvoice(), liveVisitProbe = { id: 'child-live' } } = {}) {
+    const writes = [];
+    const trx = (table) => {
+      const q = { _where: null };
+      q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
+      q.whereNot = () => q; q.whereNull = (col) => { q._whereNull = col; return q; }; q.forUpdate = () => q;
+      q.whereNotIn = () => q; q.whereIn = () => { q._whereIn = true; return q; }; q.orderBy = () => q; q.orWhereNotNull = () => q;
+      q.first = async () => {
+        if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? (siblings[0] || null) : claimRow;
+        if (table === 'annual_prepay_terms') return termBacked;
+        if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : { id: 'root-rb', pending_setup_fee: stamp, status: 'confirmed' };
+        if (table === 'invoices') return invoiceRow;
+        return null;
+      };
+      q.select = async () => (table === 'scheduled_services' ? [rodentRoot] : []);
+      q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return 1; };
+      q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
+      q.insert = (row) => { writes.push({ table, op: 'insert', row }); const p = Promise.resolve([{}]); p.onConflict = () => ({ ignore: async () => 1 }); return p; };
+      return q;
+    };
+    trx.writes = writes;
+    return trx;
+  }
+
+  test('a reversed COMPLETION invoice (claim record, no term) restores the stamp and consumes the record; a term-backed prepay still skips', async () => {
+    mockQualifyingKeys = async () => [];
+    const c = revConn();
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, stdInvoice()))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+    expect(c.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['setup_fee_claims:delete', 'scheduled_services:update']);
+    const prepay = revConn({ termBacked: { id: 'term-1' } });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, stdInvoice())).toBeNull();
+    expect(prepay.writes).toEqual([]);
+  });
+
+  test('reinstating over a completion mid-claim THROWS; a sibling claim refuses strict (unvoid) and pages non-strict (webhook)', async () => {
+    mockQualifyingKeys = async () => [];
+    await expect(InvoiceService.retireRodentSetupObligationForReinstatedInvoice(revConn({ stamp: '-99.00', claimRow: null }), 'inv-completion'))
+      .rejects.toThrow(/completion mid-claim/);
+    await expect(InvoiceService.retireRodentSetupObligationForReinstatedInvoice(
+      revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }] }), 'inv-completion', { strict: true },
+    )).rejects.toThrow(/already collected/);
+    const paged = revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }] });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(paged, 'inv-completion')).toMatchObject({ retired: false });
+  });
+
+  test('revival voids an untouched DRAFT completion setup invoice on the same anchor and consumes its claim', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    const prepayRow = { id: 'inv-prepay', customer_id: 'cust-1', scheduled_service_id: null, line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }] };
+    const writes = [];
+    const trx = (table) => {
+      const q = { _where: null };
+      q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
+      q.whereNot = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
+      q.first = async () => {
+        if (table === 'invoices') return q._where && q._where.id === 'inv-comp-draft'
+          ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }
+          : prepayRow;
+        if (table === 'scheduled_services') return { id: 'root-rb', pending_setup_fee: null };
+        if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
+        return null;
+      };
+      q.select = async () => {
+        if (table === 'setup_fee_claims') return [{ id: 'claim-comp', invoice_id: 'inv-comp-draft' }];
+        if (table === 'scheduled_services') return [{ ...rodentRoot, customer_id: 'cust-1', source_estimate_id: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' }];
+        return [];
+      };
+      q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, patch }); return 1; };
+      q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
+      q.insert = (row) => { writes.push({ table, op: 'insert', row }); const p = Promise.resolve([{}]); p.onConflict = () => ({ ignore: async () => 1 }); return p; };
+      return q;
+    };
+    trx.writes = writes;
+    const out = await InvoiceService.retireRodentSetupObligationForRevivedPrepay(trx, 'inv-prepay');
+    expect(out).toMatchObject({ scheduledServiceId: 'root-rb', amount: 99 });
+    expect(writes.some((w) => w.table === 'invoices' && w.op === 'update' && w.patch.status === 'void')).toBe(true);
+    expect(writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'delete' && w.where.id === 'claim-comp')).toBe(true);
   });
 });
