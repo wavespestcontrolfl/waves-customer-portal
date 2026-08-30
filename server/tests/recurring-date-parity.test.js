@@ -21,11 +21,12 @@ const adminSchedule = require('../routes/admin-schedule').nextRecurringDate;
 const PATTERNS = [
   'daily', 'weekly', 'biweekly', 'every_6_weeks',
   'monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'biannual', 'annual', 'yearly',
+  'monthly_nth_weekday',
   'seasonal_feb_oct',
   'custom',
 ];
 const BASES = ['2026-09-02', '2026-01-15', '2026-11-20'];
-const OPTS = { intervalDays: 10 };
+const OPTS = { intervalDays: 10, nth: 3, weekday: 4 };
 
 describe('nextRecurringDate parity across the three copies', () => {
   for (const pattern of PATTERNS) {

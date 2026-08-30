@@ -6,15 +6,23 @@
  * visits would fire ~hours early and quote the wrong window. The code fix
  * lands with this migration; this repairs the rows already written.
  *
- * Scope: FUTURE, non-terminal, windowed visits whose active reminder sits
- * exactly at that date's 08:00 ET while the visit window says otherwise.
- * Idempotent; sent flags untouched (a text already sent cannot be unsent);
- * pre-closed placeholder rows excluded (their 08:00 is deliberate).
- * timestamptz derivation: naive (date + time) interpreted as
- * America/New_York — the ET-safe direction.
+ * Scope: FUTURE (Eastern calendar), non-terminal, windowed visits whose
+ * active reminder sits exactly at that date's 08:00 ET while the visit
+ * window says otherwise. Idempotent; pre-closed placeholder rows excluded
+ * (their 08:00 is deliberate). timestamptz derivation: naive (date + time)
+ * interpreted as America/New_York — the ET-safe direction.
+ *
+ * Second pass: the erroneous 08:00 time may have sat inside the 72h/24h
+ * cutoff when the move re-armed the row, stamping a SYNTHETIC coverage flag
+ * with no text ever sent — repairing only the time would then silence the
+ * reminder forever. For repaired rows whose corrected time is still beyond
+ * the cutoff, re-arm the flag unless a genuine reminder SMS exists in
+ * sms_log (same delivered-evidence correlation appointment-reminders.js
+ * uses: outbound, real Twilio SID, reminder message_type, inside the
+ * reminder window).
  */
 exports.up = async function up(knex) {
-  const res = await knex.raw(`
+  const repaired = await knex.raw(`
     UPDATE appointment_reminders ar
     SET appointment_time = (ss.scheduled_date::timestamp + ss.window_start) AT TIME ZONE 'America/New_York',
         updated_at = now()
@@ -25,11 +33,38 @@ exports.up = async function up(knex) {
       AND ss.window_start IS NOT NULL
       AND ss.window_start <> time '08:00'
       AND ss.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show')
-      AND ss.scheduled_date >= CURRENT_DATE
+      AND ss.scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date
       AND ar.appointment_time = (ss.scheduled_date::timestamp + time '08:00') AT TIME ZONE 'America/New_York'
+    RETURNING ar.id
   `);
-   
-  console.log(`[migration] repaired ${res.rowCount ?? 0} reminder row(s) mis-armed at the 08:00 fallback`);
+  const ids = (repaired.rows || []).map((r) => r.id);
+  console.log(`[migration] repaired ${ids.length} reminder row(s) mis-armed at the 08:00 fallback`);
+  if (!ids.length) return;
+
+  const rearm = async (flag, flagAt, cutoff) => {
+    const res = await knex.raw(
+      `
+      UPDATE appointment_reminders ar
+      SET ${flag} = false, ${flagAt} = NULL, updated_at = now()
+      WHERE ar.id = ANY(?)
+        AND ar.${flag} = true
+        AND ar.appointment_time > NOW() + interval '${cutoff} hours'
+        AND NOT EXISTS (
+          SELECT 1 FROM sms_log lsl
+          WHERE lsl.customer_id = ar.customer_id
+            AND lsl.direction = 'outbound'
+            AND lsl.twilio_sid ~ '^(SM|MM)'
+            AND lsl.message_type IN ('reminder_72h', 'appointment_reminder')
+            AND lsl.created_at >= ar.appointment_time - interval '80 hours'
+            AND lsl.created_at <= NOW()
+        )
+    `,
+      [ids]
+    );
+    console.log(`[migration] re-armed ${res.rowCount ?? 0} synthetic ${flag} flag(s)`);
+  };
+  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72);
+  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24);
 };
 
 exports.down = async function down() {
