@@ -6256,7 +6256,9 @@ function declinePayload({ reason, competitorName, competitorPrice, note }) {
     status: "declined",
     disposition: reason,
     declineReason: option?.label || reason,
-    dispositionNote: note?.trim() || undefined,
+    // The note travels only with the option that owns it — a stale Other
+    // note must not ride along after the radio selection changes.
+    dispositionNote: option?.fields === "note" ? note?.trim() || undefined : undefined,
     competitorName: option?.fields === "competitor" ? competitorName?.trim() || undefined : undefined,
     competitorPrice: option?.fields === "competitor" && competitorPrice?.trim() ? competitorPrice.trim() : undefined,
   };
