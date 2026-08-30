@@ -4758,6 +4758,7 @@ AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
 // of texting customers.phone directly, so appointment_notify_primary and
 // service-contact routing always apply.
 AppointmentReminders.safeSendAppointment = safeSendAppointment;
+AppointmentReminders.handOffToOffice = handOffToOffice;
 // Sanitized customer-facing service label (strips admin suffixes; the
 // reminder row's stored value already folds in add-on lines) — shared so
 // the admin reschedule notice renders the same label as every reminder.

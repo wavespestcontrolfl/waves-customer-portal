@@ -13305,16 +13305,11 @@ const CallRecordingProcessor = {
                           // time — hand THIS contact durably to the office
                           // lane instead (same exception rail as the held
                           // email-only leg).
-                          try {
-                            await require('./notification-service').notifyAdmin(
-                              'comms',
-                              'Held confirmation text needs a manual send',
-                              `The appointment confirmation text to the ${contact.role || 'service'} contact was held by an in-progress visit move after the primary was already delivered — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
-                            );
-                            logger.info(`[call-proc] held ${contact.role} confirmation handed to the office lane (grouped move)`);
-                          } catch (notifyErr) {
-                            logger.error(`[call-proc] held ${contact.role} confirmation hand-off failed for ${scheduledServiceId}: ${notifyErr.message}`);
-                          }
+                          const contactHandedOff = await require('./appointment-reminders').handOffToOffice(
+                            'Held confirmation text needs a manual send',
+                            `The appointment confirmation text to the ${contact.role || 'service'} contact was held by an in-progress visit move after the primary was already delivered — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                          );
+                          if (contactHandedOff) logger.info(`[call-proc] held ${contact.role} confirmation handed to the office lane (grouped move)`);
                         } else if (!contactResult.sent) {
                           logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
                         } else {
@@ -13403,15 +13398,13 @@ const CallRecordingProcessor = {
                           } else {
                             const why = emailRetried?.held ? 'still held by an in-progress visit move' : `not delivered (${emailRetried?.reason || emailRetried?.error || 'unknown'})`;
                             logger.warn(`[call-proc] email-only confirmation for ${scheduledServiceId} ${why} after retries — handing to the office lane`);
-                            try {
-                              await require('./notification-service').notifyAdmin(
-                                'comms',
-                                'Held confirmation email needs a manual send',
-                                `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was ${why} — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
-                              );
-                            } catch (notifyErr) {
-                              logger.error(`[call-proc] held-email admin notification failed for ${scheduledServiceId}: ${notifyErr.message}`);
-                            }
+                            // Verified hand-off (codex): notifyAdmin can
+                            // resolve null on persistence failure — the
+                            // shared helper retries and logs a loud loss.
+                            await require('./appointment-reminders').handOffToOffice(
+                              'Held confirmation email needs a manual send',
+                              `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was ${why} — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                            );
                           }
                         } else {
                           logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);
