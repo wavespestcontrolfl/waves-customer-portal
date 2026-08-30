@@ -1250,12 +1250,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // because the parcel-scale figure (and any silent substitute) is not a
     // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
     // flag keep today's synthetic-lot pricing.
-    // Lot consumers on this path: mosquito's treatable area, rodent bait's
-    // 12k/20k brackets, and tree & shrub's lot-derived bed area
+    // Area-priced consumers on this path: mosquito's treatable area, rodent
+    // bait's 12k/20k brackets, tree & shrub's lot-derived bed area
     // (estimateTreeShrubBedAreaFromLot) — a rejected condo lot substituting
-    // sqft×4 must not hand any of them a customer-ready price (codex P0 r4).
+    // sqft×4 must not hand any of them a customer-ready price (codex P0 r4)
+    // — and the TURF family: a vision turf estimate on a flagged condo lot
+    // measures the shared development's grounds (condo records deliberately
+    // skip the parcel turf cap) and grades MEDIUM, so a lawn-only request
+    // would otherwise price the association's turf for one door (P1 r7).
     const lotFlagForcesSiteQuote = lotVerifyFlagged && !lotSizeMeasured
-      && !!(services.mosquito || services.rodentBait || services.treeShrub);
+      && !!(services.mosquito || services.rodentBait || services.treeShrub
+        || services.lawn || services.oneTimeLawn || services.lawnPestControl
+        || services.topDressing || services.dethatching || services.plugging);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
@@ -1473,7 +1479,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           entryChannel,
           quoteCity,
           sqft,
-          lot,
+          // Persist only a MEASURED/confirmed lot — the sqft×4 engine
+          // fallback must never be stored: customer-pricing-ai treats
+          // customers.lot_sqft as authoritative before the lookup, so a
+          // persisted fabrication would auto-price later quotes past the
+          // review this request was routed to (GH codex P1).
+          lot: realLotSqFt,
           landingForCustomer,
           utm: attr?.utm,
         });
@@ -1507,7 +1518,9 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           latitude: ep.lat || null,
           longitude: ep.lng || null,
           property_sqft: sqft,
-          lot_sqft: lot,
+          // Measured/confirmed only — never the engine's synthetic fallback
+          // (GH codex P1, same rule as the existing-customer update above).
+          lot_sqft: realLotSqFt ?? null,
           pipeline_stage: 'new_lead',
           pipeline_stage_changed_at: new Date(),
           lead_source: 'website_quote',

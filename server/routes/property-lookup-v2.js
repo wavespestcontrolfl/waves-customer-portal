@@ -3223,20 +3223,23 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // type string is read off commercialSignalRecord — an unverified AI
   // web-search "Multifamily" is stripped there and cannot fire this — and a
   // technician-VERIFIED lot is the unit's own treatable area, not a parcel.
-  // County-GIS parcels attesting 2–4 units (duplex/triplex/quad — the
-  // ≥5-unit ruling) are EXEMPT: their lot genuinely describes the small
-  // property, and the customer-pricing path treats a lotSize flag as an
-  // unconditional dimension rejection, which would fail-closed legitimate
-  // small-parcel quotes (GH codex P1). The floor is 2, NOT ≤4: a condo
-  // UNIT's own folio attests residentialUnits 1, and exempting it
-  // suppressed the flag on exactly the shape this exists to catch (codex
-  // P1 r3). A lot the merge already field-flagged is left to the generic
-  // evidence loop below — two lotSize flags double-count in the win/loss
-  // slices (GH codex P2).
-  const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
-  const smallSharedParcel = Number.isFinite(unitLotParcelUnits)
-    && unitLotParcelUnits >= 2 && unitLotParcelUnits <= 4;
+  // ANY parcel attesting 2+ units is a WHOLE-property record, not a
+  // one-unit folio, and is EXEMPT: a duplex/triplex lot genuinely
+  // describes the small property (GH codex P1 r1), and a "Multifamily
+  // Condominium" master parcel attesting 8 units is the established
+  // whole-building/association shape whose parcel lot is the correct
+  // basis (GH codex P1 r7 — detectCategory routes it commercial). The
+  // floor is 2: a condo UNIT's own folio attests exactly 1, the shape
+  // this flag exists to catch (codex P1 r3). Counts come from county GIS
+  // (_parcel.residentialUnits) or the TRUSTED record's own unitCount
+  // (commercialSignalRecord already stripped untrusted web counts). A lot
+  // the merge already field-flagged is left to the generic evidence loop
+  // below — two lotSize flags double-count in the win/loss slices (P2).
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
+  const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
+  const unitLotTrustedUnitCount = Number(unitLotSignalRc?.unitCount);
+  const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
+    || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
   // Condo identity via the estimator's OWN predicate (isCondoRecord —
   // propertyType OR county land-use text, aggregated excluded), so an
   // "Office Condominium" land use behind a normalized 'Commercial' type is

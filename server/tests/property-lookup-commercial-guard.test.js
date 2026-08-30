@@ -555,6 +555,18 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('a "Multifamily Condominium" master parcel attesting 8 units is whole-property — no flag (codex P1 r7)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '14 Example Complex Dr, Testville, FL 00000',
+      propertyType: 'Multifamily Condominium',
+      squareFootage: 63096,
+      lotSize: 93940,
+      unitCount: 8,
+      _source: 'county',
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
   test('apartment/multifamily whole-building records never fire the condo unit-lot flag', () => {
     for (const propertyType of ['Multifamily', 'Apartment Building', 'Condo Association']) {
       const flags = buildFieldVerifyFlags({
