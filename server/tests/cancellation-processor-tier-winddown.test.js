@@ -164,17 +164,19 @@ test('gate ON + ledger AUTHORITATIVE: a ledger failure FAILS CLOSED — churn er
   expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
 });
 
-test('gate ON + ledger ADVISORY: a ledger failure never blocks the billing wind-down', async () => {
+test('gate ON + ledger ADVISORY: a ledger failure still FAILS CLOSED and aborts (codex r48 — stale rows become authoritative on a later gate flip)', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockLedgerAuthoritative = false;
   mockResetLedgerToScalar.mockRejectedValueOnce(new Error('ledger down'));
   seedCustomer();
   const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'x', requestId: 'req-1' });
-  // Advisory store: the churn/autopay wind-down must land even when the
-  // ledger hiccups — otherwise the visit sweep would cancel service while
-  // the customer stays active and chargeable.
-  expect(result.churned).toBe(true);
-  expect(result.errors).not.toContain('churn');
-  expect(db.__tables.customers[0].waveguard_tier).toBeNull();
-  expect(db.__tables.customers[0].active).toBe(false);
+  // The ledger clear is atomic with the wind-down regardless of the read
+  // gate: everything rolls back, the run aborts before any sweep, and the
+  // request is flagged for review — no half-wound account, no stale
+  // components waiting to resurrect the rate when the gate flips on.
+  expect(result.churned).toBe(false);
+  expect(result.errors).toContain('churn');
+  expect(result.cancelledCount).toBe(0);
+  expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
+  expect(db.__tables.customers[0].active).toBe(true);
 });

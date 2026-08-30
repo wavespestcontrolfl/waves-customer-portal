@@ -203,20 +203,18 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // and any pre-check would race a pending→en_route transition. They
         // are cleared AFTER the visit sweep by one atomic conditional UPDATE
         // (see the gated block near the end of this function).
-        const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
-        const ledgerAuthoritative = planRateLedgerEnabled();
+        const { resetLedgerToScalar } = require('./plan-rate-ledger');
         await db.transaction(async (trx) => {
           await trx('customers').where({ id: customerId }).update(update);
-          if (ledgerAuthoritative) await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+          // The ledger clear is atomic with the wind-down REGARDLESS of the
+          // ledger-read gate (codex r48): rows left behind while the gate
+          // is off become authoritative the moment it flips, resurrecting
+          // the cancelled rate on a win-back. A failure here rolls the
+          // whole wind-down back and the gated abort below stops the run
+          // BEFORE any service is swept — nothing is left half-done.
+          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
           await disarmPaymentRails(trx);
         });
-        if (!ledgerAuthoritative) {
-          try {
-            await resetLedgerToScalar(db, customerId, 0, { source: 'cancellation' });
-          } catch (ledgerErr) {
-            logger.warn(`[cancellation-processor] advisory plan-rate wind-down failed for ${customerId}: ${ledgerErr.message}`);
-          }
-        }
       } else {
         // Legacy (H0) path, byte-identical: sequential writes, and on failure
         // the catch below records 'churn' and CONTINUES like H0 did.
