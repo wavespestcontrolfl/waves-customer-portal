@@ -239,6 +239,9 @@ describe('later completed treatments and follow-up next steps (codex P2 #3613 r4
     expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2, upcomingRoachVisits: 0, laterCompleted: 1 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 1 });
     // packaged total still honest when a later visit exists beyond the package size
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 1, laterCompleted: 2 })).toEqual({ treatmentNumber: 1, treatmentsTotal: 3, complete: false, laterCompleted: 2 });
+    // …and a packaged program with another same-program visit still BOOKED is never complete
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 2, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 2, treatmentsTotal: 3, complete: false, laterCompleted: 0 });
+    expect(resolveProgram({ serviceKey: 'german_roach_initial', treatmentNumber: 3, upcomingRoachVisits: 1 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 4, complete: false, laterCompleted: 0 });
   });
 
   it('an earlier report read after later treatments references none, claims nothing missing, and says the program moved on', () => {
@@ -249,6 +252,10 @@ describe('later completed treatments and follow-up next steps (codex P2 #3613 r4
     expect(out.lines[0].text).toMatch(/2 later treatments in this program have since been completed/);
     expect(out.lines.map((l) => l.label)).not.toContain('Next treatment');
     expect(out.lines.map((l) => l.label)).not.toContain('From your technician');
+    // read after treatment 2 but before a booked treatment 3: the progress note AND the next date
+    const mid = buildWhatsNext({ program: { treatmentNumber: 1, treatmentsTotal: 3, complete: false, laterCompleted: 1 }, species: 'German', scheduleResolved: true, nextVisit: { scheduledDate: '2999-01-05' } });
+    expect(mid.lines.map((l) => l.label)).toEqual(['Since this visit', 'Next treatment', 'What we will do', 'Between now and then']);
+    expect(mid.nextVisitMissing).toBe(false);
   });
 
   it('follow-up-oriented next steps are dropped when the program is complete or a next date is booked; other steps pass', () => {

@@ -218,9 +218,14 @@ function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachV
     const after = upcomingRoachVisits + later;
     total = after > 0 ? number + after : (number > 1 ? number : null);
   }
-  if (total != null && total < number + later) total = number + later;
+  // A packaged total never understates the calendar: treatments still
+  // scheduled AND treatments already completed later both extend it, so a
+  // packaged program with another same-program visit booked is never
+  // "complete" (local codex P1).
+  const scheduled = Math.max(0, Number(upcomingRoachVisits) || 0);
+  if (total != null && total < number + later + scheduled) total = number + later + scheduled;
   // "complete" describes THIS treatment: it is the program's last one.
-  const complete = total != null ? number >= total : false;
+  const complete = total != null ? number >= total && scheduled === 0 : false;
   return { treatmentNumber: number, treatmentsTotal: total, complete, laterCompleted: later };
 }
 
@@ -309,8 +314,10 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
   }
   if (!program.complete && laterCompleted > 0) {
     // This report is being read after a later treatment already happened:
-    // no date to reference, nothing missing — the program moved on.
+    // the program moved on (nothing "missing"), and a treatment still on
+    // the calendar is still referenced (local codex P1).
     lines.push({ label: 'Since this visit', text: `${laterCompleted === 1 ? 'A later treatment in this program has' : `${laterCompleted} later treatments in this program have`} since been completed — each has its own report.` });
+    if (scheduleResolved && nextVisit) lines.push({ label: 'Next treatment', kind: 'next_visit' });
   } else if (!program.complete) {
     if (scheduleResolved) {
       if (nextVisit) {
