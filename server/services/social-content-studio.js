@@ -653,10 +653,13 @@ async function getCampaignContext({ topic, city, service }) {
         // 'published' alone is NOT enough: legacy rows keep a planned-era
         // slug (e.g. parrish-garage-door-seal-roach-entry) that never became
         // a path — that row shipped a 404 to every network on 2026-08-29.
-        // astro_live_url is stamped by the pages-poll worker only after the
-        // production build served the post, so it is the one column that
-        // can't lie about the URL.
+        // Same strict semantics as content/blog-share-gate.js
+        // (blogPostShareability): astro_status must be 'live' — 'merged'
+        // already carries status='published' + astro_live_url before the
+        // pages-poll worker has seen production serve the page. The live
+        // URL is then used verbatim, never rebuilt from slug.
         .where('status', 'published')
+        .where('astro_status', 'live')
         .whereNotNull('astro_live_url')
         .orderBy('publish_date', 'desc')
         // Rank relevance BEFORE capping: take a wider recency window so a
@@ -1981,6 +1984,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         } else {
           gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
           gbpImageBranded = !campaignHeroUrl;
+          // A legacy GBP card actually rendered (not a null/text-only miss).
+          usedLegacyCard = !campaignHeroUrl && !!gbpImageUrl;
         }
       }
       finalPreview = previewWithVisual(preview, {
@@ -2039,7 +2044,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         variant: 'campaign',
         templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
       });
-      usedLegacyCard = !campaignHeroUrl;
+      // Only when a legacy card actually rendered and is going to a channel —
+      // a null render publishes text-only, which is not a card fallback.
+      usedLegacyCard = !campaignHeroUrl && !!(imageUrl || gbpImageUrl);
     }
 
     if (effectiveMode === 'draft') {
