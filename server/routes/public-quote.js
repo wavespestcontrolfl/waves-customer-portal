@@ -21,7 +21,7 @@ const smsTemplatesRouter = require('./admin-sms-templates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
-const { normalizeLeadAddress, splitStreetLineUnit } = require('../utils/address-normalizer');
+const { normalizeLeadAddress, splitStreetLineUnit, formatAddress } = require('../utils/address-normalizer');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
@@ -934,30 +934,87 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       },
       services: {},
     };
+    // Only accept non-empty numeric values. Number(null)/Number('') are 0
+    // (finite), so a missing measuredTurfSf would otherwise coerce to an
+    // authoritative measured turf of 0 and suppress the estimatedTurfSf.
+    const num = (v) => {
+      if (v === null || v === undefined || v === '') return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    // Turf figures + PROVENANCE forward for EVERY property (residential was
+    // lot-derived-only until the low-confidence review gate landed — GH codex
+    // P1 on #3622: with the gate, a residential lawn key advertised as
+    // instant would otherwise always price from the LOW lot fallback and
+    // park instead of quoting). The engine grades by provenance: a vision
+    // estimate quotes instantly at MEDIUM; a county-prior or turf-less
+    // lookup grades LOW and routes to review — the audit's intent.
+    // The figures come from the SERVER-SIDE lookup row (step 1 persisted it
+    // via performPropertyLookup), NEVER from the client `enriched` payload —
+    // payload turf as a pricing-authoritative input is a price-manipulation
+    // vector (pre-push codex P0: estimatedTurfSf:1 → cheap bookable quote).
+    // cacheOnly: no provider round-trips; a miss leaves turf unset, so the
+    // engine lot-falls-back to LOW and routes to review — fail closed.
+    // Provenance rides with the figure (codex #3376 final head): a
+    // county-prior or parcel-capped lookup profile stripped of these
+    // fields would re-grade as a plain vision measurement downstream and
+    // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
+    // number — the exact over-claim the source mapping exists to prevent.
+    // The cache key is the SAME normalized street-only parcel address step 1
+    // used (public-property-lookup's parcelLookupAddress), rebuilt from THIS
+    // request's normalizedAddress — never the raw `address` field alone,
+    // which a crafted request could point at a different cached property
+    // than the structured fields the quote stores (pre-push codex P0 r2).
+    const parcelLookupAddress = normalizedAddress.line2
+      ? formatAddress({
+        line1: normalizedAddress.line1,
+        city: normalizedAddress.city,
+        state: normalizedAddress.state,
+        zip: normalizedAddress.zip,
+      })
+      : (normalizedAddress.fullAddress || String(address || '').trim());
+    let trustedTurf = {};
+    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
+    if (parcelLookupAddress) {
+      try {
+        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
+        trustedTurf = serverLookup?.enriched || {};
+      } catch (turfErr) {
+        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
+        trustedTurf = {};
+      }
+    }
+    engineInput.measuredTurfSf = num(trustedTurf.measuredTurfSf);
+    // A parcel-capped vision estimate only describes the parcel it was
+    // capped against. When the lot the ENGINE will price differs from the
+    // lookup profile's lot (customer corrected it — lotSizeConfirmed wins),
+    // the capped figure is stale and must not ride in as a MEDIUM vision
+    // estimate; dropping it lands on the lot fallback → LOW → review
+    // (GH codex P1 on 5b23b152d). An uncapped estimate is lot-independent
+    // and forwards regardless.
+    const parcelCapStale = trustedTurf.turfCappedToParcel === true
+      && Number(trustedTurf.lotSqFt) > 0
+      && Math.abs(Number(lot) - Number(trustedTurf.lotSqFt)) > 1;
+    if (!parcelCapStale) {
+      engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
+      if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
+      if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+    }
+    if (num(trustedTurf.countyTurfPriorSf) !== undefined) engineInput.countyTurfPriorSf = num(trustedTurf.countyTurfPriorSf);
+    // The county-derived ceiling clamps a vision estimate that exceeds the
+    // trusted county geometry (computeTurfArea's plausible-max path) — the
+    // pricing-side counterpart to the coarse heuristic max. Same validity
+    // contract as the estimator translator (countyCeilingStillValid): the
+    // ceiling forwards only while THIS request's dimensions still match the
+    // county dimensions it was computed from (pre-push codex P0 r3).
+    if (countyCeilingStillValid(trustedTurf, { homeSqFt: sqft, lotSqFt: lot, stories: engineInput.stories })) {
+      engineInput.countyTurfCeilingSf = trustedTurf.countyTurfCeilingSf;
+    }
     if (commercialDetected) {
-      // The commercial auto-pricers price directly from measured turf / bed /
-      // tree dimensions. Pass the property-lookup measurements through so the
-      // profile doesn't fall back to lot-derived estimates and mis-quote (then
-      // persist/book/invoice the wrong commercial price). Residential public
-      // quotes intentionally keep their lot-derived turf basis, so this is
-      // commercial-only and doesn't shift any existing residential price.
-      // Only accept non-empty numeric values. Number(null)/Number('') are 0
-      // (finite), so a missing measuredTurfSf would otherwise coerce to an
-      // authoritative measured turf of 0 and suppress the estimatedTurfSf.
-      const num = (v) => {
-        if (v === null || v === undefined || v === '') return undefined;
-        const n = Number(v);
-        return Number.isFinite(n) ? n : undefined;
-      };
-      engineInput.measuredTurfSf = num(ep.measuredTurfSf);
-      engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
-      // Turf PROVENANCE rides with the figure (codex #3376 final head): a
-      // county-prior or parcel-capped lookup profile stripped of these
-      // fields would re-grade as a plain vision measurement downstream and
-      // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
-      // number — the exact over-claim the source mapping exists to prevent.
-      if (ep.turfSource) engineInput.turfSource = ep.turfSource;
-      if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+      // The commercial auto-pricers additionally price directly from bed /
+      // tree / impervious dimensions. Pass those through so the profile
+      // doesn't fall back to lot-derived estimates and mis-quote (then
+      // persist/book/invoice the wrong commercial price).
       engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
       engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
       engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
@@ -1146,7 +1203,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lowConfidenceForcesSiteQuote = commercialLowConfidenceRequiresSiteQuote({
       engineResult: { lineItems: estimate?.lineItems || [] },
     });
-    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep);
+    // The guard consults BOTH the client payload and the SERVER-SIDE lookup
+    // profile: pricing now uses the trusted cached turf, so a unit-address
+    // request that omits or falsifies the payload's unitCount/parcel
+    // evidence must not slip a whole-building/association price past the
+    // site-quote contract (pre-push codex P0 r4). A client can only ADD a
+    // park signal this way, never remove the server's.
+    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep)
+      || unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, trustedTurf);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
@@ -1154,6 +1218,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
     const quoteRequiredReason = manualQuoteLine?.reason
+      // The turf-review lines expose their reason via customQuoteReason /
+      // manualReviewReasons, not `reason` — without these legs a parked
+      // RESIDENTIAL lawn quote fell through to the commercial fallback copy
+      // below and told the customer commercial properties need a manual
+      // quote (GH codex P2 on 2aaf7d9a5).
+      || manualQuoteLine?.customQuoteReason
+      || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
@@ -2161,6 +2232,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`
           : quoteRequiredReason === 'unit_in_multi_unit_building'
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
+          : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
+          ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
+          : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
+          ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
