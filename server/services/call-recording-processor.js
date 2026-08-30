@@ -2333,10 +2333,28 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
-  // Phone identity is strong — the newest match wins outright.
+  // Phone identity is strong, but a shared line is not a shared PERSON:
+  // overlapping callers from one number (office line, spouse, property
+  // manager) previously collapsed onto the newest lead and the second
+  // caller's extraction overwrote the first's (estimator-engine audit
+  // 2026-08-30 #1). The newest candidate whose name does not CONFLICT with
+  // the extraction wins (extractedNameMatchesCustomer: nickname-aware;
+  // missing name on either side is compatible, so shells stay reusable and
+  // name-less extractions keep today's newest-wins behavior). All-conflict
+  // → fresh mint, same fail-closed contract as the email arm. The scan is
+  // uncapped like the email arm's in-query corroboration — nickname
+  // matching can't be expressed in SQL, and same-phone candidate sets are
+  // small by construction (the webhook reuses rather than mints).
   if (phone) {
-    const row = await query.orderBy('created_at', 'desc').first();
-    return { lead: row || null, matchedVia: row ? 'phone' : null };
+    const rows = await query.orderBy('created_at', 'desc');
+    const compatible = rows.find((r) => extractedNameMatchesCustomer(
+      { first_name: firstName, last_name: lastName }, r,
+    ));
+    if (compatible) return { lead: compatible, matchedVia: 'phone' };
+    if (rows.length) {
+      return { lead: null, matchedVia: null, phoneNameConflictLeadId: rows[0].id };
+    }
+    return { lead: null, matchedVia: null };
   }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox

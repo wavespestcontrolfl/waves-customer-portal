@@ -275,7 +275,12 @@ function makeLookupDb(result = null) {
     orWhere: jest.fn((col, val) => { calls.orWhere.push([col, val]); return b; }),
     whereNotIn: jest.fn((col, vals) => { calls.whereNotIn.push([col, vals]); return b; }),
     orderBy: jest.fn(() => b),
-    first: jest.fn(async () => result),
+    first: jest.fn(async () => (Array.isArray(result) ? result[0] || null : result)),
+    // Knex builders are thenables; the phone arm awaits the builder itself
+    // for the full candidate list (name corroboration scans all rows).
+    then: (resolve, reject) => Promise.resolve(
+      Array.isArray(result) ? result : (result ? [result] : []),
+    ).then(resolve, reject),
   };
   const database = jest.fn(() => b);
   database._calls = calls;
@@ -333,6 +338,46 @@ describe('findReusableCallLead', () => {
     expect(database._calls.whereNull).toContain('customer_id');
     // Unclaimed-only replaces the ownership group entirely.
     expect(database._calls.orWhere).toHaveLength(0);
+  });
+
+  test('phone arm skips a name-CONFLICTING newest lead and reuses the caller’s own older row', async () => {
+    // Shared line, two people: the newest lead is the other caller's.
+    const database = makeLookupDb([
+      { id: 'lead-other', first_name: 'Maria' },
+      { id: 'lead-own', first_name: 'Dave' },
+    ]);
+    const { lead, matchedVia } = await findReusableCallLead(database, {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, firstName: 'Dave',
+    });
+    expect(lead).toEqual({ id: 'lead-own', first_name: 'Dave' });
+    expect(matchedVia).toBe('phone');
+  });
+
+  test('phone arm mints fresh when every candidate’s name conflicts (second caller on a shared line)', async () => {
+    const database = makeLookupDb([{ id: 'lead-other', first_name: 'Maria' }]);
+    const result = await findReusableCallLead(database, {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, firstName: 'Dave',
+    });
+    expect(result.lead).toBeNull();
+    expect(result.phoneNameConflictLeadId).toBe('lead-other');
+  });
+
+  test('a name-less extraction or a name-less shell keeps newest-wins reuse', async () => {
+    const shell = await findReusableCallLead(makeLookupDb([{ id: 'shell', first_name: null }]), {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, firstName: 'Dave',
+    });
+    expect(shell.lead).toEqual({ id: 'shell', first_name: null });
+    const nameless = await findReusableCallLead(makeLookupDb([{ id: 'lead-7', first_name: 'Maria' }]), {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, firstName: null,
+    });
+    expect(nameless.lead).toEqual({ id: 'lead-7', first_name: 'Maria' });
+  });
+
+  test('nickname variants do not conflict (Bob reuses Robert’s lead)', async () => {
+    const { lead } = await findReusableCallLead(makeLookupDb([{ id: 'lead-rob', first_name: 'Robert' }]), {
+      phone: PHONE, customerId: null, workableUnnamedLead: true, firstName: 'Bob',
+    });
+    expect(lead).toEqual({ id: 'lead-rob', first_name: 'Robert' });
   });
 
   test('no phone → no lookup at all', async () => {

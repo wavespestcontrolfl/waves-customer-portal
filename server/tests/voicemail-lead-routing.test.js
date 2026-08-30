@@ -327,14 +327,20 @@ describe('findReusableCallLead identity keys', () => {
     })).toEqual(own);
   });
 
-  test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
+  test('a name-CONFLICTING phone match mints fresh — a shared line is not a shared person', async () => {
+    // Contract REVERSED by the estimator-engine audit 2026-08-30 #1 fix:
+    // phone corroboration now mirrors the email arm — a candidate whose
+    // name positively conflicts with the extraction is another caller on
+    // the same line, and reusing it overwrote the first caller's record.
+    // Missing names on either side still reuse (see the booking-conversion
+    // suite for the full matrix).
     const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
     expect(await findLead(db, {
       phone: '+19415550101',
       firstName: 'Pat',
       lastName: 'Sample',
       workableUnnamedLead: true,
-    })).toEqual({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
+    })).toBeNull();
   });
 });
 
