@@ -79,6 +79,8 @@ function setTables({ visit, customer, term, invoice, catalog } = {}) {
     customers: { first: () => customer || null },
     annual_prepay_terms: { first: () => term || null },
     invoices: { first: () => invoice || null },
+    // The realignment rollout instant (20260829000040 migration_time).
+    knex_migrations: { first: () => ({ migration_time: '2026-08-29T18:30:00.000Z' }) },
   };
 }
 
@@ -95,6 +97,8 @@ const baseVisit = {
   recurring_parent_id: null,
   pending_setup_fee: null,
   source_estimate_id: null,
+  // Booked AFTER the realignment rollout (see knex_migrations below).
+  created_at: '2026-09-01T12:00:00.000Z',
 };
 const baseCustomer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const request = { id: 'r1', scheduled_service_id: 'v1', selected_plan: null };
@@ -201,6 +205,29 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
     // A draft fragment carries no stamp → live constant.
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
+  });
+
+  test('a PRE-rollout direct series (grandfathered signup: no estimate, no stamp) owes nothing; an unreadable rollout or root date fails closed to nothing (codex #3591 r42 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', created_at: '2026-03-01T12:00:00.000Z' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // A child of a pre-rollout root resolves through the ROOT's date.
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0', created_at: '2026-09-05T12:00:00.000Z' } });
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: null, created_at: '2026-03-01T12:00:00.000Z' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0', created_at: '2026-09-05T12:00:00.000Z' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // A frozen positive stamp on that old root still bills (accepted claim).
+    mockTableHandlers.scheduled_services.first = (chain) => (chain.calls.some(([op, w]) => op === 'where' && w?.id === 'v0')
+      ? { id: 'v0', pending_setup_fee: '79.00', created_at: '2026-03-01T12:00:00.000Z' }
+      : { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(79);
+    // (A missing rollout row failing closed to 0 is pinned in
+    // estimate-membership-context.test.js — the rollout instant is cached
+    // per db handle, so it cannot be re-mocked mid-file here.)
+    // Post-rollout, no stamp → live fee (the r28 baseline).
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
   });
 });
 

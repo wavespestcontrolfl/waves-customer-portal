@@ -42,7 +42,7 @@ const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePr
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null, catalog = null } = {}) {
   const writes = [];
   const trx = (table) => {
     const q = { _where: null };
@@ -53,8 +53,13 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     q.first = async () => {
       if (table === 'scheduled_services') return scheduledService;
       if (table === 'setup_fee_claims') return claim;
+      if (table === 'services') return catalog;
+      // The realignment rollout instant — every root fixture below was
+      // created AFTER it (post-rollout direct series owe the live fee).
+      if (table === 'knex_migrations') return { migration_time: '2026-08-29T18:30:00.000Z' };
       return null;
     };
+    q.whereIn = () => q;
     q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return updateResult; };
     q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
     q.whereNotIn = () => q;
@@ -246,8 +251,8 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
 });
 
 describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog names only a coverage type (codex #3591 r37 P1)', () => {
-  const rodentRoot = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null };
-  const pestRoot = { id: 'root-pest', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_id: null, source_estimate_id: null, recurring_parent_id: null };
+  const rodentRoot = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
+  const pestRoot = { id: 'root-pest', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_id: null, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-01T12:00:00.000Z', status: 'confirmed' };
   beforeEach(() => { mockQualifyingKeys = async () => ['rodent_bait']; });
 
   test('a live direct rodent series matching the coverage, on a non-member account, owes the setup — anchor + amount returned', async () => {
@@ -290,6 +295,27 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     mockQualifyingKeys = async () => ['pest_control'];
     await expect(retireCoverageOnlySetupClaim(conn({ rootsForCoverage: [] }), { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations', invoiceId: 'inv-prepay', amount: 99 }))
       .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/no longer owed/) });
+  });
+
+  test('a COMPLETED root with live children is still the series (no second setup); a dead completed root is not; a stale-labeled LINKED bait root matches by catalog (codex #3591 r42 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    // Estimate-origin root whose first visit completed, children live → accept decided → null.
+    const liveKids = conn({ rootsForCoverage: [{ ...rodentRoot, status: 'completed', source_estimate_id: 'est-1' }], scheduledService: { id: 'child-1' } });
+    expect(await findDirectRodentSetupObligationForCoverage(liveKids, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+    // Same root, no live child → dead series → the coverage is new → owed anchor-less.
+    const dead = conn({ rootsForCoverage: [{ ...rodentRoot, status: 'completed', source_estimate_id: 'est-1' }], scheduledService: null });
+    expect(await findDirectRodentSetupObligationForCoverage(dead, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toEqual({ anchorId: null, amount: 99 });
+    // Linked to the bait program, wearing a stale "Pest Control" label → matches rodent coverage by catalog, owes on its own anchor.
+    const stale = conn({ rootsForCoverage: [{ ...rodentRoot, service_type: 'Quarterly Pest Control', service_id: 'svc-rb' }], catalog: { service_key: 'rodent_bait_quarterly', name: 'Rodent Bait Stations' } });
+    expect(await findDirectRodentSetupObligationForCoverage(stale, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toEqual({ anchorId: 'root-rb', amount: 99 });
+    // …and it does NOT match pest coverage despite the label.
+    expect(await findDirectRodentSetupObligationForCoverage(stale, { customerId: 'cust-1', coverageServiceType: 'Quarterly Pest Control' })).toBeNull();
+  });
+
+  test('a PRE-rollout direct root (grandfathered signup, no stamp) never acquires the live fee (codex #3591 r42 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    const old = conn({ rootsForCoverage: [{ ...rodentRoot, created_at: '2026-03-01T12:00:00.000Z' }] });
+    expect(await findDirectRodentSetupObligationForCoverage(old, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
   });
 
   test('a failing lookup propagates (the mint refuses retryably, never reads it as a waiver)', async () => {

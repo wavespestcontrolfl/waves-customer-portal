@@ -100,6 +100,7 @@ const pestVisit = {
   recurring_parent_id: null,
   pending_setup_fee: null,
   source_estimate_id: null,
+  created_at: '2026-09-01T12:00:00.000Z',
 };
 const customer = { id: 'c1', billing_mode: null, waveguard_tier: null, monthly_rate: null, property_type: 'single_family' };
 const pendingRequest = { id: 'r1', scheduled_service_id: 'v1', customer_id: 'c1', status: 'pending', token: 'tok', selected_plan: null, prepay_invoice_id: null };
@@ -115,6 +116,7 @@ function setTables(overrides = {}) {
     annual_prepay_terms: { first: () => null },
     invoices: { first: () => null },
     activity_log: {},
+    knex_migrations: { first: () => ({ migration_time: '2026-08-29T18:30:00.000Z' }) },
     ...overrides,
   };
 }

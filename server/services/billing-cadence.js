@@ -206,8 +206,23 @@ function collectRecurringServices(estimateData) {
     data.results?.recurring?.services,
     data.services,
   ];
-  return lists.flatMap((list) => (Array.isArray(list) ? list : []))
-    .filter((svc) => !isLegacyRodentRow(svc));
+  const primary = lists.flatMap((list) => (Array.isArray(list) ? list : []));
+  // Engine-backed recurring rows (codex #3591 r42 P1): a post-realignment
+  // quote-wizard save persists its rodent row ONLY under
+  // engineResult.lineItems (no mapped recurring container), so the cadence
+  // must read it there or a manual win falls back to the monthly
+  // equivalent. Recurring engine lines carry annual/monthly (one-time lines
+  // carry price alone — the engine's own oneTimeItems rule); a row whose
+  // service key the mapped lists already carry is not duplicated.
+  const primaryKeys = new Set(primary
+    .map((svc) => String(svc?.service || svc?.serviceKey || svc?.service_key || '').toLowerCase())
+    .filter(Boolean));
+  const engineRows = [data.engineResult?.lineItems, data.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((li) => li && typeof li === 'object'
+      && (Number(li.annual) > 0 || Number(li.monthly) > 0)
+      && !primaryKeys.has(String(li.service || li.serviceKey || li.service_key || '').toLowerCase()));
+  return [...primary, ...engineRows].filter((svc) => !isLegacyRodentRow(svc));
 }
 
 function inferFrequencyKeyFromEstimateData(estimateData) {

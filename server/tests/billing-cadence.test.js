@@ -135,4 +135,20 @@ describe('stored-legacy rodent rows classify without a pin (codex #3591 r37 P0)'
     expect(collectRecurringServices(storedLegacy)).toEqual([]);
     expect(collectRecurringServices(storedNew)).toHaveLength(1);
   });
+
+  test('a quote-wizard save whose rodent row lives ONLY under engineResult.lineItems still infers the per-application cadence; one-time engine lines and duplicates are ignored (codex #3591 r42 P1)', () => {
+    const { inferFrequencyKeyFromEstimateData } = require('../services/billing-cadence');
+    const wizardSave = { engineResult: { lineItems: [
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', perApp: 89, visitsPerYear: 4, annual: 356, monthly: 29.67, stations: 5, perApplicationBilled: true, pricingBasis: 'RODENT_BAIT_BRACKET' },
+      { service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 },
+    ] } };
+    expect(collectRecurringServices(wizardSave).map((r) => r.service)).toEqual(['rodent_bait']);
+    expect(inferFrequencyKeyFromEstimateData(wizardSave)).toBe('quarterly');
+    // The legacy signal still classifies an engine-only monthly row as legacy.
+    const legacyWizard = { engineResult: { lineItems: [{ service: 'rodent_bait', name: 'Rodent Bait Stations', monthly: 49, annual: 588, visitsPerYear: 4 }] } };
+    expect(collectRecurringServices(legacyWizard)).toEqual([]);
+    // A mapped row wins over its engine twin (no duplicate).
+    const both = { result: { recurring: { services: [storedNew.result.recurring.services[0]] } }, engineResult: wizardSave.engineResult };
+    expect(collectRecurringServices(both)).toHaveLength(1);
+  });
 });

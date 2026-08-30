@@ -186,7 +186,7 @@ function seriesAnchorId(visit) {
 // unpersisted preview row (no id — the prepay-on-book preview prices a
 // booking that does not exist yet) is taken as given. A missing row throws
 // (callers fail closed).
-const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id', 'pending_setup_fee'];
+const SETUP_VISIT_COLUMNS = ['id', 'customer_id', 'service_type', 'service_id', 'source_estimate_id', 'recurring_parent_id', 'pending_setup_fee', 'created_at', 'status'];
 
 // The visit's service identity, CATALOG first (codex #3591 r32 P1): a
 // scheduled row's service_type label goes stale after a catalog
@@ -217,12 +217,12 @@ async function loadAuthoritativeSetupVisit(database, visit) {
 // disclosure (codex #3591 r40 P1). A persisted child resolves to its parent's
 // stamp; a draft fragment (no row) has none. A negative stamp is a completion
 // mid-claim, not an accepted figure — callers that retire it refuse.
-async function frozenAnchorSetupStamp(database, row) {
+async function loadSeriesAnchor(database, row) {
   if (!row || !row.id) return null;
-  let anchor = row;
-  if (row.recurring_parent_id) {
-    anchor = await database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee');
-  }
+  if (!row.recurring_parent_id) return row;
+  return database('scheduled_services').where({ id: row.recurring_parent_id }).first('id', 'pending_setup_fee', 'created_at');
+}
+function frozenAnchorSetupStamp(anchor) {
   const stamp = anchor && anchor.pending_setup_fee != null ? Number(anchor.pending_setup_fee) : NaN;
   return Number.isFinite(stamp) && stamp > 0 ? cents(stamp) : null;
 }
@@ -230,12 +230,27 @@ async function frozenAnchorSetupStamp(database, row) {
 async function directRodentSetupForRow(database, row) {
   if (!row || !row.customer_id || row.source_estimate_id) return 0;
   if ((await authoritativeServiceKey(database, row)) !== 'rodent_bait') return 0;
+  const anchor = await loadSeriesAnchor(database, row);
   // An accepted, frozen claim outranks the LIVE constant (codex #3591 r40
   // P1): a config raise after the customer accepted $99 must not re-price
   // the switch / prepay-on-book / secure mint — the stamp is what the
   // retirement path clears, so it is also what the prepay bills.
-  const frozen = await frozenAnchorSetupStamp(database, row);
+  const frozen = frozenAnchorSetupStamp(anchor);
   if (frozen != null) return frozen;
+  // Provenance (codex #3591 r42 P1): only a POST-rollout direct series can
+  // owe the live fee — a grandfathered series booked before the realignment
+  // (no estimate, no stamp: the old recurring signup waived setup) must not
+  // acquire a $99 obligation years later from /secure, prepay-on-book or a
+  // switch. Same rollout instant the membership extension reads
+  // (knex_migrations.migration_time of 20260829000040); an unreadable
+  // rollout or root date fails CLOSED to no fee. A draft fragment (no row
+  // yet) is a new booking and prices live.
+  if (row.id) {
+    const { rodentRealignmentRolloutMs } = require('./rodent-bait-legacy-replay');
+    const rolloutMs = await rodentRealignmentRolloutMs(database);
+    const createdMs = new Date(anchor?.created_at ?? NaN).getTime();
+    if (!(rolloutMs > 0) || !Number.isFinite(createdMs) || createdMs < rolloutMs) return 0;
+  }
   const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
   const otherQualifiers = (await loadExistingQualifyingServiceKeys(database, row.customer_id) || [])
     .filter((key) => key !== 'rodent_bait');
@@ -274,18 +289,36 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount 
 async function findDirectRodentSetupObligationForCoverage(database, { customerId, coverageServiceType }) {
   if (!customerId || !coverageServiceType) return null;
   const { serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  // Completed roots stay in the net (codex #3591 r42 P1): a series whose
+  // first visit already ran is still the customer's live rodent plan while
+  // it has live children — dropping it would read the coverage as brand
+  // new and derive a second setup. Dead roots (no live child) are skipped.
   const roots = await database('scheduled_services')
     .where({ customer_id: customerId })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'completed', 'skipped', 'no_show'])
+    .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
     .where(function recurringRoots() {
       this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
     })
     .orderBy('scheduled_date', 'asc')
     .select(...SETUP_VISIT_COLUMNS);
+  // Catalog identity decides the match for a LINKED root (codex #3591 r42
+  // P1): a bait-program root wearing a stale "Pest Control" label still IS
+  // the rodent coverage; only unlinked legacy rows match on the label.
+  const coverageKey = recurringServiceKey({ name: coverageServiceType });
   let sawMatchingRoot = false;
   for (const root of roots || []) {
-    if (!serviceMatchesCoverage(root, coverageServiceType)) continue;
+    const matches = root.service_id
+      ? (await authoritativeServiceKey(database, root)) === coverageKey
+      : serviceMatchesCoverage(root, coverageServiceType);
+    if (!matches) continue;
+    if (String(root.status || '').toLowerCase() === 'completed') {
+      const liveChild = await database('scheduled_services')
+        .where({ recurring_parent_id: root.id })
+        .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+        .first('id');
+      if (!liveChild) continue;
+    }
     sawMatchingRoot = true;
     // An ESTIMATE-origin series made its setup decision at accept — never
     // re-derive one here (it would bill the accept's setup a second time).
