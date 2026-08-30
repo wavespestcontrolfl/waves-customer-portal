@@ -204,6 +204,17 @@ describe('enrichDomains', () => {
     expect(r3).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1 });
   });
 
+  test('a forced refresh replaces the metric set: a metric the fresh fetch no longer carries is cleared, never left stale beside the new enriched_at', async () => {
+    const db = fakeDb({ domains: [D('d1', 'a.example', { enriched_at: NOW, domain_rating: 40, spam_score: 30, referring_domains: 9, organic_traffic: 100 })] });
+    const dfs = fakeDfs({ ranks: [{ target: 'a.example', rank: 55 }], spam: [], referring: [], traffic: [] });
+    await enrichDomains(db, { dataforseo: dfs, force: true, now: NOW });
+    expect(db._store.updates[0].patch).toMatchObject({ domain_rating: 55, spam_score: null, referring_domains: null, organic_traffic: null, enriched_at: NOW });
+    // a first enrichment only writes what it has (columns it cannot fill stay untouched)
+    const db2 = fakeDb({ domains: [D('d2', 'b.example')] });
+    await enrichDomains(db2, { dataforseo: fakeDfs({ ranks: [{ target: 'b.example', rank: 5 }] }), now: NOW });
+    expect(db2._store.updates[0].patch).not.toHaveProperty('spam_score');
+  });
+
   test('lease held elsewhere (overlapping scheduler / admin run): skipped, zero calls, zero writes', async () => {
     runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
     const db = fakeDb({ domains: [D('d1', 'a.example')] });

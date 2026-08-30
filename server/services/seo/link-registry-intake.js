@@ -44,6 +44,13 @@ function hasPath(token) {
   return rest.replace(/^\/+/, '').replace(/\/+$/, '').length > 0;
 }
 
+// The host a token names: through the URL parser so a root URL with a query
+// or fragment but no slash (`https://a.example?utm=x`) never leaks `?utm=x`
+// into the domain. A bare host stays as-is.
+function hostOfToken(token) {
+  try { return new URL(toUrl(token)).hostname; } catch { return token; }
+}
+
 function toUrl(token) {
   return /^https?:\/\//i.test(token) ? token.replace(/^https?:\/\//i, (m) => m.toLowerCase()) : `https://${token}`;
 }
@@ -122,7 +129,7 @@ function parseOpportunities(text) {
         }
         continue;
       }
-      const domain = canonicalProspectDomain(token);
+      const domain = canonicalProspectDomain(hostOfToken(token));
       if (!domain || !domain.includes('.')) { dropped.push({ token, reason: 'not_a_host', dropReason: 'invalid_url' }); continue; }
       if (isOwnHost(domain)) { dropped.push({ token, reason: 'own_domain', dropReason: 'own_domain' }); continue; }
       if (isNeverTargetHost(domain)) { dropped.push({ token, reason: 'never_target', dropReason: 'never_a_target' }); continue; }
@@ -152,6 +159,11 @@ function touchDetail(batchDetail, url, note) {
   return out || null;
 }
 
+const parseTouches = (v) => {
+  if (Array.isArray(v)) return v;
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
+};
+
 // Upsert one intake item. On conflict only last_seen_at moves — state,
 // attempts and resolution are owned by the sweep (idempotent re-feed).
 async function upsertItem(q, item) {
@@ -171,8 +183,20 @@ async function upsertItem(q, item) {
   };
   const inserted = await q('seo_link_intake_items').insert(row).onConflict('item_key').ignore().returning(['id']);
   if (inserted && inserted.length) return { id: inserted[0].id, created: true };
-  const existing = await q('seo_link_intake_items').where({ item_key: row.item_key }).first('id', 'state', 'resolved_host', 'domain_id');
-  await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
+  const existing = await q('seo_link_intake_items').where({ item_key: row.item_key }).first('id', 'state', 'resolved_host', 'domain_id', 'source_detail', 'source_ref', 'pending_touches');
+  const patch = { last_seen_at: q.fn.now() };
+  // A later feed of a reference that is STILL pending carries its own
+  // provenance (batch, CSV note): kept on the row and applied as a touch of
+  // its own when the resolver lands the domain — per-feed attribution.
+  if (['pending', 'unresolved'].includes(existing.state)) {
+    const same = (a, b) => (a || null) === (b || null);
+    const touches = parseTouches(existing.pending_touches);
+    const dup = same(existing.source_detail, row.source_detail) && same(existing.source_ref, row.source_ref);
+    if (!dup && !touches.some((t) => same(t.source_detail, row.source_detail) && same(t.source_ref, row.source_ref))) {
+      patch.pending_touches = JSON.stringify([...touches, { source_detail: row.source_detail, source_ref: row.source_ref, seen_at: new Date().toISOString() }]);
+    }
+  }
+  await q('seo_link_intake_items').where({ id: existing.id }).update(patch);
   return { id: existing.id, created: false, state: existing.state || null, resolvedHost: existing.resolved_host || null, domainId: existing.domain_id || null };
 }
 
@@ -191,7 +215,7 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
   const base = {
     ...parsed, source, sourceDetail, dryRun: !!dryRun,
     inserted: 0, touched: 0, existing: 0,
-    items: { created: 0, seen: 0, pending: parsed.unresolved.length },
+    items: { created: 0, seen: 0, pending: parsed.unresolved.length }, // dryRun: what WOULD wait; live: recounted below
   };
   if (!parsed.candidates.length && !parsed.unresolved.length && !parsed.dropped.length) return base;
 
@@ -223,6 +247,7 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
       }
       out.push({ ...c, id: r.id, existing: !r.created, touched: r.touched });
     }
+    base.items.pending = 0;
     for (const raw of parsed.unresolved) {
       // The reference's CSV context rides on the item's source_detail, so the
       // resolver's touch (touchDetail(item.source_detail, finalUrl)) carries it
@@ -230,6 +255,9 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
       const detail = touchDetail(sourceDetail, null, parsed.unresolvedNotes[raw]);
       const it = await upsertItem(trx, { source, sourceDetail: detail, sourceRef, rawUrl: raw, state: 'pending' });
       base.items[it.created ? 'created' : 'seen'] += 1;
+      // only a reference the sweep will still pick up is "waiting" — a row
+      // that already resolved or dropped is reported as seen, not pending
+      if (it.created || ['pending', 'unresolved'].includes(it.state)) base.items.pending += 1;
       // Already resolved by an earlier feed: THIS feed's provenance still lands
       // on the domain (per-feed attribution), exactly as a named host's would.
       if (!it.created && it.state === 'resolved' && it.resolvedHost && !isNeverTargetHost(it.resolvedHost) && !isOwnHost(it.resolvedHost)) {
@@ -332,12 +360,13 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
     return n;
   };
 
+  let batchNow = now; // the current batch's claim time (see the claim loop): back-offs anchor here, not at run start
   const backoffOrExhaust = async (item, attempts, err) => {
     if (attempts >= MAX_ATTEMPTS) {
       await finalize(db, item, { state: 'dropped', drop_reason: 'retry_exhausted', attempts, last_error: err, next_retry_at: null });
       out.dropped += 1;
     } else {
-      await finalize(db, item, { state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(now.getTime() + BACKOFF_MS[attempts - 1]) });
+      await finalize(db, item, { state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(batchNow.getTime() + BACKOFF_MS[attempts - 1]) });
       out.unresolved += 1;
     }
   };
@@ -350,6 +379,7 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
     const size = Math.min(CLAIM_BATCH_MAX, remaining);
     const claimedAt = batchNo === 0 ? now : new Date(now.getTime() + (Date.now() - startedMs));
     hold = new Date(claimedAt.getTime() + CLAIM_HOLD_MS);
+    batchNow = claimedAt;
     const claimed = await db.transaction(async (trx) => {
       const rows = await due(trx, size).forUpdate().skipLocked();
       if (!rows.length) return rows;
@@ -376,8 +406,13 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
           // the post is its own durable reference (same provenance, post as hint).
           target = toUrl(links[0]);
           for (const extra of links.slice(1)) {
-            const it = await upsertItem(db, { source: item.source, sourceDetail: touchDetail(item.source_detail, toUrl(item.raw_url), null), sourceRef: item.source_ref, rawUrl: extra, state: 'pending' });
+            const postDetail = touchDetail(item.source_detail, toUrl(item.raw_url), null);
+            const it = await upsertItem(db, { source: item.source, sourceDetail: postDetail, sourceRef: item.source_ref, rawUrl: extra, state: 'pending' });
             if (it.created) out.spawned = (out.spawned || 0) + 1;
+            else if (it.state === 'resolved' && it.resolvedHost && !isNeverTargetHost(it.resolvedHost) && !isOwnHost(it.resolvedHost)) {
+              // already resolved by an earlier feed: this post is still a feed of its own
+              await registry.ensureDomain(db, { domain: it.resolvedHost, source: item.source, sourceDetail: postDetail, sourceRef: item.source_ref });
+            }
           }
         }
         const page = await fetcher(target, { resolveOnly: true });
@@ -398,6 +433,10 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
             const d = await registry.ensureDomain(trx, {
               domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
             });
+            // every later feed of this reference lands as its own touch
+            for (const t of parseTouches(item.pending_touches)) {
+              await registry.ensureDomain(trx, { domain: host, source: item.source, sourceDetail: touchDetail(t.source_detail, page.finalUrl, null), sourceRef: t.source_ref || null });
+            }
             await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, source_row_id: d.touchId || null, last_error: null, next_retry_at: null });
           });
           out.resolved += 1;

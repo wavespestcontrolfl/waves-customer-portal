@@ -145,7 +145,38 @@ describe('intake — persists every reference as an intake item', () => {
     });
     const r = await intake(db, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'owner_seed', sourceDetail: 'sheet:aug' });
     expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), { domain: 'dir.example', source: 'owner_seed', sourceDetail: 'sheet:aug note:Claim it', sourceRef: null });
-    expect(r.items).toEqual({ created: 0, seen: 1, pending: 1, retouched: 1 });
+    expect(r.items).toEqual({ created: 0, seen: 1, pending: 0, retouched: 1 }); // already resolved: nothing waits for the sweep
+  });
+
+  test('a later feed of a STILL-pending reference keeps its own provenance on the row (pending_touches) and the resolver applies every one as a touch', async () => {
+    const updates = [];
+    const db = makeDb({
+      'seo_link_intake_items.returning': [],
+      'seo_link_intake_items.first': { id: 'item-p', state: 'pending', source_detail: 'paste:first', source_ref: null, pending_touches: [] },
+      'seo_link_intake_items.update': (chain, args) => { updates.push(args[0]); return 1; },
+    });
+    const r = await intake(db, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
+    expect(r.items).toEqual({ created: 0, seen: 1, pending: 1 });
+    expect(updates).toHaveLength(1);
+    expect(JSON.parse(updates[0].pending_touches)).toEqual([expect.objectContaining({ source_detail: 'sheet:aug note:Claim it', source_ref: null })]);
+    // the same provenance again is not appended twice; the row's own provenance never is
+    updates.length = 0;
+    const db2 = makeDb({ 'seo_link_intake_items.returning': [], 'seo_link_intake_items.first': { id: 'item-p', state: 'pending', source_detail: 'paste:first', source_ref: null, pending_touches: [{ source_detail: 'sheet:aug note:Claim it', source_ref: null }] }, 'seo_link_intake_items.update': (chain, args) => { updates.push(args[0]); return 1; } });
+    await intake(db2, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
+    await intake(db2, { text: 'bit.ly/abc', source: 'list_import', sourceDetail: 'paste:first' });
+    expect(updates).toEqual([{ last_seen_at: 'NOW()' }, { last_seen_at: 'NOW()' }]);
+    // resolver: primary touch + one touch per pending feed, each with its own detail and the final URL
+    const dbr = makeDb({ 'seo_link_intake_items.skipLocked': [{ id: 'i1', raw_url: 'bit.ly/abc', source: 'list_import', source_detail: 'paste:first', source_ref: null, attempts: 0, pending_touches: [{ source_detail: 'sheet:aug note:Claim it', source_ref: 'ref-2' }] }], 'seo_link_intake_items.update': () => 1 });
+    await resolveIntakeItems(dbr, { now: new Date('2026-08-30T01:00:00Z'), fetchPage: async () => ({ status: 200, finalUrl: 'https://listing.example/c', blocked: false, error: null }) });
+    expect(registry.ensureDomain.mock.calls.map((c) => c[1])).toEqual([
+      expect.objectContaining({ domain: 'listing.example', source: 'list_import', sourceDetail: 'paste:first https://listing.example/c', sourceRef: null }),
+      expect.objectContaining({ domain: 'listing.example', source: 'list_import', sourceDetail: 'sheet:aug note:Claim it https://listing.example/c', sourceRef: 'ref-2' }),
+    ]);
+  });
+
+  test('a whole CSV cell that is a root URL with a query names the HOST, never `host?query`', () => {
+    const r = parseOpportunities('Website,Action\nhttps://example.com?utm=x,Claim\n');
+    expect(r.candidates).toEqual([expect.objectContaining({ domain: 'example.com', url: null, raws: ['https://example.com?utm=x'] })]); // a bare query on the root is no submission hint; the raw reference is kept
   });
 
   test('CSV note lands on the touch source_detail', async () => {
@@ -216,6 +247,17 @@ describe('resolveIntakeItems — sweep', () => {
     expect(claims).toBe(3); // 50 + 50 + 7 (< 50 ⇒ stop), never one 500-row claim
     expect(db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'limit').map((c) => c.args[0])).toEqual([50, 50, 50]);
     expect(r).toEqual(expect.objectContaining({ claimed: 107, resolved: 107, lost: 0 }));
+    // a later batch anchors its back-off (and lease) to ITS claim time, not the run start
+    claims = 0;
+    const realNow = Date.now; let tick = 0;
+    Date.now = () => realNow() + tick;
+    try {
+      const db3 = dbWith(null, { 'seo_link_intake_items.skipLocked': () => { claims += 1; tick = 25 * 60e3 * claims; /* the clock moves on after each claim */ return claims === 1 ? batch(50, 'a') : claims === 2 ? batch(1, 'b') : []; } });
+      await resolveIntakeItems(db3, { now, fetchPage: async () => ({ status: 0, finalUrl: null, blocked: false, error: 'fetch_failed' }), limit: 500 });
+      const backoffs = db3.updates.filter((u) => u.set.state === 'unresolved').map((u) => u.set.next_retry_at.getTime() - now.getTime() - _internals.BACKOFF_MS[0]);
+      expect(backoffs.slice(0, 50).every((d) => d === 0)).toBe(true);           // batch 1: anchored at `now`
+      expect(backoffs[50]).toBeGreaterThanOrEqual(25 * 60e3);                    // batch 2: anchored ≥ 25 min later
+    } finally { Date.now = realNow; }
     // limit caps the run too: 60 ⇒ 50 then 10
     claims = 0;
     const db2 = dbWith(null, { 'seo_link_intake_items.skipLocked': () => { claims += 1; return claims === 1 ? batch(50, 'a') : batch(10, 'b'); } });
@@ -326,6 +368,11 @@ describe('resolveIntakeItems — sweep', () => {
     const inserts = db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'insert').map((c) => c.args[0]);
     expect(inserts).toEqual([expect.objectContaining({ raw_url: 'https://second.example/p', state: 'pending', source: 'x', source_detail: 'paste:x https://x.com/waves/status/123' })]);
     expect(r).toEqual(expect.objectContaining({ resolved: 1, spawned: 1, parked: 0 }));
+    // an extra link whose item already resolved under this source still gets the post's provenance touch
+    registry.ensureDomain.mockClear();
+    const db3 = dbWith([{ id: 'i1', raw_url: 'https://x.com/waves/status/125', source: 'x', source_detail: 'paste:x', attempts: 0 }], { 'seo_link_intake_items.returning': [], 'seo_link_intake_items.first': { id: 'old', state: 'resolved', resolved_host: 'second.example', domain_id: 'id-second.example' } });
+    await resolveIntakeItems(db3, { now, fetchPage, fetchTweetUrls: async () => ['https://dir.example/listing', 'https://second.example/p'] });
+    expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'second.example', source: 'x', sourceDetail: 'paste:x https://x.com/waves/status/125' }));
     // a post with no outbound links can never name a host: dropped invalid_url
     const db2 = dbWith([{ id: 'i1', raw_url: 'https://x.com/waves/status/124', source: 'x', attempts: 0 }]);
     await resolveIntakeItems(db2, { now, fetchPage, fetchTweetUrls: async () => ['https://x.com/waves/status/1'] });

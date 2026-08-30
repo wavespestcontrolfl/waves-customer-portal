@@ -173,6 +173,9 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
             const host = canonicalProspectDomain(r.domain);
             const hit = Object.fromEntries(BULK_CALLS.map(([key]) => [key, byHost[key].get(host) || null]));
             const patch = { ...freeSignal(r), enriched_at: now };
+            // A forced refresh REPLACES the metric set: anything the fresh fetch does
+            // not carry is cleared, never left as a stale value beside a new enriched_at.
+            if (force) Object.assign(patch, { domain_rating: null, spam_score: null, referring_domains: null, organic_traffic: null });
             if (BULK_CALLS.every(([key]) => !hit[key])) {
               patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
             } else {
