@@ -1704,16 +1704,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // an audit-snapshot failure never unwinds a delivered send.
             try {
               const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              // Re-read the PUBLISHED row like the anchor path does — the
-              // pre-claim `sibling` still carries draft/scheduled status and
-              // stale send metadata (codex pre-push P1).
-              const publishedSibling = await db('estimates').where({ id: sibling.id }).first();
-              if (publishedSibling) {
-                // The sibling's own send_method is deliberately cleared at
-                // publication — the ANCHOR's channel is how it was
-                // delivered (GH codex P2).
-                await saveEstimatePricingAuditSnapshot(publishedSibling, { trigger: 'group_send', sendMethod });
-              }
+              // NO re-read: a customer can accept the now-sent sibling
+              // before a re-read completes, and the acceptance rewrite
+              // would contaminate this permanent send-time record (GH
+              // codex P1). The pre-claim row + the patch we just wrote IS
+              // the published state; status/expiry override to the
+              // delivered values, and the ANCHOR's channel is how it was
+              // delivered (its own send_method is cleared at publication).
+              let publishedData = sibling.estimate_data;
+              if (typeof publishedData === 'string') { try { publishedData = JSON.parse(publishedData); } catch { publishedData = {}; } }
+              await saveEstimatePricingAuditSnapshot({
+                ...sibling,
+                status: sibling.viewed_at ? 'viewed' : 'sent',
+                sent_at: now,
+                expires_at: nextExpiresAt,
+                estimate_data: { ...(publishedData || {}), ...siblingSnapshotPatch },
+              }, { trigger: 'group_send', sendMethod });
             } catch (auditErr) {
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
             }

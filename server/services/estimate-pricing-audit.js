@@ -173,7 +173,14 @@ function dimensionsFrom(data, resultOverride) {
   // substitution); property.lawnSqFt/bedArea are the engine-result twins —
   // omitting them zeroed lawn/tree COGS on wizard rows.
   const lawnSqFt = pick(inputs.measuredTurfSf, inputs.lawnSqFt, property.lawnSqFt, property.estimatedTurfSf, property.estimatedTurfSqFt, inputs.estimatedTurfSf);
-  const bedArea = pick(inputs.bedArea, inputs.estimatedBedAreaSf, property.bedArea, property.estimatedBedAreaSf, property.estimatedBedSqFt);
+  // A blank bed-area editor field persists 0 while the engine derives and
+  // stores the ACTUALLY PRICED area on the line — positive values outrank
+  // the zero-input artifact (GH codex P1; unlike turf, bed zeros are not
+  // measurements).
+  const lineBedAreas = (Array.isArray(result.lineItems) ? result.lineItems : []).map((li) => li?.bedArea);
+  const bedCandidates = [inputs.bedArea, inputs.estimatedBedAreaSf, property.bedArea, property.estimatedBedAreaSf, property.estimatedBedSqFt, ...lineBedAreas];
+  const positiveBed = bedCandidates.map(Number).find((v) => Number.isFinite(v) && v > 0);
+  const bedArea = positiveBed ?? pick(...bedCandidates);
   return { homeSqFt, lotSqFt, lawnSqFt, bedArea };
 }
 
@@ -340,14 +347,19 @@ function normalizeRecurringLines(result) {
     // discounts land ONLY there); recomputing from the generic tier
     // discount misstated those lines (GH codex P1).
     const netAnnual = pickNum(svc.manualFinalAnnual, svc.annualAfterDiscount);
-    const grossAnnual = monthly * 12;
+    // The mapper preserves svc.annual precisely BECAUSE monthly×12 can't
+    // reconstruct it ($1,108 vs $92.33×12) — it is the authoritative gross
+    // (GH codex P2).
+    const grossAnnual = pickNum(svc.annual) ?? monthly * 12;
     const priceNet = Number.isFinite(netAnnual) ? money(netAnnual) : money(grossAnnual * (1 - discount));
     const line = {
       serviceKey,
       label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'recurring',
       price: priceNet,
-      monthly: Number.isFinite(netAnnual) ? money(netAnnual / 12) : money(monthly * (1 - discount)),
+      monthly: Number.isFinite(netAnnual)
+        ? money(netAnnual / 12)
+        : (Number.isFinite(pickNum(svc.annual)) ? money((grossAnnual * (1 - discount)) / 12) : money(monthly * (1 - discount))),
       priceBeforeDiscount: money(grossAnnual),
       discount: grossAnnual > 0 && grossAnnual > priceNet
         ? Math.round((1 - priceNet / grossAnnual) * 1000) / 1000
@@ -704,6 +716,23 @@ function normalizeEngineLineItems(result) {
     const useExplicitCost = !isAdjustment
       && !SERVICE_MAP[serviceKey]
       && Number.isFinite(explicitAnnualCost) && explicitAnnualCost > 0;
+    // Raw pest rows carry the customer-visible setup charge as initialFee
+    // (the mapper normally converts it to the one-time membership fee) —
+    // omitting it dropped $99 of delivered revenue (GH codex P1).
+    const initialFee = num(item.initialFee);
+    if (Number.isFinite(initialFee) && initialFee > 0) {
+      lines.push({
+        serviceKey: 'waveguard_membership',
+        label: 'WaveGuard Membership',
+        cadence: 'one_time',
+        price: money(initialFee),
+        monthly: null,
+        priceBeforeDiscount: money(initialFee),
+        discount: 0,
+        priceSource: 'saved_estimate.engineResult.lineItems.initialFee',
+        skipCogs: true,
+      });
+    }
     if (!hasBaseWitness) continue; // installation-only row: no phantom $0 base line
     lines.push({
       ...(isAdjustment ? { skipCogs: true } : {}),
@@ -828,7 +857,18 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // container both survive, and one mapped counterpart absorbs exactly
     // one equal-priced engine row (codex pre-push P1 x2).
     const covered = new Map();
-    const priceKey = (l) => `${l.serviceKey}|${l.cadence}`;
+    // Commercial engine ids and their residential label-mapped twins are
+    // the SAME charge in two spellings — canonicalize for the dedupe key
+    // only; each line keeps its own serviceKey (GH codex P1).
+    const DEDUPE_FAMILY = {
+      commercial_pest: 'pest_control',
+      commercial_lawn: 'lawn_care',
+      commercial_tree_shrub: 'tree_shrub',
+      commercial_mosquito: 'mosquito',
+      commercial_termite_bait: 'termite_bait',
+      commercial_rodent_bait: 'rodent_bait',
+    };
+    const priceKey = (l) => `${DEDUPE_FAMILY[l.serviceKey] || l.serviceKey}|${l.cadence}`;
     const remember = (l) => {
       const key = priceKey(l);
       if (!covered.has(key)) covered.set(key, []);
