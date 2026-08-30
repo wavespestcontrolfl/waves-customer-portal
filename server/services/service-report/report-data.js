@@ -4947,15 +4947,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // "water <object>" (codex P1 r12): "Do not water the flower beds for 48
   // hours" is a NARROWER hold than the lawn-wide irrigation instruction
   // and must not fold it away.
-  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+(?:['’\w]+\s+){0,3}?(?:irrigat\w+|watering)\b/i;
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+((?:['’\w]+\s+){0,3}?)(?:irrigat\w+|watering)\b/i;
   // Scope-narrowing belt (same finding): a clause that names a non-lawn
   // target never covers the property-wide instruction, whatever its verbs.
   const NARROWED_SCOPE_RE = /\b(?:beds?|flowers?|gardens?|shrubs?|plants?|trees?|pots?|planters?)\b/i;
+  // Double negation (codex P1 r13): "Do not SKIP irrigation" instructs the
+  // OPPOSITE of a hold — a second hold-family verb inside the gap flips the
+  // polarity, so the clause covers nothing.
+  const DOUBLE_NEGATION_GAP_RE = /\b(?:skip|avoid|withhold|miss|forget|stop|hold)\b/i;
   // An irrigation-hold instruction's duration in hours, or null when the
-  // text is not one (no tied hold phrase, or no duration).
+  // text is not one (no tied hold phrase, flipped polarity, or no duration).
   const irrigationHoldHours = (text, { rejectNarrowedScope = false } = {}) => {
     const s = String(text || '');
-    if (!IRRIGATION_HOLD_PHRASE_RE.test(s)) return null;
+    const phrase = IRRIGATION_HOLD_PHRASE_RE.exec(s);
+    if (!phrase) return null;
+    if (DOUBLE_NEGATION_GAP_RE.test(phrase[1] || '')) return null;
     if (rejectNarrowedScope && NARROWED_SCOPE_RE.test(s)) return null;
     const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
     return m ? Number(m[1]) : null;

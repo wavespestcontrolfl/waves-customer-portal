@@ -238,6 +238,24 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 
+  test('double-negated hold verbs never cover: "Do not skip irrigation for 48 hours" instructs the OPPOSITE (codex P1 r13)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      technician_notes: [
+        'WHAT WE DID',
+        '',
+        'Weed control was applied across the turf today.',
+        '',
+        'WHAT WE FOUND',
+        '',
+        'Do not skip irrigation for 48 hours. Do not avoid watering for 48 hours.',
+      ].join('\n'),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-13', makeKnex());
+    expect(data.summarySource).toBe('technician_report');
+    expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
+  });
+
   test('non-performed callback outcomes suppress the traced map (codex P1 r12)', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const tracedFixtures = {
