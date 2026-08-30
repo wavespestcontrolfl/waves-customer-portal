@@ -1789,6 +1789,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // overlaps another job". The expect/expectAnchor CAS still 409s on a
     // stale row — that is a concurrency guard, not a schedule conflict.
     const memberWarnings = [];
+    // A grouped stop that moved only PARTLY (owner ruling 2026-08-30): the
+    // customer is NOT texted — "your visit moved" would be wrong for the
+    // sibling still at the old stop — and the result carries the straggler
+    // ids as a hard needsAttention for the sheet.
+    let unitMovePartial = null;
     try {
       if (wantsSeriesShift) {
         try {
@@ -1858,6 +1863,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
         coverMoved(moveResult, job);
+        if (Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) {
+          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: moveResult.visitMove.failed.map((f) => f.id) };
+          logger.error(`[rain-out] grouped move of visit ${unitMovePartial.visitId} for ${job.id} is INCOMPLETE — ${unitMovePartial.memberIds.length} member(s) still at the old stop (${unitMovePartial.memberIds.join(', ')}); customer NOT texted`);
+        }
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.
@@ -1978,7 +1987,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         if (!ownsSeriesText) sms = { sent: false, reason: 'replayed' };
       }
     }
-    if (notifyCustomer && ownsSeriesText) {
+    if (unitMovePartial) sms = { sent: false, reason: 'grouped_move_incomplete' };
+    if (notifyCustomer && ownsSeriesText && !unitMovePartial) {
       try {
         const customer = job.id === serviceId
           ? {
@@ -2045,6 +2055,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
+      ...(unitMovePartial ? { needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: `Only part of this stop moved — ${unitMovePartial.memberIds.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`, memberIds: unitMovePartial.memberIds } } : {}),
     });
   }
 
@@ -2086,6 +2097,10 @@ function summarizeCommitResults(results) {
   // count is per WARNING (per clashing date), never per stop, and the sheets
   // render the dated text rather than a bare count.
   const overlapWarnings = moved.flatMap((r) => (Array.isArray(r.warnings) ? r.warnings : []));
+  // Hard attention items (a grouped stop that moved only partly — the
+  // customer was NOT texted): surfaced top-level so the sheets render them
+  // as repairs, never buried as a soft warning (owner ruling 2026-08-30).
+  const needsAttention = moved.filter((r) => r.needsAttention).map((r) => ({ id: r.id, ...r.needsAttention }));
   return {
     ok: moved.length > 0,
     reason: moved.length === 0 ? (results[0]?.error || 'nothing_moved') : undefined,
@@ -2094,6 +2109,7 @@ function summarizeCommitResults(results) {
     failedCount: results.length - moved.length - covered.length,
     overlapCount: overlapWarnings.length,
     overlapWarnings,
+    ...(needsAttention.length ? { needsAttention } : {}),
     results,
   };
 }

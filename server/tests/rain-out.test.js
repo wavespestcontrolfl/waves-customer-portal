@@ -3315,6 +3315,14 @@ describe('commit summary — visit-covered members are not separate stops (local
 
   test('coverage = moved + unchanged (already-at-target) members, never failed ones (codex r19)', () => {
     expect(coveredIdsFrom({ visitMove: { moved: ['a'], unchanged: ['b'], failed: [{ id: 'c' }] } })).toEqual(['a', 'b']);
+    // a partly-moved stop's needsAttention is surfaced top-level (owner ruling 2026-08-30), never a soft warning
+    const partial = summarizeCommitResults([
+      { id: 'a', ok: true, newDate: '2026-09-02', smsSent: false, smsReason: 'grouped_move_incomplete', needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop moved', memberIds: ['c'] } },
+      { id: 'x', ok: true, newDate: '2026-09-02', smsSent: true, smsReason: null },
+    ]);
+    expect(partial.needsAttention).toEqual([{ id: 'a', code: 'VISIT_MOVE_INCOMPLETE', message: 'Only part of this stop moved', memberIds: ['c'] }]);
+    expect(partial.results[0].smsSent).toBe(false);
+    expect(summarizeCommitResults([{ id: 'x', ok: true, newDate: '2026-09-02', smsSent: true, smsReason: null }])).not.toHaveProperty('needsAttention');
     expect(coveredIdsFrom({ visitMove: { moved: [], failed: [], alreadyAtTarget: true, unchanged: ['a', 'b'] } })).toEqual(['a', 'b']);
     expect(coveredIdsFrom({ success: true })).toEqual([]);
   });

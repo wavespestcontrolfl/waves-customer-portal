@@ -15054,7 +15054,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         unassignedConflicts: effects.conflicts,
       });
     }
-    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
+    // A grouped stop that moved only PARTLY (owner ruling 2026-08-30): the
+    // customer is NOT texted — a "your visit moved" notice would be wrong
+    // for the sibling still at the old stop — and the response carries a
+    // hard needsAttention so the board surfaces it for repair, not a
+    // soft warning. Reminder sync runs with willNotify=false so the
+    // stranded sweep owns the (corrected) text once the stop is whole.
+    const partialVisitMove = Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0;
+    const willNotify = notifyCustomer !== false && !partialVisitMove;
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
@@ -15068,6 +15076,20 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       } catch (err) {
         logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
       }
+    }
+    if (partialVisitMove) {
+      const stuck = result.visitMove.failed.map((f) => f.id);
+      logger.error(`[dispatch] grouped move of visit ${result.visitMove.visitId} for ${req.params.serviceId} is INCOMPLETE — ${stuck.length} member(s) still at the old stop (${stuck.join(', ')}); customer NOT notified`);
+      return res.json({
+        ...result,
+        notificationSent: false,
+        notificationError: 'grouped move incomplete — customer NOT notified',
+        needsAttention: {
+          code: 'VISIT_MOVE_INCOMPLETE',
+          message: `Only part of this stop moved — ${stuck.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`,
+          memberIds: stuck,
+        },
+      });
     }
     if (notifyCustomer !== false) {
       // Shared notice path (recipient routing incl. appointment_notify_primary

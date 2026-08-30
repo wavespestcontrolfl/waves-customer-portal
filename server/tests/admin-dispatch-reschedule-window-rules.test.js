@@ -161,6 +161,22 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '11:00');
   });
 
+  test('a grouped move that only PARTLY succeeded texts nobody and returns a hard needsAttention (owner ruling 2026-08-30)', async () => {
+    const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+    const AppointmentReminders = require('../services/appointment-reminders');
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: '11111111-1111-4111-8111-111111111111' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v1', moved: ['a'], failed: [{ id: 'b', reason: 'slot taken', code: 'SLOT_TAKEN' }], unchanged: [], visitStart: '11:00' }, warnings: ['1 grouped service(s) did not move'] });
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(status).toBe(200);
+    expect(sendRescheduleNoticeForVisit).not.toHaveBeenCalled();
+    expect(body.notificationSent).toBe(false);
+    expect(body.needsAttention).toMatchObject({ code: 'VISIT_MOVE_INCOMPLETE', memberIds: ['b'] });
+    expect(body.needsAttention.message).toMatch(/Only part of this stop moved/);
+    // the reminder sync ran as a NON-notifying move (coverDueWindows false — the sweep owns the corrected text once the stop is whole)
+    const syncCall = AppointmentReminders.handleReschedule.mock.calls[0];
+    expect(syncCall && syncCall[2]).toMatchObject({ sendNotification: false, coverDueWindows: false });
+  });
+
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = { ...recurringRow(), is_recurring: false };
