@@ -429,7 +429,9 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
   const intervals = {
-    daily: 1, weekly: 7, biweekly: 14,
+    // every_6_weeks: see the rebooker copy's incident note — the
+    // parity test pins all three nextRecurringDate copies together.
+    daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42,
   };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
@@ -16526,3 +16528,5 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // Completion reruns the visit-scoped trade-name screen with the SAME typed
 // product-field classification generation used (codex r49 #3420).
 module.exports.typedFindingsPromptSections = typedFindingsPromptSections;
+// Parity-test surface (series-move incident): see tests/recurring-date-parity.test.js.
+module.exports.nextRecurringDate = nextRecurringDate;

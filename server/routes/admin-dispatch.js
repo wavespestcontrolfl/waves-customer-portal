@@ -13683,7 +13683,12 @@ function parseRescheduleWindow(w) {
 }
 
 function normalizeHHMM(value) {
-  const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  // Accept HH:MM:SS too (series-move incident 2026-08-29/30, twice): the
+  // rebooker returns SIBLING occurrence windowStart as the raw pg time
+  // ('13:00:00'); rejecting it made rescheduleReminderTime fall back to
+  // 08:00 and every collective move re-armed sibling reminders five hours
+  // early.
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
   if (!m) return null;
   return `${String(parseInt(m[1], 10)).padStart(2, '0')}:${m[2]}`;
 }
@@ -16382,6 +16387,9 @@ module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
+// Test surface for the reminder-time normalization (series-move incident).
+module.exports.normalizeHHMM = normalizeHHMM;
+module.exports.rescheduleReminderTime = rescheduleReminderTime;
 module.exports._test = {
   completionSuppressorInvoiceLookup,
   completionTerminalInvoiceLookup,
