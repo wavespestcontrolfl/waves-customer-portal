@@ -769,7 +769,7 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: null, reason: 'no_lineage' });
     // bounded same-key pick: the first same-key booking inside the window
     expect(data.cockroachNextTreatmentVisit?.scheduledDate).toBeUndefined();
-    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-px');
+    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-pn');
   });
 
   test('a treatment completed AFTER this one counts toward the total (an earlier report never shrinks)', async () => {

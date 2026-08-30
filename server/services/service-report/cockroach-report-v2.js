@@ -750,17 +750,25 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
  * primary cockroach typed report, so a flip never mass-invalidates other
  * lines. `-roachtyped2` (pest-report-v2.js) already keys the OPT-OUT render;
  * this suffix keys the dashboard render AND its calendar-derived program
- * state (treatment number · treatments still ahead) so scheduling,
- * cancelling or completing a visit re-renders the cached PDF instead of
- * serving a stale COMPLETE / IN PROGRESS (codex P1 #3613). A failed
- * resolution keys as unknown (`x`) — the render makes no program claims
- * either. Bump the letter whenever the cockroach-line report COMPOSITION
+ * state (treatment number · treatments still ahead · later completed) so
+ * scheduling, cancelling or completing a visit re-renders the cached PDF
+ * instead of serving a stale COMPLETE / IN PROGRESS (codex P1 #3613). A
+ * failed resolution keys `f`, a valid no-lineage result `n` — distinct
+ * because they render different copy. Bump the letter whenever the cockroach-line report COMPOSITION
  * changes.
  */
+// Program-state key component. A FAILED lookup (`f`) and a valid no-lineage
+// result (`n`) render different copy (the failure adds the "could not
+// confirm your treatment position" line), so they key separately — a PDF
+// rendered during an outage re-renders once the lookup succeeds instead of
+// keeping the warning cached (local codex P1).
 function cockroachProgramSignature(program) {
-  const state = program && !program.failed && program.treatmentNumber != null
-    ? `${program.treatmentNumber}u${program.upcoming}l${program.laterCompleted || 0}`
-    : 'x';
+  let state = 'f';
+  if (program && !program.failed) {
+    state = program.treatmentNumber != null
+      ? `${program.treatmentNumber}u${program.upcoming}l${program.laterCompleted || 0}`
+      : 'n';
+  }
   return `-roachv2a-p${state}`;
 }
 

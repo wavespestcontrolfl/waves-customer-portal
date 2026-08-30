@@ -206,7 +206,7 @@ describe('cockroachReportV2RenderedSignature — the store key describes the ren
     process.env.COCKROACH_REPORT_V2 = 'true';
     const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', values: {} } }) };
     expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, service)).toBe('-roachv2a-p2u1');
-    expect(cockroachReportV2RenderedSignature({}, service)).toBe('-roachv2a-px');
+    expect(cockroachReportV2RenderedSignature({}, service)).toBe('-roachv2a-pf');
     expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, {})).toBe('');
     process.env.COCKROACH_REPORT_V2 = 'false';
     expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, service)).toBe('');
@@ -421,8 +421,8 @@ describe('cockroachReportV2PdfSignature / snapshot helpers', () => {
     process.env.COCKROACH_REPORT_V2 = 'false';
     expect(await cockroachReportV2PdfSignature(roach)).toBe('');
     process.env.COCKROACH_REPORT_V2 = 'true';
-    // no knex → program state unknown ('x'); the render makes no program claims either
-    expect(await cockroachReportV2PdfSignature(roach)).toBe('-roachv2a-px');
+    // no knex → program state unresolved (keys as failed); the render makes no program claims either
+    expect(await cockroachReportV2PdfSignature(roach)).toBe('-roachv2a-pf');
     expect(await cockroachReportV2PdfSignature({ service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown', values: {} } }) })).toBe('');
     expect(await cockroachReportV2PdfSignature({ service_data: '{not json' })).toBe('');
     expect(await cockroachReportV2PdfSignature({})).toBe('');
@@ -466,8 +466,11 @@ describe('cockroachReportV2PdfSignature / snapshot helpers', () => {
     // the calendar changes → different key → cache miss → re-render
     tables.scheduled_services = tables.scheduled_services.filter((r) => r.id !== 'sch-3');
     expect(await cockroachReportV2PdfSignature(record, fake(false))).toBe('-roachv2a-p2u0l0');
-    // lineage lookup fails → unknown key, and the resolver reports failure (render fails closed)
-    expect(await cockroachReportV2PdfSignature(record, fake(true))).toBe('-roachv2a-px');
+    // lineage lookup fails → FAILED key (render fails closed with the warning line)
+    expect(await cockroachReportV2PdfSignature(record, fake(true))).toBe('-roachv2a-pf');
+    // a valid no-lineage result keys separately from a failure: different copy, different key
+    tables.scheduled_services = tables.scheduled_services.map((r) => (r.id === 'sch-2' ? { id: 'sch-2' } : r));
+    expect(await cockroachReportV2PdfSignature(record, fake(false))).toBe('-roachv2a-pn');
   });
 
   it('frozen key: completedServiceKey first, else the snapshot\'s own serviceKey', () => {
