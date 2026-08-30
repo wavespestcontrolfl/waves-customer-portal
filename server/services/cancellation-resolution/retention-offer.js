@@ -58,7 +58,9 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
   if (facts.openComplaint) blockers.push('open_complaint');
   if (facts.openCallbackLanes && facts.openCallbackLanes.length) blockers.push('open_callback');
   if (facts.prepay) blockers.push('annual_prepay');
-  if (facts.billingMode && facts.billingMode !== 'monthly_membership' && facts.billingMode !== 'per_application') {
+  // Exact lane membership — NULL/unclassified (the legacy cohort) fails
+  // closed: money never rides a lane we cannot prove is recurring.
+  if (facts.billingMode !== 'monthly_membership' && facts.billingMode !== 'per_application') {
     blockers.push('billing_lane_not_recurring');
   }
   const floor = cooldownFloor(now);

@@ -550,21 +550,21 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
     logger.warn(`[plan-rate-ledger] advisory sync failed for customer ${customerId} (${source}): ${syncErr.message}`);
   }
   if (MANUAL_RATE_SOURCES.has(source)) {
-    // Fire-and-forget on the base handle, NOT the caller's trx: a failed
-    // audit insert inside a Postgres transaction aborts it even when JS
-    // catches, and this secondary record must never fail an admin edit.
-    try {
-      const { recordAuditEvent } = require('./audit-log');
-      await recordAuditEvent({
-        actor_type: 'system',
-        action: MANUAL_RATE_AUDIT_ACTION,
-        resource_type: 'customer',
-        resource_id: customerId,
-        metadata: { source, monthly_rate: rate == null ? null : Number(rate) },
-      });
-    } catch (auditErr) {
-      logger.warn(`[plan-rate-ledger] manual-rate audit write failed for ${customerId}: ${auditErr.message}`);
-    }
+    // Joined to the CALLER's handle (usually the edit's open transaction):
+    // a rolled-back rate edit must not leave a cooldown-blocking audit
+    // event, and a committed edit must not lose its evidence. On Postgres a
+    // failed insert poisons the enclosing transaction regardless of JS
+    // catching, so the effective semantics are atomic in both directions —
+    // audit and edit commit or fail together.
+    const { recordAuditEvent } = require('./audit-log');
+    await recordAuditEvent({
+      actor_type: 'system',
+      action: MANUAL_RATE_AUDIT_ACTION,
+      resource_type: 'customer',
+      resource_id: customerId,
+      metadata: { source, monthly_rate: rate == null ? null : Number(rate) },
+      trx: database,
+    });
   }
 }
 
