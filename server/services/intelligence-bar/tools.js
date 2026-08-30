@@ -1640,8 +1640,9 @@ function parseTimeWindowStart(timeWindow) {
 // Recency resolver for "the customer we just finished": completed visits,
 // newest first. The close-out moment is completion EVIDENCE only, in
 // preference order: the completed transition in job_status_history
-// (transitionJobStatus inserts it in the completion trx) → the legacy
-// service_status_log completed row → ss.completed_at. Never ss.updated_at
+// (transitionJobStatus inserts it in the completion trx; legacy
+// service_status_log evidence was migrated into it and that table is
+// retired) → ss.completed_at. Never ss.updated_at
 // (touched by unrelated edits — an old visit would outrank the actual
 // latest completion) and never completed_at first (the tracker can
 // backdate it to an older service DAY, see admin-dispatch
@@ -1650,8 +1651,6 @@ function parseTimeWindowStart(timeWindow) {
 const CLOSED_OUT_AT_SQL = `COALESCE(
   (SELECT MAX(jsh.transitioned_at) FROM job_status_history jsh
     WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
-  (SELECT MAX(ssl.created_at) FROM service_status_log ssl
-    WHERE ssl.scheduled_service_id = ss.id AND ssl.status = 'completed'),
   ss.completed_at)`;
 
 async function getRecentCompletions(input = {}) {
