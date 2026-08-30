@@ -208,7 +208,7 @@ function buildHelp({ prepChips, species, baitRecorded = false }) {
 function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachVisits = null, laterCompleted = 0 }) {
   // Position UNKNOWN (lineage lookup failed → fail closed, codex P1): no
   // treatment number, no total, never "complete".
-  if (treatmentNumber == null) return { treatmentNumber: null, treatmentsTotal: null, complete: false, laterCompleted: 0 };
+  if (treatmentNumber == null) return { treatmentNumber: null, treatmentsTotal: null, complete: false, laterCompleted: 0, scheduledAhead: Math.max(0, Number(upcomingRoachVisits) || 0) };
   const number = Math.max(1, Number(treatmentNumber) || 1);
   const later = Math.max(0, Number(laterCompleted) || 0);
   const packageTotal = PACKAGE_TREATMENTS_BY_KEY[String(serviceKey || '')] || null;
@@ -226,7 +226,7 @@ function resolveProgram({ serviceKey = null, treatmentNumber = 1, upcomingRoachV
   if (total != null && total < number + later + scheduled) total = number + later + scheduled;
   // "complete" describes THIS treatment: it is the program's last one.
   const complete = total != null ? number >= total && scheduled === 0 : false;
-  return { treatmentNumber: number, treatmentsTotal: total, complete, laterCompleted: later };
+  return { treatmentNumber: number, treatmentsTotal: total, complete, laterCompleted: later, scheduledAhead: scheduled };
 }
 
 function programTitle(program) {
@@ -286,9 +286,13 @@ function betweenVisitsCopy({ german, large, rw }) {
 // booked (the date line is authoritative), or a later treatment has since
 // happened (codex P2 #3613 r4).
 const FOLLOWUP_STEP_RE = /follow-?up/i;
+// `scheduledAhead` (the resolved same-program count) covers pdf/static
+// renders, where the date itself is withheld but a booked treatment still
+// makes a "10–14 days" chip stale (codex P2 #3613 r5).
 function nextStepFits({ nextStep, program, nextVisit, laterCompleted = 0 }) {
   if (!nextStep) return null;
-  if (FOLLOWUP_STEP_RE.test(nextStep) && (program.complete || nextVisit || laterCompleted > 0)) return null;
+  const scheduledAhead = Math.max(0, Number(program?.scheduledAhead) || 0);
+  if (FOLLOWUP_STEP_RE.test(nextStep) && (program.complete || nextVisit || laterCompleted > 0 || scheduledAhead > 0)) return null;
   return nextStep;
 }
 
@@ -582,30 +586,50 @@ function attachCockroachReportV2(data, service = {}) {
  * true when the lookup itself errored — callers FAIL CLOSED on that
  * (codex P1 #3613): no program position, no calendar claims.
  */
+const LINEAGE_COLUMNS = ['id', 'source_estimate_id', 'followup_source_service_id', 'recurring_parent_id', 'recurring_ongoing'];
+
 async function cockroachProgramLineage(service = {}, knex) {
   const selfId = service.scheduled_service_id ? String(service.scheduled_service_id) : null;
   let estimateId = null;
   let sourceId = null;
+  // Finite-plan chain (codex P1 #3613 r5 — the representation
+  // report-followup-appointment.js documents and matches): a two- or
+  // three-visit package booked up front chains its visits through
+  // recurring_parent_id with recurring_ongoing === false on BOTH ends.
+  // Open-ended series use the very same chaining, so bare linkage is never
+  // enough; an unknown ongoing flag fails closed, exactly as there.
+  let finitePlan = false;
+  let chainParentId = null;
   let failed = false;
   if (selfId && knex) {
     try {
-      const row = await knex('scheduled_services').where('id', selfId).first('source_estimate_id', 'followup_source_service_id');
+      const row = await knex('scheduled_services').where('id', selfId).first(...LINEAGE_COLUMNS);
       estimateId = row?.source_estimate_id ? String(row.source_estimate_id) : null;
       sourceId = row?.followup_source_service_id ? String(row.followup_source_service_id) : null;
+      finitePlan = row?.recurring_ongoing === false;
+      chainParentId = row?.recurring_parent_id ? String(row.recurring_parent_id) : null;
     } catch { failed = true; }
   }
-  const known = Boolean(estimateId || sourceId);
+  const known = Boolean(estimateId || sourceId || (finitePlan && (chainParentId || selfId)));
   const matches = (cand = {}) => {
     const candId = cand?.id ? String(cand.id) : null;
     const candEstimate = cand?.source_estimate_id ? String(cand.source_estimate_id) : null;
     const candSource = cand?.followup_source_service_id ? String(cand.followup_source_service_id) : null;
+    const candParent = cand?.recurring_parent_id ? String(cand.recurring_parent_id) : null;
     if (estimateId && candEstimate && candEstimate === estimateId) return true;
     // an included follow-up of THIS visit, or this visit's own source / siblings
     if (selfId && candSource && candSource === selfId) return true;
     if (sourceId && (candId === sourceId || candSource === sourceId)) return true;
+    // finite-plan chain: children of this visit, this visit's parent, or
+    // siblings under the same parent — only when the candidate is itself
+    // flagged finite (an open-ended child inherits recurring_ongoing=true)
+    if (finitePlan && cand?.recurring_ongoing === false) {
+      if (selfId && candParent === selfId) return true;
+      if (chainParentId && (candId === chainParentId || candParent === chainParentId)) return true;
+    }
     return false;
   };
-  return { known, failed, estimateId, sourceId, selfId, matches };
+  return { known, failed, estimateId, sourceId, selfId, finitePlan, chainParentId, matches };
 }
 
 const PROGRAM_WINDOW_DAYS = 120;
@@ -665,7 +689,7 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
     if (lineage.known && scheduledIds.length) {
       const scheduledRows = await knex('scheduled_services')
         .whereIn('id', scheduledIds)
-        .select('id', 'source_estimate_id', 'followup_source_service_id');
+        .select(...LINEAGE_COLUMNS);
       for (const row of (Array.isArray(scheduledRows) ? scheduledRows : [])) scheduledById.set(String(row.id), row);
     }
     const sameProgramRecord = (row) => {
@@ -692,7 +716,7 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
       if (laterIds.length) {
         const laterSched = await knex('scheduled_services')
           .whereIn('id', laterIds)
-          .select('id', 'source_estimate_id', 'followup_source_service_id');
+          .select(...LINEAGE_COLUMNS);
         for (const row of (Array.isArray(laterSched) ? laterSched : [])) scheduledById.set(String(row.id), row);
       }
       laterCompleted = (Array.isArray(laterList) ? laterList : []).filter(sameProgramRecord).length;

@@ -781,6 +781,24 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-p2u1l1');
   });
 
+  test('a finite-plan chain (recurring_parent_id + recurring_ongoing=false) is program lineage; an open-ended child under the same parent is not', async () => {
+    const fx = fixtures();
+    fx.scheduled_services = [
+      // documented visit = chained child (visit 2 of 3) of a finite plan, no estimate on it
+      { id: 'scheduled-current', customer_id: 'customer-1', scheduled_date: '2026-05-16', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', recurring_parent_id: 'scheduled-parent', recurring_ongoing: false },
+      { id: 'scheduled-parent', customer_id: 'customer-1', scheduled_date: '2026-05-02', status: 'completed', service_type: 'German Roach Cleanout', service_id: 'svc-gr', recurring_ongoing: false },
+      { id: 'scheduled-sib', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'German Roach Cleanout', window_start: '10:00:00', service_id: 'svc-gr', recurring_parent_id: 'scheduled-parent', recurring_ongoing: false },
+      { id: 'scheduled-ongoing', customer_id: 'customer-1', scheduled_date: '2999-01-03', status: 'confirmed', service_type: 'German Roach Cleanout', window_start: '09:00:00', service_id: 'svc-gr', recurring_parent_id: 'scheduled-parent', recurring_ongoing: true },
+    ];
+    fx.service_records = [
+      { id: 'rec-parent', customer_id: 'customer-1', status: 'completed', service_date: '2026-05-02', service_type: 'German Roach Cleanout', scheduled_service_id: 'scheduled-parent', service_data: JSON.stringify({ completedServiceKey: 'german_roach' }) },
+    ];
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-chain', makeKnex(fx), LIVE_V2);
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: 2, laterCompleted: 0 });
+    expect(data.cockroachUpcomingRoachVisits).toBe(1);
+    expect(data.cockroachNextTreatmentVisit?.scheduledDate).toBe('2999-01-05');
+  });
+
   test('gate off → no program fields at all', async () => {
     process.env.COCKROACH_REPORT_V2 = 'false';
     const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-off', makeKnex(fixtures()), LIVE_V2);
