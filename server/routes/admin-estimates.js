@@ -1631,6 +1631,19 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           published = true;
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+            // The customer still SAW this sibling's quote — the public flow
+            // deliberately exposes and accepts siblings mid-'sending', and
+            // acceptance sets price_locked_at which zero-rows the guarded
+            // update above. Snapshot the terminal row too (GH codex P2).
+            try {
+              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              const terminalSibling = await db('estimates').where({ id: sibling.id }).first();
+              if (terminalSibling) {
+                await saveEstimatePricingAuditSnapshot(terminalSibling, { trigger: 'group_send', sendMethod });
+              }
+            } catch (auditErr) {
+              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (state stands): ${auditErr.message}`);
+            }
           } else {
             // Send-time pricing snapshot for the SIBLING too (estimator
             // audit M4): only the anchor wrote one, so grouped properties

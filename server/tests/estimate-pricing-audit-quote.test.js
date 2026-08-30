@@ -131,6 +131,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       selectedServices: ['pest_control', 'lawn_care'],
       inputs: null,
       services: null,
+      priorQualifyingServices: null,
     });
   });
 
@@ -157,6 +158,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         setupFeeQuote: { amount: 0, waived: true, reason: 'existing_member' },
         services: { pestControl: { frequencyKey: 'quarterly' }, mosquito: true },
         engineInput: { homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } },
+        priorQualifyingServices: [{ service: 'pest_control', mode: 'recurring' }],
         engineResult: {
           waveGuard: { tier: 'silver', discount: 0.1 },
           summary: { waveGuardSavings: 114 },
@@ -175,6 +177,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.request.services).toEqual({ pestControl: { frequencyKey: 'quarterly' }, mosquito: true });
     // The wizard's normalized, actually-priced input wins the inputs slot.
     expect(audit.quote.request.inputs).toEqual({ homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } });
+    // The prior-service tier basis freezes verbatim.
+    expect(audit.quote.request.priorQualifyingServices).toEqual([{ service: 'pest_control', mode: 'recurring' }]);
   });
 
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
@@ -242,9 +246,14 @@ describe('coverage: every delivery path snapshots', () => {
   const path = require('path');
   test('group-sibling publication saves a group_send snapshot fail-soft', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/admin-estimates.js'), 'utf8');
-    const idx = src.indexOf("trigger: 'group_send'");
-    expect(idx).toBeGreaterThan(0);
-    expect(src.slice(idx - 900, idx + 400)).toMatch(/pricing audit snapshot failed \(send stands\)/);
+    // TWO call sites: the accepted-mid-publication branch (state stands)
+    // and the normal published branch (send stands) — both fail-soft.
+    const first = src.indexOf("trigger: 'group_send'");
+    const second = src.indexOf("trigger: 'group_send'", first + 1);
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBeGreaterThan(first);
+    expect(src.slice(first - 1200, second + 400)).toMatch(/pricing audit snapshot failed \(state stands\)/);
+    expect(src.slice(first - 1200, second + 400)).toMatch(/pricing audit snapshot failed \(send stands\)/);
   });
   test('click-mint delivery saves a cta_mint snapshot after commit, fail-soft', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');

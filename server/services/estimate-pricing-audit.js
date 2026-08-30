@@ -309,6 +309,10 @@ function quoteProvenanceFrom(estimate, data, result) {
       // Quote-wizard rows keep their price-bearing selection at top-level
       // estimate_data.services with none of the above (GH codex P2).
       services: data?.services ?? null,
+      // Existing-customer / click-mint quotes derive their combined
+      // WaveGuard tier from this top-level list — the exact prior-service
+      // basis of the recorded discount (GH codex P2).
+      priorQualifyingServices: data?.priorQualifyingServices ?? null,
     },
   };
 }
