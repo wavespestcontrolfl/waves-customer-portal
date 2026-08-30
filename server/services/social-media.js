@@ -1694,7 +1694,9 @@ async function postToGBP(locationId, summary, link, imageUrl, opts = {}) {
       locationId
     );
     logger.info(`[social] GBP post created for ${loc.name}`);
-    return { platform: 'gbp', location: locationId, success: true, postId: result.name };
+    // imageUrl only when media was attached — the text-only retry in
+    // publishToAll passes null and must read as "no image shipped".
+    return { platform: 'gbp', location: locationId, success: true, postId: result.name, ...(mediaUrl ? { imageUrl: mediaUrl } : {}) };
   } catch (err) {
     logger.error(`[social] GBP post failed for ${loc.name}: ${err.message}`);
     return { platform: 'gbp', location: locationId, success: false, error: err.message };

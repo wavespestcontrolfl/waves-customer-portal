@@ -655,3 +655,35 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
     expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200 }))).toBe(true);
   });
 });
+
+describe('studio link relevance + legacy-card alert predicates', () => {
+  test('rowMatchesIntentKeywords matches pest names as word prefixes, not bare substrings', () => {
+    const kws = Studio.serviceIntentKeywords({ topic: 'ants and roaches after heavy rain', service: 'general pest' });
+    expect(kws).toEqual(expect.arrayContaining(['ant', 'ants', 'roach']));
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Your Parrish Garage Door Seal Is Letting In More Roaches' }, kws)).toBe(true);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Ant-proofing a Sarasota kitchen' }, kws)).toBe(true);
+    // The wrong-topic regression: 'important', 'plant', 'giant' must not count as "ant".
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Important plant care for giant palms' }, kws)).toBe(false);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'anything' }, [])).toBe(false);
+  });
+
+  test('legacyCardShipped is true only for a successful platform result that retained a card URL', () => {
+    const card = 'https://cdn.example.com/social-media/parrish-card.jpg';
+    const gbpCard = 'https://cdn.example.com/social-media/parrish-card-gbp.jpg';
+    const cards = new Set([card, gbpCard]);
+    // Facebook posted the card photo.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], cards, card)).toBe(true);
+    // GBP image rejected → text-only retry succeeded WITHOUT imageUrl: no card shipped.
+    expect(Studio.legacyCardShipped([{ platform: 'gbp', success: true }], cards, card)).toBe(false);
+    // LinkedIn thumbnail upload missed → success without imageUrl: no card shipped.
+    expect(Studio.legacyCardShipped([{ platform: 'linkedin', success: true }], cards, card)).toBe(false);
+    // Instagram has no text fallback: success with the shared card = card shipped…
+    expect(Studio.legacyCardShipped([{ platform: 'instagram', success: true }], cards, card)).toBe(true);
+    // …but not when the shared image was a creative scene and only GBP had a card that failed.
+    expect(Studio.legacyCardShipped([{ platform: 'instagram', success: true }, { platform: 'gbp', success: false }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(false);
+    // Unrelated Meta success + GBP card success: true via the GBP imageUrl.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: 'https://cdn.example.com/scene.jpg' }, { platform: 'gbp', success: true, imageUrl: gbpCard }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(true);
+    // Nothing rendered → never alerts.
+    expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], new Set(), card)).toBe(false);
+  });
+});

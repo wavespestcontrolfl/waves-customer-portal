@@ -673,22 +673,23 @@ async function getCampaignContext({ topic, city, service }) {
       // relevant posts ahead of city-only ones (stable sort keeps recency
       // within each tier) to avoid cross-service copy/links.
       const intentKeywords = serviceIntentKeywords({ topic, service });
-      const matchesIntent = (row) => {
-        if (!intentKeywords.length) return false;
-        const text = [row.title, row.keyword, row.tag, row.meta_description]
-          .map((v) => String(v || '').toLowerCase()).join(' ');
-        return intentKeywords.some((kw) => text.includes(kw));
-      };
+      const matchesIntent = (row) => rowMatchesIntentKeywords(row, intentKeywords);
       const ranked = rows
         .filter((row) => contentRowMatchesCity(row, location.city))
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
         .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index));
-      context.content = ranked.map((entry) => entry.row).slice(0, 8);
       // The link is chosen by topic/service, never by city alone: a city-only
       // match sent a roach headline to the Venice office-opening (termite)
       // post on 2026-08-27. No relevant live page → no link (the post still
       // goes out; a wrong or dead link is worse than none).
       context.linkPage = await firstLivePage(ranked.filter((entry) => entry.relevant).map((entry) => entry.row));
+      // sourceFacts reads content[0]: the page we link, title and illustrate
+      // must also be the page the caption quotes — so the probed row leads,
+      // ahead of any newer relevant row whose URL failed the probe.
+      const ordered = ranked.map((entry) => entry.row);
+      context.content = (context.linkPage
+        ? [context.linkPage, ...ordered.filter((row) => row !== context.linkPage)]
+        : ordered).slice(0, 8);
     } catch {
       context.content = [];
       context.linkPage = null;
@@ -749,6 +750,29 @@ async function getCampaignContext({ topic, city, service }) {
   return context;
 }
 
+// Intent keywords match as WORD PREFIXES ('ant' → ants, ant-proof; never
+// plant / important / giant). Short pest names as bare substrings picked
+// unrelated city-matched rows as the link page.
+function rowMatchesIntentKeywords(row = {}, keywords = []) {
+  if (!keywords.length) return false;
+  const text = [row.title, row.keyword, row.tag, row.meta_description]
+    .map((v) => String(v || '').toLowerCase()).join(' ');
+  return keywords.some((kw) => new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(text));
+}
+
+// Did a legacy brand card actually reach a network? True only for a
+// successful platform result that retained one of the rendered card URLs:
+// Facebook/GBP/LinkedIn report `imageUrl` when their media attached (text-only
+// fallbacks and thumbnail misses carry none); Instagram has no text fallback,
+// so its success means the shared image it was given went out.
+function legacyCardShipped(platformResults = [], cardUrls = new Set(), sharedImageUrl = null) {
+  if (!cardUrls.size) return false;
+  return platformResults.some((p) => p?.success && (
+    (p.imageUrl && cardUrls.has(p.imageUrl))
+    || (p.platform === 'instagram' && sharedImageUrl && cardUrls.has(sharedImageUrl))
+  ));
+}
+
 // A row's public URL is ONLY its pages-poll-stamped astro_live_url — never a
 // URL rebuilt from `slug` (flat, category-less, and stale for legacy rows).
 // Used verbatim: the hub's canonical form keeps the trailing slash, which
@@ -771,7 +795,8 @@ async function linkIsLive(url, fetchImpl = globalThis.fetch) {
     const parsed = new URL(String(url || ''));
     if (!HUB_HOST.test(parsed.hostname)) return false;
     const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000) });
-    return !!res?.ok;
+    // Exactly 200 — `ok` would also accept a 204 blank route as "live".
+    return res?.status === 200;
   } catch {
     return false;
   }
@@ -1975,7 +2000,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       ? await heroImageForLink(finalPreview.suggestedLink)
       : null;
     let gbpImageBranded = true;
-    let usedLegacyCard = false;
+    const legacyCardUrls = new Set();
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
       if (wantsGbp) {
@@ -1984,8 +2009,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         } else {
           gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
           gbpImageBranded = !campaignHeroUrl;
-          // A legacy GBP card actually rendered (not a null/text-only miss).
-          usedLegacyCard = !campaignHeroUrl && !!gbpImageUrl;
+          if (!campaignHeroUrl && gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
         }
       }
       finalPreview = previewWithVisual(preview, {
@@ -2044,9 +2068,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         variant: 'campaign',
         templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
       });
-      // Only when a legacy card actually rendered and is going to a channel —
-      // a null render publishes text-only, which is not a card fallback.
-      usedLegacyCard = !campaignHeroUrl && !!(imageUrl || gbpImageUrl);
+      if (!campaignHeroUrl) {
+        if (imageUrl) legacyCardUrls.add(imageUrl);
+        if (gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
+      }
     }
 
     if (effectiveMode === 'draft') {
@@ -2247,7 +2272,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // durable published stamp above, so a slow SendGrid call can never sit
     // between a live post and its record. Draft runs park in the approval
     // queue where the admin sees the card; they never reach here.
-    if (usedLegacyCard && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+    if (!SOCIAL_FLAGS.dryRun && legacyCardShipped(publishResult.platforms, legacyCardUrls, imageUrl)) {
       await alertLegacyCardFallback(plan, {
         link: finalPreview.suggestedLink,
         creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
@@ -3379,6 +3404,8 @@ module.exports = {
   contentRowMatchesCity,
   liveUrlForRow,
   linkIsLive,
+  rowMatchesIntentKeywords,
+  legacyCardShipped,
   firstLivePage,
   suggestedLink,
   suggestedLinkTitle,
