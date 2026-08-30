@@ -598,7 +598,7 @@ describe('unit-type parcel-scale lot verify flag', () => {
     }
   });
 
-  test('a lot the merge already field-flagged gets ONE flag (the generic evidence loop), not two', () => {
+  test('a lot the merge already field-flagged gets ONE flag — the SCOPED condo flag wins (codex P0 r9)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '8 Example Condo Way, Testville, FL 00000',
       propertyType: 'Condominium',
@@ -607,8 +607,12 @@ describe('unit-type parcel-scale lot verify flag', () => {
       _source: 'county',
       _fieldEvidence: { lotSize: { value: 93940, sourceType: 'county', fieldVerify: true } },
     }, null, null);
-    expect(flags.filter((f) => f.field === 'lotSize')).toHaveLength(1);
-    expect(flags.find((f) => f.field === 'lotSize').reason).not.toMatch(/parcel, not one unit/i);
+    const lotFlags = flags.filter((f) => f.field === 'lotSize');
+    expect(lotFlags).toHaveLength(1);
+    // The wrong-scope verdict must survive conflicting lot evidence — a
+    // generic flag reads as number-only downstream and keeps forwarding
+    // the shared-development turf.
+    expect(lotFlags[0].scope).toBe('unit_parcel');
   });
 
   test('aggregated multifamily association record → no unit-lot flag (whole-property workflow)', () => {

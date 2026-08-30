@@ -3232,9 +3232,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // floor is 2: a condo UNIT's own folio attests exactly 1, the shape
   // this flag exists to catch (codex P1 r3). Counts come from county GIS
   // (_parcel.residentialUnits) or the TRUSTED record's own unitCount
-  // (commercialSignalRecord already stripped untrusted web counts). A lot
-  // the merge already field-flagged is left to the generic evidence loop
-  // below — two lotSize flags double-count in the win/loss slices (P2).
+  // (commercialSignalRecord already stripped untrusted web counts). On a
+  // lot the merge ALSO field-flagged, THIS scoped flag wins and the
+  // generic evidence loop below skips lotSize (GH codex P0: the wrong-
+  // scope verdict must survive — a generic flag reads as number-only and
+  // keeps forwarding shared-development turf; and two lotSize flags
+  // double-count in the win/loss slices).
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
   const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
   // trustedUnitCount, not the raw record count: commercialSignalRecord
@@ -3266,7 +3269,6 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   const unitLotAssociationText = /hoa\s*common|common\s*(area|element|propert)|association/i;
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
-    && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
     && !smallSharedParcel
     && !unitLotAssociationText.test(String(unitLotSignalRc?.propertyType || ''))
@@ -3332,6 +3334,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 
   for (const [field, evidence] of Object.entries(rc?._fieldEvidence || {})) {
     if (!evidence?.fieldVerify) continue;
+    // The SCOPED condo unit-lot flag above outranks the generic lot-evidence
+    // flag — the wrong-scope verdict must survive (public-quote treats a
+    // generic lot flag as number-only and keeps forwarding turf), and two
+    // lotSize flags double-count in the win/loss slices (GH codex P0+P2).
+    if (field === 'lotSize' && flags.some((f) => f.field === 'lotSize' && f.scope === 'unit_parcel')) continue;
     let reason;
     if (field === 'propertyType' && evidence.sourceType === 'satellite') {
       const attach = String(ai?.structureAttachment || '').toUpperCase();
