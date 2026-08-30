@@ -21,7 +21,6 @@ const COMPLAINT_CATEGORIES = ['pest_issue', 'lawn_concern', 'billing'];
 // Nonterminal = anything not in admin-requests' TERMINAL_STATUSES —
 // 'acknowledged'/'scheduled' complaints are still open complaints.
 const TERMINAL_REQUEST_STATUSES = ['resolved', 'closed', 'cancelled'];
-const COMPLAINT_KEYWORDS = /\b(late|missed|no[- ]show|didn'?t show|never (came|showed)|gate|rushed|skipped|still seeing|still have|not (working|better)|damage|broke)\b/i;
 const DAY_MS = 86400000;
 
 function daysAgo(n, now) {
@@ -170,8 +169,8 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   }
 
   const [
-    visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
-    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, paidInvoiceCount, livePrepayTerm,
+    visitCounts, paidVisitCounts, visits12mo, callbacks12mo, callbackRows12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
+    findings, earliestFinding, complaintRequest, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, paidInvoiceCount, paidPaymentsCount, livePrepayTerm,
   ] = await Promise.all([
     leg('visitCounts', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -200,6 +199,13 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .where({ customer_id: customerId, status: 'completed', is_callback: true })
       .where('scheduled_date', '>=', dateOnly(since12mo))
       .count({ n: '*' }).first(), null),
+    // Lane-scoped callback counts (pest vs lawn) — the "N callbacks for the
+    // same problem" card must never count the OTHER lane's callbacks.
+    leg('callbackRows12mo', () => dbh('scheduled_services as s')
+      .leftJoin('services as sv', 's.service_id', 'sv.id')
+      .where({ 's.customer_id': customerId, 's.status': 'completed', 's.is_callback': true })
+      .where('s.scheduled_date', '>=', dateOnly(since12mo))
+      .select('sv.service_key', 's.service_type'), []),
     leg('reschedules12mo', () => dbh('job_status_history as h')
       .join('scheduled_services as s', 's.id', 'h.job_id')
       .where('s.customer_id', customerId)
@@ -214,17 +220,16 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .where('created_at', '>=', since12mo)
       .where('discount_label', 'ilike', '%WaveGuard%')
       .sum({ n: 'discount_amount' }).first(), null),
-    leg('pastDue', () => dbh('invoices')
-      .where({ customer_id: customerId })
-      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-      .whereNull('paid_at') // an invoice paid_at-stamped is settled even if status lags
-      // Payer-owned debt (builder/HOA/property manager) is not the
-      // customer's — it must not block their retention offer.
-      .whereNull('payer_id')
-      .whereNotNull('due_date')
-      .where('due_date', '<', today)
-      .whereRaw('COALESCE(total, 0) - COALESCE(credit_applied, 0) > 0')
-      .first('id'), 'error'),
+    // Past-due via the payer-aware open-balance AUTHORITY (open-balance.js):
+    // payer-billed rows — including a payer assigned AFTER minting, which
+    // lives on the visit/customer while the invoice stays payer-null — are
+    // the third party's debt and never block the homeowner's offer. Rows
+    // whose payer resolve fails are DROPPED by the authority (fail closed).
+    leg('pastDue', async () => {
+      const { openBalanceInvoices } = require('../open-balance');
+      const rows = await openBalanceInvoices(customerId, { database: dbh });
+      return rows.find((r) => !r.paid_at && r.due_date && String(dateOnly(r.due_date)) < today) || null;
+    }, 'error'),
     leg('failedPayment', () => dbh('payments')
       .where({ customer_id: customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
@@ -255,16 +260,8 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .whereIn('category', COMPLAINT_CATEGORIES)
       .whereNotIn('status', TERMINAL_REQUEST_STATUSES)
       .where('created_at', '>=', daysAgo(60, now))
-      .first('id'), 'error'),
-    leg('lastComplaint', () => dbh('messages as m')
-      .join('conversations as c', 'c.id', 'm.conversation_id')
-      .where('c.customer_id', customerId)
-      .where('m.direction', 'inbound')
-      .where('m.channel', 'sms')
-      .where('m.created_at', '>=', daysAgo(60, now))
-      .orderBy('m.created_at', 'desc')
-      .limit(20)
-      .select('m.body', 'm.created_at'), []),
+      .orderBy('created_at', 'desc')
+      .first('id', 'description', 'subject', 'created_at'), 'error'),
     leg('priorOffer', () => dbh('retention_offers')
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
@@ -334,13 +331,17 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // customers.billing_mode scalar can be stale/legacy while a paid term
     // is live, and prepay CATEGORICALLY excludes the money offer. Money-
     // critical → a lookup failure fails closed (treated as prepay).
-    // Durable paid signal for the monthly lane: count of settled invoices
-    // (dues or otherwise). Fail closed to 0 — the money gate then blocks.
+    // Durable paid signals for the monthly lane: settled invoices AND
+    // successful payments-ledger rows (StripeService.chargeMonthly writes
+    // dues to payments, not invoices). Fail closed to 0 — the gate blocks.
     leg('paidInvoiceCount', () => dbh('invoices')
       .where({ customer_id: customerId })
       .where(function paidSignal() {
         this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
       })
+      .count({ n: '*' }).first(), null),
+    leg('paidPaymentsCount', () => dbh('payments')
+      .where({ customer_id: customerId, status: 'paid' })
       .count({ n: '*' }).first(), null),
     leg('livePrepayTerm', async () => {
       const { coveredTermsAsOf } = require('../annual-prepay-renewals');
@@ -366,7 +367,6 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   const lastFinding = toFinding(findingRows[0]);
   const firstFinding = toFinding(earliestRows[0] || null);
 
-  const complaintMsg = (Array.isArray(lastComplaint) ? lastComplaint : []).find((m) => COMPLAINT_KEYWORDS.test(String(m.body || '')));
 
   // Prepay verdict from BOTH the scalar and the live term authority; an
   // errored term lookup fails closed (blocks the offer).
@@ -392,8 +392,12 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   // paid-visit proxy is capped by the count of actually settled invoices
   // (≥4 paid dues cycles AND ≥4 completed visits to clear the money gate).
   // Every other lane requires visits directly tied to paid invoices.
+  // Dues can settle through either rail; the two counts can double-count a
+  // single payment (invoice + payments row), so take the LARGER rail, never
+  // the sum.
+  const settledCycles = Math.max(num(paidInvoiceCount, 'n'), num(paidPaymentsCount, 'n'));
   const completedPaidVisits = customer.billing_mode === 'monthly_membership'
-    ? Math.min(completedVisits, num(paidInvoiceCount, 'n'))
+    ? Math.min(completedVisits, settledCycles)
     : num(paidVisitCounts, 'n');
 
   return {
@@ -404,6 +408,17 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     completedPaidVisits,
     visits12mo: num(visits12mo, 'n'),
     callbacks12mo: num(callbacks12mo, 'n'),
+    callbacksByLane: (() => {
+      const { laneForCallbackRow } = require('../reservice-scheduler');
+      const byLane = { pest: 0, lawn: 0 };
+      for (const row of (Array.isArray(callbackRows12mo) ? callbackRows12mo : [])) {
+        try {
+          const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
+          if (byLane[lane] !== undefined) byLane[lane] += 1;
+        } catch { /* unknown lane rows count toward neither */ }
+      }
+      return byLane;
+    })(),
     reschedules12mo: num(reschedules12mo, 'n'),
     savings12mo: Math.round(num(savings12mo, 'n') * 100) / 100,
     accountCurrent,
@@ -412,8 +427,11 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     moneyFactsDegraded,
     lastFinding,
     firstFinding,
-    lastComplaint: complaintMsg
-      ? { date: dateOnly(complaintMsg.created_at), quote: String(complaintMsg.body).trim().slice(0, 140) }
+    // Only STRUCTURED complaint evidence is ever quoted back — a filed
+    // service request in the customer's own words, never a keyword-matched
+    // SMS ("Gate code is 1234" must not become an apology card).
+    lastComplaint: complaintRequest && complaintRequest !== 'error' && (complaintRequest.description || complaintRequest.subject)
+      ? { date: dateOnly(complaintRequest.created_at), quote: String(complaintRequest.description || complaintRequest.subject).trim().slice(0, 140) }
       : null,
     priorRetentionOfferAt: priorOfferAt,
     manualPriceOverrideAt: manualOverrideAt,
@@ -430,4 +448,4 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
   };
 }
 
-module.exports = { loadCancellationFacts, laneForServiceLine, COMPLAINT_KEYWORDS };
+module.exports = { loadCancellationFacts, laneForServiceLine };

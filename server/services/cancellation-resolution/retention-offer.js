@@ -106,11 +106,33 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
         .where({ cancellation_case_id: cancellationCaseId, customer_id: customerId })
         .first();
       if (existing) return existing;
-      const caseRow = await trx('cancellation_cases').where({ id: cancellationCaseId }).first('customer_id');
+      const caseRow = await trx('cancellation_cases')
+        .where({ id: cancellationCaseId })
+        .first('customer_id', 'reason_code', 'resolution_action');
       if (caseRow && caseRow.customer_id !== customerId) {
         const err = new Error('retention_offer_case_mismatch');
         err.code = 'retention_offer_case_mismatch';
         throw err;
+      }
+      // The DURABLE case authorizes the grant, not the caller: its recorded
+      // reason must be the money-eligible reason claimed, and when the case
+      // recorded a resolution action it must be a retention offer for this
+      // family. A caller cannot upgrade an 'away' case into a 'price' offer.
+      if (caseRow) {
+        if (caseRow.reason_code && caseRow.reason_code !== reasonCode) {
+          const err = new Error('retention_offer_case_reason_mismatch');
+          err.code = 'retention_offer_case_reason_mismatch';
+          throw err;
+        }
+        let action = caseRow.resolution_action;
+        if (typeof action === 'string') { try { action = JSON.parse(action); } catch { action = null; } }
+        if (action && typeof action === 'object' && Object.keys(action).length) {
+          if (action.type !== 'retention_offer' || (action.familyKey && action.familyKey !== familyKey)) {
+            const err = new Error('retention_offer_case_action_mismatch');
+            err.code = 'retention_offer_case_action_mismatch';
+            throw err;
+          }
+        }
       }
     }
     // Re-derive FULL eligibility from fresh facts under the advisory lock —

@@ -23,6 +23,7 @@ function baseFacts(overrides = {}) {
     completedPaidVisits: 10,
     visits12mo: 6,
     callbacks12mo: 1,
+    callbacksByLane: { pest: 0, lawn: 0 },
     reschedules12mo: 0,
     savings12mo: 184.5,
     accountCurrent: true,
@@ -190,8 +191,11 @@ describe('resolver — money rules', () => {
 
 describe('resolver — data-backed selection', () => {
   test('results_pest: 2+ callbacks → program change; finding → quoted finding; else generic fix', () => {
-    expect(resolveCancellation({ facts: baseFacts({ callbacks12mo: 3 }), reasonCode: 'results_pest' }).card.templateId)
+    expect(resolveCancellation({ facts: baseFacts({ callbacks12mo: 3, callbacksByLane: { pest: 3, lawn: 0 } }), reasonCode: 'results_pest' }).card.templateId)
       .toBe('results_pest_program_change');
+    // Lawn callbacks must never trigger the pest program-change promise.
+    expect(resolveCancellation({ facts: baseFacts({ callbacks12mo: 3, callbacksByLane: { pest: 0, lawn: 3 } }), reasonCode: 'results_pest' }).card.templateId)
+      .toBe('results_pest_fix');
     const withFinding = resolveCancellation({
       facts: baseFacts({ lastFinding: { text: 'Ant trailing at the kitchen slab', lane: 'pest' } }),
       reasonCode: 'results_pest',

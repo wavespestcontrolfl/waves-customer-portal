@@ -34,7 +34,13 @@
 
 const path = require('path');
 
-process.env.DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL || '';
+// FAIL CLOSED on the connection: without an explicit URL, pg can fall back
+// to the OS-user database — a mutating script must never guess its target.
+if (!process.env.DATABASE_URL && !process.env.DATABASE_PUBLIC_URL) {
+  console.error('[churn-residue-backfill] DATABASE_URL / DATABASE_PUBLIC_URL not set — aborting. Run via: railway run --service Postgres -- node ops/agents/churn-residue-backfill.js');
+  process.exit(1);
+}
+process.env.DATABASE_URL = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
 const db = require(path.join(__dirname, '..', '..', 'server', 'models', 'db'));
 
 const EXECUTE = process.argv.includes('--execute');
@@ -128,7 +134,38 @@ async function main() {
   for (const candidate of candidates) {
     if (!EXECUTE) {
       const live = await hasLiveState(knex, candidate.id);
-      console.log(`  ${candidate.id}: stage=${candidate.pipeline_stage} active=${candidate.active} tier=${candidate.waveguard_tier || '-'} rate=${candidate.monthly_rate || 0} lane=${candidate.billing_mode || '-'} → ${live ? 'SKIP (live state)' : 'WOULD WIND DOWN'}`);
+      if (live) {
+        console.log(`  ${candidate.id}: stage=${candidate.pipeline_stage} active=${candidate.active} → SKIP (live state)`);
+        continue;
+      }
+      // Dry-run prints EVERY planned mutation (ops/agents convention: the
+      // dry run shows exactly what --execute would change).
+      const [methods, retries, staleFlags, ledgerRows, uninvoiced] = await Promise.all([
+        knex('payment_methods').where({ customer_id: candidate.id, autopay_enabled: true }).count({ n: '*' }).first(),
+        knex('payments').where({ customer_id: candidate.id, status: 'failed' }).whereNull('superseded_by_payment_id').whereNotNull('next_retry_at').count({ n: '*' }).first(),
+        knex('scheduled_services').where({ customer_id: candidate.id, status: 'cancelled', recurring_ongoing: true }).count({ n: '*' }).first(),
+        hasLedger ? knex('customer_plan_rates').where({ customer_id: candidate.id }).count({ n: '*' }).first() : Promise.resolve({ n: 0 }),
+        candidate.billing_mode === 'per_application'
+          ? knex('scheduled_services as s').where('s.customer_id', candidate.id).where('s.status', 'completed')
+            .whereNotExists(function invoiced() { this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id'); })
+            .first('s.id')
+          : Promise.resolve(null),
+      ]);
+      const planned = [
+        candidate.active ? 'active→false' : null,
+        'autopay_enabled→false', 'next_charge_date→null',
+        candidate.waveguard_tier ? `waveguard_tier ${candidate.waveguard_tier}→null (+tier_source→null)` : null,
+        Number(candidate.monthly_rate) > 0 ? `monthly_rate $${Number(candidate.monthly_rate).toFixed(2)}→null${candidate.churn_mrr == null ? ' (churn_mrr snapshotted first)' : ''}` : null,
+        candidate.billing_mode === 'per_application'
+          ? (uninvoiced ? 'per_application lane RETAINED (completed uninvoiced visit)' : 'billing_mode+per_application_fee→null')
+          : null,
+        Number(methods && methods.n) > 0 ? `disable ${methods.n} payment method(s)` : null,
+        Number(retries && retries.n) > 0 ? `disarm ${retries.n} failed-payment retr${Number(retries.n) === 1 ? 'y' : 'ies'}` : null,
+        Number(staleFlags && staleFlags.n) > 0 ? `clear recurring_ongoing on ${staleFlags.n} cancelled row(s)` : null,
+        Number(ledgerRows && ledgerRows.n) > 0 ? `delete ${ledgerRows.n} plan-rate component(s)` : null,
+        'timeline note',
+      ].filter(Boolean);
+      console.log(`  ${candidate.id}: stage=${candidate.pipeline_stage} active=${candidate.active} → WOULD WIND DOWN:\n      - ${planned.join('\n      - ')}`);
       continue;
     }
 

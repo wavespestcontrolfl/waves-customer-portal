@@ -110,7 +110,9 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       if (!hasPest) break; // never promise a pest re-service on a lane the account does not own
       if (pestLane) break; // a free callback is already on the calendar
       candidates = [
-        facts.callbacks12mo >= 2 ? { id: 'results_pest_program_change', values: { callbacks: facts.callbacks12mo } } : null,
+        (facts.callbacksByLane && facts.callbacksByLane.pest >= 2)
+          ? { id: 'results_pest_program_change', values: { callbacks: facts.callbacksByLane.pest } }
+          : null,
         facts.lastFinding && facts.lastFinding.lane === 'pest'
           ? { id: 'results_pest_fix_finding', values: { finding: facts.lastFinding.text } }
           : null,
