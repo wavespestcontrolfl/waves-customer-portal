@@ -2121,8 +2121,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (!visit || String(visit.status) !== 'open') { repairOutcome = 'failed'; return; }
         const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).orderBy('id').forUpdate()
-          .select('id', 'scheduled_date', 'window_start', 'window_end', 'status');
+          .select('id', 'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id');
         if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) { repairOutcome = 'failed'; return; }
+        // ONE-STOP invariant before any repair (codex r48): a same-day
+        // partial window move can leave the moved primary and the stranded
+        // sibling on DISCONNECTED windows that both read as at-target by
+        // date alone — spanning them into one parent window would report a
+        // broken stop repaired. Same technician + connected windows, the
+        // grouping invariant everywhere else.
+        if (rows.length >= 2 && (
+          new Set(rows.map((r) => String(r.technician_id || ''))).size > 1
+          || !windowedMembersConnected(rows)
+        )) { repairOutcome = 'failed'; return; }
         // Live residue is derived from the STALE PARENT, not the plan
         // (codex r44): a same-day allowLive partial rewound the children
         // to 'confirmed' before this re-save, so plan.anyLive is false and

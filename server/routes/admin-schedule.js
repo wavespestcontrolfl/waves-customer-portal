@@ -1175,7 +1175,16 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: serviceId }, {
+      }, 'appointment_rescheduled', 'appointment_confirmation', {
+        scheduled_service_id: serviceId,
+        // ABA guard input (codex #3609 r48): the slot this notice quotes —
+        // the shared guard accepts either the row's own start or the
+        // grouped stop's canonical start, so visitMove.visitStart works.
+        rendered_slot_ms: (() => {
+          const at = parseETDateTime(`${dateStr}T${start || '08:00'}`);
+          return at && !Number.isNaN(at.getTime()) ? at.getTime() : undefined;
+        })(),
+      }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
