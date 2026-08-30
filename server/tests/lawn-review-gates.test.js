@@ -98,6 +98,44 @@ describe('low-confidence turf parks the lawn line', () => {
   });
 });
 
+describe('turf-derived add-ons inherit the review contract', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const BASE = { homeSqFt: 1800, lotSqFt: 8783, stories: 1 };
+
+  test('top dressing and plugging priced from lot-fallback turf park', () => {
+    const estimate = generateEstimate({
+      ...BASE,
+      services: { topDressing: { depth: 'eighth' }, plugging: { spacing: 12 } },
+    });
+    for (const service of ['top_dressing', 'plugging']) {
+      const line = estimate.lineItems.find((l) => l.service === service);
+      expect({ service, flagged: line?.requiresCustomQuote === true }).toEqual({ service, flagged: true });
+      expect(line.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
+    }
+  });
+
+  test('an explicitly entered add-on area stays exempt', () => {
+    const estimate = generateEstimate({
+      ...BASE,
+      services: { topDressing: { depth: 'eighth', lawnSqFt: 2000 }, plugging: { spacing: 12, area: 800 } },
+    });
+    for (const service of ['top_dressing', 'plugging']) {
+      const line = estimate.lineItems.find((l) => l.service === service);
+      expect({ service, flagged: line?.requiresCustomQuote === true }).toEqual({ service, flagged: false });
+    }
+  });
+
+  test('a vision turf estimate (MEDIUM, unflagged) does not park add-ons', () => {
+    const estimate = generateEstimate({
+      ...BASE,
+      estimatedTurfSf: 4500,
+      services: { topDressing: { depth: 'eighth' } },
+    });
+    const line = estimate.lineItems.find((l) => l.service === 'top_dressing');
+    expect(line?.requiresCustomQuote === true).toBe(false);
+  });
+});
+
 describe('lead automation consults estimate fieldVerify flags', () => {
   function lawnReadiness() {
     return evaluateLeadEstimateAutomationReadiness({
@@ -126,6 +164,10 @@ describe('lead automation consults estimate fieldVerify flags', () => {
     expect(draft.automation.generated).toBe(false);
     expect(draft.automation.fieldVerify).toContain('FIELD_VERIFY_TURF_SQFT');
     expect(draft.automation.quoteRequiredReason).toBeTruthy();
+    // The reviewer keeps the engine's calculated figures even though the
+    // customer-facing totals zero out (codex P2).
+    expect(draft.automation.provisionalTotals.monthly).toBeGreaterThan(0);
+    expect(draft.monthly).toBe(0);
   });
 
   test('a non-turf-priced draft (mosquito) still auto-generates', () => {
