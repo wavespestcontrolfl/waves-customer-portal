@@ -1687,6 +1687,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         oneTimeTotal: oneTimeTotal || 0,
         isOneTimeOnly,
         enriched: ep,
+        // The NORMALIZED input the engine actually priced (GH codex P1 on
+        // #3628): `enriched` is the raw lookup payload — clamped sizes,
+        // trusted-turf substitutions, normalized densities, and derived
+        // service options live only here. Frozen verbatim for the
+        // send-time pricing-audit provenance.
+        engineInput,
         quoteRequired,
         quoteRequiredReason,
         quoteRequiredService: manualQuoteLine?.service || null,

@@ -156,6 +156,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       estimate_data: {
         setupFeeQuote: { amount: 0, waived: true, reason: 'existing_member' },
         services: { pestControl: { frequencyKey: 'quarterly' }, mosquito: true },
+        engineInput: { homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } },
         engineResult: {
           waveGuard: { tier: 'silver', discount: 0.1 },
           summary: { waveGuardSavings: 114 },
@@ -166,6 +167,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.setupFee.setupFeeQuote).toEqual({ amount: 0, waived: true, reason: 'existing_member' });
     expect(audit.quote.discount).toMatchObject({ waveguardTier: 'silver', rate: 0.1, savingsAnnual: 114 });
     expect(audit.quote.request.services).toEqual({ pestControl: { frequencyKey: 'quarterly' }, mosquito: true });
+    // The wizard's normalized, actually-priced input wins the inputs slot.
+    expect(audit.quote.request.inputs).toEqual({ homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } });
   });
 
   test('markerless engineInputs (click-mint / v1 shape) still freeze the price-bearing property facts', async () => {

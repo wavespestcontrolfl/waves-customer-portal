@@ -282,7 +282,9 @@ function quoteProvenanceFrom(estimate, data, result) {
     request: {
       options: data?.engineRequest?.options ?? null,
       selectedServices: data?.engineRequest?.selectedServices ?? null,
-      inputs: data?.inputs ?? data?.engineInputs ?? null,
+      // engineInput (singular) is the quote wizard's normalized, actually-
+      // priced input — preferred over the raw shapes when present.
+      inputs: data?.engineInput ?? data?.inputs ?? data?.engineInputs ?? null,
       // Quote-wizard rows keep their price-bearing selection at top-level
       // estimate_data.services with none of the above (GH codex P2).
       services: data?.services ?? null,
