@@ -65,11 +65,25 @@ async function loadFamilies(customerId, today) {
   const {
     detectWaveGuardPlanKeys, serviceRowCountsTowardWaveGuard, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
+  // Mirrors hasCancellableWork's reach (cancellation-eligibility): an
+  // ongoing recurring series indicates its family regardless of the row's
+  // date, and 'rescheduled' rows are date-exempt rebook intents — an
+  // account that CAN cancel must never resolve with families=[] (that would
+  // suppress away/health/retention cards for exactly the plans being
+  // cancelled).
   const rows = await db('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
-    .where('s.scheduled_date', '>=', today)
-    .whereNotIn('s.status', ['cancelled', 'completed'])
+    .where(function familyEvidence() {
+      this.where('s.recurring_ongoing', true)
+        .orWhere(function upcoming() {
+          this.whereNotIn('s.status', ['cancelled', 'completed'])
+            .where(function dateOrRescheduled() {
+              this.where('s.scheduled_date', '>=', today).orWhere('s.status', 'rescheduled');
+            });
+        });
+    })
+    .whereNot('s.status', 'cancelled')
     .select('s.*', 'sv.service_key', 'sv.service_name');
   const keys = [];
   for (const row of rows) {
@@ -183,13 +197,14 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
       .first('granted_at'), 'error'),
-    // Latest manual/admin rate write: every non-estimate ledger source
-    // (scalar_write mirrors admin monthly_rate edits, admin_edit is the IB
-    // path). estimate_accept / legacy_scalar are system provenance, not a
-    // manual override.
+    // Latest manual/admin rate write — explicit allowlist of the sources a
+    // HUMAN drives (admin-customers edit/create, IB update tools). System
+    // provenance (estimate_accept, legacy_scalar, plan_sync,
+    // gate_off_divergence, unsliced_accept, grouped_accept, cancellation)
+    // must never trip the manual-override cooldown.
     leg('manualOverride', () => db('customer_plan_rates')
       .where({ customer_id: customerId })
-      .whereNotIn('source', ['estimate_accept', 'legacy_scalar'])
+      .whereIn('source', ['admin_edit', 'admin_create', 'ib_update', 'ib_bulk_update'])
       .orderBy('updated_at', 'desc')
       .first('updated_at'), 'error'),
     leg('shownCases', () => db('cancellation_cases')
