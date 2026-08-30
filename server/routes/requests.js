@@ -373,6 +373,21 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     let preChurnFacts = null;
     let serverResolution = null;
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
+      try {
+        caseSnapshot = await db('customers')
+          .where({ id: req.customer.id })
+          .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'pipeline_stage');
+      } catch (snapErr) {
+        logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
+      }
+      if (value.reasonCode) {
+        try {
+          const { loadCancellationFacts } = require('../services/cancellation-resolution/facts');
+          preChurnFacts = await loadCancellationFacts(req.customer.id);
+        } catch (factsErr) {
+          logger.warn(`Cancellation facts preload failed for ${req.customer.id}: ${factsErr.message}`);
+        }
+      }
       // Pure, I/O-free resolve from the preloaded pre-churn facts. The
       // moving address verdict is deliberately absent here (it needs the
       // paid external call, which must wait until after the billing
@@ -393,21 +408,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           });
         } catch (resErr) {
           logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
-        }
-      }
-      try {
-        caseSnapshot = await db('customers')
-          .where({ id: req.customer.id })
-          .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'pipeline_stage');
-      } catch (snapErr) {
-        logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
-      }
-      if (value.reasonCode) {
-        try {
-          const { loadCancellationFacts } = require('../services/cancellation-resolution/facts');
-          preChurnFacts = await loadCancellationFacts(req.customer.id);
-        } catch (factsErr) {
-          logger.warn(`Cancellation facts preload failed for ${req.customer.id}: ${factsErr.message}`);
         }
       }
     }
