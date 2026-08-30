@@ -4988,7 +4988,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // term, invoice, and payment are created by THIS transaction and the
       // converter would double-mint them; accept-side comms fire only from
       // the accept routes, never from a status change.
-      let freshEstimateUpdatedAt = null;
       if (linkEstimateId) {
         // The COMPLETE validation runs here, on the locked in-trx row — the
         // client's sourceEstimateId is only a hint, and any pre-transaction
@@ -5008,6 +5007,24 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .first();
         if (freshEstimate) {
           try {
+            // Engine-drafted rows: lock the linked lead and the CALL row
+            // (same accept/decline contract — staleCallLinkageReason with
+            // lockCallRow) and hold both locks through the claim, so a
+            // concurrent call reprocessing/correction can't begin after an
+            // unlocked read and find the estimate already terminal.
+            let freshData = freshEstimate.estimate_data;
+            if (typeof freshData === 'string') {
+              try { freshData = JSON.parse(freshData); } catch { freshData = null; }
+            }
+            if (freshData?.estimatorEngine?.callLogId) {
+              if (freshData?.lead_id && ['sid', 'stamp'].includes(freshData?.lead_linkage)) {
+                await trx('leads').where({ id: String(freshData.lead_id) }).forUpdate().first('id');
+              }
+              const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+              const staleLinkage = await staleCallLinkageReason(trx, freshData, { lockCallRow: true });
+              if (staleLinkage) throw new Error(`stale call linkage: ${staleLinkage}`);
+            }
+
             const linkedTermRows = await trx('annual_prepay_terms')
               .where({ customer_id: customer.id })
               .whereNotNull('source_estimate_id')
@@ -5029,16 +5046,15 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           }
         }
         if (!validated) linkEstimateId = null;
-        else freshEstimateUpdatedAt = freshEstimate.updated_at;
       }
       if (linkEstimateId) {
         const claimNow = trx.fn.now();
         const [claimed] = await trx('estimates')
           .where({ id: linkEstimateId, customer_id: customer.id })
-          // CAS on the locked read's revision: any concurrent reprice or
-          // correction that slipped in voids the claim instead of being
-          // overwritten with terminal accepted/LOCKED state.
-          .where('updated_at', freshEstimateUpdatedAt)
+          // No updated_at CAS: pg's millisecond Date vs Postgres microsecond
+          // timestamps makes exact equality silently miss, and the row is
+          // already held FOR UPDATE by the validation read in this same
+          // transaction — nothing can revise it between validation and here.
           // Archive/invalidation guards apply UNCONDITIONALLY — an archived
           // estimate without a call id must be just as unclaimable.
           .whereNull('archived_at')
