@@ -5011,15 +5011,18 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // term, invoice, and payment are created by THIS transaction and the
       // converter would double-mint them; accept-side comms fire only from
       // the accept routes, never from a status change.
+      let freshEstimateUpdatedAt = null;
       if (linkEstimateId) {
         // Re-validate ownership and live call linkage on the FRESH in-trx
-        // row: a concurrent customer relink or call-linkage correction since
-        // the pre-transaction check must drop the link, never attach another
-        // customer's (or a quarantined) estimate to this customer's paid
-        // term.
+        // row, under a row lock: a concurrent customer relink, archive, or
+        // call-linkage correction since the pre-transaction check must drop
+        // the link, never attach another customer's (or a quarantined)
+        // estimate to this customer's paid term.
         const freshEstimate = await trx('estimates')
           .where({ id: linkEstimateId, customer_id: customer.id })
-          .first('id', 'estimate_data');
+          .whereNull('archived_at')
+          .forUpdate()
+          .first('id', 'estimate_data', 'updated_at');
         let freshCallBlock = null;
         if (freshEstimate) {
           let freshData = freshEstimate.estimate_data;
@@ -5033,11 +5036,19 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           }
         }
         if (!freshEstimate || freshCallBlock) linkEstimateId = null;
+        else freshEstimateUpdatedAt = freshEstimate.updated_at;
       }
       if (linkEstimateId) {
         const claimNow = trx.fn.now();
         const [claimed] = await trx('estimates')
           .where({ id: linkEstimateId, customer_id: customer.id })
+          // CAS on the locked read's revision: any concurrent reprice or
+          // correction that slipped in voids the claim instead of being
+          // overwritten with terminal accepted/LOCKED state.
+          .where('updated_at', freshEstimateUpdatedAt)
+          // Archive/invalidation guards apply UNCONDITIONALLY — an archived
+          // estimate without a call id must be just as unclaimable.
+          .whereNull('archived_at')
           .whereIn('status', ['sent', 'viewed'])
           // A locked price means a prior accept already committed money.
           .whereNull('price_locked_at')
