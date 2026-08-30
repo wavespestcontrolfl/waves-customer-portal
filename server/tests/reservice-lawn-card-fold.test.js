@@ -49,7 +49,10 @@ const AI_REPORT = [
   '',
   'WHAT WE FOUND',
   '',
-  'The lawn is recovering, though weed and gray leaf spot pressure stayed active. Hold off on any irrigation for at least 48 hours so the product is not washed away.',
+  // Mirrors the production narrative shape: the irrigation instruction and
+  // the application reference share ONE sentence — sentence-scoped coverage
+  // (codex P1 r7) requires that to fold the matching recommendation row.
+  'The lawn is recovering, though weed and gray leaf spot pressure stayed active. Please stay off the grass until the application has fully dried, and hold off on any irrigation for at least 48 hours so the product isn’t washed away before it is absorbed.',
 ].join('\n');
 
 function lawnCallbackService(overrides = {}) {

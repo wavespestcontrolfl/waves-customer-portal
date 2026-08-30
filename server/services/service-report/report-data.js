@@ -4935,14 +4935,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   ]);
   const contentTokens = (text) => String(text || '')
     .toLowerCase()
+    .replace(/n['’]t\b/g, ' not')
     .replace(/\bhrs?\b/g, 'hours')
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter((w) => w && !RECOMMENDATION_STOPWORDS.has(w));
-  const recommendationCoveredByNarrative = (rec, narrative) => {
-    const recTokens = [...new Set(contentTokens(rec))];
-    if (!recTokens.length) return false;
-    const narrativeTokens = [...new Set(contentTokens(narrative))];
+  // ONE sentence must carry the whole instruction (codex P1 r7): pooling
+  // tokens across the narrative let "Do not mow for 48 hours. Apply
+  // irrigation…" cover "Do not apply irrigation for 48 hrs" — words from
+  // unrelated sentences, negation cross-attributed. Sentence scope keeps
+  // the correspondence clause-level; the cost is only an occasional
+  // duplicate row, the information-preserving direction.
+  const sentenceCoversAllTokens = (recTokens, sentence) => {
+    const narrativeTokens = [...new Set(contentTokens(sentence))];
     const narrativeSet = new Set(narrativeTokens);
     return recTokens.every((token) => {
       if (narrativeSet.has(token)) return true;
@@ -4960,6 +4965,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         return shared >= 4 && shared >= Math.min(token.length, n.length) - 2;
       });
     });
+  };
+  const recommendationCoveredByNarrative = (rec, narrative) => {
+    const recTokens = [...new Set(contentTokens(rec))];
+    if (!recTokens.length) return false;
+    return String(narrative || '')
+      .split(/[.!?]+/)
+      .some((sentence) => sentence.trim() && sentenceCoversAllTokens(recTokens, sentence));
   };
 
   // Lawn callback reports fold the fragmented cards into the narrative
