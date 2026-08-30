@@ -171,7 +171,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
 
   const [
     visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
-    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, livePrepayTerm,
+    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, paidInvoiceCount, livePrepayTerm,
   ] = await Promise.all([
     leg('visitCounts', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -334,6 +334,14 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // customers.billing_mode scalar can be stale/legacy while a paid term
     // is live, and prepay CATEGORICALLY excludes the money offer. Money-
     // critical → a lookup failure fails closed (treated as prepay).
+    // Durable paid signal for the monthly lane: count of settled invoices
+    // (dues or otherwise). Fail closed to 0 — the money gate then blocks.
+    leg('paidInvoiceCount', () => dbh('invoices')
+      .where({ customer_id: customerId })
+      .where(function paidSignal() {
+        this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
+      })
+      .count({ n: '*' }).first(), null),
     leg('livePrepayTerm', async () => {
       const { coveredTermsAsOf } = require('../annual-prepay-renewals');
       return coveredTermsAsOf(dbh, today).where('t.customer_id', customerId).first('t.id');
@@ -379,11 +387,13 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     ? now.toISOString()
     : (manualOverride && manualOverride.updated_at ? new Date(manualOverride.updated_at).toISOString() : null);
   const completedVisits = num(visitCounts, 'n');
-  // Monthly membership: dues cover visits, so no per-visit paid invoice
-  // exists — completed visits stand in, with accountCurrent as the money
-  // check. Every other lane requires visits actually tied to paid invoices.
+  // Monthly membership: dues cover visits, so visits rarely link to paid
+  // invoices — but completed visits alone prove nothing was PAID. The lane's
+  // paid-visit proxy is capped by the count of actually settled invoices
+  // (≥4 paid dues cycles AND ≥4 completed visits to clear the money gate).
+  // Every other lane requires visits directly tied to paid invoices.
   const completedPaidVisits = customer.billing_mode === 'monthly_membership'
-    ? completedVisits
+    ? Math.min(completedVisits, num(paidInvoiceCount, 'n'))
     : num(paidVisitCounts, 'n');
 
   return {

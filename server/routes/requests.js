@@ -360,18 +360,45 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
     }
 
-    // Cancellation case snapshot + PRE-CHURN facts — LOCAL reads only.
-    // Ordering invariant (codex rounds 27+30): nothing EXTERNAL may run
-    // between the acceptance persisting and the billing wind-down (a
-    // billing cron could charge inside that window), and nothing slow may
-    // run before the acceptance persists (a crash would lose the submitted
-    // cancellation). So: local facts here → insert → pure resolve → case
-    // write → processor; the paid Google address validation, when needed,
-    // runs AFTER the wind-down and only refines the case verdict.
     const isCancellation = category === 'cancellation';
     let caseSnapshot = null;
     let preChurnFacts = null;
     let serverResolution = null;
+
+    const [request] = await db('service_requests')
+      .insert({
+        customer_id: req.customer.id,
+        category,
+        subject: cleanSubject,
+        description: cleanDescription,
+        urgency: validUrgency,
+        location_on_property: validLocation,
+        photos: JSON.stringify(photoData),
+        status: 'new',
+      })
+      .returning('*');
+
+    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
+
+    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
+    const categoryLabel = category.replace(/_/g, ' ');
+    const photoCount = photoData.length;
+    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
+
+    // A cancellation request is auto-processed: pull the customer's upcoming
+    // visits off the calendar, stop any recurring series, and mark the account
+    // churned. Best-effort — run it before the admin alert so the notification
+    // can report what happened. The durable service_requests row and the alert
+    // itself remain even if this fails.
+    let cancellationResult = null;
+    let cancellationProcessed = false;
+    let caseOpened = false;
+    // Cancellation ordering invariant (codex rounds 27, 30, 38): the
+    // durable acceptance persists FIRST (a crash mid-preload must not lose
+    // the submitted cancellation); then the pre-churn snapshot/facts load +
+    // the PURE resolve run — local DB reads only, no external I/O between
+    // the acceptance and the billing wind-down; the paid Google address
+    // validation runs AFTER the wind-down and only refines the verdict.
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
       try {
         caseSnapshot = await db('customers')
@@ -412,34 +439,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
     }
 
-    const [request] = await db('service_requests')
-      .insert({
-        customer_id: req.customer.id,
-        category,
-        subject: cleanSubject,
-        description: cleanDescription,
-        urgency: validUrgency,
-        location_on_property: validLocation,
-        photos: JSON.stringify(photoData),
-        status: 'new',
-      })
-      .returning('*');
-
-    logger.info(`Service request created: ${request.id} by customer ${req.customer.id} [${validUrgency}]`);
-
-    const customerName = `${req.customer.first_name} ${req.customer.last_name}`;
-    const categoryLabel = category.replace(/_/g, ' ');
-    const photoCount = photoData.length;
-    const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
-
-    // A cancellation request is auto-processed: pull the customer's upcoming
-    // visits off the calendar, stop any recurring series, and mark the account
-    // churned. Best-effort — run it before the admin alert so the notification
-    // can report what happened. The durable service_requests row and the alert
-    // itself remain even if this fails.
-    let cancellationResult = null;
-    let cancellationProcessed = false;
-    let caseOpened = false;
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
       // Open the durable case NOW, with the pre-churn snapshot and the
       // server resolution, so a crash mid-processing can never lose them —

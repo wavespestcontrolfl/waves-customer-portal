@@ -53,7 +53,10 @@ function cooldownFloor(now = new Date()) {
 function offerEligibility(facts, { reasonCode, families = [], now = new Date() } = {}) {
   const blockers = [];
   if (!OFFER_REASONS.includes(reasonCode)) blockers.push('reason_not_money_eligible');
-  const scope = families.length ? families : (facts.families || []);
+  // Requested scope only counts where it intersects CURRENT ownership — a
+  // stale or forged family the account no longer holds can never qualify.
+  const owned = (facts.families || []).filter(Boolean);
+  const scope = families.length ? families.filter((f) => owned.includes(f)) : owned;
   const familyKey = OFFER_FAMILIES.find((f) => scope.includes(f)) || null;
   if (!familyKey) blockers.push('no_eligible_family');
   if (!(facts.tenureDays >= MIN_TENURE_DAYS)) blockers.push('tenure_under_12_months');
@@ -97,8 +100,18 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
     // when both passed the facts-level cooldown check.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(customerId)]);
     if (cancellationCaseId) {
-      const existing = await trx('retention_offers').where({ cancellation_case_id: cancellationCaseId }).first();
+      // Scoped to the customer: a mismatched case id must never surface
+      // another customer's financial record as a "successful" grant.
+      const existing = await trx('retention_offers')
+        .where({ cancellation_case_id: cancellationCaseId, customer_id: customerId })
+        .first();
       if (existing) return existing;
+      const caseRow = await trx('cancellation_cases').where({ id: cancellationCaseId }).first('customer_id');
+      if (caseRow && caseRow.customer_id !== customerId) {
+        const err = new Error('retention_offer_case_mismatch');
+        err.code = 'retention_offer_case_mismatch';
+        throw err;
+      }
     }
     // Re-derive FULL eligibility from fresh facts under the advisory lock —
     // the preview verdict is stale by commit time and callers are never
