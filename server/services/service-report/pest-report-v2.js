@@ -261,9 +261,13 @@ function buildPestReportV2({
   // original predicate unchanged.
   const emptyByOriginalPredicate = !defense && !primaryMove && !bugFiles.length
     && !supportingMetric && !forecastCard;
-  const suppressedCallbackContent = suppressDefense && Boolean(
-    aiSummary || concernCard || premiumExperience.pressureReceipt || premiumExperience.weatherCall,
-  );
+  // Only fields the composed section actually MOUNTS count as content
+  // (codex P2 r4): PestReportV2Section renders the hero (statusSummary +
+  // aiSummary) and the concern card; bug files, the receipt, and the
+  // weather call were removed from the composed section 2026-07-09 and the
+  // weather facts already render in HeroConditions — counting them kept an
+  // empty shell alive that also suppressed the legacy summary/coverage.
+  const suppressedCallbackContent = suppressDefense && Boolean(aiSummary || concernCard);
   if (emptyByOriginalPredicate && !suppressedCallbackContent) {
     return null;
   }

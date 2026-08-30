@@ -1190,6 +1190,13 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
         // any drift between what the customer saw and what the server now
         // computes rejects, not just key/mode/price/option drift.
         const clickedPrint = String(metadata.fingerprint || '').trim();
+        // Callback reports no longer render offer cards (owner 2026-08-30):
+        // a card retained by a page opened before this deploy/gate flip must
+        // not act — same 409 the customer would get for any vanished offer
+        // (codex P2 r4 on #3631).
+        if (reserviceReportCopyGateOn() && joined?.is_callback === true) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
         const offerMismatch = !crossSell
           || !clickedPrint || clickedPrint !== crossSell.fingerprint
           || !clickedKey || clickedKey !== crossSell.serviceKey
@@ -1414,12 +1421,18 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (suppressedTypedReport(service)) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Callback reports no longer render the referral card (owner
+    // 2026-08-30) — a stale open page must not enroll a promoter through a
+    // button the report no longer shows (codex P2 r4 on #3631).
+    if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {

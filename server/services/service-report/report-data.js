@@ -4958,7 +4958,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     return String(narrative || '')
       .split(/[.!?]+/)
       .some((sentence) => sentence
-        .split(/[,;]|\bbut\b|\bhowever\b/i)
+        // "and"/"then" split too (codex P1 r11): "Do not water the flower
+        // beds and wait 72 hours before mowing" must not lend mowing's 72
+        // hours to a watering hold — the duration has to live in the same
+        // conjunct as the tied hold phrase.
+        .split(/[,;]|\bbut\b|\bhowever\b|\band\b|\bthen\b/i)
         .some((clause) => {
           const clauseHours = irrigationHoldHours(clause);
           return clauseHours != null && clauseHours >= recHours;

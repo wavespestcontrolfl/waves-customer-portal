@@ -171,6 +171,26 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 
+  test('a duration in a different conjunct never covers: "Do not water the flower beds and wait 72 hours before mowing" (codex P1 r11)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      technician_notes: [
+        'WHAT WE DID',
+        '',
+        'Weed control was applied across the turf today.',
+        '',
+        'WHAT WE FOUND',
+        '',
+        'Do not water the flower beds and wait 72 hours before mowing.',
+      ].join('\n'),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-9', makeKnex());
+    expect(data.summarySource).toBe('technician_report');
+    // The 72 hours belongs to mowing, not the watering hold — the 48-hour
+    // irrigation instruction stays.
+    expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
+  });
+
   test('opposite/non-hold irrigation sentences cover nothing: "Irrigation caused no runoff for 48 hours" (codex P1 r9)', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const svc = lawnCallbackService({
