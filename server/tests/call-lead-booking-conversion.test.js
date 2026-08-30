@@ -264,25 +264,46 @@ describe('convertCallLeadOnPhoneBooking', () => {
 // tests can assert which filters a path applies. where(fn) invokes the
 // closure against the same builder (mirroring knex query grouping).
 function makeLookupDb(result = null) {
-  const calls = { where: [], whereNull: [], whereNotIn: [], orWhere: [] };
-  const b = {
-    where: jest.fn(function (arg, val) {
-      if (typeof arg === 'function') { calls.where.push('group'); arg(b); }
-      else calls.where.push([arg, val]);
-      return b;
-    }),
-    whereNull: jest.fn((col) => { calls.whereNull.push(col); return b; }),
-    orWhere: jest.fn((col, val) => { calls.orWhere.push([col, val]); return b; }),
-    whereNotIn: jest.fn((col, vals) => { calls.whereNotIn.push([col, vals]); return b; }),
-    orderBy: jest.fn(() => b),
-    first: jest.fn(async () => (Array.isArray(result) ? result[0] || null : result)),
-    // Knex builders are thenables; the phone arm awaits the builder itself
-    // for the full candidate list (name corroboration scans all rows).
-    then: (resolve, reject) => Promise.resolve(
-      Array.isArray(result) ? result : (result ? [result] : []),
-    ).then(resolve, reject),
+  const rows = Array.isArray(result) ? result : (result ? [result] : []);
+  const calls = { where: [], whereNull: [], whereNotIn: [], orWhere: [], whereRaw: [] };
+  const norm = (v) => String(v || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+  // The phone arm's name corroboration lives in SQL — interpret its two
+  // whereRaw shapes so these tests stay behavioral (a mock that returns
+  // rows regardless of WHERE would trivially pass every identity test).
+  const filteredFor = (own) => {
+    let out = rows;
+    for (const [sql, binds] of own) {
+      const s = String(sql);
+      if (s.includes('REGEXP_REPLACE(first_name')) {
+        out = out.filter((r) => { const f = norm(r.first_name); return !f || (binds || []).includes(f); });
+      } else if (s.includes('REGEXP_REPLACE(last_name')) {
+        out = out.filter((r) => {
+          const f = norm(r.first_name); const ln = norm(r.last_name);
+          return !f || !ln || ln === (binds || [])[(binds || []).length - 1];
+        });
+      }
+    }
+    return out;
   };
-  const database = jest.fn(() => b);
+  const makeBuilder = (ownRaw) => {
+    const b = {
+      where: jest.fn(function (arg, val) {
+        if (typeof arg === 'function') { calls.where.push('group'); arg(b); }
+        else calls.where.push([arg, val]);
+        return b;
+      }),
+      whereNull: jest.fn((col) => { calls.whereNull.push(col); return b; }),
+      orWhere: jest.fn((col, val) => { calls.orWhere.push([col, val]); return b; }),
+      whereNotIn: jest.fn((col, vals) => { calls.whereNotIn.push([col, vals]); return b; }),
+      whereRaw: jest.fn((sql, binds) => { ownRaw.push([sql, binds]); calls.whereRaw.push([sql, binds]); return b; }),
+      orderBy: jest.fn(() => b),
+      clone: jest.fn(() => makeBuilder([...ownRaw])),
+      first: jest.fn(async () => filteredFor(ownRaw)[0] || null),
+      then: (resolve, reject) => Promise.resolve(filteredFor(ownRaw)).then(resolve, reject),
+    };
+    return b;
+  };
+  const database = jest.fn(() => makeBuilder([]));
   database._calls = calls;
   return database;
 }

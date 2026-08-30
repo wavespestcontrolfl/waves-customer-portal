@@ -145,14 +145,25 @@ describe('findReusableCallLead identity keys', () => {
     // The corroboration predicates live in SQL now — interpret the two name
     // whereRaw shapes so these tests stay behavioral (a mock that returns
     // rows regardless of WHERE would trivially pass every identity test).
-    const filtered = () => {
+    const norm = (v) => String(v || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const filteredFor = (own) => {
       let out = rows;
-      for (const [m, a] of calls) {
+      for (const [m, a] of own) {
         if (m !== 'whereRaw') continue;
         const [sql, binds] = a;
-        if (String(sql).includes('LOWER(TRIM(first_name))')) {
+        const s = String(sql);
+        if (s.includes('REGEXP_REPLACE(first_name')) {
+          // Phone-arm compat: blank first OR first in the variant list.
+          out = out.filter((r) => { const f = norm(r.first_name); return !f || (binds || []).includes(f); });
+        } else if (s.includes('REGEXP_REPLACE(last_name')) {
+          // Phone-arm last non-conflict: blank first/last never conflicts.
+          out = out.filter((r) => {
+            const f = norm(r.first_name); const ln = norm(r.last_name);
+            return !f || !ln || ln === (binds || [])[(binds || []).length - 1];
+          });
+        } else if (s.includes('LOWER(TRIM(first_name))')) {
           out = out.filter((r) => String(r.first_name || '').trim().toLowerCase() === binds[0]);
-        } else if (String(sql).includes('last_name IS NULL')) {
+        } else if (s.includes('last_name IS NULL')) {
           out = out.filter((r) => {
             const ln = String(r.last_name || '').trim().toLowerCase();
             return !ln || ln === binds[0];
@@ -161,14 +172,21 @@ describe('findReusableCallLead identity keys', () => {
       }
       return out;
     };
-    const builder = {};
-    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
-      builder[m] = (...a) => { calls.push([m, a]); return builder; };
-    }
-    builder.first = async () => { calls.push(['first', []]); return filtered()[0] || null; };
-    // Some paths await the builder itself (knex builders are thenable).
-    builder.then = (resolve) => resolve(filtered());
-    const db = (table) => { calls.push(['table', [table]]); return builder; };
+    // Each builder carries its OWN clause list (clone() snapshots it) so a
+    // cloned conflict query is not filtered by the compat query's clauses;
+    // everything still mirrors into the shared `calls` for assertions.
+    const makeBuilder = (own) => {
+      const builder = {};
+      for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
+        builder[m] = (...a) => { own.push([m, a]); calls.push([m, a]); return builder; };
+      }
+      builder.clone = () => makeBuilder([...own]);
+      builder.first = async () => { calls.push(['first', []]); return filteredFor(own)[0] || null; };
+      // Some paths await the builder itself (knex builders are thenable).
+      builder.then = (resolve) => resolve(filteredFor(own));
+      return builder;
+    };
+    const db = (table) => { calls.push(['table', [table]]); return makeBuilder([]); };
     db.calls = calls;
     return db;
   };

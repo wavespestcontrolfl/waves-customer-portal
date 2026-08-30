@@ -14,12 +14,13 @@ jest.mock('../services/lead-funnel-bridge', () => ({ bridgeLeadFunnelStage: jest
 const db = require('../models/db');
 const { attributeInboundContact } = require('../services/lead-attribution');
 
-function makeDb({ existingLead = null, otherCall = null } = {}) {
+function makeDb({ existingLead = null, otherCall = null, leadUpdateCount = 1 } = {}) {
   const state = { leadInserts: [], activityInserts: [], leadUpdates: [] };
   db.mockImplementation((table) => {
     const b = {
-      where: jest.fn(() => b),
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg(b); return b; }),
       whereNull: jest.fn(() => b),
+      orWhere: jest.fn(() => b),
       orderBy: jest.fn(() => b),
       first: jest.fn(async () => {
         if (table === 'lead_sources') return null;
@@ -28,7 +29,10 @@ function makeDb({ existingLead = null, otherCall = null } = {}) {
         if (table === 'call_log') return otherCall;
         return null;
       }),
-      update: jest.fn(async (payload) => { state.leadUpdates.push({ table, payload }); return 1; }),
+      update: jest.fn(async (payload) => {
+        state.leadUpdates.push({ table, payload });
+        return table === 'leads' ? leadUpdateCount : 1;
+      }),
       insert: jest.fn((payload) => {
         state[table === 'leads' ? 'leadInserts' : 'activityInserts'].push(payload);
         const chain = Promise.resolve([{ id: 'new-lead-1', ...payload }]);
@@ -98,6 +102,21 @@ describe('attributeInboundContact concurrent-call guard', () => {
     const result = await attributeInboundContact(CALL);
     expect(result).toMatchObject({ type: 'existing_lead', leadId: 'lead-1' });
     expect(state.leadInserts).toHaveLength(0);
+  });
+
+  test('a lost sid race (guarded update hits 0 rows) mints a fresh lead instead of colliding', async () => {
+    // Both calls read the lead while it still pointed at a COMPLETED
+    // historical call; the other call won the conditional write first.
+    const state = makeDb({
+      existingLead: { id: 'lead-1', twilio_call_sid: 'CA-old-completed', follow_up_count: 0 },
+      otherCall: { status: 'completed', created_at: new Date(Date.now() - 60 * 60 * 1000) },
+      leadUpdateCount: 0,
+    });
+    const result = await attributeInboundContact(CALL);
+    expect(result.type).toBe('new_lead');
+    expect(state.leadInserts).toHaveLength(1);
+    const activity = state.activityInserts.find((a) => a.activity_type === 'created');
+    expect(JSON.parse(activity.metadata).sharedPhoneWithLeadId).toBe('lead-1');
   });
 
   test('SMS touches never run the guard', async () => {
