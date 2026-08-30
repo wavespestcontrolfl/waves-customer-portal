@@ -216,6 +216,16 @@ async function main() {
         }
       }
       await trx('customers').where({ id: customer.id }).update(update);
+      // Staleness PROOF for the flag clear (series lineage): recurring-series
+      // extension is strictly COMPLETION-driven — recurring-series-extend.js
+      // only fires from the dispatch completion routes into
+      // runRecurringSeriesMaintenance. The guards above (held under the
+      // table lock) prove this account has NO completable work: no pending/
+      // confirmed/scheduled/rescheduled row, nothing en_route/on_site. With
+      // no completion possible, a recurring_ongoing=true flag on a CANCELLED
+      // row can never generate another visit — it is residue, not a live
+      // this_only parent (a live this_only series necessarily has future
+      // non-cancelled occurrences, which guard #2 catches and skips).
       await trx('scheduled_services')
         .where({ customer_id: customer.id, status: 'cancelled', recurring_ongoing: true })
         .update({ recurring_ongoing: false, updated_at: trx.fn.now() });

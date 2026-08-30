@@ -351,6 +351,17 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // the partial-failure repair paths are the 60s dedupe above and the
     // inactive-retry path, and a partial run already raised a review alert.
     if (category === 'cancellation') {
+      // Scoped (per-family) cancellation is C1 scope: the processor below
+      // churns the WHOLE account, so accepting a family list here would let
+      // a customer selecting one plan lose everything. Reject until the
+      // per-family processor exists; the preview endpoint still accepts
+      // scope for card resolution.
+      if (CancellationResolution.cancelFlowV2Enabled() && Array.isArray(value.families) && value.families.length) {
+        return res.status(400).json({
+          error: 'Cancelling individual services is not available yet. Submit without a service selection to cancel the whole plan, or call our office.',
+          code: 'scoped_cancellation_unsupported',
+        });
+      }
       if (!(await hasCancellableWork(req.customer.id))) {
         return res.status(400).json({
           error:

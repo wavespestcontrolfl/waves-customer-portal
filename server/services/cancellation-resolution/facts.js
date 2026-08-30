@@ -227,7 +227,16 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // whose payer resolve fails are DROPPED by the authority (fail closed).
     leg('pastDue', async () => {
       const { openBalanceInvoices } = require('../open-balance');
-      const rows = await openBalanceInvoices(customerId, { database: dbh });
+      // The authority DROPS rows whose payer resolve fails and TRUNCATES
+      // past its bound — either makes the classification incomplete, and an
+      // incomplete balance must fail CLOSED for money, not read as current.
+      let incomplete = false;
+      const rows = await openBalanceInvoices(customerId, {
+        database: dbh,
+        onResolveFailure: () => { incomplete = true; },
+        onTruncation: () => { incomplete = true; },
+      });
+      if (incomplete) return 'error';
       return rows.find((r) => !r.paid_at && r.due_date && String(dateOnly(r.due_date)) < today) || null;
     }, 'error'),
     leg('failedPayment', () => dbh('payments')
