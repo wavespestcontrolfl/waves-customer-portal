@@ -8,6 +8,12 @@
 #   - knex migrations
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=.cursor/lib.sh
+source "$(dirname "$0")/lib.sh"
+
+# Refuse a remote/prod DATABASE_URL injected via the secrets panel BEFORE we
+# migrate — knexfile keeps a process-env DATABASE_URL over the local .env below.
+assert_local_database_url
 
 echo "[install] ensuring PostgreSQL 16 + pgvector are present"
 if ! command -v pg_ctlcluster >/dev/null 2>&1; then
