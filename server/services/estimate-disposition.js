@@ -58,6 +58,14 @@ const LEGACY_LABEL_TO_CODE = new Map([
   ['price', 'declined_price'],
   ['went with competitor', 'declined_competitor'],
   ['competitor', 'declined_competitor'],
+  // The pipeline's free-text decline suggests "chose another provider" —
+  // recognize that wording (and close variants) so its competitor losses
+  // don't fall into declined_other (codex pre-push P1).
+  ['another provider', 'declined_competitor'],
+  ['other provider', 'declined_competitor'],
+  ['another company', 'declined_competitor'],
+  ['other company', 'declined_competitor'],
+  ['someone else', 'declined_competitor'],
   ['not ready', 'declined_timing'],
   ['timing', 'declined_timing'],
   ['service not needed', 'not_needed'],

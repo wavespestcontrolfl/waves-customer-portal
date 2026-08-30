@@ -46,6 +46,9 @@ describe('dispositionFromDeclineReason — legacy labels', () => {
     ['No response', 'no_response'],
     ['Price, went with Orkin', 'declined_price'], // first keyword hit wins
     ['Moved out of area', 'invalid_lead'],
+    ['Chose another provider', 'declined_competitor'], // pipeline free-text suggestion
+    ['went with another company', 'declined_competitor'],
+    ['hired someone else', 'declined_competitor'],
     ['They hated the color of the truck', 'declined_other'],
   ])('%s → %s', (label, code) => {
     expect(dispositionFromDeclineReason(label)).toBe(code);
