@@ -834,7 +834,11 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
       detail: pendingText
         ? 'Keep pets and people away from treated zones until they are ready. We also included the recommended next step below.'
         : (reserviceNotPerformed
-          ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
+          // 'incomplete' can include a PARTIAL application — only the two
+          // genuinely non-performed outcomes may claim none (codex r10 P1).
+          ? (reservice.outcome === 'incomplete'
+            ? 'The visit could not be completed — we documented what we found and included the recommended next step below.'
+            : 'No application was made on this visit — we documented what we found and included the recommended next step below.')
           : 'We treated the documented area today and included the recommended next step below.'),
     };
   }

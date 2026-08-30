@@ -1159,6 +1159,17 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.detail).toContain('No application was made on this visit');
   });
 
+  it('an incomplete callback with a high-priority finding claims neither treatment nor "no application"', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'incomplete', completedFallback: 'The visit was not completed.' },
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.detail).not.toMatch(/We treated/);
+    expect(status.detail).not.toMatch(/No application was made/);
+    expect(status.detail).toContain('could not be completed');
+  });
+
   it('a non-performed callback never claims treatment, even in the high-priority branch', () => {
     const status = smartStatusSummary({
       reserviceReport: {

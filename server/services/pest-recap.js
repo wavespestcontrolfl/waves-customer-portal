@@ -556,14 +556,13 @@ async function submitRecap({
       // the tier snapshot stays unfrozen, and the money claim stays refused.
       const snapshotBackfill = {};
       if (Object.prototype.hasOwnProperty.call(tierSnapshot, 'is_callback')) {
-        // Promote false→true as well as NULL: the pre-#3617 recap insert
-        // omitted the field and the column DEFAULTS to false, so an
-        // existing recap-created callback reads false even though the
-        // scheduled row — the authoritative source — says true (codex r6
-        // P1; migration 20260830000051 repairs the standing rows). Never
-        // demote an existing true.
+        // NULL-only: an explicit false is left to migration 20260830000051,
+        // which promotes on FROZEN completedServiceKey evidence. Promoting
+        // here from the scheduled row's CURRENT flag would let a post-
+        // completion update-details reclassify rewrite a historical
+        // non-callback report on a mere recap retry (codex r10 P1); records
+        // created by this code already stamp the flag at insert.
         if (existing.is_callback == null) snapshotBackfill.is_callback = tierSnapshot.is_callback;
-        else if (existing.is_callback !== true && tierSnapshot.is_callback === true) snapshotBackfill.is_callback = true;
       }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,
