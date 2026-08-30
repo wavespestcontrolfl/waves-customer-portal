@@ -18,6 +18,7 @@ const { isEnabled } = require('../../config/feature-gates');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 
 const BULK_MAX = 1000;
+const ENRICH_LOCK_KEY = 'seo_link_enrich'; // pg_advisory_xact_lock(hashtext(key)) around every paid batch
 
 const items = (resp) => {
   const r = resp && resp.tasks && resp.tasks[0] && resp.tasks[0].result;
@@ -38,7 +39,8 @@ const chunk = (arr, size) => {
   return out;
 };
 
-/** Select the batch: explicit ids, else un-enriched (or everything when force). owner_seed first. */
+/** Select the candidates: explicit ids, else un-enriched (or everything when force). owner_seed first.
+ * enriched_at is re-checked INSIDE the per-batch lock (enrichDomains) unless force — selection is advisory. */
 async function selectDomains(db, { domainIds, limit, force }) {
   let q = db('seo_link_domains').select('id', 'domain', 'discovery_priority', 'enriched_at');
   if (Array.isArray(domainIds)) {
@@ -90,7 +92,7 @@ async function competitorsLinked(db, hosts) {
 async function enrichDomains(db, { domainIds = null, limit = 500, force = false, dryRun = false, now = new Date(), dataforseo = require('./dataforseo') } = {}) {
   const rows = await selectDomains(db, { domainIds, limit, force });
   const gated = !isEnabled('seoIntelligence');
-  const out = { dryRun, gated, selected: rows.length, enriched: 0, failed: [], calls: 0 };
+  const out = { dryRun, gated, selected: rows.length, enriched: 0, skippedClaimed: 0, failed: [], calls: 0 };
   if (!rows.length) return out;
 
   const hosts = rows.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean);
@@ -101,72 +103,86 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
   }
 
   const nowIso = now instanceof Date ? now.toISOString() : String(now);
-  for (const batch of chunk(rows, BULK_MAX)) {
-    const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
-    const patches = [];
+  for (const candidates of chunk(rows, BULK_MAX)) {
+    await db.transaction(async (trx) => {
+      const patches = [];
+      let batch = candidates;
 
-    if (gated) {
-      for (const r of batch) {
-        const host = canonicalProspectDomain(r.domain);
-        patches.push({ id: r.id, patch: { competitors_linked: linked.get(host) || 0, updated_at: now } });
-      }
-    } else {
-      // Both calls complete (or throw) BEFORE any write for this batch.
-      const ranksResp = await dataforseo.bulkRanks(targets);
-      out.calls += 1;
-      const spamResp = await dataforseo.bulkSpamScore(targets);
-      out.calls += 1;
-      const ranks = items(ranksResp);
-      const spam = items(spamResp);
-      if (!ranks || !spam) {
-        for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: !ranks ? 'bulk_ranks_no_response' : 'bulk_spam_score_no_response' });
-        // still write the free signal
-        for (const r of batch) patches.push({ id: r.id, patch: { competitors_linked: linked.get(canonicalProspectDomain(r.domain)) || 0, updated_at: now } });
-      } else {
-        const byHostRank = new Map();
-        for (const it of ranks) { const h = canonicalProspectDomain(it && it.target); if (h) byHostRank.set(h, it); }
-        const byHostSpam = new Map();
-        for (const it of spam) { const h = canonicalProspectDomain(it && it.target); if (h) byHostSpam.set(h, it); }
-
+      if (gated) {
         for (const r of batch) {
-          try {
-            const host = canonicalProspectDomain(r.domain);
-            const rk = byHostRank.get(host) || null;
-            const sp = byHostSpam.get(host) || null;
-            const patch = { competitors_linked: linked.get(host) || 0, enriched_at: now, updated_at: now };
-            if (!rk && !sp) {
-              patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
-            } else {
-              const enrichment = { fetched_at: nowIso };
-              if (rk) {
-                enrichment.bulk_ranks = rk;
-                // bulk_ranks items are { target, rank } on the one_hundred scale
-                // (dataforseo.bulkRanks); referring_domains / organic_traffic
-                // have no source in this pass and stay untouched.
-                const dr = intOrNull(rk.rank);
-                if (dr != null) patch.domain_rating = dr;
-              } else enrichment.bulk_ranks = { missing: true };
-              if (sp) {
-                enrichment.bulk_spam_score = sp;
-                const ss = intOrNull(sp.spam_score);
-                if (ss != null) patch.spam_score = ss;
-              } else enrichment.bulk_spam_score = { missing: true };
-              patch.enrichment = JSON.stringify(enrichment);
+          const host = canonicalProspectDomain(r.domain);
+          patches.push({ id: r.id, patch: { competitors_linked: linked.get(host) || 0, updated_at: now } });
+        }
+      } else {
+        // Credit discipline: one enrich run at a time across instances and the
+        // admin job. The transaction-scoped advisory lock is held through the
+        // paid calls, and the batch is re-checked INSIDE it, so two overlapping
+        // runs can never both see enriched_at IS NULL for the same domain.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [ENRICH_LOCK_KEY]);
+        if (!force) {
+          const still = await trx('seo_link_domains').select('id').whereIn('id', batch.map((r) => r.id)).whereNull('enriched_at');
+          const open = new Set((still || []).map((r) => r.id));
+          out.skippedClaimed += batch.filter((r) => !open.has(r.id)).length;
+          batch = batch.filter((r) => open.has(r.id));
+        }
+        if (!batch.length) return;
+        const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
+
+        // Both calls complete (or throw) BEFORE any write for this batch.
+        const ranksResp = await dataforseo.bulkRanks(targets);
+        out.calls += 1;
+        const spamResp = await dataforseo.bulkSpamScore(targets);
+        out.calls += 1;
+        const ranks = items(ranksResp);
+        const spam = items(spamResp);
+        if (!ranks || !spam) {
+          for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: !ranks ? 'bulk_ranks_no_response' : 'bulk_spam_score_no_response' });
+          // still write the free signal
+          for (const r of batch) patches.push({ id: r.id, patch: { competitors_linked: linked.get(canonicalProspectDomain(r.domain)) || 0, updated_at: now } });
+        } else {
+          const byHostRank = new Map();
+          for (const it of ranks) { const h = canonicalProspectDomain(it && it.target); if (h) byHostRank.set(h, it); }
+          const byHostSpam = new Map();
+          for (const it of spam) { const h = canonicalProspectDomain(it && it.target); if (h) byHostSpam.set(h, it); }
+
+          for (const r of batch) {
+            try {
+              const host = canonicalProspectDomain(r.domain);
+              const rk = byHostRank.get(host) || null;
+              const sp = byHostSpam.get(host) || null;
+              const patch = { competitors_linked: linked.get(host) || 0, enriched_at: now, updated_at: now };
+              if (!rk && !sp) {
+                patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
+              } else {
+                const enrichment = { fetched_at: nowIso };
+                if (rk) {
+                  enrichment.bulk_ranks = rk;
+                  // bulk_ranks items are { target, rank } on the one_hundred scale
+                  // (dataforseo.bulkRanks); referring_domains / organic_traffic
+                  // have no source in this pass and stay untouched.
+                  const dr = intOrNull(rk.rank);
+                  if (dr != null) patch.domain_rating = dr;
+                } else enrichment.bulk_ranks = { missing: true };
+                if (sp) {
+                  enrichment.bulk_spam_score = sp;
+                  const ss = intOrNull(sp.spam_score);
+                  if (ss != null) patch.spam_score = ss;
+                } else enrichment.bulk_spam_score = { missing: true };
+                patch.enrichment = JSON.stringify(enrichment);
+              }
+              patches.push({ id: r.id, patch });
+            } catch (err) {
+              out.failed.push({ id: r.id, domain: r.domain, reason: `map_error: ${err.message}` });
             }
-            patches.push({ id: r.id, patch });
-          } catch (err) {
-            out.failed.push({ id: r.id, domain: r.domain, reason: `map_error: ${err.message}` });
           }
         }
       }
-    }
 
-    await db.transaction(async (trx) => {
       for (const { id, patch } of patches) await trx('seo_link_domains').where({ id }).update(patch);
+      out.enriched += patches.filter((p) => p.patch.enriched_at).length;
     });
-    out.enriched += patches.filter((p) => p.patch.enriched_at).length;
   }
   return out;
 }
 
-module.exports = { enrichDomains, competitorsLinked, BULK_MAX, _test: { items, selectDomains } };
+module.exports = { enrichDomains, competitorsLinked, BULK_MAX, ENRICH_LOCK_KEY, _test: { items, selectDomains } };

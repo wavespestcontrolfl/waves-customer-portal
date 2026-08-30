@@ -64,6 +64,15 @@ exports.up = async function (knex) {
     });
   }
 
+  // ---- §3.4 path attribute the baseline writes (step 1b shipped only
+  // execution_after_send): terms accepted by the act of sending outreach.
+  const pathCols = await knex('seo_link_acquisition_paths').columnInfo();
+  if (!pathCols.terms_accepted_by_send) {
+    await knex.schema.alterTable('seo_link_acquisition_paths', (t) => {
+      t.boolean('terms_accepted_by_send').notNullable().defaultTo(false);
+    });
+  }
+
   // ---- §3.3 CONTRACT: drop the legacy 2-column placement key --------------
   // Step 1 (20260828000040) added UNIQUE (target_domain, target_page,
   // location_key) and deliberately KEPT the legacy UNIQUE (target_domain,
@@ -77,6 +86,7 @@ exports.up = async function (knex) {
 exports.down = async function (knex) {
   await knex.schema.dropTableIfExists('seo_link_placement_backlinks');
   await knex.schema.dropTableIfExists('seo_link_intake_items');
+  await knex.raw('ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS terms_accepted_by_send');
   // Restore the legacy key only when the rows still satisfy it — per-location
   // duplicates written after step 2 make the restore impossible, and a failing
   // down() would strand the rollback; the wider step-1 key stays either way.

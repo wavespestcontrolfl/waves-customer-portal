@@ -13,9 +13,10 @@ const MIG = path.join(__dirname, '..', 'models/migrations/20260830000021_backlin
 const migration = require(MIG);
 const R = require('../services/seo/link-registry');
 
-function fakeKnex({ existing = [] } = {}) {
+function fakeKnex({ existing = [], pathColumns = {} } = {}) {
   const raws = [];
   const created = {};
+  const altered = {};
   const table = (cb) => {
     const cols = [];
     const t = new Proxy({}, {
@@ -29,16 +30,17 @@ function fakeKnex({ existing = [] } = {}) {
     cb(t);
     return cols;
   };
-  const knex = Object.assign(jest.fn(() => ({ columnInfo: async () => ({}) })), {
+  const knex = Object.assign(jest.fn((name) => ({ columnInfo: async () => (name === 'seo_link_acquisition_paths' ? pathColumns : {}) })), {
     raw: jest.fn(async (sql) => { raws.push(String(sql)); return {}; }),
     fn: { now: () => 'now()' },
     schema: {
       hasTable: jest.fn(async (name) => existing.includes(name)),
       createTable: jest.fn(async (name, cb) => { created[name] = table(cb); }),
+      alterTable: jest.fn(async (name, cb) => { altered[name] = table(cb); }),
       dropTableIfExists: jest.fn(async () => {}),
     },
   });
-  knex._raws = raws; knex._created = created;
+  knex._raws = raws; knex._created = created; knex._altered = altered;
   return knex;
 }
 
@@ -118,10 +120,22 @@ describe('up()', () => {
     expect(knex._raws.some((r) => /seo_link_placement_backlinks/.test(r))).toBe(false); // no CHECKs needed
   });
 
-  test('idempotent: existing tables are not re-created and no CHECK is re-added', async () => {
-    const knex = fakeKnex({ existing: ['seo_link_intake_items', 'seo_link_placement_backlinks'] });
+  test('seo_link_acquisition_paths.terms_accepted_by_send: boolean NOT NULL DEFAULT false (the baseline path row writes it)', async () => {
+    const knex = fakeKnex();
+    await migration.up(knex);
+    const cols = knex._altered.seo_link_acquisition_paths;
+    expect(cols.map((c) => [c.method, c.args[0]])).toEqual([['boolean', 'terms_accepted_by_send']]);
+    expect(hasMod(cols[0], 'notNullable')).toBe(true);
+    expect(hasMod(cols[0], 'defaultTo', [false])).toBe(true);
+    const baseline = fs.readFileSync(path.join(__dirname, '..', 'services/seo/link-registry-baseline.js'), 'utf8');
+    expect(baseline).toMatch(/terms_accepted_by_send: false/);
+  });
+
+  test('idempotent: existing tables are not re-created, the column is not re-added and no CHECK is re-added', async () => {
+    const knex = fakeKnex({ existing: ['seo_link_intake_items', 'seo_link_placement_backlinks'], pathColumns: { terms_accepted_by_send: {} } });
     await migration.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();
+    expect(knex.schema.alterTable).not.toHaveBeenCalled();
     expect(knex._raws).toEqual(['ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique']);
   });
 
@@ -144,8 +158,9 @@ describe('down()', () => {
   test('restores the legacy 2-column key only when no per-location duplicates exist (never strands the rollback)', async () => {
     const knex = fakeKnex();
     await migration.down(knex);
-    expect(knex._raws).toHaveLength(1);
-    const sql = knex._raws[0];
+    expect(knex._raws).toHaveLength(2);
+    expect(knex._raws[0]).toBe('ALTER TABLE seo_link_acquisition_paths DROP COLUMN IF EXISTS terms_accepted_by_send');
+    const sql = knex._raws[1];
     expect(sql).toMatch(/IF NOT EXISTS \(SELECT 1 FROM pg_constraint WHERE conname = 'seo_link_prospects_target_domain_target_page_unique'\)/);
     expect(sql).toMatch(/AND NOT EXISTS \(SELECT 1 FROM seo_link_prospects GROUP BY target_domain, target_page HAVING COUNT\(\*\) > 1\)/);
     expect(sql).toContain('ADD CONSTRAINT seo_link_prospects_target_domain_target_page_unique UNIQUE (target_domain, target_page)');

@@ -47,6 +47,8 @@ function fakeDb({ domains = [], competitorBacklinks = [] } = {}) {
   };
   const db = jest.fn(builder);
   db.fn = { now: () => 'NOW()' };
+  db.raw = jest.fn(async (sql, bind) => { store.raws.push([sql, bind]); return {}; });
+  store.raws = [];
   db.transaction = jest.fn(async (fn) => fn(db));
   db._store = store;
   return db;
@@ -151,7 +153,33 @@ describe('enrichDomains', () => {
     expect(r).toMatchObject({ dryRun: true, gated: false, selected: 2, enriched: 0, calls: 0, failed: [], wouldCall: 2 });
     expect(dfs.calls).toEqual([]);
     expect(db._store.updates).toEqual([]);
+    expect(db._store.raws).toEqual([]); // no lock, no transaction: report only
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('credit discipline: every paid batch runs under pg_advisory_xact_lock(hashtext(seo_link_enrich)) taken BEFORE the calls, and re-checks enriched_at inside the lock — a domain enriched by an overlapping run is never re-spent on', async () => {
+    const domains = [
+      { id: 'd1', domain: 'open.example', discovery_priority: 'normal', enriched_at: null },
+      { id: 'd2', domain: 'taken.example', discovery_priority: 'normal', enriched_at: NOW }, // enriched between selection and lock
+    ];
+    const order = [];
+    const db = fakeDb({ domains });
+    db.raw.mockImplementation(async (sql, bind) => { order.push(['raw', sql, bind]); return {}; });
+    const dfs = fakeDfs({ ranks: (t) => { order.push(['bulkRanks', t]); return dfsResp(t.map((x) => ({ target: x, rank: 1 }))); }, spam: (t) => dfsResp(t.map((x) => ({ target: x, spam_score: 0 }))) });
+    const r = await enrichDomains(db, { dataforseo: dfs, domainIds: ['d1', 'd2'], now: NOW });
+    expect(order).toEqual([
+      ['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']],
+      ['bulkRanks', ['open.example']],
+    ]);
+    expect(r).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1, calls: 2 });
+    expect(db._store.updates.map((u) => u.where.id)).toEqual(['d1']);
+    // force = deliberate re-spend: no re-check, both targets go out (still under the lock)
+    const db2 = fakeDb({ domains });
+    const dfs2 = fakeDfs({ ranks: (t) => dfsResp(t.map((x) => ({ target: x, rank: 1 }))), spam: (t) => dfsResp(t.map((x) => ({ target: x, spam_score: 0 }))) });
+    const r2 = await enrichDomains(db2, { dataforseo: dfs2, domainIds: ['d1', 'd2'], force: true, now: NOW });
+    expect(dfs2.calls[0]).toEqual(['bulkRanks', ['open.example', 'taken.example']]);
+    expect(r2).toMatchObject({ enriched: 2, skippedClaimed: 0 });
+    expect(db2._store.raws).toHaveLength(1);
   });
 
   test('selection: un-enriched only unless force; explicit domainIds; owner_seed first; limit honored', async () => {
@@ -163,7 +191,11 @@ describe('enrichDomains', () => {
     d = dfs();
     expect((await enrichDomains(fakeDb({ domains }), { dataforseo: d, force: true, now: NOW })).selected).toBe(3);
     d = dfs();
-    expect((await enrichDomains(fakeDb({ domains }), { dataforseo: d, domainIds: ['d3'], now: NOW })).selected).toBe(1);
+    // explicit ids select the row but still honor enriched_at inside the lock — re-spend needs force
+    expect(await enrichDomains(fakeDb({ domains }), { dataforseo: d, domainIds: ['d3'], now: NOW })).toMatchObject({ selected: 1, skippedClaimed: 1, calls: 0 });
+    expect(d.calls).toEqual([]);
+    d = dfs();
+    expect((await enrichDomains(fakeDb({ domains }), { dataforseo: d, domainIds: ['d3'], force: true, now: NOW })).enriched).toBe(1);
     expect(d.calls[0][1]).toEqual(['done.example']);
     d = dfs();
     expect((await enrichDomains(fakeDb({ domains }), { dataforseo: d, domainIds: [], now: NOW })).selected).toBe(0);
@@ -177,7 +209,7 @@ describe('enrichDomains', () => {
     const db = fakeDb({ domains: [D('d1', 'a.example')] });
     await expect(enrichDomains(db, { dataforseo: fakeDfs({ throwOn: 'spam' }), now: NOW })).rejects.toThrow('DFS down');
     expect(db._store.updates).toEqual([]);
-    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db._store.raws).toEqual([['SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']]]); // the lock was held; the throw rolls the batch back
   });
 
   test('a null response (client swallowed a transport/auth failure) = batch failed, enriched_at left NULL for retry, competitors_linked still written', async () => {
