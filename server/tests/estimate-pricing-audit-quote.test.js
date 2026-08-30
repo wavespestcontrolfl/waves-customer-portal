@@ -146,6 +146,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       estimate_data: { engineInputs: { homeSqFt: 1800, lotSqFt: 6000, stories: 2 } },
     });
     expect(audit.quote.property).toMatchObject({ homeSqFt: 1800, lotSqFt: 6000, stories: 2 });
+    // The full input object is frozen verbatim — whitelist-free.
+    expect(audit.quote.property.inputs).toEqual({ homeSqFt: 1800, lotSqFt: 6000, stories: 2 });
     // Missing fields are null, never a fabricated 0.
     expect(audit.quote.property.measuredTurfSf).toBeNull();
   });
@@ -159,6 +161,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.discount.rate).toBe(0);
     expect(audit.quote.setupFee.waived).toBe(false);
     expect(audit.quote.property.fieldVerifyFlags).toBeNull();
+    expect(audit.quote.property.inputs).toBeNull();
     expect(audit.quote.pricingBundle).toBeNull();
     expect(audit.lines).toEqual([]);
   });

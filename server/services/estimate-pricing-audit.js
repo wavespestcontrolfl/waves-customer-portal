@@ -250,6 +250,11 @@ function quoteProvenanceFrom(estimate, data, result) {
     },
     operatorAdjustment: data?.operatorPriceAdjustment || null,
     property: {
+      // The COMPLETE price-bearing input object, verbatim (codex pre-push
+      // P1) — lawnSqFt/bedArea/palmCount/propertyType/features and any
+      // future engine input freeze without whitelist chasing. The named
+      // numerics below are analysis conveniences, not the record.
+      inputs: profile && Object.keys(profile).length ? profile : null,
       homeSqFt: number(profile.homeSqFt ?? profile.squareFootage),
       lotSqFt: number(profile.lotSqFt),
       measuredTurfSf: number(profile.measuredTurfSf),
