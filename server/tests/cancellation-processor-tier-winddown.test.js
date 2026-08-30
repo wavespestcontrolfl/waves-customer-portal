@@ -25,8 +25,10 @@ jest.mock('../services/appointment-card-request', () => ({
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockResetLedgerToScalar = jest.fn().mockResolvedValue(undefined);
+let mockLedgerAuthoritative = true;
 jest.mock('../services/plan-rate-ledger', () => ({
   resetLedgerToScalar: (...args) => mockResetLedgerToScalar(...args),
+  planRateLedgerEnabled: () => mockLedgerAuthoritative,
 }));
 
 // Minimal stateful knex fake: enough for the churn block (customers update,
@@ -105,6 +107,7 @@ function seedCustomer() {
 afterEach(() => {
   delete process.env.GATE_CANCEL_FLOW_V2;
   mockResetLedgerToScalar.mockClear();
+  mockLedgerAuthoritative = true;
 });
 
 test('gate ON: churn clears tier, tier source, and rate, and resets the plan-rate ledger to zero', async () => {
@@ -132,15 +135,29 @@ test('gate OFF: byte-identical to H0 — tier and rate residue stays', async () 
   expect(mockResetLedgerToScalar).not.toHaveBeenCalled();
 });
 
-test('gate ON: a ledger failure FAILS CLOSED — churn errors, request flagged for review', async () => {
+test('gate ON + ledger AUTHORITATIVE: a ledger failure FAILS CLOSED — churn errors, review alert', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  mockLedgerAuthoritative = true;
   mockResetLedgerToScalar.mockRejectedValueOnce(new Error('ledger down'));
   seedCustomer();
   const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'x', requestId: 'req-1' });
-  // With GATE_PLAN_RATE_LEDGER authoritative, a surviving positive component
-  // would resurrect the old rate on win-back — so the whole churn write
-  // reports as an error (→ partial-processing review alert) instead of
-  // silently leaving the ledger stale.
+  // A surviving positive component would resurrect the old rate on win-back
+  // — the whole churn write reports as an error instead of leaving it stale.
   expect(result.churned).toBe(false);
   expect(result.errors).toContain('churn');
+});
+
+test('gate ON + ledger ADVISORY: a ledger failure never blocks the billing wind-down', async () => {
+  process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  mockLedgerAuthoritative = false;
+  mockResetLedgerToScalar.mockRejectedValueOnce(new Error('ledger down'));
+  seedCustomer();
+  const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'x', requestId: 'req-1' });
+  // Advisory store: the churn/autopay wind-down must land even when the
+  // ledger hiccups — otherwise the visit sweep would cancel service while
+  // the customer stays active and chargeable.
+  expect(result.churned).toBe(true);
+  expect(result.errors).not.toContain('churn');
+  expect(db.__tables.customers[0].waveguard_tier).toBeNull();
+  expect(db.__tables.customers[0].active).toBe(false);
 });

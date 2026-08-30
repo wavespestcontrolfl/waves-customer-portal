@@ -191,12 +191,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         } catch (retryErr) {
           logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
         }
-        // Repair a case row the original submit failed to write (idempotent —
-        // an existing row is returned untouched).
+        // Promote the original request's case to committed if this retry
+        // completed the cancel. The pre-processor write on the ORIGINAL
+        // submit holds the snapshot/resolution; retry input is deliberately
+        // not attached to the original request's record.
         await recordCancellationCase({
           customerId: req.customer.id,
           requestId: dupe.id,
-          value,
           reasonText: dupe.description || null,
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
         });
@@ -253,10 +254,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (retryErr) {
         logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
       }
+      // Same promotion-only semantics as the dedupe branch above.
       await recordCancellationCase({
         customerId: req.customer.id,
         requestId: priorCancellation.id,
-        value,
         reasonText: priorCancellation.description || null,
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
       });
@@ -357,6 +358,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // itself remain even if this fails.
     let cancellationResult = null;
     let cancellationProcessed = false;
+    let caseOpened = false;
     // Case snapshot AND the server-side resolution must be computed BEFORE
     // the processor runs — with GATE_CANCEL_FLOW_V2 on, the churn wind-down
     // clears tier/rate and the facts change under the resolver.
@@ -399,25 +401,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
         }
       }
-    }
-    if (isCancellation) {
-      try {
-        cancellationResult = await processCancellationRequest({
-          customerId: req.customer.id,
-          reason: `Portal cancellation request ${request.id}`,
-          requestId: request.id,
-        });
-      } catch (cancelErr) {
-        logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
-      }
-      cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
-
-      // Cancellation case (PR E) — the durable record is the SERVER-computed
-      // resolution (recomputed pre-churn above); caller input can never forge
-      // the card. The claimed outcome (accepted/declined) is honored only
-      // when the claimed template IS the server-resolved card. Money is
-      // unaffected either way — offer grants re-derive eligibility
-      // server-side (C1), never from this record.
+      // Open the durable case NOW, with the pre-churn snapshot and the
+      // server resolution, so a crash mid-processing can never lose them —
+      // the post-processor call below only promotes open→committed.
       {
         const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
         const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
@@ -435,7 +421,45 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
             monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
             billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
-            processed: cancellationProcessed,
+          },
+          processed: false,
+        });
+        caseOpened = true;
+      }
+    }
+    if (isCancellation) {
+      try {
+        cancellationResult = await processCancellationRequest({
+          customerId: req.customer.id,
+          reason: `Portal cancellation request ${request.id}`,
+          requestId: request.id,
+        });
+      } catch (cancelErr) {
+        logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
+      }
+      cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
+
+      // Finalize the case opened pre-churn: an idempotent second call that
+      // only promotes open→committed (and re-supplies the resolution in case
+      // the pre-write itself failed). Caller input can never forge the card
+      // — the resolution is the server's, recomputed before churn.
+      if (caseOpened || CancellationResolution.cancelFlowV2Enabled()) {
+        const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
+        const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
+          ? (value.resolutionOutcome || 'shown')
+          : null;
+        await recordCancellationCase({
+          customerId: req.customer.id,
+          requestId: request.id,
+          value,
+          families: Array.isArray(value.families) ? value.families : [],
+          reasonText: cleanDescription || null,
+          resolution: serverResolution,
+          resolutionOutcome: outcome,
+          snapshot: {
+            tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
+            monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
+            billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
           },
           processed: cancellationProcessed,
         });

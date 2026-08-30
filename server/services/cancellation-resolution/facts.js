@@ -18,7 +18,9 @@ const { etDateString } = require('../../utils/datetime-et');
 const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('../invoice-helpers');
 
 const COMPLAINT_CATEGORIES = ['pest_issue', 'lawn_concern', 'billing'];
-const OPEN_REQUEST_STATUSES = ['new', 'open', 'in_progress'];
+// Nonterminal = anything not in admin-requests' TERMINAL_STATUSES —
+// 'acknowledged'/'scheduled' complaints are still open complaints.
+const TERMINAL_REQUEST_STATUSES = ['resolved', 'closed', 'cancelled'];
 const COMPLAINT_KEYWORDS = /\b(late|missed|no[- ]show|didn'?t show|never (came|showed)|gate|rushed|skipped|still seeing|still have|not (working|better)|damage|broke)\b/i;
 const DAY_MS = 86400000;
 
@@ -151,7 +153,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     leg('complaintRequest', () => db('service_requests')
       .where({ customer_id: customerId })
       .whereIn('category', COMPLAINT_CATEGORIES)
-      .whereIn('status', OPEN_REQUEST_STATUSES)
+      .whereNotIn('status', TERMINAL_REQUEST_STATUSES)
       .where('created_at', '>=', daysAgo(60, now))
       .first('id'), 'error'),
     leg('lastComplaint', () => db('messages as m')

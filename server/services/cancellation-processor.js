@@ -169,11 +169,27 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
-        const { resetLedgerToScalar } = require('./plan-rate-ledger');
-        await db.transaction(async (trx) => {
-          await trx('customers').where({ id: customerId }).update(update);
-          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
-        });
+        const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
+        if (planRateLedgerEnabled()) {
+          // Ledger AUTHORITATIVE: scalar clear + component reset are one
+          // atomic write, fail-closed — a surviving positive component would
+          // resurrect the old rate on a win-back.
+          await db.transaction(async (trx) => {
+            await trx('customers').where({ id: customerId }).update(update);
+            await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+          });
+        } else {
+          // Ledger ADVISORY (gate off): the billing wind-down must land even
+          // if the advisory store hiccups — otherwise a ledger error would
+          // roll back the churn while the visit sweep below still cancels
+          // service, leaving an active, chargeable customer with no visits.
+          await db('customers').where({ id: customerId }).update(update);
+          try {
+            await resetLedgerToScalar(db, customerId, 0, { source: 'cancellation' });
+          } catch (ledgerErr) {
+            logger.warn(`[cancellation-processor] advisory plan-rate wind-down failed for ${customerId}: ${ledgerErr.message}`);
+          }
+        }
       } else {
         await db('customers').where({ id: customerId }).update(update);
       }
