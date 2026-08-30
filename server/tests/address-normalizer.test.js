@@ -162,6 +162,42 @@ describe('address normalizer', () => {
     });
   });
 
+  test('does not read a 5-digit house number as the ZIP in comma-free addresses', () => {
+    expect(parseRawAddress('12345 Gulf Drive Bradenton')).toMatchObject({
+      line1: '12345 Gulf Dr',
+      city: 'Bradenton',
+      state: '',
+      zip: '',
+    });
+  });
+
+  test('keeps a trailing ZIP while preserving a 5-digit house number', () => {
+    expect(parseRawAddress('12345 Gulf Drive Bradenton FL 34209')).toMatchObject({
+      line1: '12345 Gulf Dr',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
+  test('house number equal to the ZIP survives in the street line', () => {
+    expect(parseRawAddress('34209 Gulf Drive Bradenton FL 34209')).toMatchObject({
+      line1: '34209 Gulf Dr',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
+  test('trailing punctuation after the ZIP still parses (codex P1)', () => {
+    expect(parseRawAddress('123 Main Street Bradenton FL 34209.')).toMatchObject({
+      line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
   test('raw parser leaves state empty unless an explicit Florida token is present', () => {
     expect(parseRawAddress('123 Main St Parrish')).toMatchObject({
       line1: '123 Main St',
