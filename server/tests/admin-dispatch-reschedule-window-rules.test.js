@@ -25,10 +25,13 @@ jest.mock('../middleware/admin-auth', () => {
 // The visit row the route resolves windows against (scheduled_services
 // .first()); null = not found.
 let mockVisitRow = null;
+// Open members of the anchor's visit (visit-groups.openMembers → scheduled_services.select()); [] = none scripted.
+let mockOpenMembers = [];
 jest.mock('../models/db', () => {
   const chain = () => {
     const c = {};
-    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    for (const m of ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'leftJoin', 'join', 'orderBy', 'limit', 'update', 'insert']) c[m] = () => c;
+    c.select = async () => mockOpenMembers;
     c.first = async () => mockVisitRow;
     c.then = (resolve) => Promise.resolve([]).then(resolve);
     return c;
@@ -81,7 +84,7 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; mockOpenMembers = []; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
 
 describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   const recurringRow = () => ({ is_recurring: true, scheduled_date: etDateString(addETDays(new Date(), 2)), window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
@@ -120,6 +123,7 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
   test('gate on: a GROUPED recurring anchor moves as one visit (seriesPolicy single) — never widened, no series ack owed (local audit r26)', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     mockVisitRow = { ...recurringRow(), visit_id: '11111111-1111-4111-8111-111111111111' };
+    mockOpenMembers = [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'pending' }];
     const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
     expect(status).toBe(200);
     expect(SmartRebooker.previewSeriesMove).not.toHaveBeenCalled();
@@ -132,6 +136,12 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     jest.clearAllMocks();
     mockVisitRow = { ...recurringRow(), visit_id: null };
     expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    // a visit_id with ONE live member is not grouped (the unit mover's own rule, local audit r30): the ack is still owed
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), visit_id: '11111111-1111-4111-8111-111111111111' };
+    mockOpenMembers = [{ id: 'a', status: 'confirmed' }];
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
   });
 
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {

@@ -1638,13 +1638,18 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           .whereNotIn('status', TERMINAL_ROW_STATUSES).forUpdate()
           .select('id', 'status', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'is_recurring', 'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded');
         const primary = members.find((m) => String(m.id) === String(serviceId));
-        if (!primary || members.length < 2) return null;
+        if (!primary) return null;
         // Frozen membership (issued link, packet, artifacts, payment attempt —
         // completion-stage state; the detach seam deliberately preserves it):
         // members are moved in separate transactions, so no compensation can
         // make a grouped move of such a visit atomic across a crash or deploy
         // between member commits (local codex audit P0). Refused up front —
         // nothing is written; finish the visit or contact the office.
+        // Checked BEFORE the lone-member decline (local audit r30): a frozen
+        // visit that kept one live member beside a terminal one would
+        // otherwise fall to the rebooker's single-row path, whose seam
+        // preserves the frozen membership — the child at the new stop, the
+        // visit and its issued/payment artifacts at the old one.
         const split = canSplit(await visitActivity(visit.id, t));
         if (!split.ok && split.reason !== 'visit_not_open') {
           throw Object.assign(new Error('Cannot move this stop: the visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: split.reason });
@@ -1666,6 +1671,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (liveClaim) {
           throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
         }
+        // One live member is not a grouped stop: the rebooker's ordinary
+        // single-row path moves it (its seam detaches an unfrozen visit).
+        if (members.length < 2) return null;
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
         // moved as a unit by STAFF, on the direct (non-series) path only —
         // the surfaces whose callers handle partial results. A customer

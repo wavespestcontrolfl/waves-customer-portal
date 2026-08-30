@@ -706,6 +706,14 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // a visit that is merely not open (closing/dissolved) is the mover's own null path, not the frozen refusal
     db.__script = script({ visit: { ...VISIT, status: 'closing' }, members: [] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
+    // ONE live member beside a terminal one on a FROZEN visit is refused too (local audit r30): the single-row path's seam
+    // would preserve the frozen membership — the child at the new stop, the visit and its artifacts at the old one
+    db.__script = script({ visit: FROZEN, members: [member('a')] });
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: 'link_issued' });
+    // an UNFROZEN lone member still declines to the rebooker's single-row path
+    db.__script = script({ members: [member('a')] });
+    expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' })).toBe(null);
   });
 
   test('destination technician occupancy (local codex audit r24): every derived member window is checked against the NEW tech under the plan lock — hard clash refuses the unit (SLOT_TAKEN), advisory warns; alignMember repeats it under the tech slot-reserve lock', async () => {

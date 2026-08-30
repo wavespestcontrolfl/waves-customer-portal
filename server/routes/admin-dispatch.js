@@ -14972,7 +14972,16 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         ? observedForMove
         : await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date', 'visit_id');
       const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
-      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0] && job.visit_id) {
+      // Grouped = at least two LIVE members (the unit mover's own rule —
+      // local audit r30): a visit_id whose other member is terminal is an
+      // ungrouped anchor and keeps the disclosure contract below. A member
+      // joining after this count re-enters the unit mover without a series
+      // policy and is refused there (VISIT_SERIES_MOVE_UNSUPPORTED); a
+      // detach is caught by the visit_id pinned in the CAS.
+      const groupedLive = job?.visit_id
+        ? (await require('../services/visit-groups').openMembers(db, job.visit_id)).length >= 2
+        : false;
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0] && groupedLive) {
         // A GROUPED recurring anchor is never widened to its series from
         // this surface (scope ruling, codex #3609 r3; local audit r26): the
         // unit mover refuses the widening (VISIT_SERIES_MOVE_UNSUPPORTED)
