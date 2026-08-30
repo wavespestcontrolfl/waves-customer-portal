@@ -2,14 +2,14 @@
 # Cloud Agent — on-demand dev servers (run this when you want to work on the app).
 # Starts the API (:3001) and the Vite client (:5173), staying attached.
 #
-# The API runs under NODE_ENV=test so server/index.js skips
-# initScheduledJobs()/initBankingSync() — no paid LLM canary and no automated
-# cron on startup. Feature gates still resolve as non-production, so dev
-# features remain usable; the Vite client stays in development mode. Note the
-# app's boot queues (receipt/photo/etc.) still start here by design: they no-op
-# against the fresh local database and can only reach a provider if you have
-# injected that provider's credentials — this is a deliberate `dev.sh` action,
-# not automatic agent startup.
+# This is the REAL development server, in NODE_ENV=development — same as
+# `npm run dev`: full dev behavior, including the catalog-name cache prime and
+# every scheduled/queue worker. It is a DELIBERATE action, distinct from
+# automatic agent startup: booting an agent runs only start.sh (infrastructure
+# only, no app server), so merely booting can never spend money or contact a
+# provider. When you run this launcher you are opting into the full app; with no
+# provider credentials configured the workers/crons no-op (external calls need
+# those keys, and the local database starts empty).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.cursor/lib.sh
@@ -30,7 +30,7 @@ assert_local_effective_database_url
 echo "[dev] applying any pending migrations"
 npm run db:migrate
 
-echo "[dev] launching API (:3001, NODE_ENV=test — no cron/canary) + Vite client (:5173)"
+echo "[dev] launching API (:3001, NODE_ENV=development) + Vite client (:5173)"
 exec npx concurrently -k -n api,web -c blue,green \
-  "cd server && NODE_ENV=test npm run dev" \
+  "cd server && npm run dev" \
   "cd client && npm run dev"
