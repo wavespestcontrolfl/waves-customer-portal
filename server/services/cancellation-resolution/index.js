@@ -49,7 +49,10 @@ async function openCancellationCase({
   const code = isReasonCode(reasonCode) ? reasonCode : null;
   const meta = code ? reasonCodeMeta(code) : null;
   const card = resolution && resolution.kind === 'card' ? resolution.card : null;
-  const hardStop = !!(resolution && resolution.kind === 'hard_stop');
+  // A code-level hard-stop reason is a hard stop even when the caller passed
+  // no resolution object (the POST commit path never passes one) — the flag
+  // and review_type must come from the taxonomy, not caller input.
+  const hardStop = !!(resolution && resolution.kind === 'hard_stop') || !!(meta && meta.hardStop);
   const row = {
     customer_id: customerId,
     service_request_id: serviceRequestId,
@@ -58,7 +61,8 @@ async function openCancellationCase({
     reason_code_version: REASON_CODE_VERSION,
     reason_text: reasonText ? String(reasonText).slice(0, 2000) : null,
     hard_stop: hardStop,
-    review_type: hardStop ? resolution.reviewType : (meta && meta.hardStop ? meta.reviewType : null),
+    review_type: (resolution && resolution.kind === 'hard_stop' && resolution.reviewType)
+      || (meta && meta.hardStop ? meta.reviewType : null),
     resolution_template_id: card ? card.templateId : null,
     resolution_slots: card ? JSON.stringify(card.slots) : null,
     resolution_action: card ? JSON.stringify(card.action) : null,

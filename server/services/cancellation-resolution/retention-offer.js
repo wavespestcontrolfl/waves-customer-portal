@@ -20,11 +20,14 @@ const OFFER_REASONS = Object.freeze(['price', 'diy']);
 const OFFER_FAMILIES = Object.freeze(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
 const MIN_TENURE_DAYS = 365;
 const MIN_PAID_VISITS = 4;
-const COOLDOWN_DAYS = 18 * 30;
+const COOLDOWN_MONTHS = 18;
 const OFFER_TTL_DAYS = 365;
 
-function daysBetween(a, b) {
-  return Math.floor((b.getTime() - a.getTime()) / 86400000);
+// True 18-calendar-month boundary (18*30 days lands 6-10 days short).
+function cooldownFloor(now) {
+  const floor = new Date(now.getTime());
+  floor.setMonth(floor.getMonth() - COOLDOWN_MONTHS);
+  return floor;
 }
 
 /**
@@ -47,13 +50,14 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
   if (facts.billingMode && facts.billingMode !== 'monthly_membership' && facts.billingMode !== 'per_application') {
     blockers.push('billing_lane_not_recurring');
   }
+  const floor = cooldownFloor(now);
   if (facts.priorRetentionOfferAt) {
     const at = new Date(facts.priorRetentionOfferAt);
-    if (!Number.isNaN(at.getTime()) && daysBetween(at, now) < COOLDOWN_DAYS) blockers.push('offer_within_18_months');
+    if (!Number.isNaN(at.getTime()) && at > floor) blockers.push('offer_within_18_months');
   }
   if (facts.manualPriceOverrideAt) {
     const at = new Date(facts.manualPriceOverrideAt);
-    if (!Number.isNaN(at.getTime()) && daysBetween(at, now) < COOLDOWN_DAYS) blockers.push('manual_override_within_18_months');
+    if (!Number.isNaN(at.getTime()) && at > floor) blockers.push('manual_override_within_18_months');
   }
   return { eligible: blockers.length === 0, familyKey, blockers };
 }
@@ -75,10 +79,9 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }
       if (existing) return existing;
     }
     const now = new Date();
-    const cooldownFloor = new Date(now.getTime() - COOLDOWN_DAYS * 86400000);
     const recent = await trx('retention_offers')
       .where({ customer_id: customerId })
-      .where('granted_at', '>', cooldownFloor)
+      .where('granted_at', '>', cooldownFloor(now))
       .first('id', 'granted_at');
     if (recent) {
       const err = new Error('retention_offer_cooldown');
@@ -118,11 +121,16 @@ function retentionDiscountForInvoice(offer, eligibleSubtotal, { now = new Date()
   if (applied >= Number(offer.max_charges)) return null;
   const subtotal = Number(eligibleSubtotal);
   if (!(subtotal > 0)) return null;
-  const capLeft = Math.round((Number(offer.cap_amount) - (Number(offer.amount_applied) || 0)) * 100) / 100;
-  if (!(capLeft > 0)) return null;
-  const raw = Math.round(subtotal * (Number(offer.percent_off) / 100) * 100) / 100;
-  const amount = Math.min(raw, capLeft);
-  if (!(amount > 0)) return null;
+  // Money math in INTEGER CENTS (repo discipline — see stripe-pricing.js):
+  // rounding after binary float multiplication drops cents (15% of $1.50
+  // computed as floats is 0.22499999... → $0.22 instead of $0.23).
+  const subtotalCents = Math.round(subtotal * 100);
+  const capLeftCents = Math.round(Number(offer.cap_amount) * 100) - Math.round((Number(offer.amount_applied) || 0) * 100);
+  if (!(capLeftCents > 0)) return null;
+  const rawCents = Math.round((subtotalCents * Number(offer.percent_off)) / 100);
+  const amountCents = Math.min(rawCents, capLeftCents);
+  if (!(amountCents > 0)) return null;
+  const amount = amountCents / 100;
   return {
     amount,
     lineItem: {
@@ -132,7 +140,7 @@ function retentionDiscountForInvoice(offer, eligibleSubtotal, { now = new Date()
       amount: -amount,
       category: 'retention_offer',
     },
-    exhaustsOffer: applied + 1 >= Number(offer.max_charges) || Math.round((capLeft - amount) * 100) / 100 <= 0,
+    exhaustsOffer: applied + 1 >= Number(offer.max_charges) || capLeftCents - amountCents <= 0,
   };
 }
 
@@ -162,7 +170,8 @@ module.exports = {
   OFFER_FAMILIES,
   MIN_TENURE_DAYS,
   MIN_PAID_VISITS,
-  COOLDOWN_DAYS,
+  COOLDOWN_MONTHS,
+  cooldownFloor,
   offerEligibility,
   grantRetentionOffer,
   retentionDiscountForInvoice,

@@ -13,6 +13,7 @@ const { processCancellationRequest } = require('../services/cancellation-process
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
+const { getTemplate } = require('../services/cancellation-resolution/templates');
 const { etDateString } = require('../utils/datetime-et');
 
 function etDisplayDate(value) {
@@ -339,15 +340,22 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // write failure never blocks or un-reports a completed cancel.
       if (CancellationResolution.cancelFlowV2Enabled()) {
         try {
+          // The claimed template is caller input: only a registry template
+          // that belongs to the claimed reason is recorded; anything else is
+          // dropped (the case still lands, just without a card claim). Money
+          // is unaffected either way — offer grants re-derive eligibility
+          // server-side (C1), never from this field.
+          const claimed = value.resolutionTemplateId ? getTemplate(value.resolutionTemplateId) : null;
+          const validCard = claimed && value.reasonCode && claimed.reason === value.reasonCode ? claimed : null;
           await CancellationResolution.openCancellationCase({
             customerId: req.customer.id,
             serviceRequestId: request.id,
             reasonCode: value.reasonCode || null,
             reasonText: cleanDescription || null,
-            resolution: value.resolutionTemplateId
-              ? { kind: 'card', card: { templateId: value.resolutionTemplateId, slots: {}, action: {} } }
+            resolution: validCard
+              ? { kind: 'card', card: { templateId: validCard.id, slots: {}, action: {} } }
               : null,
-            resolutionOutcome: value.resolutionOutcome || null,
+            resolutionOutcome: validCard ? (value.resolutionOutcome || null) : null,
             snapshot: {
               tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
               monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,

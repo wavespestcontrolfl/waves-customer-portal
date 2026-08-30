@@ -28,8 +28,15 @@ function daysAgo(n, now) {
 
 function dateOnly(value) {
   if (!value) return null;
+  // DATE columns arrive as 'YYYY-MM-DD' strings — pass through untouched.
   if (typeof value === 'string') return value.slice(0, 10);
-  return value.toISOString ? value.toISOString().slice(0, 10) : null;
+  // Timestamps convert on the ET calendar (AGENTS.md America/New_York rule):
+  // toISOString() is UTC and misdates anything after 8 PM ET by a day.
+  try {
+    return etDateString(value);
+  } catch {
+    return null;
+  }
 }
 
 function laneForServiceLine(line) {

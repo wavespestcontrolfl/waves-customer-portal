@@ -55,9 +55,10 @@ describe('retentionDiscountForInvoice', () => {
     expect(retentionDiscountForInvoice(offer({ amount_applied: 75 }), 100)).toBeNull();
   });
 
-  test('rounding stays on cents', () => {
-    const out = retentionDiscountForInvoice(offer(), 89.99);
-    expect(out.amount).toBe(13.5); // 13.4985 → 13.50
+  test('rounding stays on cents (integer-cents math, no float drop)', () => {
+    expect(retentionDiscountForInvoice(offer(), 89.99).amount).toBe(13.5); // 13.4985 → 13.50
+    // Float math yields 0.22499999... → $0.22; integer cents give the right $0.23.
+    expect(retentionDiscountForInvoice(offer(), 1.5).amount).toBe(0.23);
   });
 });
 

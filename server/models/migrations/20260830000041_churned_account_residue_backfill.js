@@ -78,6 +78,17 @@ exports.up = async function up(knex) {
     if ((await knex.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
     if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
     await knex('customers').where({ id: customer.id }).update(update);
+    // Independent charge rails (mirrors cancellation-processor): Stripe picks
+    // a method by payment_methods.autopay_enabled ALONE, and the failed-
+    // payment retry ladder never checks active/churn — disarm both.
+    await knex('payment_methods')
+      .where({ customer_id: customer.id })
+      .update({ autopay_enabled: false });
+    await knex('payments')
+      .where({ customer_id: customer.id, status: 'failed' })
+      .whereNull('superseded_by_payment_id')
+      .whereNotNull('next_retry_at')
+      .update({ next_retry_at: null });
     if (hasLedger) await knex('customer_plan_rates').where({ customer_id: customer.id }).del();
 
     await knex('customer_interactions').insert({
