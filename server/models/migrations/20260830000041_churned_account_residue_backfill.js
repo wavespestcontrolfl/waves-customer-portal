@@ -151,8 +151,21 @@ exports.up = async function up(knex) {
     if ((await trx.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
     if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
     if (customer.billing_mode === 'per_application') {
-      update.billing_mode = null;
-      if (hasPerAppFee) update.per_application_fee = null;
+      // Same guard as the processor's lane wind-down: a COMPLETED but
+      // uninvoiced application is priced from these fields by billing
+      // recovery — keep them (the account stays in the audit script) until
+      // the office settles the visit.
+      const completedUninvoiced = await trx('scheduled_services as s')
+        .where('s.customer_id', customer.id)
+        .where('s.status', 'completed')
+        .whereNotExists(function invoiced() {
+          this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
+        })
+        .first('s.id');
+      if (!completedUninvoiced) {
+        update.billing_mode = null;
+        if (hasPerAppFee) update.per_application_fee = null;
+      }
     }
     await trx('customers').where({ id: customer.id }).update(update);
     // Stale series flag, scoped to THIS wound-down account only: with no

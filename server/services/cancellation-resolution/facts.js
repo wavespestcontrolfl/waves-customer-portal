@@ -241,12 +241,30 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     // (admin_edit, admin_create, ib_update, ib_bulk_update); system
     // provenance never trips the cooldown.
     leg('manualOverride', async () => {
-      const { MANUAL_RATE_AUDIT_ACTION } = require('../plan-rate-ledger');
-      const row = await db('audit_log')
-        .where({ action: MANUAL_RATE_AUDIT_ACTION, resource_type: 'customer', resource_id: customerId })
-        .orderBy('created_at', 'desc')
-        .first('created_at');
-      return row ? { updated_at: row.created_at } : null;
+      const { MANUAL_RATE_AUDIT_ACTION, MANUAL_RATE_SOURCES } = require('../plan-rate-ledger');
+      // Primary: the permanent audit trail (written prospectively from this
+      // ship forward). Secondary, transitional: any SURVIVING
+      // customer_plan_rates row with a human source — pre-deployment manual
+      // reprices never got an audit event, and a still-standing ledger row
+      // is the best remaining evidence (mutable, so absence proves nothing;
+      // presence still blocks).
+      const [auditRow, ledgerRow] = await Promise.all([
+        db('audit_log')
+          .where({ action: MANUAL_RATE_AUDIT_ACTION, resource_type: 'customer', resource_id: customerId })
+          .orderBy('created_at', 'desc')
+          .first('created_at'),
+        db('customer_plan_rates')
+          .where({ customer_id: customerId })
+          .whereIn('source', Array.from(MANUAL_RATE_SOURCES))
+          .orderBy('updated_at', 'desc')
+          .first('updated_at')
+          .catch(() => null),
+      ]);
+      const stamps = [auditRow && auditRow.created_at, ledgerRow && ledgerRow.updated_at]
+        .filter(Boolean)
+        .map((t) => new Date(t).getTime())
+        .filter((t) => !Number.isNaN(t));
+      return stamps.length ? { updated_at: new Date(Math.max(...stamps)) } : null;
     }, 'error'),
     // Only cases whose card was actually SHOWN (or acted on) suppress a
     // repeat — a server-resolved-but-never-displayed card (outcome 'none')
