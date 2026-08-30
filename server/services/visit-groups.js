@@ -1638,6 +1638,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (options.primaryViaSeries) {
           throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
         }
+        // The same refusal for IMPLICIT widening (local codex audit): with the
+        // collective gate on, a date move of a cadence primary would enter the
+        // series path, which moves future occurrences one row at a time and
+        // detaches them from their own grouped siblings. Staff move this visit
+        // only (seriesPolicy 'single') until the series-aware visit operation
+        // ships.
+        if (primary.is_recurring === true && options.seriesPolicy !== 'single'
+          && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true' && newDateStr !== dateOnly(primary.scheduled_date)) {
+          throw Object.assign(new Error('This service is grouped with another at the same stop — move this visit only (not the series), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+        }
         for (const m of members) {
           // Auto-dispatch honours the operator opt-outs on EVERY grouped
           // member, with the same guard the tapped row gets (codex r5): a

@@ -212,6 +212,30 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule.mock.calls[1][2]).toBe(null);
   });
 
+  test('a grouped cadence anchor never widens into a collective series move (gate on, date change, no explicit single scope) — this-visit-only proceeds (local audit)', async () => {
+    const prevGate = process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
+      const rb = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED' });
+      expect(rb.reschedule).not.toHaveBeenCalled();
+      db.__script = script({ members: [member('a', { is_recurring: true }), member('b')] });
+      const out = await moveVisitAsUnit({ rebooker: rb, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { seriesPolicy: 'single' } });
+      expect(out.visitMove.moved).toEqual(['a', 'b']);
+      // a same-day window move of a cadence anchor never widens (no date change) ⇒ allowed
+      db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-08-30' }, members: [member('a', { is_recurring: true }), member('b')], landed: [
+        { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+        { id: 'b', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      ] });
+      const same = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00', initiatedBy: 'admin' });
+      expect(same.visitMove.moved).toEqual(['a', 'b']);
+    } finally {
+      if (prevGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; else process.env.GATE_ADMIN_COLLECTIVE_MOVE = prevGate;
+    }
+  });
+
   test('a windowless tapped row anchors the sibling offset on the VISIT start; no anchor at all with windowed siblings is refused (local audit)', async () => {
     // visit start 09:00 (VISIT), tapped row windowless, sibling 10:00-11:00, request 13:00 ⇒ +4h ⇒ sibling 14:00-15:00
     db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });

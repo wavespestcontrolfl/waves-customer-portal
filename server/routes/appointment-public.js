@@ -283,6 +283,11 @@ async function visitServicesFor(svc) {
         // the whole stop pending-rebook: its stored slot is stale, so the
         // group must not render as booked (local codex audit).
         pendingRebook: members.some((m) => String(m.status || '').toLowerCase() === 'rescheduled'),
+        // A member already underway makes the whole stop underway (local
+        // codex audit): the technician is at / heading to this stop, so no
+        // member's link may still offer a confirm or read as upcoming.
+        livePhase: members.some((m) => String(m.status || '').toLowerCase() === 'on_site') ? 'on_site'
+          : members.some((m) => String(m.status || '').toLowerCase() === 'en_route') ? 'en_route' : null,
       },
     };
   } catch (err) {
@@ -337,6 +342,11 @@ async function membersMatchShown(trx, svc, shown) {
   // windows since the page loaded must reload, never be confirmed together.
   if (members.length >= 2 && !membersOneStop(members)) {
     throw Object.assign(new Error('visit members no longer share one stop'), { code: 'VISIT_STOP_MOVED' });
+  }
+  // A stop already underway (any member en_route / on_site) takes no
+  // customer confirm — the page renders in_progress; a stale tap reloads.
+  if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) {
+    throw Object.assign(new Error('visit already underway'), { code: 'VISIT_STOP_MOVED' });
   }
   return members;
 }
@@ -556,13 +566,15 @@ router.get('/:token', async (req, res, next) => {
     // Grouped state aggregates the members: any member awaiting a rebook
     // makes the stop pending-rebook, whichever member's link this is.
     const state = visitUnknown ? 'not_available'
-      : (visitInfo.visit?.pendingRebook && liveState === 'upcoming') ? 'pending_rebook'
-        : liveState;
+      : (visitInfo.visit?.livePhase && liveState === 'upcoming') ? 'in_progress'
+        : (visitInfo.visit?.pendingRebook && liveState === 'upcoming') ? 'pending_rebook'
+          : liveState;
+    const livePhase = state === 'in_progress' ? (phase || visitInfo.visit?.livePhase) : phase;
     const base = {
       state,
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
       // the way" vs "at your property" truthfully.
-      phase: phase || null,
+      phase: livePhase || null,
       // Deliberately NOT the customer's first name. The token is shared with
       // whoever the visit notification reached — a spouse, tenant or buyer —
       // so serving the account holder's name both mis-greets them and hands
