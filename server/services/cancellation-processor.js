@@ -197,43 +197,12 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
           update.churn_mrr = Number(customer.monthly_rate);
         }
-        // Per-application lane: billing_mode + per_application_fee are the
-        // live price for unpriced visit completions and survive nothing else
-        // clearing them (same reasoning and shape as customer-offboarding).
-        // NULL mode + NULL rate = the billing paths have nothing to charge.
-        // EXCEPT while a visit is actually in progress (en_route/on_site —
-        // the sweep below deliberately never auto-cancels those): its
-        // completion still needs this price, so the lane fields are KEPT and
-        // the in_progress_visit flag the sweep raises routes the whole
-        // account to manual review, where the office clears the lane after
-        // settling the visit (offboarding's straggler-completion rail).
-        if (customer.billing_mode === 'per_application') {
-          const unsettledWork = await db('scheduled_services as s')
-            .where('s.customer_id', customerId)
-            .where(function unsettled() {
-              // A visit actually in progress (the sweep never auto-cancels
-              // those) …
-              this.where(function liveNow() {
-                this.whereIn('s.status', ['en_route', 'on_site']).orWhereIn('s.track_state', LIVE_TRACK_STATES);
-              })
-                // … or COMPLETED but not yet invoiced: billing recovery
-                // prices such applications from the customer lane fields
-                // when the row has no price of its own.
-                .orWhere(function completedUninvoiced() {
-                  this.where('s.status', 'completed')
-                    .whereNotExists(function invoiced() {
-                      this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
-                    });
-                });
-            })
-            .first('s.id');
-          if (!unsettledWork) {
-            update.billing_mode = null;
-            update.per_application_fee = null;
-          } else {
-            logger.warn(`[cancellation-processor] per-application price kept for ${customerId} — unsettled visit (in progress or completed-uninvoiced); office clears the lane after settlement`);
-          }
-        }
+        // Per-application lane fields (billing_mode + per_application_fee)
+        // are NOT cleared here: they are the live price for unsettled work
+        // (an in-progress visit, or a completed-but-uninvoiced application),
+        // and any pre-check would race a pending→en_route transition. They
+        // are cleared AFTER the visit sweep by one atomic conditional UPDATE
+        // (see the gated block near the end of this function).
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
         const ledgerAuthoritative = planRateLedgerEnabled();
         await db.transaction(async (trx) => {
@@ -615,6 +584,42 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     for (const svc of batch) {
       processed.add(svc.id);
       await processVisit(svc);
+    }
+  }
+
+  // Per-application lane wind-down — AFTER the sweep, as ONE atomic
+  // conditional UPDATE so no service transition can race it: the fields
+  // clear only if, at the instant of the update, the account has no
+  // in-progress visit and no completed-but-uninvoiced application (billing
+  // recovery prices those from these fields; same straggler-completion rail
+  // as customer-offboarding). Unsettled work keeps the price; the account
+  // is already flagged for review by the in_progress/unresolved errors.
+  if (churned && gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+    try {
+      const cleared = await db('customers')
+        .where({ id: customerId, billing_mode: 'per_application' })
+        .whereNotExists(function unsettledWork() {
+          this.select(1).from('scheduled_services as s')
+            .whereRaw('s.customer_id = customers.id')
+            .where(function unsettled() {
+              this.where(function liveNow() {
+                this.whereIn('s.status', ['en_route', 'on_site']).orWhereIn('s.track_state', LIVE_TRACK_STATES);
+              })
+                .orWhere(function completedUninvoiced() {
+                  this.where('s.status', 'completed')
+                    .whereNotExists(function invoiced() {
+                      this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
+                    });
+                });
+            });
+        })
+        .update({ billing_mode: null, per_application_fee: null, updated_at: new Date() });
+      if (cleared === 0) {
+        logger.info(`[cancellation-processor] per-application lane left intact for ${customerId} (not per-application, or unsettled work keeps the price)`);
+      }
+    } catch (laneErr) {
+      errors.push('per_application_lane');
+      logger.error(`[cancellation-processor] per-application lane wind-down failed for ${customerId}: ${laneErr.message}`);
     }
   }
 

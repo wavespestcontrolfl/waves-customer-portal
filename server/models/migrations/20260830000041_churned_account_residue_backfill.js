@@ -87,12 +87,19 @@ exports.up = async function up(knex) {
     // leave a newly re-won customer wound down.
      
     await knex.transaction(async (trx) => {
-      await trx.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE', [customer.id]);
-      await windDownIfStillResidue(trx, customer);
+      await windDownIfStillResidue(trx, customer.id);
     });
   }
 
-  async function windDownIfStillResidue(trx, customer) {
+  async function windDownIfStillResidue(trx, customerId) {
+    // Lock and RE-FETCH — the candidate snapshot is stale by now; an admin
+    // reactivation or reprice committed before this lock must win.
+    const customer = await trx('customers')
+      .where({ id: customerId })
+      .forUpdate()
+      .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
+    if (!customer) return;
+    if (!(customer.pipeline_stage === 'churned' || customer.active === false)) return; // re-won — leave alone
     const [liveSeries, upcoming, inProgress, coveredTerm] = await Promise.all([
       trx('scheduled_services')
         .where({ customer_id: customer.id, recurring_ongoing: true })
