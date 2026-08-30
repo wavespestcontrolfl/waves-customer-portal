@@ -1325,16 +1325,41 @@ async function uploadVideoToS3(buffer, filename) {
 const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'blog_auto', 'content_agent']);
 async function blogHeroSocialImageUrl(link) {
   try {
-    const pageUrl = new URL(String(link || ''));
-    if (!/(^|\.)wavespestcontrol\.com$/i.test(pageUrl.hostname)) return null;
-    const pageRes = await fetch(pageUrl.href, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (!pageRes.ok) return null;
+    // SSRF guard (same discipline as the GBP watermark fetch and the LinkedIn
+    // thumbnail upload): both server-side hops — the page and the og:image it
+    // names — must be on our own hosts (isTrustedImageHost: hub + social CDN),
+    // and redirects are refused outright so a trusted host can never 302 the
+    // server to a private/metadata address. A page whose og:image points
+    // anywhere else simply gets no hero (card fallback), never a fetch.
+    let pageUrl = new URL(String(link || ''));
+    if (!isTrustedImageHost(pageUrl.href)) return null;
+    // Blog-share lanes pass normalizeUrl'd links (trailing slash stripped) and
+    // the hub 301s those to its canonical slash form — allow exactly ONE
+    // redirect hop, and only to a trusted host, validated before it is
+    // fetched; a second hop or an off-host Location is a miss (no hero).
+    let pageRes = await fetch(pageUrl.href, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    if ([301, 302, 307, 308].includes(pageRes.status)) {
+      // Release the redirect body before anything else — an unconsumed manual
+      // redirect pins its undici connection (same discipline as linkIsLive).
+      if (pageRes.body && typeof pageRes.body.cancel === 'function') await pageRes.body.cancel().catch(() => {});
+      const location = pageRes.headers?.get?.('location');
+      const hop = location ? new URL(location, pageUrl) : null;
+      if (!hop || !isTrustedImageHost(hop.href)) return null;
+      pageUrl = hop;
+      pageRes = await fetch(pageUrl.href, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    }
+    if (pageRes.status !== 200) return null;
     const html = await pageRes.text();
     const match = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     if (!match) return null;
-    const imgRes = await fetch(new URL(match[1], pageUrl).href, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (!imgRes.ok) return null;
+    const imageUrl = new URL(match[1], pageUrl).href;
+    if (!isTrustedImageHost(imageUrl)) {
+      logger.warn(`[social] blog hero og:image is off-host for ${link} — no hero`);
+      return null;
+    }
+    const imgRes = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (imgRes.status !== 200) return null;
     const buffer = Buffer.from(await imgRes.arrayBuffer());
     if (!buffer.length) return null;
     const slug = pageUrl.pathname.replace(/\/+$/, '').split('/').pop() || 'post';
@@ -1694,7 +1719,9 @@ async function postToGBP(locationId, summary, link, imageUrl, opts = {}) {
       locationId
     );
     logger.info(`[social] GBP post created for ${loc.name}`);
-    return { platform: 'gbp', location: locationId, success: true, postId: result.name };
+    // imageUrl only when media was attached — the text-only retry in
+    // publishToAll passes null and must read as "no image shipped".
+    return { platform: 'gbp', location: locationId, success: true, postId: result.name, ...(mediaUrl ? { imageUrl: mediaUrl } : {}) };
   } catch (err) {
     logger.error(`[social] GBP post failed for ${loc.name}: ${err.message}`);
     return { platform: 'gbp', location: locationId, success: false, error: err.message };
