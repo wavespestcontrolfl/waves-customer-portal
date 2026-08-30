@@ -342,7 +342,6 @@ async function winLossSlices({ days = 90 } = {}) {
   const byServiceLine = new Map();
   const byLeadSource = new Map();
   const byWaveguardTier = new Map();
-  let excludedFromRatesCount = 0;
 
   for (const row of rows) {
     // This card reports RATES, so archived rows drop symmetrically —
@@ -364,10 +363,7 @@ async function winLossSlices({ days = 90 } = {}) {
     if (row.archived_at) continue;
     // Dead/won-elsewhere rows are counted in "why we lose" above but leave
     // every RATE denominator — they were never a winnable offer.
-    if (disposition && excludedFromRates(disposition)) {
-      excludedFromRatesCount += 1;
-      continue;
-    }
+    if (disposition && excludedFromRates(disposition)) continue;
     tally(totals, isWon);
 
     const lines = inferEstimateServiceLines({
@@ -429,6 +425,12 @@ async function winLossSlices({ days = 90 } = {}) {
   // The percentage denominator is REAL losses only — dead leads and
   // customers who converted another way are listed for visibility but must
   // not dilute pctOfLosses (codex pre-push P1).
+  // Derived from the disposition counts so ARCHIVED excluded rows are
+  // counted too (GH codex P2) — every converted_other_path row is archived
+  // by the conversion sweep, and the archived-row skip above runs first.
+  const excludedFromRatesCount = DISPOSITIONS
+    .filter((d) => d.group !== 'lost')
+    .reduce((sum, d) => sum + (byDispositionCount.get(d.code) || 0), 0);
   const lossTotal = DISPOSITIONS
     .filter((d) => d.group === 'lost')
     .reduce((sum, d) => sum + (byDispositionCount.get(d.code) || 0), 0);

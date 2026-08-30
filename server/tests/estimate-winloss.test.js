@@ -257,17 +257,21 @@ describe('winLossSlices — audit slices', () => {
       // Archived live row with a classification: visible in "why we lose",
       // out of the rates (archived drops stay symmetric) — codex pre-push P1.
       row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
+      // Archived converted row (the conversion sweep's shape): listed, and
+      // COUNTED in excludedFromRates even though archived (GH codex P2).
+      row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
-    expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 1 });
+    expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 2 });
     // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
     // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
       expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 25, group: 'lost' }),
       expect.objectContaining({ code: 'expired_viewed', count: 1, pctOfLosses: 25 }),
       expect.objectContaining({ code: 'archived_unresolved', count: 1 }),
+      expect.objectContaining({ code: 'converted_other_path', count: 1, group: 'won_elsewhere', pctOfLosses: null }),
       expect.objectContaining({ code: 'declined_price', count: 1 }),
       expect.objectContaining({ code: 'invalid_lead', count: 1, group: 'dead', pctOfLosses: null }),
     ]);
