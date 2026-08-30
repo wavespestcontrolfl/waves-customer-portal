@@ -36,7 +36,10 @@ exports.up = async function up(knex) {
   }
   const repaired = await knex('service_records')
     .whereRaw("(field_flags ->> 'recap') = 'true'")
-    .whereRaw("service_type ~* '\\mre-?service\\M'")
+    // The pattern rides as a BINDING: a bare `?` inside knex.raw SQL text is
+    // a placeholder and mangled this regex to `re-$2service` (CI migrate
+    // failure; the standing knex.raw micro-rule).
+    .whereRaw('service_type ~* ?', ['\\mre-?service\\M'])
     .where(function notTrue() {
       this.where('is_callback', false).orWhereNull('is_callback');
     })
