@@ -14245,9 +14245,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // reminds the customer on the new slot.
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
-      await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
-      if (moved.smsSent === true) {
-        await markRescheduleReminderNotified(moved.id);
+      // A member carried by its visit's unit move (coveredByVisit) had its
+      // reminder synced by moveVisitAsUnit with its OWN landed window; the
+      // covered result carries no window, and re-syncing here would fall
+      // back to 08:00 (local codex audit). Board refresh only.
+      if (!moved.coveredByVisit) {
+        await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
+        if (moved.smsSent === true) {
+          await markRescheduleReminderNotified(moved.id);
+        }
       }
       try {
         await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });

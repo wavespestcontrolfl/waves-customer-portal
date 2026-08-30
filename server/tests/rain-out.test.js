@@ -3304,6 +3304,15 @@ describe('rain-out service', () => {
 
 describe('commit summary — visit-covered members are not separate stops (local codex audit)', () => {
   const { summarizeCommitResults, coveredIdsFrom } = require('../services/rain-out')._test;
+  test('the admin-dispatch effects loop never re-syncs a covered member\'s reminder (the unit mover synced its real window)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+    const loop = src.slice(src.indexOf('for (const moved of result.results || [])'));
+    const sync = loop.indexOf('await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow');
+    const guard = loop.indexOf('if (!moved.coveredByVisit) {');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(sync);
+  });
+
   test('coverage = moved + unchanged (already-at-target) members, never failed ones (codex r19)', () => {
     expect(coveredIdsFrom({ visitMove: { moved: ['a'], unchanged: ['b'], failed: [{ id: 'c' }] } })).toEqual(['a', 'b']);
     expect(coveredIdsFrom({ visitMove: { moved: [], failed: [], alreadyAtTarget: true, unchanged: ['a', 'b'] } })).toEqual(['a', 'b']);
