@@ -566,6 +566,12 @@ function normalizeEngineLineItems(result) {
     const price = isRecurring
       ? money(Number.isFinite(netAnnual) ? netAnnual : monthly * 12)
       : money(pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) ?? 0);
+    // A manual discount lands ONLY in manualFinalAnnual — the row's
+    // monthlyAfterDiscount predates it, so the audited monthly derives
+    // from the final annual when present (codex pre-push P1).
+    const netMonthly = Number.isFinite(num(item.manualFinalAnnual))
+      ? money(num(item.manualFinalAnnual) / 12)
+      : (isRecurring ? money(monthly) : null);
     const before = isRecurring
       ? pickNum(item.annualBeforeDiscount, item.annual)
       : pickNum(item.priceBeforeDiscount, item.price, item.totalBeforeDiscount, item.total);
@@ -594,7 +600,7 @@ function normalizeEngineLineItems(result) {
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: isRecurring ? 'recurring' : 'one_time',
       price,
-      monthly: isRecurring ? money(monthly) : null,
+      monthly: isRecurring ? netMonthly : null,
       priceBeforeDiscount,
       discount,
       priceSource: 'saved_estimate.engineResult.lineItems',

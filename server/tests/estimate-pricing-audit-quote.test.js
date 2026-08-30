@@ -192,13 +192,18 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
             { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
+            // Manual discount lands ONLY in manualFinalAnnual — the audited
+            // monthly must derive from it, not the stale monthlyAfterDiscount.
+            { service: 'tree_shrub', name: 'Tree & Shrub', monthly: 40, monthlyAfterDiscount: 40, annual: 480, manualFinalAnnual: 420 },
             // RAW agent shape: gross annual, net in annualAfterDiscount.
             { service: 'mosquito', name: 'Mosquito', monthly: 80, monthlyAfterDiscount: 72, annual: 960, annualAfterDiscount: 864, visits: 12, program: 'precision', addOns: { stationCount: 3 } },
           ],
         },
       },
     });
-    expect(audit.lines).toHaveLength(5);
+    expect(audit.lines).toHaveLength(6);
+    const ts = audit.lines.find((l) => l.serviceKey === 'tree_shrub');
+    expect(ts).toMatchObject({ price: 420, monthly: 35, priceBeforeDiscount: 480 });
     const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
     // Net wins the price; gross survives as priceBeforeDiscount.
     expect(mq).toMatchObject({ price: 864, monthly: 72, priceBeforeDiscount: 960, discount: 0.1 });
