@@ -13122,10 +13122,29 @@ const CallRecordingProcessor = {
                           let emailRetried = null;
                           for (let attempt = 1; attempt <= 3; attempt += 1) {
                             await new Promise((r) => setTimeout(r, attempt * 15000));
+                            // The hold existed because a move was changing
+                            // the slot — re-read the CURRENT one before each
+                            // retry (local gate P1: replaying the extracted
+                            // pre-move time would email the old slot). No
+                            // live slot ⇒ stop retrying and hand off below.
+                            let currentSlot = null;
+                            try {
+                              const liveRow = await db('scheduled_services')
+                                .where({ id: scheduledServiceId })
+                                .whereIn('status', ['pending', 'confirmed'])
+                                .first('scheduled_date', 'window_start');
+                              if (liveRow && liveRow.scheduled_date) {
+                                const d = liveRow.scheduled_date instanceof Date
+                                  ? liveRow.scheduled_date.toISOString().slice(0, 10)
+                                  : String(liveRow.scheduled_date).slice(0, 10);
+                                currentSlot = parseETDateTime(`${d}T${liveRow.window_start ? String(liveRow.window_start).slice(0, 5) : '08:00'}`);
+                              }
+                            } catch { /* fail to the hand-off below */ }
+                            if (!currentSlot || Number.isNaN(currentSlot.getTime())) { emailRetried = { held: true }; break; }
                             emailRetried = await AppointmentEmail.sendAppointmentConfirmationEmail({
                               customerId,
                               scheduledServiceId,
-                              appointmentTime: parseETDateTime(extracted.preferred_date_time),
+                              appointmentTime: currentSlot,
                               serviceLabel: serviceType,
                               recipientFilter: emailOnlySlots.map((s) => s.email),
                             });

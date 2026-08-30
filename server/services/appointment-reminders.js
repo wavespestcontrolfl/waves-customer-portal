@@ -3165,12 +3165,16 @@ const AppointmentReminders = {
             .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
             .where({ 'ar.move_hold_until': record.move_hold_until, 'ar.customer_id': record.customer_id })
             .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id');
-          const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'].includes(String(r.status || '').toLowerCase()));
-          const oneStop = liveRows.length < 2 || (
+          // A 'rescheduled' cohort member is UNRESOLVED, not ignorable
+          // (local gate P1): it is a failed sibling awaiting its
+          // replacement slot — the stop is not repaired while one exists.
+          const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
+          const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
+          const oneStop = !pendingRebook && (liveRows.length < 2 || (
             new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
             && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
             && require('./visit-groups').windowedMembersConnected(liveRows)
-          );
+          ));
           if (oneStop) {
             const released = await db('appointment_reminders')
               .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
