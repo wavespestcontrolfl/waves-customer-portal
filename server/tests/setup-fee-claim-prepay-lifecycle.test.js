@@ -49,6 +49,7 @@ function conn({ scheduledService = null, claim = null, updateResult = 1, rootsFo
     const q = { _where: null };
     q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = w; return q; };
     q.whereNot = () => q;
+    q.orWhere = () => q;
     q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
     q.forUpdate = () => q;
@@ -770,7 +771,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const trx = (table) => {
       const q = { _where: null };
       q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
-      q.whereNot = () => q; q.whereNull = (col) => { q._whereNull = col; return q; }; q.forUpdate = () => q;
+      q.whereNot = () => q; q.orWhere = () => q; q.whereNull = (col) => { q._whereNull = col; return q; }; q.forUpdate = () => q;
       q.whereNotIn = () => q; q.whereIn = () => { q._whereIn = true; return q; }; q.orderBy = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
         if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? (siblings[0] || null) : claimRow;
@@ -828,7 +829,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const trx = (table) => {
       const q = { _where: null };
       q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = { ...(q._where || {}), ...(typeof w === 'object' ? w : {}) }; return q; };
-      q.whereNot = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
+      q.whereNot = () => q; q.orWhere = () => q; q.whereNull = () => q; q.forUpdate = () => q; q.whereNotIn = () => q; q.whereIn = () => q; q.orderBy = () => q; q.orWhereNotNull = () => q;
       q.first = async () => {
         if (table === 'invoices') return q._where && q._where.id === 'inv-comp-draft'
           ? { id: 'inv-comp-draft', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }

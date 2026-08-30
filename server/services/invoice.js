@@ -5167,7 +5167,7 @@ const InvoiceService = {
       if (!moneyAttached) {
         voided += await conn("invoices")
           .where({ id: inv.id, status: inv.status })
-          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
           .update({ status: "void", updated_at: new Date() });
       } else {
         logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: switch-restored invoice ${inv.id} has money attached (${inv.status}) — refund/reconcile so the coverage is not collected twice`);
@@ -5265,7 +5265,7 @@ const InvoiceService = {
         // a lost CAS means money arrived mid-flight and a human reconciles.
         const sibVoided = await conn("invoices")
           .where({ id: sib.id, status: sib.status })
-          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
           .update({ status: "void", updated_at: new Date() });
         if (sibVoided === 1) {
           await conn("setup_fee_claims").where({ id: sc.id }).delete();
@@ -5324,7 +5324,7 @@ const InvoiceService = {
       if (!moneyAttached) {
         voided += await conn("invoices")
           .where({ id: rb.id, status: rb.status })
-          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
           .update({ status: "void", updated_at: new Date() });
       } else {
         logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} has money attached (${rb.status}) — refund/reconcile so the setup is not collected twice`);
@@ -5415,7 +5415,7 @@ const InvoiceService = {
         } else if (!moneyAttached) {
           const sibVoided = await conn("invoices")
             .where({ id: sib.id, status: sib.status })
-            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
+            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id").where(function creditFree() { this.whereNull("credit_applied").orWhere("credit_applied", 0); })
             .update({ status: "void", updated_at: new Date() });
           if (sibVoided === 1) {
             await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
