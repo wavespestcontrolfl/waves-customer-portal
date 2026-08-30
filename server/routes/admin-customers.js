@@ -5012,9 +5012,32 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       // converter would double-mint them; accept-side comms fire only from
       // the accept routes, never from a status change.
       if (linkEstimateId) {
+        // Re-validate ownership and live call linkage on the FRESH in-trx
+        // row: a concurrent customer relink or call-linkage correction since
+        // the pre-transaction check must drop the link, never attach another
+        // customer's (or a quarantined) estimate to this customer's paid
+        // term.
+        const freshEstimate = await trx('estimates')
+          .where({ id: linkEstimateId, customer_id: customer.id })
+          .first('id', 'estimate_data');
+        let freshCallBlock = null;
+        if (freshEstimate) {
+          let freshData = freshEstimate.estimate_data;
+          if (typeof freshData === 'string') {
+            try { freshData = JSON.parse(freshData); } catch { freshData = null; }
+          }
+          if (freshData?.estimatorEngine?.callLogId) {
+            const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
+            freshCallBlock = await callSideBlockForEstimateData(trx, freshData)
+              .catch(() => 'call_linkage_unverifiable');
+          }
+        }
+        if (!freshEstimate || freshCallBlock) linkEstimateId = null;
+      }
+      if (linkEstimateId) {
         const claimNow = trx.fn.now();
         const [claimed] = await trx('estimates')
-          .where({ id: linkEstimateId })
+          .where({ id: linkEstimateId, customer_id: customer.id })
           .whereIn('status', ['sent', 'viewed'])
           // A locked price means a prior accept already committed money.
           .whereNull('price_locked_at')

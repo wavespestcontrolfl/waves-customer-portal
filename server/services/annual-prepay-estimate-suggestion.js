@@ -12,9 +12,13 @@
 // (non-discountable lines and the lawn program-minimum floor included).
 
 // Cash/verbal accepts leave the estimate at `viewed` (the customer never
-// clicks Accept), so eligibility can't be accepted-only. Draft, declined,
-// expired, and archived estimates never suggest.
-const SUGGESTION_STATUSES = { accepted: 3, viewed: 2, sent: 1 };
+// clicks Accept) — that is the shape this prefill exists for. ACCEPTED
+// estimates never suggest: their acceptance already ran conversion/billing
+// through the estimate lane, so pricing a manual cash record from one risks
+// duplicating obligations (that shape belongs to the on-site prepay-switch
+// lane and its invoice supersede). Draft, declined, expired, and archived
+// estimates never suggest either.
+const SUGGESTION_STATUSES = { viewed: 2, sent: 1 };
 
 function suggestionActivityStamp(estimate = {}) {
   return estimate.accepted_at || estimate.viewed_at || estimate.sent_at || estimate.created_at || 0;
@@ -34,9 +38,8 @@ function pickAnnualPrepayEstimate(estimates = [], { excludeIds = [] } = {}) {
       && !excluded.has(String(e.id))
       // The expiration sweep isn't the boundary: a still-`sent`/`viewed` row
       // whose expires_at has passed is a stale quote (public helpers reject it
-      // the same way). Accepted estimates don't expire.
-      && !(String(e.status) !== 'accepted' && e.expires_at
-        && new Date(e.expires_at).getTime() < now));
+      // the same way).
+      && !(e.expires_at && new Date(e.expires_at).getTime() < now));
   ranked.sort((a, b) => (
     (new Date(suggestionActivityStamp(b)) - new Date(suggestionActivityStamp(a)))
     || (SUGGESTION_STATUSES[String(b.status)] - SUGGESTION_STATUSES[String(a.status)])
