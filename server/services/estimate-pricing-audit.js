@@ -155,13 +155,25 @@ function dimensionsFrom(data) {
   const inputs = data?.engineInput || data?.inputs || data?.engineInputs || {};
   const result = data?.result || data?.engineResult || {};
   const property = result.property || {};
-  const homeSqFt = Number(inputs.homeSqFt || property.homeSqFt || property.squareFootage || 0);
-  const lotSqFt = Number(inputs.lotSqFt || property.lotSqFt || 0);
+  // Nullish-aware pick: a MEASURED 0 is authoritative (computeTurfArea
+  // treats any non-negative measured value as final) and must not fall
+  // through to an estimate (codex pre-push P1). First present, finite,
+  // non-negative value wins.
+  const pick = (...vals) => {
+    for (const v of vals) {
+      if (v === null || v === undefined || v === '') continue;
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return 0;
+  };
+  const homeSqFt = pick(inputs.homeSqFt, property.homeSqFt, property.squareFootage);
+  const lotSqFt = pick(inputs.lotSqFt, property.lotSqFt);
   // measuredTurfSf is the wizard's AUTHORITATIVE turf (trusted-measurement
   // substitution); property.lawnSqFt/bedArea are the engine-result twins —
-  // omitting them zeroed lawn/tree COGS on wizard rows (codex pre-push P1).
-  const lawnSqFt = Number(inputs.measuredTurfSf || inputs.lawnSqFt || property.lawnSqFt || property.estimatedTurfSf || property.estimatedTurfSqFt || inputs.estimatedTurfSf || 0);
-  const bedArea = Number(inputs.bedArea || inputs.estimatedBedAreaSf || property.bedArea || property.estimatedBedAreaSf || property.estimatedBedSqFt || 0);
+  // omitting them zeroed lawn/tree COGS on wizard rows.
+  const lawnSqFt = pick(inputs.measuredTurfSf, inputs.lawnSqFt, property.lawnSqFt, property.estimatedTurfSf, property.estimatedTurfSqFt, inputs.estimatedTurfSf);
+  const bedArea = pick(inputs.bedArea, inputs.estimatedBedAreaSf, property.bedArea, property.estimatedBedAreaSf, property.estimatedBedSqFt);
   return { homeSqFt, lotSqFt, lawnSqFt, bedArea };
 }
 

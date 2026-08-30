@@ -177,6 +177,17 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.request.inputs).toEqual({ homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } });
   });
 
+  test('a measured ZERO turf survives — never falls through to an estimate', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,
+      estimate_data: {
+        engineInput: { homeSqFt: 1500, measuredTurfSf: 0, estimatedTurfSf: 3000 },
+        engineResult: { property: { estimatedTurfSf: 3000 } },
+      },
+    });
+    expect(audit.dimensions.lawnSqFt).toBe(0);
+  });
+
   test('markerless engineInputs (click-mint / v1 shape) still freeze the price-bearing property facts', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-3', status: 'sent', source: 'service_report_cta',
