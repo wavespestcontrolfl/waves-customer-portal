@@ -12840,6 +12840,17 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   purpose: 'appointment_confirmation',
                   customerId: customerId || undefined,
                   appointmentId: confirmedAppointmentRow?.id,
+                  // ABA guard input (codex #3609 r45): the slot the body
+                  // quotes, derived the same way the canonical check derives
+                  // the live one. Omitted when the row carries no slot.
+                  ...(confirmedAppointmentRow?.scheduled_date ? (() => {
+                    const { parseETDateTime } = require('../utils/datetime-et');
+                    const d = confirmedAppointmentRow.scheduled_date instanceof Date
+                      ? confirmedAppointmentRow.scheduled_date.toISOString().slice(0, 10)
+                      : String(confirmedAppointmentRow.scheduled_date).slice(0, 10);
+                    const at = parseETDateTime(`${d}T${confirmedAppointmentRow.window_start ? String(confirmedAppointmentRow.window_start).slice(0, 5) : '08:00'}`);
+                    return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                  })() : {}),
                   estimateId: estimate.id,
                   identityTrustLevel: 'service_contact_authorized',
                   entryPoint: 'estimate_accept_onetime_confirmed',

@@ -12878,6 +12878,12 @@ const CallRecordingProcessor = {
                       purpose: 'appointment_confirmation',
                       customerId,
                       appointmentId: scheduledServiceId,
+                      // ABA guard input (codex #3609 r45): the booked slot
+                      // the body quotes, derived like the canonical check.
+                      ...(scheduledDateForLog ? (() => {
+                        const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
+                        return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                      })() : {}),
                       identityTrustLevel: 'phone_matches_customer',
                       metadata: {
                         original_message_type: 'confirmation',
@@ -13020,6 +13026,12 @@ const CallRecordingProcessor = {
                           purpose: 'appointment_confirmation',
                           customerId,
                           appointmentId: scheduledServiceId,
+                          // ABA guard input (codex #3609 r45): the booked slot
+                          // the body quotes, derived like the canonical check.
+                          ...(scheduledDateForLog ? (() => {
+                            const at = parseETDateTime(`${String(scheduledDateForLog).slice(0, 10)}T${windowStartForLog ? String(windowStartForLog).slice(0, 5) : '08:00'}`);
+                            return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+                          })() : {}),
                           identityTrustLevel: isServiceContactRole(contact.role)
                             ? 'service_contact_authorized'
                             : 'phone_matches_customer',
