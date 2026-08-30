@@ -368,8 +368,8 @@ describe('grouped visit payload (codex #3609 r10)', () => {
       const api = {
         where: () => api, whereNotIn: () => api, orderBy: () => api,
         select: async () => [
-          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, window_start: '09:00:00' },
-          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, window_start: '10:00:00' },
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, window_start: '09:00:00', window_end: '10:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, window_start: '10:00:00', window_end: '11:00:00' },
         ],
         first: async () => {
           if (table === 'service_visits') return { window_start: '09:00:00' }; // not read since r23 — the start comes from the member snapshot
@@ -383,7 +383,7 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     // each member carries its OWN pristine label (codex r15 P2) — the
     // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, state: 'upcoming', phase: null } });
+      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a', window_start: '09:00:00' }, { id: 'b', window_start: '10:00:00' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, state: 'upcoming', phase: null } });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
