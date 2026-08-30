@@ -1096,6 +1096,19 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.result).toBe('We noted fungus in the back lawn — details below.');
   });
 
+  it('every honest-status branch keeps the $0 WaveGuard line in its detail', () => {
+    const cases = [
+      { cockroachReportV2: { status: { label: 'Activity moderate after treatment 2 of 3.' } } },
+      { termiteReportV2: { status: { label: 'No termite activity at 12 stations.' } } },
+      { reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'We noted fungus — details below.' } } },
+      { findings: [{ severity: 'high', title: 'Ant activity near front entry' }] },
+    ];
+    for (const extra of cases) {
+      const status = smartStatusSummary({ reserviceReport: reservicePest, applications: [], ...extra }, 'static');
+      expect(status.detail).toContain('$0.00 billed');
+    }
+  });
+
   it('a cockroach V2 status headline outranks the re-service headline', () => {
     const status = smartStatusSummary({
       reserviceReport: reservicePest,

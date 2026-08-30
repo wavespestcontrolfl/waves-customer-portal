@@ -91,9 +91,12 @@ async function resolveCallbackBilling(service = {}, knex = null) {
     if (!service?.scheduled_service_id) return { free: false, reason: 'no_visit' };
     const row = await knex('scheduled_services')
       .where({ id: service.scheduled_service_id })
-      .first('id', 'estimated_price', 'is_callback');
+      .first('id', 'estimated_price', 'prepaid_amount', 'is_callback');
     if (!row) return { free: false, reason: 'visit_missing' };
     if (positiveMoney(row.estimated_price)) return { free: false, reason: 'priced' };
+    // Money can be collected with NO invoice: the prepaid lane stamps
+    // scheduled_services.prepaid_amount when a payment is taken up front.
+    if (positiveMoney(row.prepaid_amount)) return { free: false, reason: 'prepaid' };
     // Linked by EITHER key: "Charge now" mints an invoice before completion
     // against scheduled_service_id only (migration 20260420000002), and a
     // positive invoice that never back-linked to the record must still

@@ -87,6 +87,14 @@ describe('reservice-report (gate on)', () => {
     expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1n');
   });
 
+  test('PREPAID member callback (prepaid_amount, no invoice): no money claim', async () => {
+    const knex = fakeKnex({ visit: { id: 'visit-1', estimated_price: null, prepaid_amount: '45.00', is_callback: true } });
+    const block = await buildReserviceReport(member, { serviceLine: 'pest', knex });
+    expect(block.includedWithWaveGuard).toBe(false);
+    expect(block.billingLine).toBeNull();
+    expect(block.billingReason).toBe('prepaid');
+  });
+
   test('member callback with a collectible invoice on the record: no money claim', async () => {
     const knex = fakeKnex({ invoices: [{ id: 'inv-1' }] });
     const block = await buildReserviceReport(member, { serviceLine: 'pest', knex });

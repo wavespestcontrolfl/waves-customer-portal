@@ -757,7 +757,22 @@ export function visitWorkSummary(data = {}, fallback = '') {
   return parts.length ? parts.join(' · ') : fallback;
 }
 
+// Every status branch — high-priority findings, re-entry, the honest V2
+// statuses, the callback branch itself — flows through the billing-line
+// wrapper below, so an eligible member callback keeps its "$0 — included
+// with WaveGuard" line no matter which summary wins (codex r5 P1: the
+// earlier branches silently dropped it while the PDF printed it).
 export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now()) {
+  const summary = statusSummaryCore(data, mode, nowMs);
+  const billingLine = data.reserviceReport && typeof data.reserviceReport === 'object'
+    ? data.reserviceReport.billingLine : null;
+  if (typeof billingLine === 'string' && billingLine && !String(summary.detail || '').includes(billingLine)) {
+    summary.detail = [summary.detail || '', billingLine].filter(Boolean).join(' ');
+  }
+  return summary;
+}
+
+function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
   const completedItems = coverageItems.filter((item) => isCompletedCoverageStatus(item.status));
