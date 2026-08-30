@@ -624,7 +624,11 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
     const probed = [];
     const probe = async (url) => { probed.push(url); return url === live.astro_live_url; };
     expect(await Studio.firstLivePage([legacy, dead, live], probe)).toBe(live);
-    expect(probed).toEqual([dead.astro_live_url, live.astro_live_url]); // legacy row never probed (no live URL)
+    expect(probed.sort()).toEqual([dead.astro_live_url, live.astro_live_url].sort()); // legacy row never probed (no live URL); probes run in parallel
+    // Rank order wins even when a later candidate answers first.
+    const slowLive = { ...live, astro_live_url: 'https://www.wavespestcontrol.com/slow-but-first/' };
+    const raced = async (url) => { if (url === slowLive.astro_live_url) await new Promise((r) => setTimeout(r, 20)); return true; };
+    expect(await Studio.firstLivePage([slowLive, live], raced)).toBe(slowLive);
     // Four dead candidates: only the first three are probed, result is null.
     const many = [1, 2, 3, 4].map((n) => ({ ...live, astro_live_url: `https://www.wavespestcontrol.com/dead-${n}/` }));
     probed.length = 0;

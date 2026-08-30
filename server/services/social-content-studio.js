@@ -796,11 +796,12 @@ function liveUrlForRow(row = {}) {
 // stamped astro_live_url is already the hub's canonical form (trailing
 // slash), so a live page never needs a hop. Any failure = dead.
 const HUB_HOST = /(^|\.)wavespestcontrol\.com$/i;
+const LINK_PROBE_TIMEOUT_MS = 5000;
 async function linkIsLive(url, fetchImpl = globalThis.fetch) {
   try {
     const parsed = new URL(String(url || ''));
     if (!HUB_HOST.test(parsed.hostname)) return false;
-    const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(LINK_PROBE_TIMEOUT_MS) });
     // Exactly 200 — `ok` would also accept a 204 blank route as "live".
     return res?.status === 200;
   } catch {
@@ -810,14 +811,16 @@ async function linkIsLive(url, fetchImpl = globalThis.fetch) {
 
 const LINK_PROBE_LIMIT = 3;
 
-// First candidate whose live URL answers 200 — bounded so a hub outage costs
-// at most LINK_PROBE_LIMIT fetches and yields "no link", never a dead one.
+// First candidate (in rank order) whose live URL answers 200. The ≤3 probes
+// run in PARALLEL under one LINK_PROBE_TIMEOUT_MS ceiling, so an unreachable
+// hub costs a preview request ~5s, not 3×10s serial — and yields "no link",
+// never a dead one.
 async function firstLivePage(rows = [], probe = linkIsLive) {
   const candidates = rows.filter((row) => liveUrlForRow(row)).slice(0, LINK_PROBE_LIMIT);
-  for (const row of candidates) {
-    if (await probe(liveUrlForRow(row))) return row;
-  }
-  return null;
+  if (!candidates.length) return null;
+  const verdicts = await Promise.all(candidates.map((row) => probe(liveUrlForRow(row)).catch(() => false)));
+  const index = verdicts.findIndex(Boolean);
+  return index === -1 ? null : candidates[index];
 }
 
 function suggestedLink(context) {
