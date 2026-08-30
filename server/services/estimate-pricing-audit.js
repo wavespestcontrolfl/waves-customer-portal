@@ -787,14 +787,32 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // the one with priced lines, it becomes THE result for the whole audit
   // (dimensions, visit counts, provenance), not just the lines (codex
   // pre-push P1).
-  if (!rawLines.length && data.proposal?.enabled !== true) {
-    rawLines = normalizeEngineLineItems(result);
-    if (!rawLines.length && data.engineResult && data.engineResult !== result) {
+  if (data.proposal?.enabled !== true) {
+    // Real rows can MIX shapes: mapped recurring/oneTime blocks plus
+    // additional priced rows only in (engine)result.lineItems — merge and
+    // dedupe by service+cadence so no priced line is silently omitted
+    // (codex pre-push P1). When the alternate container is the only one
+    // with lines, it becomes THE result for the whole audit.
+    const covered = new Set(rawLines.map((l) => `${l.serviceKey}|${l.cadence}`));
+    const merge = (extra) => {
+      for (const line of extra) {
+        const key = `${line.serviceKey}|${line.cadence}`;
+        if (covered.has(key)) continue;
+        covered.add(key);
+        rawLines.push(line);
+      }
+    };
+    const hadMappedLines = rawLines.length > 0;
+    const fromResult = normalizeEngineLineItems(result);
+    if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
       const alt = normalizeEngineLineItems(data.engineResult);
       if (alt.length) {
         result = data.engineResult;
-        rawLines = alt;
+        merge(alt);
       }
+    } else {
+      merge(fromResult);
+      if (data.engineResult && data.engineResult !== result) merge(normalizeEngineLineItems(data.engineResult));
     }
   }
   const dimensions = dimensionsFrom(data, result);

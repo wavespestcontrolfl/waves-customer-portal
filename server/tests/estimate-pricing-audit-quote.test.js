@@ -314,6 +314,23 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(install.margin).toBeCloseTo((900 - 320) / 900, 2);
   });
 
+  test('mixed shapes merge: extra lineItems join mapped result lines without duplicates', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-mix', status: 'sent', monthly_total: '90.00', annual_total: '1080.00', onetime_total: '350.00',
+      estimate_data: {
+        result: { recurring: { services: [{ name: 'Pest Control', mo: 60 }] } },
+        engineResult: {
+          lineItems: [
+            { service: 'pest_control', name: 'Pest Control', monthly: 60, annual: 720 }, // duplicate — dropped
+            { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350, monthly: null }, // extra — merged
+          ],
+        },
+      },
+    });
+    expect(audit.lines.filter((l) => l.serviceKey === 'pest_control')).toHaveLength(1);
+    expect(audit.lines.find((l) => l.serviceKey === 'rodent_trapping')).toMatchObject({ cadence: 'one_time', price: 350 });
+  });
+
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,

@@ -1575,21 +1575,25 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
-      // builtSendSnapshot came from freshForSnapshot, which post-dates
-      // delivery and may already carry the acceptance rewrite — rebuild
-      // the bundle from the PRE-DELIVERY claimed row for the audit, with
-      // the earlier build as fallback (GH codex P1).
-      let raceBundle = builtSendSnapshot;
+      // ONLY a bundle rebuilt from the PRE-DELIVERY claimed row is
+      // send-time truth — builtSendSnapshot came from freshForSnapshot,
+      // which post-dates delivery and can carry the acceptance rewrite,
+      // and a prior send's stored sendSnapshot is equally stale. When the
+      // rebuild fails, the audit goes out with NO bundle rather than a
+      // wrong one (codex pre-push P1).
+      let raceBundle = null;
       try {
         const rebuilt = await buildEstimateSendSnapshot({ ...estimate, expires_at: nextExpiresAt }, now);
         if (rebuilt?.sendSnapshot && !rebuilt.sendSnapshot.pricingBundleError) raceBundle = rebuilt.sendSnapshot;
-      } catch { /* fall back to the earlier build */ }
+      } catch { /* no validated pre-delivery bundle */ }
+      const { sendSnapshot: stalePriorSnapshot, ...preAcceptSansSnapshot } = preAcceptData;
+      void stalePriorSnapshot;
       const auditRow = {
         ...estimate,
         status: estimate.viewed_at ? 'viewed' : 'sent',
         estimate_data: raceBundle
-          ? { ...preAcceptData, sendSnapshot: raceBundle }
-          : preAcceptData,
+          ? { ...preAcceptSansSnapshot, sendSnapshot: raceBundle }
+          : preAcceptSansSnapshot,
       };
       await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'send', sendMethod });
     } catch (auditErr) {
