@@ -2307,9 +2307,13 @@ function priceLawnCare(property, options = {}) {
   // Review gate (mirrors the pest confidence gate's contract): LOW-graded turf
   // is a provenance guess (county prior / lot fallback / implausible vision),
   // not a measurement — it may not produce a customer-ready price unreviewed.
-  // MEDIUM (the ordinary vision measurement) stays unparked by design; whether
-  // it should carry a softer signal is an open owner ruling.
-  const lowConfidenceTurf = String(property.turfConfidence || '').toUpperCase() === 'LOW';
+  // A FIELD_VERIFY_TURF_SQFT flag parks at ANY grade: computeTurfArea emits it
+  // on MEDIUM when a vision estimate had to be capped to the plausible max
+  // (codex P1 — client mirror parity). MEDIUM without the flag (the ordinary
+  // vision measurement) stays unparked by design; whether it should carry a
+  // softer signal is an open owner ruling.
+  const lowConfidenceTurf = String(property.turfConfidence || '').toUpperCase() === 'LOW'
+    || (Array.isArray(property.turfFlags) && property.turfFlags.includes('FIELD_VERIFY_TURF_SQFT'));
   const manualReviewReasons = [
     ...(grassTypeWasDefaulted ? ['unknown_grass_type_priced_st_augustine'] : []),
     ...(lowConfidenceTurf ? ['low_confidence_turf_requires_field_verification'] : []),

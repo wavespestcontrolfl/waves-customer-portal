@@ -2765,7 +2765,13 @@ export function calculateEstimate(inputs) {
     const e8 = otP(Math.max(250, Math.round((lk * 1.04 * 4.09 + lk * 2.62 + LABOR * (topDressingLawnEst / 130 + 30) / 60) / 0.40)));
     const e4 = otP(Math.max(450, Math.round((lk * 2.08 * 4.09 + lk * 5.24 + LABOR * (topDressingLawnEst / 130 * 1.5 + 45) / 60) / 0.35)));
     R.td = e8;
-    otItems.push({ name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"' });
+    otItems.push({
+      name: 'Lawn Top Dressing Service', price: e8, detail: 'St. Augustine standard', depth: '1/8"',
+      // An explicit topDressArea is exact and needs no turf verification; a
+      // blank area derives from the (possibly guessed) turf estimate, so a
+      // low-confidence basis carries the send-gate marker here too (codex P1).
+      ...(lowConfidenceTurf && !(topDressArea > 0) ? { requiresCustomQuote: true } : {}),
+    });
     R.tdTiers = [
       { name: '1/8" Depth', price: e8, detail: 'St. Augustine standard' },
       { name: '1/4" Depth', price: e4, detail: 'Bermuda / leveling — 2x material' },

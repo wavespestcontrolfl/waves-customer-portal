@@ -65,6 +65,20 @@ describe('low-confidence turf parks the lawn line', () => {
     expect(result.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
   });
 
+  test('a FIELD_VERIFY_TURF_SQFT flag parks even at MEDIUM grade (plausible-max cap)', () => {
+    const result = priceLawnCare(
+      {
+        turfSf: 8000,
+        turfConfidence: 'MEDIUM',
+        turfBasis: 'plausibleMaxTurfCap',
+        turfFlags: ['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'],
+      },
+      { track: 'st_augustine' }
+    );
+    expect(result.requiresManualReview).toBe(true);
+    expect(result.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
+  });
+
   test('MEDIUM and HIGH turfConfidence do not park on confidence alone', () => {
     for (const turfConfidence of ['MEDIUM', 'HIGH']) {
       const result = priceLawnCare(
