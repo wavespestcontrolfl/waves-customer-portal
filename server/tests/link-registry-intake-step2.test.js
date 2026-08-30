@@ -40,7 +40,8 @@ function makeDb(answers = {}) {
   }
   const db = (table) => builder(table);
   db.fn = { now: () => 'NOW()' };
-  db.transaction = async (fn) => { const trx = (t) => builder(t); trx.fn = db.fn; return fn(trx); };
+  db.raw = (sql, bind) => ({ __raw: [sql, bind] });
+  db.transaction = async (fn) => { const trx = (t) => builder(t); trx.fn = db.fn; trx.raw = db.raw; return fn(trx); };
   db.calls = calls;
   return db;
 }
@@ -158,13 +159,15 @@ describe('intake — persists every reference as an intake item', () => {
     const r = await intake(db, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
     expect(r.items).toEqual({ created: 0, seen: 1, pending: 1 });
     expect(updates).toHaveLength(1);
-    expect(JSON.parse(updates[0].pending_touches)).toEqual([expect.objectContaining({ source_detail: 'sheet:aug note:Claim it', source_ref: null })]);
-    // the same provenance again is not appended twice; the row's own provenance never is
+    // ATOMIC: a jsonb || concat (never a serialized read-modify-write array), deduped by a NOT-contains predicate
+    expect(updates[0].pending_touches.__raw).toEqual(['pending_touches || ?::jsonb', [JSON.stringify([{ source_detail: 'sheet:aug note:Claim it', source_ref: null }])]]);
+    const appendWheres = db.calls.filter((c) => c.op === 'whereRaw').map((c) => c.args[0]);
+    expect(appendWheres).toContain('NOT pending_touches @> ?::jsonb');
+    // the row's own provenance is never appended
     updates.length = 0;
-    const db2 = makeDb({ 'seo_link_intake_items.returning': [], 'seo_link_intake_items.first': { id: 'item-p', state: 'pending', source_detail: 'paste:first', source_ref: null, pending_touches: [{ source_detail: 'sheet:aug note:Claim it', source_ref: null }] }, 'seo_link_intake_items.update': (chain, args) => { updates.push(args[0]); return 1; } });
-    await intake(db2, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
+    const db2 = makeDb({ 'seo_link_intake_items.returning': [], 'seo_link_intake_items.first': { id: 'item-p', state: 'pending', source_detail: 'paste:first', source_ref: null, pending_touches: [] }, 'seo_link_intake_items.update': (chain, args) => { updates.push(args[0]); return 1; } });
     await intake(db2, { text: 'bit.ly/abc', source: 'list_import', sourceDetail: 'paste:first' });
-    expect(updates).toEqual([{ last_seen_at: 'NOW()' }, { last_seen_at: 'NOW()' }]);
+    expect(updates).toEqual([{ last_seen_at: 'NOW()' }]);
     // resolver: primary touch + one touch per pending feed — read FRESH under the row lock inside
     // the resolve trx (a feed appended after the claim snapshot is applied too, never stranded),
     // and cleared atomically with the resolution
@@ -243,6 +246,10 @@ describe('resolveIntakeItems — sweep', () => {
     expect(db.calls.some((c) => c.table === 'seo_link_intake_items' && c.op === 'forUpdate')).toBe(true);
     expect(db.calls.some((c) => c.table === 'seo_link_intake_items' && c.op === 'skipLocked')).toBe(true);
     expect(fetchPage).toHaveBeenCalledWith('https://bit.ly/abc', { resolveOnly: true });
+    // userinfo in a redirect target never pollutes the identity
+    const dbu = dbWith([{ id: 'u1', raw_url: 'bit.ly/u', source: 'list_import', attempts: 0 }]);
+    await resolveIntakeItems(dbu, { now, fetchPage: async () => ({ status: 200, finalUrl: 'https://user@evil-looking.example/p', blocked: false, error: null }) });
+    expect(registry.ensureDomain).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ domain: 'evil-looking.example' }));
     expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'example.org', source: 'list_import', sourceDetail: 'paste:x https://Example.org/page?a=1' }));
     // hold, then final resolved write
     expect(db.updates[0].set).toEqual({ next_retry_at: new Date(now.getTime() + _internals.CLAIM_HOLD_MS) });

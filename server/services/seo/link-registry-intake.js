@@ -184,31 +184,30 @@ async function upsertItem(q, item) {
   const inserted = await q('seo_link_intake_items').insert(row).onConflict('item_key').ignore().returning(['id']);
   if (inserted && inserted.length) return { id: inserted[0].id, created: true };
   const existing = await q('seo_link_intake_items').where({ item_key: row.item_key }).first('id', 'state', 'resolved_host', 'domain_id', 'source_detail', 'source_ref', 'pending_touches');
-  const patch = { last_seen_at: q.fn.now() };
   // A later feed of a reference that is STILL pending carries its own
   // provenance (batch, CSV note): kept on the row and applied as a touch of
   // its own when the resolver lands the domain — per-feed attribution.
-  if (['pending', 'unresolved'].includes(existing.state)) {
-    const same = (a, b) => (a || null) === (b || null);
-    const touches = parseTouches(existing.pending_touches);
-    const dup = same(existing.source_detail, row.source_detail) && same(existing.source_ref, row.source_ref);
-    if (!dup && !touches.some((t) => same(t.source_detail, row.source_detail) && same(t.source_ref, row.source_ref))) {
-      patch.pending_touches = JSON.stringify([...touches, { source_detail: row.source_detail, source_ref: row.source_ref, seen_at: new Date().toISOString() }]);
-    }
+  const same = (a, b) => (a || null) === (b || null);
+  const ownProvenance = same(existing.source_detail, row.source_detail) && same(existing.source_ref, row.source_ref);
+  if (['pending', 'unresolved'].includes(existing.state) && !ownProvenance) {
+    const touch = { source_detail: row.source_detail || null, source_ref: row.source_ref || null };
+    // ATOMIC append: a jsonb concat guarded by state + NOT-contains, so two
+    // simultaneous feeds can never overwrite each other's touch, and the same
+    // provenance is never recorded twice. 0 rows ⇒ either a duplicate (still
+    // waiting) or the resolver landed the row meanwhile — re-read to tell.
+    const n = await q('seo_link_intake_items').where({ id: existing.id })
+      .whereIn('state', ['pending', 'unresolved'])
+      .whereRaw('NOT pending_touches @> ?::jsonb', [JSON.stringify([touch])])
+      .update({ last_seen_at: q.fn.now(), pending_touches: q.raw('pending_touches || ?::jsonb', [JSON.stringify([touch])]) });
+    if (n) return { id: existing.id, created: false, state: existing.state, resolvedHost: null, domainId: null };
+    const after = await q('seo_link_intake_items').where({ id: existing.id }).first('state', 'resolved_host', 'domain_id');
+    await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
+    const state = (after && after.state) || existing.state || null;
+    return ['pending', 'unresolved'].includes(state)
+      ? { id: existing.id, created: false, state, resolvedHost: null, domainId: null } // duplicate touch — still waiting
+      : { id: existing.id, created: false, state, resolvedHost: (after && after.resolved_host) || null, domainId: (after && after.domain_id) || null };
   }
-  if (patch.pending_touches) {
-    // The append lands only while the row is STILL waiting: if the resolver
-    // committed a resolution meanwhile, re-read and let the caller's
-    // resolved-state handling apply this feed's touch directly instead.
-    const n = await q('seo_link_intake_items').where({ id: existing.id }).whereIn('state', ['pending', 'unresolved']).update(patch);
-    if (!n) {
-      const after = await q('seo_link_intake_items').where({ id: existing.id }).first('state', 'resolved_host', 'domain_id');
-      await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
-      return { id: existing.id, created: false, state: (after && after.state) || null, resolvedHost: (after && after.resolved_host) || null, domainId: (after && after.domain_id) || null };
-    }
-    return { id: existing.id, created: false, state: existing.state, resolvedHost: null, domainId: null };
-  }
-  await q('seo_link_intake_items').where({ id: existing.id }).update(patch);
+  await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
   return { id: existing.id, created: false, state: existing.state || null, resolvedHost: existing.resolved_host || null, domainId: existing.domain_id || null };
 }
 
@@ -428,7 +427,8 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
           }
         }
         const page = await fetcher(target, { resolveOnly: true });
-        const host = page && page.finalUrl ? canonicalProspectDomain(page.finalUrl) : null;
+        // hostOfToken parses through URL, so userinfo (`https://user@host/…`) never leaks into the identity
+      const host = page && page.finalUrl ? canonicalProspectDomain(hostOfToken(page.finalUrl)) : null;
 
         if (page && (page.error === 'invalid_url' || page.error === 'unsupported_protocol' || page.blocked)) {
           await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: page.error || 'blocked_host', next_retry_at: null });

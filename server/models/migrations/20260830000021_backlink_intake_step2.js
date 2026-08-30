@@ -41,7 +41,7 @@ exports.up = async function (knex) {
       t.uuid('domain_id').references('id').inTable('seo_link_domains').onDelete('SET NULL');
       t.uuid('source_row_id').references('id').inTable('seo_link_domain_sources').onDelete('SET NULL'); // the provenance touch a resolution landed on
       t.string('drop_reason');
-      t.jsonb('pending_touches').notNullable().defaultTo('[]'); // later feeds of a still-pending reference: [{ source_detail, source_ref, seen_at }], applied as touches on resolution
+      t.jsonb('pending_touches').notNullable().defaultTo('[]'); // later feeds of a still-pending reference: [{ source_detail, source_ref }], atomically ||-appended, applied as touches on resolution
       t.timestamp('first_seen_at').notNullable().defaultTo(knex.fn.now());
       t.timestamp('last_seen_at').notNullable().defaultTo(knex.fn.now());
       t.unique(['item_key']);
