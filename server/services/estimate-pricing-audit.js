@@ -595,7 +595,7 @@ function normalizeEngineLineItems(result) {
     // mosquitoCogs overrides their per-visit COGS misses the hardware
     // (GH codex P1; mirrors normalizeRecurringLines' mosquito branch).
     const mosquitoExtras = /mosquito/.test(String(serviceKey))
-      ? mosquitoCogs(item.program, item.addOns || {})
+      ? mosquitoCogs(item.program ?? item.selectedProgram ?? item.tier, item.addOns || {})
       : null;
     lines.push({
       ...(mosquitoExtras ? {

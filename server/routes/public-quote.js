@@ -1722,7 +1722,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             priceBeforeDiscount: item.price ?? null,
             totalBeforeDiscount: item.total ?? null,
             tier: item.tier ?? null,
-            program: item.program ?? null,
+            // Mosquito rows name their program via selectedProgram/tier and
+            // carry station/dunk addOns — both feed the audit's COGS
+            // overrides (GH codex on #3628).
+            program: item.program ?? item.selectedProgram ?? item.tier ?? null,
+            addOns: item.addOns ?? null,
             floorPa: item.floorPa ?? null,
             floorAnn: item.floorAnn ?? null,
             floorMo: item.floorMo ?? null,
