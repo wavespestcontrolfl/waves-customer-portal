@@ -86,6 +86,7 @@ import PushSettingsV2 from "../../components/admin/PushSettingsV2";
 import CallRoutingSettingsV2 from "../../components/admin/CallRoutingSettingsV2";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
+import InsertLinkSheet from "../../components/admin/InsertLinkSheet";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   Badge,
@@ -664,43 +665,37 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
-// Evergreen public links for the composer's Insert Link menu. Unlike the
-// reschedule / re-service bearer links these are the same for every
-// recipient: no server lookup, no per-recipient strip tracking, and a second
-// click is a no-op instead of a re-mint. The quote page is the portal's own
-// /quote redirect target (server/config/estimate-marketing-redirects.js);
-// store URLs mirror the server's WAVES_IOS_APP_URL / WAVES_ANDROID_APP_URL
-// envs (VITE_-prefixed for the client build, same defaults — see
-// AppShowcaseCard). Clause copy stays plain ASCII for the same UCS-2 reason
-// as the prefill builders above.
-const QUOTE_PAGE_URL = "https://www.wavespestcontrol.com/quote/";
-const APP_STORE_URL =
-  import.meta.env.VITE_IOS_APP_URL ||
-  "https://apps.apple.com/us/app/waves-pest-control/id6782775654";
-const PLAY_STORE_URL =
-  import.meta.env.VITE_ANDROID_APP_URL ||
-  "https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal";
+// The Insert Link sheet's "For this customer" rows. reschedule/reservice
+// keep their dedicated endpoints; the other minted kinds go through
+// POST /admin/communications/customer-link. portal_login is the one static
+// row in the group — same link for everyone, scheme-less per the SMS
+// link policy for portal hosts. Keywords feed the sheet's search.
+export const CUSTOMER_COMPOSER_LINKS = [
+  { key: "reschedule", name: "Reschedule link", keywords: "appointment move change visit time", dynamic: true },
+  { key: "reservice", name: "Re-service link", keywords: "free callback between visit retreat", dynamic: true },
+  { key: "review_request", name: "Review request link", keywords: "rate rating feedback stars ask google", dynamic: true },
+  { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
+  { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
+  { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
+  {
+    key: "portal_login",
+    name: "Portal login",
+    url: "portal.wavespestcontrol.com/login",
+    clause: "Manage your account and appointments here",
+    keywords: "portal login account app sign in manage",
+  },
+].map((l) => ({ ...l, category: "customer" }));
 
-export const STATIC_COMPOSER_LINKS = {
-  quote: {
-    url: QUOTE_PAGE_URL,
-    clause: `Get your free quote here: ${QUOTE_PAGE_URL}`,
-    added: "Quote link added.",
-    already: "The quote link is already in the message.",
-  },
-  appStore: {
-    url: APP_STORE_URL,
-    clause: `Download the Waves app on the App Store: ${APP_STORE_URL}`,
-    added: "App Store link added.",
-    already: "The App Store link is already in the message.",
-  },
-  playStore: {
-    url: PLAY_STORE_URL,
-    clause: `Get the Waves app on Google Play: ${PLAY_STORE_URL}`,
-    added: "Google Play link added.",
-    already: "The Google Play link is already in the message.",
-  },
-};
+// Personalized empty-composer prefill for the generic minted links (the
+// reschedule/re-service builders above stay specialized). `clause` is the
+// server's ready-made sentence, trimmed of its trailing clause newlines.
+// Same plain-ASCII template rule as the builders above.
+export function buildCustomerLinkPrefill({ firstName, clause }) {
+  const first = String(firstName || "").trim();
+  const line = String(clause || "").trim();
+  if (!first || !line) return null;
+  return `Hi ${first}, it's Waves Pest Control. ${line}`;
+}
 
 // Append a static link clause to the composer body (empty body gets the
 // clause alone). Returns the body unchanged when the URL is already present
@@ -710,6 +705,13 @@ export function appendStaticLinkClause(body, { url, clause }) {
   if (b.includes(url)) return b;
   if (!b.trim()) return clause;
   return `${b.replace(/\s+$/, "")}\n\n${clause}`;
+}
+
+// The rendered insert text for a library row: "{clause}: {url}" with the
+// row's name standing in when no clause was authored (sitemap rows).
+export function libraryLinkClause(link) {
+  const prefix = String(link.clause || "").trim() || String(link.name || "").trim() || "More info";
+  return `${prefix}: ${link.url}`;
 }
 
 function SmsTab() {
@@ -769,9 +771,20 @@ function SmsTab() {
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
-  // Insert Link dropdown (reschedule / re-service / quote / app stores) —
-  // same toggle-and-close-on-pick contract as the attach sheet above.
-  const [showLinkMenu, setShowLinkMenu] = useState(false);
+  // Insert Link sheet — the searchable link library (customer links +
+  // reviews + the whole website + app stores + socials).
+  const [showLinkSheet, setShowLinkSheet] = useState(false);
+  // Library rows from GET /admin/communications/link-library, fetched once
+  // per page load on first open (search/filtering is client-side).
+  const [libraryLinks, setLibraryLinks] = useState(null);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState(null);
+  // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
+  // a /customer-link kind), and the inserted minted links being tracked per
+  // kind: { url, recipientKey, customerId, requestId? }. Same bearer-link
+  // strip contract as insertedResched/insertedReservice above.
+  const [insertingCustomerLink, setInsertingCustomerLink] = useState(null);
+  const [insertedCustomerLinks, setInsertedCustomerLinks] = useState({});
 
   // Filters
   const [dirFilter, setDirFilter] = useState("all");
@@ -1099,6 +1112,17 @@ function SmsTab() {
       setSendResult({ ok: false, text: "Draft approval does not support attachments. Remove attachments or start a new SMS." });
       return;
     }
+    // A composer-inserted review link is marked delivered by the immediate
+    // /sms send (clearing its safety-net auto-ask). The scheduled and
+    // draft-approval paths can't do that yet, so a review link riding them
+    // would double-text the customer — block instead.
+    if (insertedCustomerLinks.review_request && (scheduledFor || loadedMessageDraft?.id)) {
+      setSendResult({
+        ok: false,
+        text: "Review request links can only go on an immediate send — send now, or remove the review link first.",
+      });
+      return;
+    }
     setSending(true);
     setSendResult(null);
     try {
@@ -1154,6 +1178,9 @@ function SmsTab() {
                 : undefined,
             agentDecisionId: selectedAgentDraft?.decisionId || undefined,
             agentDraft: selectedAgentDraft?.suggestedMessage || undefined,
+            // The send that just left IS the review ask — the server marks
+            // the inline review_requests row delivered (see /sms route).
+            reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
           }),
         });
         setSendResult({ ok: true, text: "Message sent." });
@@ -1162,6 +1189,10 @@ function SmsTab() {
       setToSearch("");
       setSelectedCustomerId(null);
       setMsgBody("");
+      // Cleared in the same batch as the body: the strip effect must see the
+      // sent links as already forgotten, not as operator-withdrawn (which
+      // would cancel a review ask that just went out).
+      setInsertedCustomerLinks({});
       setAgentDraft(null);
       setSelectedAgentDraft(null);
       setLoadedMessageDraft(null);
@@ -1586,18 +1617,197 @@ function SmsTab() {
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
-  // Insert one of the evergreen links (quote page / app store listings).
-  // Static URLs need none of the bearer-link machinery — append once,
-  // confirm in the result line, and refuse to stack a duplicate.
-  const handleInsertStaticLink = (key) => {
-    const link = STATIC_COMPOSER_LINKS[key];
-    if (!link) return;
+  // Load the link library once per page load — the sheet's search runs
+  // client-side over the full list (office review links + sitemap-synced
+  // website pages + hand-managed rows).
+  const loadLinkLibrary = async () => {
+    if (libraryLoading) return;
+    setLibraryLoading(true);
+    setLibraryError(null);
+    try {
+      const d = await adminFetch("/admin/communications/link-library");
+      setLibraryLinks(Array.isArray(d.links) ? d.links : []);
+    } catch (e) {
+      setLibraryError(`Couldn't load the link library: ${e.message}`);
+    } finally {
+      setLibraryLoading(false);
+    }
+  };
+
+  const openLinkSheet = () => {
+    setShowLinkSheet(true);
+    if (!libraryLinks && !libraryLoading) loadLinkLibrary();
+  };
+
+  // Insert a static library row (or the portal-login customer row). No
+  // bearer-link machinery — append once, confirm in the result line, and
+  // refuse to stack a duplicate.
+  const handleInsertLibraryLink = (link) => {
     if (msgBody.includes(link.url)) {
-      setSendResult({ ok: true, text: link.already });
+      setSendResult({ ok: true, text: `${link.name} is already in the message.` });
       return;
     }
-    setMsgBody((b) => appendStaticLinkClause(b, link));
-    setSendResult({ ok: true, text: link.added });
+    setMsgBody((b) => appendStaticLinkClause(b, { url: link.url, clause: libraryLinkClause(link) }));
+    setSendResult({ ok: true, text: `${link.name} added.` });
+  };
+
+  // Insert one of the generic minted per-customer links (review request /
+  // pay balance / latest estimate / referral) via POST /customer-link. Same
+  // three invariants as the reschedule/re-service handlers above: stale-
+  // response guard, replace-don't-stack per kind, and the strip-on-
+  // recipient-change effect below.
+  const CUSTOMER_LINK_NOTES = {
+    review_request: (d) => `Review request added — personal link${d.firstName ? ` for ${d.firstName}` : ""}.`,
+    pay_balance: (d) =>
+      d.balance
+        ? `Pay link added — $${Number(d.balance.total).toFixed(2)} open across ${d.balance.count === 1 ? "1 invoice" : `${d.balance.count} invoices`}.`
+        : "Pay link added.",
+    estimate: (d) => `Estimate link added${d.estimate?.serviceType ? ` — ${d.estimate.serviceType}` : ""}.`,
+    referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
+  };
+
+  const handleInsertCustomerLink = async (kind) => {
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingCustomerLink) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    const contextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient ? smsThreadKey(latestRecipient) : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
+    setInsertingCustomerLink(kind);
+    setSendResult(null);
+    try {
+      // POST body, never a query string — same request-log redaction reason
+      // as the reschedule/re-service lookups.
+      const d = await adminFetch("/admin/communications/customer-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+          kind,
+        }),
+      });
+      if (contextChanged()) {
+        // The mint landed after the operator moved on. A review row minted
+        // for the abandoned recipient must not keep its safety-net send.
+        if (kind === "review_request" && d.requestId) {
+          adminFetch("/admin/communications/customer-link/cancel", {
+            method: "POST",
+            body: JSON.stringify({ requestId: d.requestId }),
+          }).catch(() => {});
+        }
+        return;
+      }
+      const clause = String(d.line || "").trim() || `${d.url}`;
+      const prefill = buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+      // Replace-don't-stack per kind (same rule as the reschedule insert).
+      const prevUrl = insertedCustomerLinks[kind]?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim()
+          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+          : prefill || clause;
+      });
+      setInsertedCustomerLinks((m) => ({
+        ...m,
+        [kind]: {
+          url: d.url,
+          recipientKey: requestRecipientKey,
+          customerId: requestCustomerId,
+          requestId: d.requestId || null,
+        },
+      }));
+      setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))(d) });
+    } catch (e) {
+      if (!contextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
+    } finally {
+      setInsertingCustomerLink(null);
+    }
+  };
+
+  // Same bearer-credential rule as the reschedule/re-service links: a minted
+  // customer link must not survive a recipient change, and the tracked entry
+  // is forgotten once the operator deletes it from the body. A withdrawn
+  // review-request link additionally cancels its row's safety-net send.
+  useEffect(() => {
+    const entries = Object.entries(insertedCustomerLinks);
+    if (!entries.length) return;
+    const cancelReviewRow = (entry) => {
+      if (entry.requestId) {
+        adminFetch("/admin/communications/customer-link/cancel", {
+          method: "POST",
+          body: JSON.stringify({ requestId: entry.requestId }),
+        }).catch(() => {});
+      }
+    };
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient ? smsThreadKey(currentRecipient) : "";
+    let removedForRecipient = false;
+    const kept = {};
+    for (const [kind, entry] of entries) {
+      if (!msgBody.includes(entry.url)) {
+        // Operator deleted the line (or the body cleared) — forget it, and
+        // withdraw a pending review ask.
+        if (kind === "review_request") cancelReviewRow(entry);
+        continue;
+      }
+      if (
+        currentRecipientKey !== entry.recipientKey ||
+        (selectedCustomerId || null) !== entry.customerId
+      ) {
+        setMsgBody((b) =>
+          b
+            .split("\n")
+            .filter((l) => !l.includes(entry.url))
+            .join("\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim(),
+        );
+        if (kind === "review_request") cancelReviewRow(entry);
+        removedForRecipient = true;
+        continue;
+      }
+      kept[kind] = entry;
+    }
+    if (Object.keys(kept).length !== entries.length) {
+      setInsertedCustomerLinks(kept);
+      if (removedForRecipient) {
+        setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
+      }
+    }
+  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId]);
+
+  // The sheet's full list: the customer group first, then the library rows.
+  const insertSheetLinks = useMemo(
+    () => [...CUSTOMER_COMPOSER_LINKS, ...(libraryLinks || [])],
+    [libraryLinks],
+  );
+
+  const handleInsertSheetPick = (link) => {
+    setShowLinkSheet(false);
+    if (link.key === "reschedule") return handleInsertRescheduleLink();
+    if (link.key === "reservice") return handleInsertReserviceLink();
+    if (link.dynamic) return handleInsertCustomerLink(link.key);
+    return handleInsertLibraryLink(link);
   };
 
   const handleRewriteSms = async () => {
@@ -2396,6 +2606,7 @@ function SmsTab() {
               // the response) — wait out the link fetches.
               insertingResched ||
               insertingReservice ||
+              !!insertingCustomerLink ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
             }
@@ -2421,101 +2632,47 @@ function SmsTab() {
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
-          {/* Insert Link dropdown — the reschedule/re-service buttons plus
-              the evergreen quote + app store links, one menu. Same
-              toggle-and-close-on-pick contract as the attach sheet. */}
-          <div className="relative">
-            {" "}
-            <Button
-              variant="secondary"
-              onClick={() => setShowLinkMenu((v) => !v)}
-              disabled={insertingResched || insertingReservice || !toNumber.trim()}
-              title="Insert a booking, quote, or app link into the message"
-              aria-haspopup="menu"
-              aria-expanded={showLinkMenu}
-            >
-              {insertingResched || insertingReservice ? "Adding…" : "Insert Link"}
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="ml-1.5"
-                aria-hidden="true"
-              >
-                {" "}
-                <polyline points="6 9 12 15 18 9" />{" "}
-              </svg>
-            </Button>
-            {showLinkMenu && (
-              <div
-                className="absolute top-full left-0 mt-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
-                style={{ width: 230 }}
-              >
-                {" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowLinkMenu(false);
-                    handleInsertRescheduleLink();
-                  }}
-                  title="Insert this customer's self-serve reschedule link"
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
-                >
-                  Reschedule link
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowLinkMenu(false);
-                    handleInsertReserviceLink();
-                  }}
-                  title="Insert this customer's free re-service booking link"
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  Re-service link
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowLinkMenu(false);
-                    handleInsertStaticLink("quote");
-                  }}
-                  title="Insert the free quote page link"
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  Free quote link
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowLinkMenu(false);
-                    handleInsertStaticLink("appStore");
-                  }}
-                  title="Insert the Waves app's App Store link"
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  App Store link (iPhone)
-                </button>{" "}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowLinkMenu(false);
-                    handleInsertStaticLink("playStore");
-                  }}
-                  title="Insert the Waves app's Google Play link"
-                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
-                >
-                  Google Play link (Android)
-                </button>{" "}
-              </div>
-            )}
-          </div>{" "}
+          {/* Insert Link — opens the searchable link library sheet: the
+              per-customer minted links, per-office review links, the whole
+              website, app stores, and socials. */}
+          <Button
+            variant="secondary"
+            onClick={openLinkSheet}
+            disabled={
+              insertingResched ||
+              insertingReservice ||
+              !!insertingCustomerLink ||
+              !toNumber.trim()
+            }
+            title="Insert a customer, review, website, or app link into the message"
+            aria-haspopup="dialog"
+            aria-expanded={showLinkSheet}
+          >
+            {insertingResched || insertingReservice || insertingCustomerLink
+              ? "Adding…"
+              : "Insert Link"}
+          </Button>{" "}
         </div>
+        <InsertLinkSheet
+          open={showLinkSheet}
+          onClose={() => setShowLinkSheet(false)}
+          links={insertSheetLinks}
+          loading={libraryLoading}
+          error={libraryError}
+          onRetry={loadLinkLibrary}
+          busyKey={
+            insertingResched
+              ? "reschedule"
+              : insertingReservice
+                ? "reservice"
+                : insertingCustomerLink
+          }
+          onPick={handleInsertSheetPick}
+          groupCaptions={{
+            customer: "Personal links — each one is looked up for this recipient",
+            website: "Every wavespestcontrol.com page, synced nightly from the sitemap",
+          }}
+        />
         {sendResult && (
           <div
             className={cn(

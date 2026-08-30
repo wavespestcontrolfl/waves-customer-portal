@@ -6,9 +6,11 @@
 import { describe, expect, it } from "vitest";
 import {
   appendStaticLinkClause,
+  buildCustomerLinkPrefill,
   buildReschedulePrefill,
   buildReservicePrefill,
-  STATIC_COMPOSER_LINKS,
+  CUSTOMER_COMPOSER_LINKS,
+  libraryLinkClause,
 } from "./CommunicationsPageV2";
 
 const URL = "https://portal.wavespestcontrol.com/l/abc123";
@@ -102,11 +104,14 @@ describe("buildReservicePrefill", () => {
   });
 });
 
-// The Insert Link menu's evergreen entries (quote page, app store listings)
-// share one append helper: clause alone into an empty composer, clause
-// appended below a typed draft, and never a stacked duplicate.
+// The Insert Link sheet's static entries share one append helper: clause
+// alone into an empty composer, clause appended below a typed draft, and
+// never a stacked duplicate.
 describe("appendStaticLinkClause", () => {
-  const link = STATIC_COMPOSER_LINKS.quote;
+  const link = {
+    url: "https://www.wavespestcontrol.com/quote/",
+    clause: "Get your free quote here: https://www.wavespestcontrol.com/quote/",
+  };
 
   it("an empty composer gets the clause alone", () => {
     expect(appendStaticLinkClause("", link)).toBe(link.clause);
@@ -126,19 +131,53 @@ describe("appendStaticLinkClause", () => {
   });
 });
 
-describe("STATIC_COMPOSER_LINKS", () => {
-  it("carries the quote page and both app store listings", () => {
-    expect(STATIC_COMPOSER_LINKS.quote.url).toBe(
-      "https://www.wavespestcontrol.com/quote/",
-    );
-    expect(STATIC_COMPOSER_LINKS.appStore.url).toContain("apps.apple.com");
-    expect(STATIC_COMPOSER_LINKS.playStore.url).toContain("play.google.com");
+describe("libraryLinkClause", () => {
+  it("renders '{clause}: {url}' and falls back to the row name", () => {
+    expect(
+      libraryLinkClause({ name: "Free quote", clause: "Get your free quote here", url: "https://www.wavespestcontrol.com/quote/" }),
+    ).toBe("Get your free quote here: https://www.wavespestcontrol.com/quote/");
+    expect(
+      libraryLinkClause({ name: "Pest Library", clause: null, url: "https://www.wavespestcontrol.com/pest-library/" }),
+    ).toBe("Pest Library: https://www.wavespestcontrol.com/pest-library/");
+  });
+});
+
+describe("buildCustomerLinkPrefill", () => {
+  it("greets the recipient ahead of the server clause", () => {
+    expect(
+      buildCustomerLinkPrefill({ firstName: "PersonA", clause: `You can view your estimate here: ${URL}` }),
+    ).toBe(`Hi PersonA, it's Waves Pest Control. You can view your estimate here: ${URL}`);
   });
 
-  it("keeps every clause plain ASCII (UCS-2 guard) and carries its own URL", () => {
-    for (const link of Object.values(STATIC_COMPOSER_LINKS)) {
-      expect(link.clause).toMatch(/^[\x00-\x7F]+$/);
-      expect(link.clause).toContain(link.url);
+  it("returns null without a first name or clause — caller falls back to the bare clause", () => {
+    expect(buildCustomerLinkPrefill({ firstName: "", clause: `x: ${URL}` })).toBeNull();
+    expect(buildCustomerLinkPrefill({ firstName: "PersonA", clause: "  " })).toBeNull();
+  });
+
+  it("keeps the TEMPLATE copy pure ASCII (UCS-2 guard)", () => {
+    const msg = buildCustomerLinkPrefill({ firstName: "PersonA", clause: `Pay here: ${URL}` });
+    expect(msg).toMatch(/^[\x00-\x7F]+$/);
+  });
+});
+
+describe("CUSTOMER_COMPOSER_LINKS", () => {
+  it("carries all seven customer rows in the customer category", () => {
+    expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
+      "reschedule",
+      "reservice",
+      "review_request",
+      "pay_balance",
+      "estimate",
+      "referral",
+      "portal_login",
+    ]);
+    for (const link of CUSTOMER_COMPOSER_LINKS) {
+      expect(link.category).toBe("customer");
     }
+    // The one static row inserts a scheme-less portal link (SMS link policy
+    // for owned hosts) and carries its clause with it.
+    const login = CUSTOMER_COMPOSER_LINKS.find((l) => l.key === "portal_login");
+    expect(login.dynamic).toBeUndefined();
+    expect(login.url).toBe("portal.wavespestcontrol.com/login");
   });
 });

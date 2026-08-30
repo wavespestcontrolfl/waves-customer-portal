@@ -224,6 +224,9 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
+      // Composer Insert Link: a pending inline review_requests row whose link
+      // rides in this body — marked delivered after a real send (below).
+      reviewRequestId,
     } = req.body;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
@@ -448,6 +451,35 @@ router.post('/sms', async (req, res, next) => {
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
+    }
+
+    // A composer-inserted review link rode this body — the send that just
+    // left IS the ask, so stamp the inline row delivered (clears its +120min
+    // safety-net send; see /customer-link). Guarded on the row still being a
+    // pending inline ask, the recipient owning it, and the link actually
+    // still in the sent body (a deleted link means no ask went out — the
+    // cancel endpoint owns that path). Fail-soft: bookkeeping never breaks
+    // a send that already happened.
+    if (reviewRequestId) {
+      try {
+        const rr = await db('review_requests')
+          .where({ id: String(reviewRequestId) })
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+        if (rr && rr.triggered_by === 'auto_inline' && rr.status === 'pending' && !rr.sms_sent_at) {
+          const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
+          const { existingShortUrlFor } = require('../services/short-url');
+          const short = await existingShortUrlFor({ kind: 'review', entityType: 'review_requests', entityId: rr.id });
+          const linkInBody = [short, rr.token]
+            .filter(Boolean)
+            .some((frag) => cleanBody.includes(String(frag).replace(/^https?:\/\//, '')));
+          if (owner && normalizePhoneLast10(owner.phone) === normalizePhoneLast10(to) && linkInBody) {
+            const ReviewService = require('../services/review-request');
+            await ReviewService.markInlineDelivered(rr.id);
+          }
+        }
+      } catch (markErr) {
+        logger.warn(`[communications] inline review mark-delivered failed (requestId=${reviewRequestId}): ${markErr.message}`);
+      }
     }
 
     // A reply from the Comms composer is a first response to any open lead
@@ -1432,6 +1464,192 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
   } catch (err) {
     logger.error(`reservice-link lookup failed: ${err.message}`);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/customer-link  { phone, customerId?, kind }
+// The Insert Link sheet's other per-customer links — kind ∈ review_request |
+// pay_balance | estimate | referral. Same fail-closed recipient contract as
+// /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
+// cross-checked then expanded to the account, cross-account 409). Builders
+// live in services/composer-customer-links.js; a kind with nothing to insert
+// answers 404 with the builder's plain reason.
+// review_request mints a real review_requests row via createInline (the
+// dispatch completion-SMS pattern): its +120min safety-net send stays armed
+// until POST /sms marks it delivered or /customer-link/cancel suppresses it,
+// so the returned requestId must ride the eventual send.
+router.post('/customer-link', requireAdmin, async (req, res) => {
+  try {
+    const kind = String(req.body?.kind || '');
+    const builders = require('../services/composer-customer-links');
+    const builderByKind = {
+      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
+      pay_balance: (ids) => builders.buildPayBalanceLink(ids),
+      estimate: (ids) => builders.buildLatestEstimateLink(ids),
+      referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
+    };
+    if (!builderByKind[kind]) {
+      return res.status(400).json({ error: 'kind must be one of review_request, pay_balance, estimate, referral' });
+    }
+
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+
+    const customerId = req.body?.customerId;
+    let customerIds = [];
+    if (customerId && UUID_RE.test(String(customerId))) {
+      const customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone', 'account_id');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+    } else {
+      const matches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id', 'account_id');
+      if (!matches.length) {
+        return res.status(404).json({ error: 'No customer found for that number' });
+      }
+      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+      if (accountKeys.length > 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
+        });
+      }
+      customerIds = await customerIdsForAccount(accountKeys[0]);
+    }
+    if (!customerIds.length) {
+      return res.status(404).json({ error: 'No customer found for that number' });
+    }
+
+    const recipientFirstName = await firstNameForPhone(last10, customerIds);
+
+    // The single-customer kinds (review ask, referral) target the phone's
+    // owner: the operator-selected row first, else the account row whose
+    // phone matches the number, else the first sibling (sorted — the account
+    // expansion has no ORDER BY of its own).
+    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+    let primaryId = selectedId;
+    if (!primaryId) {
+      const phoneRows = await db('customers')
+        .whereNull('deleted_at')
+        .whereIn('id', customerIds)
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id');
+      primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
+    }
+
+    const result = await builderByKind[kind](customerIds, primaryId);
+    if (!result?.url) {
+      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    }
+    res.json({
+      kind,
+      url: stripSmsLinkScheme(result.url),
+      line: stripSmsLinkScheme(result.line),
+      firstName: recipientFirstName,
+      requestId: result.requestId || undefined,
+      balance: result.balance || undefined,
+      estimate: result.estimate || undefined,
+    });
+  } catch (err) {
+    logger.error(`customer-link lookup failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/customer-link/cancel  { requestId }
+// The operator withdrew a composer-inserted review link (recipient changed,
+// line deleted) — suppress the inline review_requests row so its +120min
+// safety-net send can't text a customer whose ask was withdrawn. Idempotent:
+// a row already sent/suppressed/missing is left alone and still answers ok.
+router.post('/customer-link/cancel', requireAdmin, async (req, res) => {
+  try {
+    const requestId = String(req.body?.requestId || '');
+    if (!requestId || requestId.length > 64) {
+      return res.status(400).json({ error: 'requestId required' });
+    }
+    const row = await db('review_requests')
+      .where({ id: requestId })
+      .first('id', 'status', 'sms_sent_at', 'triggered_by');
+    if (row && row.triggered_by === 'auto_inline' && row.status === 'pending' && !row.sms_sent_at) {
+      const ReviewService = require('../services/review-request');
+      await ReviewService.markInlineDeliveryFailed(row.id);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`customer-link cancel failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/admin/communications/link-library
+// The Insert Link sheet's full searchable list (office review links computed
+// live + stored manual/sitemap rows) — filtering happens client-side. Read
+// stays at the router's tech-or-admin level: rows are public marketing URLs,
+// nothing customer-scoped.
+router.get('/link-library', async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const [links, lastSyncedAt] = await Promise.all([
+      linkLibrary.listLinks(),
+      linkLibrary.sitemapLastSyncedAt(),
+    ]);
+    res.json({ links, lastSyncedAt });
+  } catch (err) {
+    logger.error(`link-library list failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/link-library  { name, url, category?, clause?, keywords? }
+// Settings ▸ Link Library — add a hand-managed row.
+router.post('/link-library', requireAdmin, async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const { id, error } = await linkLibrary.createManualLink(req.body || {});
+    if (error) return res.status(400).json({ error });
+    res.json({ id });
+  } catch (err) {
+    logger.error(`link-library create failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/communications/link-library/:id — manual rows only;
+// synced rows follow their source (sitemap / office config).
+router.delete('/link-library/:id', requireAdmin, async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'invalid id' });
+    const linkLibrary = require('../services/link-library');
+    const result = await linkLibrary.deleteManualLink(id);
+    if (result.error) return res.status(result.status || 400).json({ error: result.error });
+    res.json({ ok: true });
+  } catch (err) {
+    logger.error(`link-library delete failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/communications/link-library/sync — Settings "Sync now":
+// re-pull the marketing site's sitemap on demand (the daily job in
+// services/scheduler.js does the same on schedule).
+router.post('/link-library/sync', requireAdmin, async (req, res) => {
+  try {
+    const linkLibrary = require('../services/link-library');
+    const result = await linkLibrary.syncSitemapLinks();
+    res.json(result);
+  } catch (err) {
+    logger.error(`link-library sync failed: ${err.message}`);
+    res.status(502).json({ error: `Sitemap sync failed — ${err.message}` });
   }
 });
 
