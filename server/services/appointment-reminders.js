@@ -483,6 +483,24 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
       if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
       return false;
     }
+    // SMS delivered, THEN the email leg was held (codex r44 uncapped): the
+    // caller will close the row on this success, so the requested email
+    // would silently drop. Re-arming would duplicate the accepted SMS —
+    // hand the email leg durably to the office lane instead (the same
+    // exception rail every other partial hold uses).
+    if (smsOk && emailRes?.held) {
+      try {
+        await require('./notification-service').notifyAdmin(
+          'comms',
+          'Held appointment email needs a manual send',
+          `The ${kind} email leg of a 'both'-channel notice was held by an in-progress visit move after the text was already delivered — send it from the composer once the stop settles${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
+        );
+        logger.info(`[appt-remind] ${kind} email leg held after a delivered SMS — handed to the office lane`);
+      } catch (notifyErr) {
+        logger.error(`[appt-remind] held email-leg hand-off failed for ${customerId}: ${notifyErr.message}`);
+      }
+      return smsOk;
+    }
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
     if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
