@@ -778,6 +778,23 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
+  test('a PARTLY-moved stop claims every moved member\'s pending creation confirmation (owner ruling 2026-08-30; local audit r35) — nobody is auto-texted; the dispatcher owns the message', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' }, // b failed: still on the old date
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b' })]);
+    const burns = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values && c.values.confirmation_sent === true);
+    expect(burns.length).toBe(1); // the MOVED member a — never the failed b (its reminder still names its real, unmoved slot)
+    expect(burns[0].ops).toEqual(expect.arrayContaining([['where', { scheduled_service_id: 'a', confirmation_sent: false }]]));
+    // a fully-moved stop burns nothing
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = script({ members: [member('a'), member('b')] });
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update').length).toBe(0);
+  });
+
   test('visitMove.visitStart is the STOP\'s landed arrival start (earliest represented member), for the caller\'s one notice (codex #3609 r25 P1)', async () => {
     // tapped 10:00 sibling moved to 11:00 (+1h) shifts its 09:00 sibling to 10:00 ⇒ the stop starts at 10:00, not 11:00
     db.__script = script({ visit: { ...VISIT, window_start: '09:00', window_end: '11:00' }, members: [member('b', { window_start: '09:00', window_end: '10:00' }), member('a', { window_start: '10:00', window_end: '11:00' })], landed: [

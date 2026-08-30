@@ -2267,7 +2267,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     });
   } catch (err) { logger.warn(`[visit-groups] unit move window recompute for ${plan.visitId} failed: ${err.message}`); }
 
-  if (failed.length) warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
+  if (failed.length) {
+    warnings.push(`${failed.length} grouped service(s) did not move with this stop — check the visit: ${failed.map((f) => f.reason).join('; ')}`);
+    // A partly-moved stop texts NOBODY (owner ruling 2026-08-30; local audit
+    // r35): a moved sibling's still-armed creation confirmation
+    // (keepPendingConfirmation) would otherwise be delivered by the deferred
+    // sender / stranded sweep with the NEW time while a member sits at the
+    // old stop. Claim those confirmations sent — the dispatcher owns the
+    // customer message after the repair (needsAttention carries the ids).
+    for (const movedId of moved) {
+      try {
+        await db('appointment_reminders')
+          .where({ scheduled_service_id: movedId, confirmation_sent: false })
+          .update({ confirmation_sent: true, confirmation_sent_at: db.fn.now() });
+      } catch (err) {
+        logger.warn(`[visit-groups] partial-move confirmation hold for ${movedId} failed: ${err.message}`);
+      }
+    }
+  }
   // members: per-row pre-move state so a caller with its own post-move
   // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
   // to EVERY row this move touched, not just the tapped one (codex r4).

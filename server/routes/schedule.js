@@ -7,7 +7,8 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
+const { calendarIcsAvailable, arrivalWindowEndsAt, hhmm: icsHHMM, UPCOMING_STATUSES } = require('../services/appointment-ics-eligibility');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
 // NOT re-derived here — services/appointment-ics-eligibility.js owns it and
@@ -33,22 +34,49 @@ function calendarUrlFor(row, now = new Date()) {
 // Grouped stop states the public ICS route refuses (a member awaiting rebook,
 // a member underway) — read from the visit's open members; an unreadable
 // membership blocks (fail closed, the route's own posture).
-async function groupedCalendarBlocked(visitId) {
+// The grouped calendar verdict, mirroring the public ICS route (codex #3609
+// r27 P1 + local r35): blocked unless the members still form ONE quiet stop
+// (one date, one technician, connected windows, nobody underway/awaiting
+// rebook), and — when servable — the STOP's expiry: the later of the
+// earliest member's arrival promise and the latest member end, exactly the
+// grouped state the appointment page renders. An early chained member's own
+// two-hour window elapsing must not hide a link the ICS route still serves.
+async function groupedCalendarVerdict(visitId) {
   try {
     const vg = require('../services/visit-groups');
     const members = await vg.openMembers(db, visitId);
-    if (members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) return true;
-    // The ICS route also fails closed unless the members still form ONE stop
-    // (codex #3609 r27 P1) — one date, one technician, connected windows;
-    // a partially committed unit move can leave rows that do not. Same
-    // invariant, or the payload hands out a link that deterministically 404s.
+    const blocked = { blocked: true, endsAt: null };
+    if (members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) return blocked;
     const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : '');
-    if (new Set(members.map((m) => day(m.scheduled_date))).size > 1) return true;
-    if (new Set(members.map((m) => String(m.technician_id || ''))).size > 1) return true;
-    return !vg.windowedMembersConnected(members);
+    if (new Set(members.map((m) => day(m.scheduled_date))).size > 1) return blocked;
+    if (new Set(members.map((m) => String(m.technician_id || ''))).size > 1) return blocked;
+    if (!vg.windowedMembersConnected(members)) return blocked;
+    const date = day(members[0]?.scheduled_date);
+    const starts = members.map((m) => icsHHMM(m.window_start)).filter(Boolean).sort();
+    const ends = members.map((m) => icsHHMM(m.window_end)).filter(Boolean).sort();
+    const bounds = [];
+    if (date && starts.length) {
+      const promise = arrivalWindowEndsAt({ scheduled_date: date, window_start: starts[0] });
+      if (promise) bounds.push(promise.getTime());
+    }
+    if (date && ends.length) {
+      const latest = parseETDateTime(`${date}T${ends[ends.length - 1]}`);
+      if (latest && !Number.isNaN(latest.getTime())) bounds.push(latest.getTime());
+    }
+    return { blocked: false, endsAt: bounds.length ? new Date(Math.max(...bounds)) : null };
   } catch {
-    return true;
+    return { blocked: true, endsAt: null };
   }
+}
+
+// Grouped rows: same gate/token posture as calendarUrlFor, but eligibility
+// and expiry come from the STOP's verdict, never the row's own window.
+function groupedCalendarUrl(row, verdict, now = new Date()) {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
+  if (!row?.reschedule_token) return null;
+  if (!UPCOMING_STATUSES.has(String(row.status || '').toLowerCase())) return null;
+  if (verdict.blocked || !verdict.endsAt || verdict.endsAt < now) return null;
+  return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
 }
 
 // The instant the link stops being servable, straight from the same owner, so
@@ -141,12 +169,13 @@ router.get('/', async (req, res, next) => {
     // 404s a grouped stop whose membership cannot be read, that has a member
     // awaiting rebook, or that is underway — a row-only calendarUrlFor would
     // hand out a link that deterministically 404s.
-    const calendarBlockedById = new Map();
+    const calendarVerdictById = new Map();
     for (const s of upcoming) {
       if (!s.visit_id) continue;
       const g = await groupedVisit(s);
       groupedById.set(String(s.id), g === true || g === 'unknown');
-      calendarBlockedById.set(String(s.id), g === 'unknown' || (g === true && await groupedCalendarBlocked(s.visit_id)));
+      calendarVerdictById.set(String(s.id), g === 'unknown' ? { blocked: true, endsAt: null }
+        : g === true ? await groupedCalendarVerdict(s.visit_id) : null);
     }
 
     res.json({
@@ -192,8 +221,12 @@ router.get('/', async (req, res, next) => {
         // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
         // window). Same-customer token, same posture as rescheduleUrl above;
         // calendarUrlFor nulls every case that route would 404.
-        calendarUrl: calendarBlockedById.get(String(s.id)) ? null : calendarUrlFor(s),
-        calendarExpiresAt: calendarBlockedById.get(String(s.id)) ? null : calendarExpiresAtFor(s),
+        calendarUrl: calendarVerdictById.get(String(s.id))
+          ? groupedCalendarUrl(s, calendarVerdictById.get(String(s.id)))
+          : calendarUrlFor(s),
+        calendarExpiresAt: calendarVerdictById.get(String(s.id))
+          ? (groupedCalendarUrl(s, calendarVerdictById.get(String(s.id))) ? calendarVerdictById.get(String(s.id)).endsAt.toISOString() : null)
+          : calendarExpiresAtFor(s),
       })),
     });
   } catch (err) {
@@ -490,8 +523,8 @@ router.get('/next', async (req, res, next) => {
     // Same group-aware posture as the list payload (codex #3609 r25 P2).
     const nextGroupedVerdict = nextService.visit_id ? await require('./reschedule-public').groupedVisit(nextService) : false;
     const nextGrouped = nextGroupedVerdict !== false;
-    const nextCalendarBlocked = nextGroupedVerdict === 'unknown'
-      || (nextGroupedVerdict === true && await groupedCalendarBlocked(nextService.visit_id));
+    const nextCalVerdict = nextGroupedVerdict === 'unknown' ? { blocked: true, endsAt: null }
+      : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
     res.json({
       next: {
@@ -510,8 +543,10 @@ router.get('/next', async (req, res, next) => {
         // Self-serve deep link — see the list route's note above.
         rescheduleUrl: nextService.reschedule_token && !nextGrouped ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
-        calendarUrl: nextCalendarBlocked ? null : calendarUrlFor(nextService),
-        calendarExpiresAt: nextCalendarBlocked ? null : calendarExpiresAtFor(nextService),
+        calendarUrl: nextCalVerdict ? groupedCalendarUrl(nextService, nextCalVerdict) : calendarUrlFor(nextService),
+        calendarExpiresAt: nextCalVerdict
+          ? (groupedCalendarUrl(nextService, nextCalVerdict) ? nextCalVerdict.endsAt.toISOString() : null)
+          : calendarExpiresAtFor(nextService),
       },
     });
   } catch (err) {
