@@ -234,11 +234,18 @@ async function main() {
           .where({ id: candidate.id })
           .forUpdate()
           .first('active', 'waveguard_tier', 'monthly_rate', 'billing_mode');
+        // Any intervening plan-rate component is a concurrent state change:
+        // restoring the old scalar over someone else's fresh ledger rows
+        // would let a later reprice disagree with its components.
+        const ledgerNow = hasLedger
+          ? await trx('customer_plan_rates').where({ customer_id: candidate.id }).first('id')
+          : null;
         const stillWoundDown = current
           && current.active === false
           && current.waveguard_tier == null
           && (current.monthly_rate == null || Number(current.monthly_rate) === 0)
-          && String(current.billing_mode || '') === String(wound.expectedBillingMode || '');
+          && String(current.billing_mode || '') === String(wound.expectedBillingMode || '')
+          && !ledgerNow;
         let restored = false;
         if (stillWoundDown) {
           await trx('customers').where({ id: candidate.id }).update({
@@ -254,8 +261,7 @@ async function main() {
             updated_at: trx.fn.now(),
           });
           if (hasLedger && wound.planRates.length) {
-            const ledgerNow = await trx('customer_plan_rates').where({ customer_id: candidate.id }).first('id');
-            if (!ledgerNow) await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
+            await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
           }
           restored = true;
         }
