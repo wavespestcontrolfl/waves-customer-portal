@@ -732,6 +732,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // to find the dollars and review flags they are approving.
       params: confirmationDisplayParams(toolUse.name, params, preview),
       expiresAt: row.expires_at,
+      // Server-computed remaining ms — the client countdown anchors on
+      // receipt + this, never on comparing expiresAt to the device clock
+      // (codex P2 on #3633: a skewed clock staled the card at the wrong
+      // moment in both directions).
+      expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     },
   };
 }

@@ -47,10 +47,26 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
 
-  // New proposals replace the previous batch's local state.
+  // New proposals replace the previous batch's local state. Countdown
+  // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
+  // skewed device clock can't stale the card early or keep Confirm alive
+  // past the server's TTL; raw expiresAt is only the fallback for older
+  // server responses that don't send the duration.
+  const [deadlineById, setDeadlineById] = useState({});
   useEffect(() => {
     setStatusById({});
     setErrorById({});
+    const received = Date.now();
+    const deadlines = {};
+    for (const a of actions || []) {
+      if (typeof a.expiresInMs === "number") {
+        deadlines[a.id] = received + a.expiresInMs;
+      } else if (a.expiresAt) {
+        const at = new Date(a.expiresAt).getTime();
+        if (Number.isFinite(at)) deadlines[a.id] = at;
+      }
+    }
+    setDeadlineById(deadlines);
   }, [actions]);
 
   // Tick for the expiry countdown — the server enforces the 10-minute TTL
@@ -65,11 +81,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
 
   if (!actions || actions.length === 0) return null;
 
-  const msLeft = (action) => {
-    if (!action.expiresAt) return null;
-    const at = new Date(action.expiresAt).getTime();
-    return Number.isFinite(at) ? at - now : null;
-  };
+  const msLeft = (action) => (
+    deadlineById[action.id] != null ? deadlineById[action.id] - now : null
+  );
   const countdownLabel = (ms) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
