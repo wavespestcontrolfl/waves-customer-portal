@@ -1951,6 +1951,12 @@ export function calculateEstimate(inputs) {
   }
 
   const turfArea = computeTurfArea();
+  // LOW-graded turf is a provenance guess, not a measurement — turf-priced
+  // results built on it carry the send-gate marker so a CLIENT_FALLBACK
+  // persist can never store the guessed price as customer-ready (server
+  // mirror: the lawn line's low_confidence_turf manualReviewReason).
+  const lowConfidenceTurf = String(turfArea.turfConfidence || '').toUpperCase() === 'LOW'
+    || (turfArea.turfFlags || []).includes('FIELD_VERIFY_TURF_SQFT');
   const hasTurfPricedService = svcLawn || svcOnetimeLawn || svcTopdress || svcDethatch || svcPlugging;
   if (hasTurfPricedService) {
     turfArea.turfFlags.forEach(flag => {
@@ -2252,9 +2258,9 @@ export function calculateEstimate(inputs) {
       requestedGrassType: requestedGrassType || null,
       grassTypeWasDefaulted,
       // Consumed by the pages' estimateRequiresQuote deep scan — an
-      // unsupported grass type priced off the St. Augustine table must not
-      // be sendable from the client fallback without review (codex P1).
-      ...(grassTypeWasDefaulted ? { requiresCustomQuote: true } : {}),
+      // unsupported grass type or a low-confidence turf basis must not be
+      // sendable from the client fallback without review (codex P1 ×2).
+      ...(grassTypeWasDefaulted || lowConfidenceTurf ? { requiresCustomQuote: true } : {}),
       turfEstimated: turfArea.turfEstimated,
       turfConfidence: turfArea.turfConfidence,
       turfBasis: turfArea.turfBasis,
@@ -2704,8 +2710,11 @@ export function calculateEstimate(inputs) {
     otItems.push({
       name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl,
       // Same send-gate marker as the recurring lawnMeta — a one-time-only
-      // quote on an unsupported grass type must not be sendable unreviewed.
-      ...(grassTypeWasDefaulted ? { requiresCustomQuote: true, requestedGrassType } : {}),
+      // quote on an unsupported grass type or low-confidence turf must not
+      // be sendable unreviewed.
+      ...(grassTypeWasDefaulted || lowConfidenceTurf
+        ? { requiresCustomQuote: true, ...(grassTypeWasDefaulted ? { requestedGrassType } : {}) }
+        : {}),
     });
   }
 
