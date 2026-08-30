@@ -23,10 +23,17 @@ const MIN_PAID_VISITS = 4;
 const COOLDOWN_MONTHS = 18;
 const OFFER_TTL_DAYS = 365;
 
-// True 18-calendar-month boundary (18*30 days lands 6-10 days short).
+// True 18-calendar-month boundary. setMonth alone overflows at month ends
+// (2026-08-31 minus 18 months would land on 2025-03-03 and let a
+// 2025-03-01 offer through 6 days early) — clamp to the target month's
+// last day instead.
 function cooldownFloor(now) {
+  const day = now.getDate();
   const floor = new Date(now.getTime());
+  floor.setDate(1);
   floor.setMonth(floor.getMonth() - COOLDOWN_MONTHS);
+  const lastDay = new Date(floor.getFullYear(), floor.getMonth() + 1, 0).getDate();
+  floor.setDate(Math.min(day, lastDay));
   return floor;
 }
 
@@ -155,6 +162,10 @@ async function consumeRetentionOffer({ offerId, expectedChargesApplied, amount, 
     .where(function notExpired() {
       this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
     })
+    // Idempotent per invoice: a retry that reloads the offer and passes the
+    // next expectedChargesApplied must not take a second slot for the same
+    // invoice (double discount).
+    .whereRaw("NOT (COALESCE(applied_invoice_ids, '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([invoiceId])])
     .update({
       charges_applied: expectedChargesApplied + 1,
       amount_applied: dbh.raw('COALESCE(amount_applied, 0) + ?', [amount]),

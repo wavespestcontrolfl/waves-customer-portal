@@ -13,7 +13,6 @@ const { processCancellationRequest } = require('../services/cancellation-process
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
-const { getTemplate } = require('../services/cancellation-resolution/templates');
 const { etDateString } = require('../utils/datetime-et');
 
 function etDisplayDate(value) {
@@ -93,6 +92,28 @@ function stripHtml(s) {
   return String(s || '').replace(/[<>]/g, '');
 }
 
+// Durable cancellation case (PR E) — idempotent per request id, best-effort:
+// a case failure never blocks or un-reports a cancel. Called from the fresh
+// create AND both retry branches, so a transient insert failure on the first
+// submit is repaired by any retry.
+async function recordCancellationCase({ customerId, requestId, value = {}, snapshot = null, resolution = null, resolutionOutcome = null, processed = false, reasonText = null }) {
+  if (!CancellationResolution.cancelFlowV2Enabled()) return;
+  try {
+    await CancellationResolution.openCancellationCase({
+      customerId,
+      serviceRequestId: requestId,
+      reasonCode: value.reasonCode || null,
+      reasonText,
+      resolution,
+      resolutionOutcome,
+      snapshot: snapshot || {},
+      processed,
+    });
+  } catch (caseErr) {
+    logger.warn(`Cancellation case write failed for request ${requestId}: ${caseErr.message}`);
+  }
+}
+
 // =========================================================================
 // POST /api/requests — Create a new service request
 // =========================================================================
@@ -161,6 +182,15 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         } catch (retryErr) {
           logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
         }
+        // Repair a case row the original submit failed to write (idempotent —
+        // an existing row is returned untouched).
+        await recordCancellationCase({
+          customerId: req.customer.id,
+          requestId: dupe.id,
+          value,
+          reasonText: dupe.description || null,
+          processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+        });
       }
       return res.status(200).json({
         success: true,
@@ -214,6 +244,13 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (retryErr) {
         logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
       }
+      await recordCancellationCase({
+        customerId: req.customer.id,
+        requestId: priorCancellation.id,
+        value,
+        reasonText: priorCancellation.description || null,
+        processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+      });
       return res.status(200).json({
         success: true,
         deduped: true,
@@ -311,9 +348,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // itself remain even if this fails.
     let cancellationResult = null;
     let cancellationProcessed = false;
-    // Case snapshot must be read BEFORE the processor runs — with
-    // GATE_CANCEL_FLOW_V2 on, the churn wind-down clears tier/rate.
+    // Case snapshot AND the server-side resolution must be computed BEFORE
+    // the processor runs — with GATE_CANCEL_FLOW_V2 on, the churn wind-down
+    // clears tier/rate and the facts change under the resolver.
     let caseSnapshot = null;
+    let serverResolution = null;
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
       try {
         caseSnapshot = await db('customers')
@@ -321,6 +360,23 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'pipeline_stage');
       } catch (snapErr) {
         logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
+      }
+      // The audit record is the SERVER's resolution, recomputed here — never
+      // the caller's claim. The claimed template id is only used below to
+      // decide whether the claimed outcome refers to the card the server
+      // would actually have shown.
+      if (value.reasonCode) {
+        try {
+          const preview = await CancellationResolution.previewCancellationResolution({
+            customerId: req.customer.id,
+            reasonCode: value.reasonCode,
+            families: [],
+            context: {},
+          });
+          serverResolution = preview ? preview.resolution : null;
+        } catch (resErr) {
+          logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
+        }
       }
     }
     if (isCancellation) {
@@ -335,38 +391,32 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
       cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
 
-      // Cancellation case (PR E) — the durable record of the reason, the one
-      // card shown, and its outcome. Best-effort AFTER the processor: a case
-      // write failure never blocks or un-reports a completed cancel.
-      if (CancellationResolution.cancelFlowV2Enabled()) {
-        try {
-          // The claimed template is caller input: only a registry template
-          // that belongs to the claimed reason is recorded; anything else is
-          // dropped (the case still lands, just without a card claim). Money
-          // is unaffected either way — offer grants re-derive eligibility
-          // server-side (C1), never from this field.
-          const claimed = value.resolutionTemplateId ? getTemplate(value.resolutionTemplateId) : null;
-          const validCard = claimed && value.reasonCode && claimed.reason === value.reasonCode ? claimed : null;
-          await CancellationResolution.openCancellationCase({
-            customerId: req.customer.id,
-            serviceRequestId: request.id,
-            reasonCode: value.reasonCode || null,
-            reasonText: cleanDescription || null,
-            resolution: validCard
-              ? { kind: 'card', card: { templateId: validCard.id, slots: {}, action: {} } }
-              : null,
-            resolutionOutcome: validCard ? (value.resolutionOutcome || null) : null,
-            snapshot: {
-              tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
-              monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
-              billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
-              processed: cancellationProcessed,
-            },
+      // Cancellation case (PR E) — the durable record is the SERVER-computed
+      // resolution (recomputed pre-churn above); caller input can never forge
+      // the card. The claimed outcome (accepted/declined) is honored only
+      // when the claimed template IS the server-resolved card. Money is
+      // unaffected either way — offer grants re-derive eligibility
+      // server-side (C1), never from this record.
+      {
+        const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
+        const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
+          ? (value.resolutionOutcome || 'shown')
+          : null;
+        await recordCancellationCase({
+          customerId: req.customer.id,
+          requestId: request.id,
+          value,
+          reasonText: cleanDescription || null,
+          resolution: serverResolution,
+          resolutionOutcome: outcome,
+          snapshot: {
+            tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
+            monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
+            billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
             processed: cancellationProcessed,
-          });
-        } catch (caseErr) {
-          logger.warn(`Cancellation case write failed for request ${request.id}: ${caseErr.message}`);
-        }
+          },
+          processed: cancellationProcessed,
+        });
       }
     }
 

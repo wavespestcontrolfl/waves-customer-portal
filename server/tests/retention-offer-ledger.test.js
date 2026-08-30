@@ -5,7 +5,7 @@
 
 jest.mock('../models/db', () => jest.fn());
 
-const { retentionDiscountForInvoice, offerEligibility } = require('../services/cancellation-resolution/retention-offer');
+const { retentionDiscountForInvoice, offerEligibility, cooldownFloor } = require('../services/cancellation-resolution/retention-offer');
 
 function offer(overrides = {}) {
   return {
@@ -59,6 +59,33 @@ describe('retentionDiscountForInvoice', () => {
     expect(retentionDiscountForInvoice(offer(), 89.99).amount).toBe(13.5); // 13.4985 → 13.50
     // Float math yields 0.22499999... → $0.22; integer cents give the right $0.23.
     expect(retentionDiscountForInvoice(offer(), 1.5).amount).toBe(0.23);
+  });
+});
+
+describe('cooldownFloor month-end clamping', () => {
+  test('18 months back from Aug 31 clamps to Feb 28, never overflows to Mar 03', () => {
+    const floor = cooldownFloor(new Date('2026-08-31T12:00:00-04:00'));
+    expect(floor.getFullYear()).toBe(2025);
+    expect(floor.getMonth()).toBe(1); // February
+    expect(floor.getDate()).toBe(28);
+  });
+
+  test('an offer granted 2025-03-01 still blocks on 2026-08-31 (anniversary is 2026-09-01)', () => {
+    const facts = {
+      tenureDays: 800, completedPaidVisits: 5, accountCurrent: true, openComplaint: false,
+      openCallbackLanes: [], prepay: false, billingMode: 'monthly_membership',
+      priorRetentionOfferAt: '2025-03-01T12:00:00-05:00', manualPriceOverrideAt: null,
+      families: ['pest_control'],
+    };
+    const out = offerEligibility(facts, { reasonCode: 'price', now: new Date('2026-08-31T12:00:00-04:00') });
+    expect(out.blockers).toContain('offer_within_18_months');
+  });
+
+  test('a plain mid-month boundary behaves as calendar months', () => {
+    const floor = cooldownFloor(new Date('2026-08-15T12:00:00-04:00'));
+    expect(floor.getFullYear()).toBe(2025);
+    expect(floor.getMonth()).toBe(1);
+    expect(floor.getDate()).toBe(15);
   });
 });
 
