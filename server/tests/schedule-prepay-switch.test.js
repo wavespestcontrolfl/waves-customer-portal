@@ -1098,3 +1098,84 @@ describe('on-site prepay switch — activation status (paid ≠ activated)', () 
     expect(body.termStatus).toBe('payment_pending');
   });
 });
+
+describe('on-site prepay switch — estimate-origin rodent setup is carried, never waived (codex #3591 r38 P1)', () => {
+  // The non-member rodent accept: bait-station setup + first application
+  // (estimate-public.js). Nothing here is the WaveGuard membership fee.
+  const RODENT_ACCEPT_INVOICE = {
+    ...ACCEPT_INVOICE,
+    total: '227.00',
+    notes: 'Auto-generated from accepted estimate #est-1. Customer selected pay per application — $99.00 setup fee plus first application.',
+    line_items: [
+      { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+    ],
+  };
+  let termSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    mockLockOverlap.mockResolvedValue(undefined);
+    termSpy = jest.spyOn(AnnualPrepayRenewals, 'createTermForAnnualPrepay').mockResolvedValue({ id: 'term-1' });
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations' },
+      invoices: [RODENT_ACCEPT_INVOICE],
+    });
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+  });
+  afterEach(() => termSpy.mockRestore());
+
+  test('preview: the accept invoice is a recognized supersede; its bait-station setup rides the prepay as its own line and is NOT offered as a waiver', async () => {
+    const { status, body } = await preview();
+    expect(status).toBe(200);
+    expect(body.eligible).toBe(true);
+    expect(body.supersedes).toHaveLength(1);
+    // Coverage 4 × $128 = $512 less the rodent plan's 5% prepay discount
+    // = $486.40, plus the carried $99 setup (never discounted, never waived).
+    expect(body.prepayTotal).toBe(585.4);
+    expect(body.discountAmount).toBe(25.6);
+    expect(body.setupFee).toBeNull();
+    expect(body.rodentSetupFee).toEqual({ amount: 99, waivedWithPrepay: false });
+    expect(body.mintPayload).toMatchObject({ amount: 486.4, setupFeeAmount: 99, scheduledServiceId: 'svc-1' });
+  });
+
+  test('preview: a membership setup fee on the same invoice is still the waivable one — only the rodent line is carried', async () => {
+    stubTables({
+      visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations' },
+      invoices: [{
+        ...RODENT_ACCEPT_INVOICE,
+        total: '326.00',
+        line_items: [
+          { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
+          ...RODENT_ACCEPT_INVOICE.line_items,
+        ],
+      }],
+    });
+    const { body } = await preview();
+    expect(body.eligible).toBe(true);
+    expect(body.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+    expect(body.rodentSetupFee).toEqual({ amount: 99, waivedWithPrepay: false });
+    expect(body.prepayTotal).toBe(585.4);
+  });
+
+  test('switch: the carried setup bills as its OWN line, the term keeps coverage money only, and no separate claim is ledgered (the marker re-mint restores the line)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect([status, body.error]).toEqual([201, undefined]);
+      const { lineItems } = mockCreateInvoice.mock.calls[0][0];
+      expect(lineItems).toHaveLength(2);
+      expect(lineItems[0]).toMatchObject({ unit_price: 486.4, category: 'Annual prepay' });
+      expect(lineItems[1]).toMatchObject({ unit_price: 99, description: 'Bait Station Setup — one-time setup fee', category: 'Setup fee' });
+      expect(termSpy.mock.calls[0][0]).toMatchObject({ prepayAmount: 486.4, sourceEstimateId: 'est-1' });
+      expect(retireSpy).not.toHaveBeenCalled();
+      expect(stubTables.inserts.filter((i) => i.table === 'setup_fee_claims')).toHaveLength(0);
+    } finally {
+      retireSpy.mockRestore();
+    }
+  });
+});

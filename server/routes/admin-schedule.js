@@ -12265,6 +12265,11 @@ function invoiceLineItems(raw) {
 // One definition — the resolver's supersede match and the supersede
 // endpoint's idempotent re-report must agree on what "this accept's
 // invoice" means.
+// The accept-minted rodent bait-station setup line (estimate-public.js) —
+// recognized by the supersede resolver and carried onto the prepay by the
+// preview (codex #3591 r38 P1).
+const RODENT_SETUP_ACCEPT_LINE_RE = /^Bait Station Setup — one-time setup fee$/;
+
 function acceptProvenanceRe(estimateId) {
   return new RegExp(
     `Auto-generated from accepted estimate #${String(estimateId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
@@ -12379,7 +12384,10 @@ async function resolveSupersededInvoices({ visitIds, estimateId, customerId, con
     // mints exactly a setup-fee line and/or a first-application line, and
     // ANYTHING else means sibling charges ride this invoice and voiding it
     // would erase them.
-    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|First service application)$/;
+    // The non-member rodent accept bills its bait-station setup beside the
+    // first application (estimate-public.js) — a recognized accept line,
+    // carried onto the prepay rather than waived (codex #3591 r38 P1).
+    const RECOGNIZED_ACCEPT_LINES = /^(WaveGuard Membership — one-time setup fee|Bait Station Setup — one-time setup fee|First service application)$/;
     // deposit_credit lines are exempt here only so the DEDICATED guard below
     // refuses them with its accurate ledger-restore reason.
     const unrecognized = lines.find((li) => String(li?.category || '') !== 'deposit_credit'
@@ -12930,13 +12938,27 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // A committed series hands the resolver its PERSISTED id so the
     // catalog-first re-read decides (codex #3591 r33 P1); only the draft
     // probe (no row yet) prices from the fragment.
-    const unwaivedSetupFee = await resolveDirectRodentSetupObligation(conn, input.anchorVisit
+    const directSetupFee = await resolveDirectRodentSetupObligation(conn, input.anchorVisit
       ? { id: input.anchorVisit.id }
       : {
         customer_id: customerId,
         service_type: coverageServiceType,
         source_estimate_id: anchorEstimateId || null,
       });
+    // ESTIMATE-origin rodent series (codex #3591 r38 P1): the accept billed
+    // the non-member bait-station setup on the per-application invoice this
+    // switch supersedes. Unlike the WaveGuard membership fee it is NOT
+    // waivable with prepay, so the superseded line's exact amount rides the
+    // prepay as its own line — voiding the accept invoice never forgives it.
+    // The direct resolver is 0 for estimate-origin rows by design, so the two
+    // sources never overlap; a later void/refund of the prepay re-mints the
+    // superseded invoice (line included) through its marker, which is why
+    // the write path ledgers no separate claim for this lane.
+    const supersededRodentSetup = Math.round(supersedes
+      .flatMap((inv) => inv.lines)
+      .filter((li) => RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
+      .reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
+    const unwaivedSetupFee = directSetupFee > 0 ? directSetupFee : supersededRodentSetup;
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass, unwaivedSetupFee });
     const planLabel = `${coverageServiceType} Annual Prepay`;
 
@@ -12945,9 +12967,10 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // items, never assumed from the plan class (the manual prepay-on-book
     // lane never writes the fee, so it has nothing to waive; see setupFee
     // below).
+    // The rodent bait-station setup is excluded: it is carried, never waived.
     const supersededSetupFee = supersedes
       .flatMap((inv) => inv.lines)
-      .filter((li) => /setup fee/i.test(li.description))
+      .filter((li) => /setup fee/i.test(li.description) && !RODENT_SETUP_ACCEPT_LINE_RE.test(String(li.description || '').trim()))
       .reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
 
     return {
@@ -12975,6 +12998,13 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       // superseded fee ⇒ null, same as every other lane.
       setupFee: supersededSetupFee > 0
         ? { amount: Math.round(supersededSetupFee * 100) / 100, waivedWithPrepay: true }
+        : null,
+      // The rodent bait-station setup the prepay BILLS as its own line (a
+      // direct non-member series' live obligation, or the estimate-origin
+      // line carried off the superseded accept invoice). Never waived; the
+      // sheet shows it beside the year so the total is itemized.
+      rodentSetupFee: pricing.prepay.setupAmount > 0
+        ? { amount: pricing.prepay.setupAmount, waivedWithPrepay: false }
         : null,
       // Invoices the prepaid year replaces. The caller retires them through
       // POST /:id/prepay-switch/supersede BEFORE minting the prepay, so there
@@ -13299,6 +13329,12 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
         // fee against this prepay — the term void/refund sync restores the
         // claim from that record — then retires the stamp by exact-value
         // CAS; a mid-mint (negative) stamp refuses the switch.
+        // ESTIMATE-origin lanes deliberately skip this (codex #3591 r38 P1):
+        // their setup line was carried off the superseded accept invoice,
+        // and a void/refund of this prepay re-mints that invoice — line
+        // included — through its marker (restoreSwitchSupersededInvoicesForPrepay).
+        // A ledger record here would re-stamp the claim on top of that
+        // re-minted line and bill the setup twice.
         if (switchSetupFee > 0 && !target.estimateId) {
           await require('../services/secure-appointment-plans').retireDirectSetupClaimForPrepay(trx, {
             anchorId: anchorRowId,
