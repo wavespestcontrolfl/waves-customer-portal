@@ -144,6 +144,31 @@ describe('pest-pressure display exclusion is OPT-IN (scoring callers unaffected)
     return Object.assign(() => chain, { applied });
   }
 
+  test('the same-day-overflow FALLBACK query applies the exclusion too', async () => {
+    // Force the fallback: current record absent from the over-fetched window.
+    const applied = [];
+    const row = { id: 'pps-cur', service_record_id: 'rec-now', service_date: '2026-08-30' };
+    const chain = {
+      leftJoin() { return chain; },
+      where(...args) { if (typeof args[0] === 'function') { args[0].call(chain, chain); } else applied.push(args); return chain; },
+      orWhere(...args) { applied.push(['orWhere', ...args]); return chain; },
+      orWhereNull(...args) { applied.push(['orWhereNull', ...args]); return chain; },
+      orderBy() { return chain; }, orderByRaw() { return chain; }, limit() { return chain; },
+      async first() { return row; },
+      select(...args) {
+        const p = Promise.resolve([]);
+        p.first = async () => row;
+        p.catch = (fn) => Promise.resolve([]).catch(fn);
+        return p;
+      },
+    };
+    const knex = () => chain;
+    await loadHistoryForCustomer(knex, 'cust-1', { serviceLine: 'pest', excludeCallbacks: true, currentServiceRecordId: 'rec-now', limit: 2 });
+    // Both the main window and the fallback earlierQuery carry the filter.
+    const flat = JSON.stringify(applied);
+    expect((flat.match(/is_callback/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
   test('excludeCallbacks: true applies the is_callback filter; default does not', async () => {
     const withFlag = recordingKnex();
     await loadHistoryForCustomer(withFlag, 'cust-1', { serviceLine: 'pest', excludeCallbacks: true });

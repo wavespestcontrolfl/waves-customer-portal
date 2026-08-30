@@ -474,6 +474,15 @@ async function loadHistoryForCustomer(knex, customerId, { serviceLine = null, li
         .orderBy('pps.id', 'desc')
         .limit(limit);
       if (serviceLine) earlierQuery.where('pps.service_line', serviceLine);
+      // Same opt-in exclusion as the main window: this fallback rebuilds the
+      // earlier-days list from scratch, so callback rows would reappear on
+      // the customer chart through this rare path (codex #3623 r3 P2). The
+      // current row is returned separately above and always charts itself.
+      if (excludeCallbacks) {
+        earlierQuery.where(function notCallbackPoint() {
+          this.where('sr.is_callback', false).orWhereNull('sr.is_callback');
+        });
+      }
       const earlierDays = await earlierQuery.select(
         'pps.id', 'pps.service_record_id', 'pps.service_date', 'pps.service_line',
         'pps.displayed_score', 'pps.calculated_score', 'pps.label_key', 'pps.label_name',
