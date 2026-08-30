@@ -756,13 +756,20 @@ function liveUrlForRow(row = {}) {
 
 // Liveness probe for a link about to ship to every network. The DB stamp says
 // the page WAS live; the hub can still retire/rename it (redirect rules,
-// content rebases). Only wavespestcontrol.com is probed; any failure = dead.
+// content rebases). Only wavespestcontrol.com is probed, and the response must
+// be a 200 at the SAME canonical URL — a retired path that 301s to the
+// homepage or another post is "ok" to fetch but is not this page, and the
+// server-side request must never be redirected off-domain. Any failure = dead.
+const HUB_HOST = /(^|\.)wavespestcontrol\.com$/i;
 async function linkIsLive(url, fetchImpl = globalThis.fetch) {
   try {
     const parsed = new URL(String(url || ''));
-    if (!/(^|\.)wavespestcontrol\.com$/i.test(parsed.hostname)) return false;
+    if (!HUB_HOST.test(parsed.hostname)) return false;
     const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    return !!res?.ok;
+    if (!res?.ok) return false;
+    const finalUrl = new URL(String(res.url || parsed.href));
+    if (!HUB_HOST.test(finalUrl.hostname)) return false;
+    return normalizeUrl(finalUrl.href) === normalizeUrl(parsed.href);
   } catch {
     return false;
   }
@@ -2644,14 +2651,24 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // Milestone drafts take the fleet-stats lease instead (see
     // publishWithFleetStatsLease) — the drift re-check and the post happen
     // with the stats sync excluded.
+    // The stored link was probed when the draft was previewed; a draft can sit
+    // in the queue for days while the hub retires that page. Re-probe right
+    // before publishing and drop a dead link (and the page title that rode
+    // with it) rather than recreate the 2026-08-29 404.
+    const approvedLink = preview.suggestedLink && (await linkIsLive(preview.suggestedLink))
+      ? preview.suggestedLink
+      : '';
+    if (preview.suggestedLink && !approvedLink) {
+      logger.warn(`[social-studio] approval link no longer live, publishing without it: ${preview.suggestedLink}`);
+    }
     const withPublishLock = (fn) => (input.milestone
       ? publishWithFleetStatsLease(input, fn, run.id)
       : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
     const publishOutcome = remainingChannels.length
       ? await withPublishLock(() => SocialMediaService.publishToAll({
-        title: preview.suggestedLinkTitle || run.topic || preview.inputs?.topic || 'Waves update',
+        title: (approvedLink && preview.suggestedLinkTitle) || run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
-        link: preview.suggestedLink,
+        link: approvedLink,
         guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
         source: AUTONOMOUS_SOURCE,
         customContent: preview.drafts,

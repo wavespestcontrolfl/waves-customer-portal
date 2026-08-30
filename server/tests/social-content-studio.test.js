@@ -633,7 +633,7 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
   });
 
   test('linkIsLive probes only wavespestcontrol.com and treats any failure as dead', async () => {
-    const ok = async () => ({ ok: true });
+    const ok = async (url) => ({ ok: true, url });
     const notFound = async () => ({ ok: false, status: 404 });
     const boom = async () => { throw new Error('ECONNRESET'); };
     expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', ok)).toBe(true);
@@ -641,5 +641,20 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
     expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', boom)).toBe(false);
     expect(await Studio.linkIsLive('https://evil.example.com/', ok)).toBe(false); // never probed off-domain
     expect(await Studio.linkIsLive('', ok)).toBe(false);
+  });
+
+  test('linkIsLive requires the 200 to land on the SAME canonical URL — a redirect elsewhere is dead', async () => {
+    const page = 'https://www.wavespestcontrol.com/pest-control/garage-door-seal-roaches-parrish-fl/';
+    // Retired path 301 → homepage: fetch is "ok" but it is not this page.
+    const toHome = async () => ({ ok: true, url: 'https://www.wavespestcontrol.com/' });
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/retired-post/', toHome)).toBe(false);
+    // Redirected off-domain by the trusted host: dead.
+    const offDomain = async () => ({ ok: true, url: 'https://evil.example.com/' });
+    expect(await Studio.linkIsLive(page, offDomain)).toBe(false);
+    // Canonical-only hops (http→https, trailing slash) are the same page.
+    const slashHop = async () => ({ ok: true, url: page.replace(/\/$/, '') });
+    expect(await Studio.linkIsLive(page, slashHop)).toBe(true);
+    // A fetch impl without res.url (older mocks/runtimes) is judged on the request URL.
+    expect(await Studio.linkIsLive(page, async () => ({ ok: true }))).toBe(true);
   });
 });
