@@ -300,10 +300,16 @@ exports.down = async function down(knex) {
   // the row must still hold this migration's new_value — an admin edit
   // after up() is authoritative and survives rollback untouched.
   for (const configKey of ['rodent_waveguard', 'rodent_setup_fee']) {
-    const auditRow = await knex('pricing_config_audit')
-      .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
+    // Same current-cycle ownership rule as the bracket row (codex #3591 r49
+    // P2): the LATEST audit entry — any author — must be this migration's
+    // up(), or a later admin-authored identical row would be consumed.
+    const latestAudit = await knex('pricing_config_audit')
+      .where({ config_key: configKey })
       .orderBy('id', 'desc')
       .first();
+    const auditRow = latestAudit && latestAudit.changed_by === MIGRATION_TAG && latestAudit.reason === UP_REASON
+      ? latestAudit
+      : null;
     if (!auditRow) continue;
     const currentRow = await knex('pricing_config').where({ config_key: configKey }).first();
     const currentMatchesUp = currentRow

@@ -207,6 +207,23 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).resolves.toBe(Number(RODENT.baitSetupFee));
   });
 
+  test('an UNRELATED per_application lane (palm) does not hide the rodent disclosure page; non-rodent visits stay hidden (codex #3591 r49 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({
+      visit: { ...baseVisit, service_type: 'Rodent Bait Stations' },
+      customer: { ...baseCustomer, billing_mode: 'per_application' },
+    });
+    const ctx = await buildSecurePlanContext({ request, visitId: 'v1' });
+    expect(ctx).not.toBeNull();
+    expect(ctx.setupFee).toEqual({ amount: Number(RODENT.baitSetupFee), waivedWithPrepay: false });
+    // A pest visit under the same lane keeps the card-only page.
+    setTables({
+      visit: { ...baseVisit },
+      customer: { ...baseCustomer, billing_mode: 'per_application' },
+    });
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
   test('a CHILD of an ESTIMATE-origin root owes nothing — provenance resolves at the anchor (codex #3591 r47 local P0)', async () => {
     mockQualifyingKeys = async () => [];
     setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations', recurring_parent_id: 'v0' } });

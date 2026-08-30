@@ -5170,16 +5170,22 @@ const InvoiceService = {
       const sib = await conn("invoices")
         .where({ id: sc.invoice_id })
         .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
-      const untouchedDraft = sib && String(sib.status).toLowerCase() === "draft" && !sib.sent_at && !sib.paid_at && !sib.payment_recorded_at && !sib.stripe_payment_intent_id;
-      if (untouchedDraft) {
+      const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
+      const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+        || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
+      if (sib && sibTerminal) {
+        await conn("setup_fee_claims").where({ id: sc.id }).delete();
+      } else if (!moneyAttached) {
+        // Unpaid — sent included (codex #3591 r49 local P0): a live pay
+        // link on the duplicate is a double charge waiting.
         await conn("invoices")
           .where({ id: sib.id, status: sib.status })
-          .whereNull("sent_at").whereNull("paid_at")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
           .update({ status: "void", updated_at: new Date() });
         await conn("setup_fee_claims").where({ id: sc.id }).delete();
-        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup draft ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
+        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
       } else {
-        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: invoice ${sc.invoice_id} also carries this series' setup claim (${sib ? sib.status : "unreadable"}) — reconcile so the setup is not collected twice`);
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: invoice ${sc.invoice_id} also carries this series' setup claim with money attached (${sib ? sib.status : "unreadable"}) — refund/reconcile so the setup is not collected twice`);
       }
     }
     await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
@@ -5215,8 +5221,12 @@ const InvoiceService = {
    * term sync's job and are skipped. Unexpected failures PROPAGATE so the
    * unwind retries.
    */
-  // Void every UNTOUCHED draft replacement carrying the re-bill marker for
-  // `sourceInvoiceId`; sent/paid replacements page a human. Returns the
+  // Void every UNPAID replacement carrying the re-bill marker for
+  // `sourceInvoiceId` — sent-but-unpaid included (codex #3591 r49 local
+  // P0: a live pay link on a duplicate setup is a double charge waiting;
+  // the voided pay page reads "no longer payable"). Only a replacement
+  // with MONEY attached (paid, payment recorded, or a PaymentIntent in
+  // flight) pages a human for an explicit refund/reconcile. Returns the
   // voided count. Shared by the prepay revival and the reinstated-invoice
   // cleanup (codex #3591 r46/r47 P1).
   async _voidUntouchedRodentSetupRebills(conn, sourceInvoiceId) {
@@ -5226,14 +5236,15 @@ const InvoiceService = {
       .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
     let voided = 0;
     for (const rb of rebills || []) {
-      const untouchedDraft = String(rb.status).toLowerCase() === "draft" && !rb.sent_at && !rb.paid_at && !rb.payment_recorded_at && !rb.stripe_payment_intent_id;
-      if (untouchedDraft) {
+      const moneyAttached = rb.paid_at || rb.payment_recorded_at || rb.stripe_payment_intent_id
+        || ["paid", "prepaid", "processing"].includes(String(rb.status).toLowerCase());
+      if (!moneyAttached) {
         voided += await conn("invoices")
           .where({ id: rb.id, status: rb.status })
-          .whereNull("sent_at").whereNull("paid_at")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
           .update({ status: "void", updated_at: new Date() });
       } else {
-        logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} is ${rb.status}${rb.sent_at ? "/sent" : ""} — reconcile so the setup is not collected twice`);
+        logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} has money attached (${rb.status}) — refund/reconcile so the setup is not collected twice`);
       }
     }
     return voided;
@@ -5301,10 +5312,29 @@ const InvoiceService = {
         .whereNot({ invoice_id: invoiceRow.id })
         .first("id", "invoice_id");
       if (siblingClaim) {
-        if (strict) {
+        // An UNPAID sibling is retired automatically (codex #3591 r49
+        // local P0) — the reinstated invoice becomes THE setup carrier;
+        // only money attached needs a human refund/reconcile.
+        const sib = await conn("invoices")
+          .where({ id: siblingClaim.invoice_id })
+          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+        const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
+        const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+          || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
+        if (sib && sibTerminal) {
+          await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
+        } else if (!moneyAttached) {
+          await conn("invoices")
+            .where({ id: sib.id, status: sib.status })
+            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
+            .update({ status: "void", updated_at: new Date() });
+          await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
+          logger.info(`[invoice] invoice ${invoiceRow.id} reinstated — sibling setup invoice ${sib.id} voided (claim consumed) so the fee is carried once`);
+        } else if (strict) {
           throw new Error(`Cannot restore invoice ${invoiceRow.id} — invoice ${siblingClaim.invoice_id} already collected this series' bait-station setup; reconcile which invoice carries the fee first`);
+        } else {
+          logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but invoice ${siblingClaim.invoice_id} also carries this series' setup claim with money attached — refund/reconcile so the setup is not collected twice`);
         }
-        logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but invoice ${siblingClaim.invoice_id} also carries this series' setup claim — reconcile so the setup is not collected twice`);
       }
       if (stamp != null && Math.round(stamp * 100) === Math.round(amount * 100)) {
         retired = await conn("scheduled_services")

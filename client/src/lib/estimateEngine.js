@@ -3515,8 +3515,15 @@ export function calculateEstimate(inputs) {
       // the canonical rodentBaitLineBillsMonthly gate reads this row as a
       // legacy monthly plan and suppresses per-application provenance.
       perApplicationBilled: true,
-      ...(rbDiscountable ? {} : { discountable: false, excludeFromPctDiscount: true }),
-      ...(rbCountsTowardTier ? {} : { countsTowardWaveGuardTier: false, tierQualifier: false }),
+      // EXPLICIT posture in both directions (codex #3591 r49 P1 — parity
+      // with the server mapper and the compact quote mirror): the replay
+      // signal needs the affirmative booleans too, or a later flag flip
+      // re-prices a saved CLIENT_FALLBACK estimate.
+      tierQualifier: !!rbCountsTowardTier,
+      countsTowardWaveGuardTier: !!rbCountsTowardTier,
+      excludeFromPctDiscount: !rbDiscountable,
+      waveGuardDiscountEligible: !!rbDiscountable,
+      ...(rbDiscountable ? {} : { discountable: false }),
     });
     // Setup only for NON-members: no other qualifying service on this
     // estimate AND no ACTIVE WaveGuard membership on the matched account.

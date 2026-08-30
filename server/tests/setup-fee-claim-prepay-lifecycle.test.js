@@ -586,9 +586,15 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
       expect.objectContaining({ table: 'setup_fee_claims', op: 'insert' }),
     ]);
     expect(marker).toBe('[rodent-setup-rebill:inv-prepay]');
+    // SENT-but-unpaid is voided too (codex #3591 r49 local P0): a live pay
+    // link on the duplicate is a double charge waiting.
     const sent = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'sent', sent_at: '2026-08-30', paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(sent, 'inv-prepay')).toMatchObject({ retired: false });
-    expect(sent.writes.filter((w) => w.table === 'invoices')).toEqual([]);
+    expect(sent.writes.filter((w) => w.table === 'invoices' && w.patch?.status === 'void')).toHaveLength(1);
+    // Money attached → paged, never auto-voided.
+    const paid = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'paid', sent_at: '2026-08-30', paid_at: '2026-08-30', payment_recorded_at: null, stripe_payment_intent_id: null }] });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(paid, 'inv-prepay')).toMatchObject({ retired: false });
+    expect(paid.writes.filter((w) => w.table === 'invoices')).toEqual([]);
   });
 
   test('anchor-less restore lookups keep RESCHEDULED roots (source contract, codex #3591 r46 P1)', () => {
@@ -756,7 +762,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     ...over,
   });
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revConn({ stamp = null, claimRow = { id: 'claim-c' }, termBacked = null, siblings = [], invoiceRow = stdInvoice(), liveVisitProbe = { id: 'child-live' } } = {}) {
+  function revConn({ stamp = null, claimRow = { id: 'claim-c' }, termBacked = null, siblings = [], invoiceRow = stdInvoice(), liveVisitProbe = { id: 'child-live' }, siblingInvoice = null } = {}) {
     const writes = [];
     const trx = (table) => {
       const q = { _where: null };
@@ -767,7 +773,7 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
         if (table === 'setup_fee_claims') return q._where && q._where.scheduled_service_id ? (siblings[0] || null) : claimRow;
         if (table === 'annual_prepay_terms') return termBacked;
         if (table === 'scheduled_services') return q._whereIn ? liveVisitProbe : { id: 'root-rb', pending_setup_fee: stamp, status: 'confirmed' };
-        if (table === 'invoices') return invoiceRow;
+        if (table === 'invoices') return q._where && q._where.id && q._where.id !== invoiceRow.id ? siblingInvoice : invoiceRow;
         return null;
       };
       q.select = async () => (table === 'scheduled_services' ? [rodentRoot] : []);
@@ -795,11 +801,20 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     mockQualifyingKeys = async () => [];
     await expect(InvoiceService.retireRodentSetupObligationForReinstatedInvoice(revConn({ stamp: '-99.00', claimRow: null }), 'inv-completion'))
       .rejects.toThrow(/completion mid-claim/);
+    // A sibling WITH money attached refuses strict; unpaid siblings are
+    // auto-voided in both modes (codex #3591 r49 local P0).
+    const paidSibling = { id: 'inv-other', status: 'paid', paid_at: '2026-08-30', payment_recorded_at: null, stripe_payment_intent_id: null };
     await expect(InvoiceService.retireRodentSetupObligationForReinstatedInvoice(
-      revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }] }), 'inv-completion', { strict: true },
+      revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }], siblingInvoice: paidSibling }), 'inv-completion', { strict: true },
     )).rejects.toThrow(/already collected/);
-    const paged = revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }] });
+    const unpaidSibling = { id: 'inv-other', status: 'sent', paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null };
+    const autoVoid = revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }], siblingInvoice: unpaidSibling });
+    expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(autoVoid, 'inv-completion')).toMatchObject({ retired: false });
+    expect(autoVoid.writes.some((w) => w.table === 'invoices' && w.patch?.status === 'void')).toBe(true);
+    expect(autoVoid.writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'delete')).toBe(true);
+    const paged = revConn({ stamp: null, claimRow: null, siblings: [{ id: 'claim-x', invoice_id: 'inv-other' }], siblingInvoice: paidSibling });
     expect(await InvoiceService.retireRodentSetupObligationForReinstatedInvoice(paged, 'inv-completion')).toMatchObject({ retired: false });
+    expect(paged.writes.filter((w) => w.table === 'invoices')).toEqual([]);
   });
 
   test('revival voids an untouched DRAFT completion setup invoice on the same anchor and consumes its claim', async () => {

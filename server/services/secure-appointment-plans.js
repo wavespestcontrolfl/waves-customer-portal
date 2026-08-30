@@ -489,7 +489,13 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
   // their setup fee at estimate accept — all would falsify the plan copy
   // or double-bill the fee.
   if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) return null;
-  if (customer.billing_mode === 'per_application') return null;
+  // An established per_application lane hides the plan page — UNLESS this
+  // visit is a residential bait program owing its setup (codex #3591 r49
+  // P1): the lane may belong to an unrelated service (palm injection),
+  // which never waives the rodent setup, and /secure is the disclosure
+  // rail the funnel routed here for.
+  const serviceKey = await authoritativeServiceKey(db, visit);
+  if (customer.billing_mode === 'per_application' && serviceKey !== 'rodent_bait') return null;
   const lane = resolveBillingLane(customer);
   if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
 
@@ -503,7 +509,6 @@ async function deriveSecurePlanContext({ request, visitId, consumeDisclosure = f
   const coverageCadence = prepayCoverageCadenceForPattern(pattern);
   if (!pattern || !visitsPerYear || !coverageCadence) return null;
 
-  const serviceKey = await authoritativeServiceKey(db, visit);
   const planClass = PLAN_CLASS_BY_SERVICE_KEY[serviceKey] || null;
   if (!planClass) return null;
 
