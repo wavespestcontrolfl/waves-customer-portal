@@ -1191,7 +1191,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lowConfidenceForcesSiteQuote = commercialLowConfidenceRequiresSiteQuote({
       engineResult: { lineItems: estimate?.lineItems || [] },
     });
-    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep);
+    // The guard consults BOTH the client payload and the SERVER-SIDE lookup
+    // profile: pricing now uses the trusted cached turf, so a unit-address
+    // request that omits or falsifies the payload's unitCount/parcel
+    // evidence must not slip a whole-building/association price past the
+    // site-quote contract (pre-push codex P0 r4). A client can only ADD a
+    // park signal this way, never remove the server's.
+    const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep)
+      || unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, trustedTurf);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
