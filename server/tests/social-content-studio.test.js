@@ -633,7 +633,7 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
   });
 
   test('linkIsLive probes only wavespestcontrol.com and treats any failure as dead', async () => {
-    const ok = async (url) => ({ ok: true, url });
+    const ok = async (url) => ({ ok: true, status: 200, url });
     const notFound = async () => ({ ok: false, status: 404 });
     const boom = async () => { throw new Error('ECONNRESET'); };
     expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', ok)).toBe(true);
@@ -664,6 +664,10 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.rowMatchesIntentKeywords({ title: 'Ant-proofing a Sarasota kitchen' }, kws)).toBe(true);
     // The wrong-topic regression: 'important', 'plant', 'giant' must not count as "ant".
     expect(Studio.rowMatchesIntentKeywords({ title: 'Important plant care for giant palms' }, kws)).toBe(false);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Antenna and antique shop pests' }, kws)).toBe(false);
+    // Derivational suffixes still count for stem keywords like 'fertil'.
+    const lawn = Studio.serviceIntentKeywords({ service: 'lawn care' });
+    expect(Studio.rowMatchesIntentKeywords({ title: 'October fertilization for Sarasota lawns' }, lawn)).toBe(true);
     expect(Studio.rowMatchesIntentKeywords({ title: 'anything' }, [])).toBe(false);
   });
 

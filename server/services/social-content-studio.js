@@ -750,14 +750,20 @@ async function getCampaignContext({ topic, city, service }) {
   return context;
 }
 
-// Intent keywords match as WORD PREFIXES ('ant' → ants, ant-proof; never
-// plant / important / giant). Short pest names as bare substrings picked
-// unrelated city-matched rows as the link page.
+// Intent keywords match as WHOLE WORDS with the usual English suffixes
+// ('ant' → ant, ants, ant-proof; 'fertil' → fertilizer, fertilization;
+// 'roach' → roaches) — never as bare substrings or open prefixes, which
+// matched plant / important / antenna and picked an unrelated city-matched
+// row as the link page.
+const INTENT_SUFFIX = '(?:s|es|ed|er|ers|ing|ize|izer|izers|izing|ization)?';
 function rowMatchesIntentKeywords(row = {}, keywords = []) {
   if (!keywords.length) return false;
   const text = [row.title, row.keyword, row.tag, row.meta_description]
     .map((v) => String(v || '').toLowerCase()).join(' ');
-  return keywords.some((kw) => new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(text));
+  return keywords.some((kw) => {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped}${INTENT_SUFFIX}\\b`).test(text);
+  });
 }
 
 // Did a legacy brand card actually reach a network? True only for a
