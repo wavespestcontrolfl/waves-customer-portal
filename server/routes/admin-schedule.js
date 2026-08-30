@@ -7137,7 +7137,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Observed visit membership at the slot-change pre-read; CAS'd on the
     // locked row inside the transaction (codex #3609 r10).
     let preReadVisitId;
-    if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
+    // `!== undefined`, never truthiness (codex #3609 r28 P1): an explicit
+    // clear of both bounds is represented as window_start/window_end = null
+    // and must enter the same effective-slot comparison — and therefore the
+    // grouped/frozen membership guards and CAS — as any other slot change.
+    if (updates.window_start !== undefined || updates.window_end !== undefined || updates.scheduled_date !== undefined
       || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
         .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');

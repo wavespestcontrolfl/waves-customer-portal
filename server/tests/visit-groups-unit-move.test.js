@@ -810,6 +810,13 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     const claimStampVal = after.find((c) => c.values.confirmation_sent === true).values.confirmation_sent_at;
     const fence = restore.ops.find((o) => o[0] === 'where' && o[1] && o[1].confirmation_sent === true);
     expect(fence[1].confirmation_sent_at).toEqual(claimStampVal);
+    // an ABORTED move (the primary itself could not move — nothing landed) RESTORES the holds
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
+    const abortCalls = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(abortCalls.length).toBe(6); // 3 claims + 3 restores — the unchanged appointment must not read as already reminded
+    expect(abortCalls[abortCalls.length - 1].values).toMatchObject({ reminder_24h_sent: false });
     // an unclaimable hold ABORTS before anything moves
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => { throw new Error('ledger down'); } } };

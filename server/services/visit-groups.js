@@ -1936,23 +1936,46 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     ['reminder_24h_sent', 'reminder_24h_sent_at'],
   ];
   const reminderHolds = new Map(); // flag -> reminder row ids we flipped
-  try {
-    const holdRows = await db('appointment_reminders')
-      .whereIn('scheduled_service_id', pending.map((x) => x.id))
-      .where({ cancelled: false })
-      .select('id', 'confirmation_sent', 'reminder_72h_sent', 'reminder_24h_sent');
+  // Restore every claimed leg (fenced per flag on our stamp). Used on full
+  // success AND on any abort where no member committed (codex r28 P1) — a
+  // hold surviving an aborted move would permanently suppress the unchanged
+  // appointment's sends. Restore failures leave the row held (quiet — the
+  // safe direction) and report.
+  const restoreReminderHolds = async (onFailure) => {
     for (const [flag, at] of REMINDER_HOLD_FLAGS) {
-      const ids = holdRows.filter((r) => !r[flag]).map((r) => r.id);
-      if (!ids.length) continue;
-      await db('appointment_reminders').whereIn('id', ids)
-        .where({ [flag]: false })
-        .update({ [flag]: true, [at]: reminderClaimStamp });
-      reminderHolds.set(flag, ids);
+      const ids = reminderHolds.get(flag);
+      if (!ids || !ids.length) continue;
+      try {
+        await db('appointment_reminders').whereIn('id', ids)
+          .where({ [flag]: true, [at]: reminderClaimStamp })
+          .update({ [flag]: false, [at]: null });
+      } catch (err) {
+        onFailure(flag, err);
+      }
     }
+  };
+  try {
+    // ONE transaction (codex r28 P1): the three per-flag claims commit
+    // together or not at all — a partial claim can never leak.
+    await db.transaction(async (t) => {
+      const holdRows = await t('appointment_reminders')
+        .whereIn('scheduled_service_id', pending.map((x) => x.id))
+        .where({ cancelled: false })
+        .select('id', 'confirmation_sent', 'reminder_72h_sent', 'reminder_24h_sent');
+      for (const [flag, at] of REMINDER_HOLD_FLAGS) {
+        const ids = holdRows.filter((r) => !r[flag]).map((r) => r.id);
+        if (!ids.length) continue;
+        await t('appointment_reminders').whereIn('id', ids)
+          .where({ [flag]: false })
+          .update({ [flag]: true, [at]: reminderClaimStamp });
+        reminderHolds.set(flag, ids);
+      }
+    });
   } catch (err) {
     // The hold could not be secured (codex #3609 r28 P1): moving anyway
-    // would let a cron text a half-moved stop. Nothing has been written —
-    // abort, the caller retries.
+    // would let a cron text a half-moved stop. The claim transaction rolled
+    // back — nothing is held, nothing has moved; abort, the caller retries.
+    reminderHolds.clear();
     throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true });
   }
   const moved = [];
@@ -2186,7 +2209,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (!target.isPrimary) await syncSiblingReminder();
         continue;
       }
-      if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved
+      if (target.isPrimary) {
+        // The tapped row itself could not move — NOTHING has moved: the
+        // reminder holds must not outlive this abort (codex r28 P1) or the
+        // unchanged appointment reads as already confirmed/reminded forever.
+        await restoreReminderHolds((flag, rerr) => logger.warn(`[visit-groups] reminder-hold restore (${flag}) after aborted move of visit ${plan.visitId} failed: ${rerr.message} — rows stay quiet until re-saved`));
+        throw err;
+      }
       await failSibling(target, err, err.message);
     }
   }
@@ -2324,22 +2353,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // (owner ruling 2026-08-30); the dispatcher owns the message after the
     // repair (needsAttention carries the straggler ids).
   } else if (reminderHolds.size) {
-    // Full success: restore each claimed flag, fenced per flag on our own
-    // stamp so a send genuinely delivered (or claimed by a newer writer) in
-    // the meantime is never re-armed. A failed restore leaves the row HELD
-    // (no reminder texts — the safe direction) and warns.
-    for (const [flag, at] of REMINDER_HOLD_FLAGS) {
-      const ids = reminderHolds.get(flag);
-      if (!ids || !ids.length) continue;
-      try {
-        await db('appointment_reminders').whereIn('id', ids)
-          .where({ [flag]: true, [at]: reminderClaimStamp })
-          .update({ [flag]: false, [at]: null });
-      } catch (err) {
-        warnings.push(`reminder hold restore failed for the moved stop (${flag}) — reminders stay quiet; re-save the visit to re-arm them`);
-        logger.warn(`[visit-groups] unit move reminder-hold restore (${flag}) failed for visit ${plan.visitId}: ${err.message}`);
-      }
-    }
+    // Full success: restore each claimed flag (fenced on our stamp — a send
+    // genuinely delivered meanwhile is never re-armed). A failed restore
+    // leaves the row HELD (quiet, the safe direction) and warns.
+    await restoreReminderHolds((flag, err) => {
+      warnings.push(`reminder hold restore failed for the moved stop (${flag}) — reminders stay quiet; re-save the visit to re-arm them`);
+      logger.warn(`[visit-groups] unit move reminder-hold restore (${flag}) failed for visit ${plan.visitId}: ${err.message}`);
+    });
   }
   // members: per-row pre-move state so a caller with its own post-move
   // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it
