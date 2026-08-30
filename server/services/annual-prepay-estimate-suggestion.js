@@ -134,6 +134,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   // an unverifiable option set must never prefill money.
   let optionAnnuals = [];
   let singleOptionKey = null;
+  let singleOptionMonthly = null;
   try {
     const { buildPricingBundle } = require('../routes/estimate-public');
     const bundle = await buildPricingBundle(estimate);
@@ -158,19 +159,37 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     if (pricedRows.length === 1 && pricedRows[0]?.annualPrepayEligible === false) {
       return blocked('estimate is not annual-prepay eligible');
     }
-    if (pricedRows.length === 1) singleOptionKey = pricedRows[0]?.key || null;
+    if (pricedRows.length === 1) {
+      singleOptionKey = pricedRows[0]?.key || null;
+      singleOptionMonthly = Number(pricedRows[0]?.monthly) || null;
+    }
   } catch {
     return blocked('estimate pricing options could not be verified');
   }
 
   const annualTotal = Number(estimate.annual_total || 0);
   const monthlyTotal = Number(estimate.monthly_total || 0);
-  const baseAnnual = optionAnnuals.length === 1
+  let baseAnnual = optionAnnuals.length === 1
     ? optionAnnuals[0] / 100
     : (annualTotal > 0
       ? annualTotal
       : (monthlyTotal > 0 ? Math.round(monthlyTotal * 12 * 100) / 100 : 0));
   if (!(baseAnnual > 0)) return blocked('estimate has no recurring total');
+
+  // Cents anchoring (same rule the accept path applies): a candidate annual
+  // that is exactly round(monthly) × 12 is a recompute of the DISPLAY monthly,
+  // not the engine's true annual — quarterly $392/yr shows $32.67/mo, and
+  // 32.67 × 12 = 392.04. Re-anchor through the shared anchoredAnnualTotal so
+  // the prefill equals the amount an accept would invoice to the cent. An
+  // annual that already differs from monthly × 12 is the engine figure —
+  // leave it.
+  const monthlyForAnchor = singleOptionMonthly || monthlyTotal;
+  if (monthlyForAnchor > 0
+    && Math.round(monthlyForAnchor * 12 * 100) / 100 === Math.round(baseAnnual * 100) / 100) {
+    const { anchoredAnnualTotal } = require('../routes/estimate-public');
+    const anchored = anchoredAnnualTotal(estData, monthlyForAnchor);
+    if (anchored > 0) baseAnnual = anchored;
+  }
 
   const { resolveAnnualPrepayInvoiceTotal } = require('./estimate-converter');
   const resolved = resolveAnnualPrepayInvoiceTotal({

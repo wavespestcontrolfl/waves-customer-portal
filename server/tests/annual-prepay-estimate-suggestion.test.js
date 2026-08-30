@@ -112,6 +112,23 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(noReader.amount).toBeUndefined();
   });
 
+  test('rounding residue: display-monthly × 12 re-anchors to the engine annual', async () => {
+    // Quarterly $392/yr displays as $32.67/mo; 32.67 × 12 = 392.04. The
+    // prefill must equal the accept path's $392.00, not the recompute.
+    const drifty = pestEstimate({
+      monthly_total: 32.67,
+      estimate_data: {
+        result: {
+          totals: { year2: 392, year2mo: 32.67 },
+          recurring: { services: [PEST_LINE] },
+        },
+      },
+    });
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([drifty], { resolveLineCadence: (line) => line?.frequency || null });
+    expect(suggestion.blocked).toBeUndefined();
+    expect(suggestion.baseAnnual).toBe(392);
+  });
+
   test('stored annual_total wins over monthly × 12', async () => {
     const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.baseAnnual).toBe(400);
