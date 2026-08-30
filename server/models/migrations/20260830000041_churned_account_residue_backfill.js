@@ -87,6 +87,13 @@ exports.up = async function up(knex) {
     // leave a newly re-won customer wound down.
      
     await knex.transaction(async (trx) => {
+      // One-off migration: block concurrent scheduled_services writers for
+      // the (tiny) duration of this per-customer transaction. SHARE ROW
+      // EXCLUSIVE conflicts with every writer's ROW EXCLUSIVE lock, so a
+      // booking insert cannot cross the wind-down commit — readers are
+      // unaffected. This, not the read-checks, is what actually closes the
+      // race; the pre/post guards remain as cheap belt-and-suspenders.
+      await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
       await windDownIfStillResidue(trx, customer.id);
     }).catch((err) => {
       // A concurrent booking raced this account mid-wind-down: everything
