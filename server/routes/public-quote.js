@@ -909,7 +909,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSizeConfirmed,
     });
     const lotSizeMeasured = realLotSqFt != null;
-    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
+    // A flagged lot also rejects the unconfirmed POSTED lotSqFt from the
+    // synthetic fallback (pre-push codex P0: rodent bait prices off `lot`
+    // via its 12k/20k brackets, so the posted association-scale number
+    // could still price a bookable quote) — the fallback is the sqft×4
+    // synthetic only.
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt
+      ?? ((lotDimensionTrusted ? Number(lotSqFt) : 0) || sqft * 4)));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water) flow into the
@@ -1229,14 +1235,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // park signal this way, never remove the server's.
     const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep)
       || unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, trustedTurf);
-    // A lot-priced service (mosquito is the lot consumer on this path) on a
+    // A lot-priced service (mosquito's treatable area and rodent bait's
+    // 12k/20k lot brackets are the lot consumers on this path) on a
     // profile whose lot the lookup flagged verify-first, with no
     // customer-confirmed lot to fall back on, parks instead of pricing the
     // synthetic sqft×4 guess — the condo unit-lot flag exists precisely
     // because the parcel-scale figure (and any silent substitute) is not a
     // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
     // flag keep today's synthetic-lot pricing.
-    const lotFlagForcesSiteQuote = !lotDimensionTrusted && !lotSizeMeasured && !!services.mosquito;
+    const lotFlagForcesSiteQuote = !lotDimensionTrusted && !lotSizeMeasured
+      && !!(services.mosquito || services.rodentBait);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates

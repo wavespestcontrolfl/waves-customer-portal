@@ -531,6 +531,18 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
   });
 
+  test('a "Condominium Common Elements" land use is association property — no flag (codex P1 r6)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '13 Example Commons, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 0,
+      lotSize: 120000,
+      _source: 'county',
+      _parcel: { landUseDescription: 'Condominium Common Elements' },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
   test('a "Condominium Common Area" land use behind a normalized type is an association parcel — no flag (codex P1 r5)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '12 Example Commons, Testville, FL 00000',

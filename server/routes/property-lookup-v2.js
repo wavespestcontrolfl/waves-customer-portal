@@ -3252,7 +3252,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // The association/common-area exclusion scans the SAME two texts the
   // condo predicate scans (codex P1 r5): a "Condominium Common Area" land
   // use behind a normalized type is an association parcel, not a unit.
-  const unitLotAssociationText = /hoa\s*common|common\s*area|association/i;
+  // Covers the county label family for association-owned property:
+  // "HOA Common Area", "Condominium Common Elements", "Common Property"
+  // (codex P1 — 'Condominium Common Elements' matched isCondoRecord via
+  // 'condominium' but escaped the exclusion).
+  const unitLotAssociationText = /hoa\s*common|common\s*(area|element|propert)|association/i;
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
     && !rc._fieldEvidence?.lotSize?.fieldVerify
