@@ -949,15 +949,32 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // park instead of quoting). The engine grades by provenance: a vision
     // estimate quotes instantly at MEDIUM; a county-prior or turf-less
     // lookup grades LOW and routes to review — the audit's intent.
+    // The figures come from the SERVER-SIDE lookup row (step 1 persisted it
+    // via performPropertyLookup), NEVER from the client `enriched` payload —
+    // payload turf as a pricing-authoritative input is a price-manipulation
+    // vector (pre-push codex P0: estimatedTurfSf:1 → cheap bookable quote).
+    // cacheOnly: no provider round-trips; a miss leaves turf unset, so the
+    // engine lot-falls-back to LOW and routes to review — fail closed.
     // Provenance rides with the figure (codex #3376 final head): a
     // county-prior or parcel-capped lookup profile stripped of these
     // fields would re-grade as a plain vision measurement downstream and
     // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
     // number — the exact over-claim the source mapping exists to prevent.
-    engineInput.measuredTurfSf = num(ep.measuredTurfSf);
-    engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
-    if (ep.turfSource) engineInput.turfSource = ep.turfSource;
-    if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+    let trustedTurf = {};
+    if (address) {
+      try {
+        const { performPropertyLookup } = require('./property-lookup-v2');
+        const serverLookup = await performPropertyLookup(address, { cacheOnly: true, persist: false });
+        trustedTurf = serverLookup?.enriched || {};
+      } catch (turfErr) {
+        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
+        trustedTurf = {};
+      }
+    }
+    engineInput.measuredTurfSf = num(trustedTurf.measuredTurfSf);
+    engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
+    if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
+    if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
     if (commercialDetected) {
       // The commercial auto-pricers additionally price directly from bed /
       // tree / impervious dimensions. Pass those through so the profile
