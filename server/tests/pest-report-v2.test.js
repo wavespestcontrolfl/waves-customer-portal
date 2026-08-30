@@ -54,6 +54,31 @@ describe('buildPestReportV2 — protection status mapping', () => {
   });
 });
 
+describe('buildPestReportV2 — callback defense suppression (owner 2026-08-30)', () => {
+  it('suppressDefense drops the schematic rows but keeps the shell', () => {
+    const out = buildPestReportV2({ premiumExperience: premium(), suppressDefense: true });
+    expect(out.defense).toBeNull();
+    // Status/summary/receipt survive — R2 keeps Pest V2 on callbacks.
+    expect(out.status).toBeTruthy();
+    expect(out.pressureReceipt).toBeTruthy();
+  });
+
+  it('defense-only intelligence with suppressDefense composes no empty V2 shell', () => {
+    const out = buildPestReportV2({
+      premiumExperience: premium({
+        primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null,
+      }),
+      suppressDefense: true,
+    });
+    expect(out).toBeNull();
+  });
+
+  it('default (regular visits) keeps the defense rows', () => {
+    const out = buildPestReportV2({ premiumExperience: premium() });
+    expect(out.defense?.items?.length).toBeGreaterThan(0);
+  });
+});
+
 describe('buildPestReportV2 — no internal zone letters reach the customer', () => {
   it('strips the leading "A · " zone letter from bug-file location', () => {
     const out = buildPestReportV2({ premiumExperience: premium() });

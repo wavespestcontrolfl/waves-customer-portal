@@ -487,6 +487,12 @@ async function buildServiceReportV1ResponseData(service, token, {
         // card, so what the customer told the tech never disappears into a
         // summary clause (John Kelleher audit 2026-07-29).
         customerConcern: data.customerConcern || null,
+        // Callback reports drop the schematic defense rows (owner
+        // 2026-08-30) — rides the re-service copy gate so one kill switch
+        // (unset GATE_RESERVICE_REPORT_COPY) restores the pre-lane render.
+        // isCallback rides the payload ungated (report-data), so the gate
+        // term here is what makes the suppression killable.
+        suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }

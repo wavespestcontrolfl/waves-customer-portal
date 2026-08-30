@@ -217,10 +217,19 @@ function buildPestReportV2({
   forecast = null,
   technicianReport = null,
   customerConcern = null,
+  suppressDefense = false,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
-  const defense = buildDefense(defenseStatus);
+  // Callback (re-service) reports never compose the schematic defense rows
+  // (owner 2026-08-30, first-callback eyeball): "Front entry — Clear · No
+  // active entry finding was documented" is routine-visit framing — and an
+  // inferred claim — on a complaint-driven visit. The technician-traced
+  // spray map, when captured, already replaces the schematic in the hero;
+  // with no trace the report simply carries no invented diagram. The
+  // status/summary/metric shell stays (owner ruling R2: keep Pest V2 on
+  // callbacks).
+  const defense = suppressDefense ? null : buildDefense(defenseStatus);
   const primaryMove = buildPrimaryMove(premiumExperience.primaryMove);
   const bugFiles = buildBugFiles(premiumExperience.bugFiles);
   const supportingMetric = buildSupportingMetric({ pestPressure, activity });

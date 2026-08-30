@@ -255,7 +255,12 @@ function signatureFor(block) {
   const outcomeKey = block.outcome === 'inspection_only' ? 'i'
     : block.outcome === 'customer_declined' ? 'd'
       : block.outcome === 'incomplete' ? 'x' : 't';
-  return `${block.includedWithWaveGuard ? '-rs1m' : '-rs1n'}${outcomeKey}`;
+  // 'rs2' = the no-schematic composition (owner 2026-08-30): callback pest
+  // reports stopped composing the "Where we protected" defense rows, so
+  // PDFs cached under '-rs1…' would keep serving the schematic on
+  // permanent links. Bump this version whenever the CALLBACK report
+  // composition changes — each callback PDF re-renders once on next view.
+  return `${block.includedWithWaveGuard ? '-rs2m' : '-rs2n'}${outcomeKey}`;
 }
 
 /**

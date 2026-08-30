@@ -15170,7 +15170,13 @@ export function CompletionPanel({
                 points, and inviting a trace the save route will 403 is a
                 dead end (codex P2 r1). Absent flag (other feeds, gate off)
                 keeps today's behavior; the named lane checks stay as belt. */}
-            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit
+            {/* Offered in quick-complete too (owner 2026-08-30): the pest
+                re-service callback completed via the slim flow shipped with
+                no trace, and the customer report fell back to the schematic
+                diagram — the tracer is the one capture whose absence the
+                report can't recover from. Still optional; the eligibility
+                belts stay. */}
+            {!isBedBugVisit && !isRodentTrappingVisit
               && service.traceEligible !== false && (
               <Field label="Treatment zone map">
                 <button
