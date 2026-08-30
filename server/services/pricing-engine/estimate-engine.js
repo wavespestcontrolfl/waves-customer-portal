@@ -1999,8 +1999,13 @@ function generateEstimate(input) {
     // also rides on residential palm lines that still earn their FLAT
     // credits (Gold+ $10/palm) through getEffectiveDiscount — the flags
     // block the percentage, not the pass.
+    // A new-model rodent row replayed under a frozen posture keeps its
+    // frozen % treatment exactly like a pinned legacy row (codex #3591 r44
+    // P1): the flags were re-stamped from the stored quote above, so the
+    // interpreter — not the live service policy — decides.
     if (item.discountable === false
-      || (item.legacyPinnedReplay === true && lineFlagsBlockPercentDiscount(item))) {
+      || (item.legacyPinnedReplay === true && lineFlagsBlockPercentDiscount(item))
+      || (item.service === 'rodent_bait' && input.rodentWaveguardPostureReplay && lineFlagsBlockPercentDiscount(item))) {
       item.discount = {
         serviceKey,
         waveGuardTier: waveGuardTier.tier,
@@ -2031,6 +2036,13 @@ function generateEstimate(input) {
       isOneTimeService: isOneTime,
       palmCount: item.palmCount,
       annualBeforeCredits: item.annualBeforeCredits ?? item.annual,
+      // Frozen-ELIGIBLE rodent posture with the live map since flipped to
+      // excluded (codex #3591 r44 P1): the sent quote's % holds.
+      ...(item.service === 'rodent_bait'
+        && input.rodentWaveguardPostureReplay
+        && !lineFlagsBlockPercentDiscount(item)
+        ? { ignorePercentExclusion: true }
+        : {}),
     });
 
     item.discount = discount;

@@ -91,6 +91,22 @@ async function updateRow(knex, configKey, mutate, reason) {
   await audit(knex, configKey, oldData, newData, reason);
 }
 
+
+// JSONB equality must be STRUCTURAL (codex #3591 r44 P2): Postgres does not
+// preserve object-key order, so stringify-compare can miss an identical
+// value and leave rollback skipping a row this migration owns.
+function jsonDeepEqual(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => jsonDeepEqual(v, b[i]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+    const ka = Object.keys(a); const kb = Object.keys(b);
+    return ka.length === kb.length && ka.every((k) => jsonDeepEqual(a[k], b[k]));
+  }
+  return false;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
@@ -262,7 +278,7 @@ exports.down = async function down(knex) {
     .first('id');
   if (bracketAudit) {
     const bracketRow = await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).first();
-    if (bracketRow && JSON.stringify(parseData(bracketRow)) === JSON.stringify(BRACKETS_DATA)) {
+    if (bracketRow && jsonDeepEqual(parseData(bracketRow), BRACKETS_DATA)) {
       await knex('pricing_config').where({ config_key: 'rodent_bait_brackets' }).del();
       await audit(knex, 'rodent_bait_brackets', BRACKETS_DATA, null, DOWN_REASON);
     }
@@ -281,7 +297,7 @@ exports.down = async function down(knex) {
     if (!auditRow) continue;
     const currentRow = await knex('pricing_config').where({ config_key: configKey }).first();
     const currentMatchesUp = currentRow
-      && JSON.stringify(parseData(currentRow)) === JSON.stringify(JSON.parse(auditRow.new_value || 'null'));
+      && jsonDeepEqual(parseData(currentRow), JSON.parse(auditRow.new_value || 'null'));
     if (!currentMatchesUp) continue;
     if (!auditRow.old_value) {
       await knex('pricing_config').where({ config_key: configKey }).del();

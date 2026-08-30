@@ -228,15 +228,18 @@ function frozenAnchorSetupStamp(anchor) {
 }
 
 async function directRodentSetupForRow(database, row) {
-  if (!row || !row.customer_id || row.source_estimate_id) return 0;
+  if (!row || !row.customer_id) return 0;
   if ((await authoritativeServiceKey(database, row)) !== 'rodent_bait') return 0;
   const anchor = await loadSeriesAnchor(database, row);
-  // An accepted, frozen claim outranks the LIVE constant (codex #3591 r40
-  // P1): a config raise after the customer accepted $99 must not re-price
-  // the switch / prepay-on-book / secure mint — the stamp is what the
-  // retirement path clears, so it is also what the prepay bills.
+  // An accepted/RESTORED frozen claim outranks everything (codex #3591 r40
+  // P1, r44 P1): the stamp is what the retirement path clears, so it is
+  // also what the prepay bills — including on an ESTIMATE-origin series
+  // whose refunded prepay just re-stamped it (estimate provenance is proof
+  // the ORIGINAL decision was made at accept, not that a restored claim is
+  // settled).
   const frozen = frozenAnchorSetupStamp(anchor);
   if (frozen != null) return frozen;
+  if (row.source_estimate_id) return 0;
   // Provenance (codex #3591 r42 P1): only a POST-rollout direct series can
   // owe the live fee — a grandfathered series booked before the realignment
   // (no estimate, no stamp: the old recurring signup waived setup) must not
@@ -293,10 +296,13 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
   // first visit already ran is still the customer's live rodent plan while
   // it has live children — dropping it would read the coverage as brand
   // new and derive a second setup. Dead roots (no live child) are skipped.
+  // 'rescheduled' roots stay too (codex #3591 r44 P1): the legacy customer
+  // reschedule marks the ROOT rescheduled while its future children remain —
+  // the series still exists, so it must not read as brand-new coverage.
   const roots = await database('scheduled_services')
     .where({ customer_id: customerId })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show'])
+    .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
     .where(function recurringRoots() {
       this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
     })
@@ -312,7 +318,7 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
       ? (await authoritativeServiceKey(database, root)) === coverageKey
       : serviceMatchesCoverage(root, coverageServiceType);
     if (!matches) continue;
-    if (String(root.status || '').toLowerCase() === 'completed') {
+    if (['completed', 'rescheduled'].includes(String(root.status || '').toLowerCase())) {
       const liveChild = await database('scheduled_services')
         .where({ recurring_parent_id: root.id })
         .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
@@ -321,8 +327,13 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
     }
     sawMatchingRoot = true;
     // An ESTIMATE-origin series made its setup decision at accept — never
-    // re-derive one here (it would bill the accept's setup a second time).
-    if (root.source_estimate_id) return null;
+    // re-derive a LIVE fee here (it would bill the accept's setup a second
+    // time). But a POSITIVE restored claim (its refunded prepay re-stamped
+    // the root; codex #3591 r44 P1) IS the outstanding obligation.
+    if (root.source_estimate_id) {
+      const restored = frozenAnchorSetupStamp(root);
+      return restored != null ? { anchorId: root.id, amount: restored } : null;
+    }
     const owed = await directRodentSetupForRow(database, root);
     if (owed > 0) return { anchorId: root.id, amount: owed };
   }

@@ -128,6 +128,10 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
   const {
     isRecurringCustomer = false,
     isOneTimeService = false,
+    // Saved-replay posture freeze (codex #3591 r44 P1): a row whose FROZEN
+    // flags say %-eligible keeps the tier % even after the live exclusion
+    // map flipped. Only replay callers pass it.
+    ignorePercentExclusion = false,
   } = options;
 
   const result = {
@@ -140,7 +144,7 @@ function getEffectiveDiscount(serviceKey, waveGuardTier, options = {}) {
   };
 
   // ── Excluded from % discount entirely ──
-  if (WAVEGUARD.excludedFromPercentDiscount[serviceKey]) {
+  if (WAVEGUARD.excludedFromPercentDiscount[serviceKey] && !ignorePercentExclusion) {
     result.appliedDiscounts.push({ type: 'exclusion', reason: `${serviceKey} excluded from % discounts` });
 
     // Flat credits for eligible services

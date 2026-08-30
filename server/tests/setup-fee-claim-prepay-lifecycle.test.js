@@ -351,6 +351,25 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     expect(await findDirectRodentSetupObligationForCoverage(old, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
   });
 
+  test('a RESCHEDULED root with live children is still the series; an estimate-origin root with a RESTORED positive stamp reports that claim (codex #3591 r44 P1)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    // Legacy customer-reschedule marked the ESTIMATE-origin root; children
+    // live → the series exists → null (never a second setup). A DIRECT
+    // rescheduled root still owes on its own anchor (first test above).
+    const resched = conn({ rootsForCoverage: [{ ...rodentRoot, status: 'rescheduled', source_estimate_id: 'est-1' }], scheduledService: { id: 'child-1' } });
+    expect(await findDirectRodentSetupObligationForCoverage(resched, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+    // Same root with NO live child → dead series → new coverage → anchor-less obligation.
+    const reschedDead = conn({ rootsForCoverage: [{ ...rodentRoot, status: 'rescheduled', source_estimate_id: 'est-1' }], scheduledService: null });
+    expect(await findDirectRodentSetupObligationForCoverage(reschedDead, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toEqual({ anchorId: null, amount: 99 });
+    // Estimate-origin root whose refunded prepay re-stamped it → the restored claim IS the obligation.
+    const restored = conn({ rootsForCoverage: [{ ...rodentRoot, source_estimate_id: 'est-1', pending_setup_fee: '99.00' }] });
+    expect(await findDirectRodentSetupObligationForCoverage(restored, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ anchorId: 'root-rb', amount: 99 });
+    // …and the shared resolver honors it too (the C360 mint re-derives through it).
+    const resolverConn = conn({ scheduledService: { ...rodentRoot, source_estimate_id: 'est-1', pending_setup_fee: '99.00' } });
+    expect(await plans.resolveDirectRodentSetupObligation(resolverConn, { id: 'root-rb' })).toBe(99);
+  });
+
   test('a failing lookup propagates (the mint refuses retryably, never reads it as a waiver)', async () => {
     const c = conn({ rootsForCoverage: [rodentRoot] });
     mockQualifyingKeys = async () => { throw new Error('db down'); };
@@ -433,5 +452,54 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('the switch route retires the claim through the service, only for a DIRECT series with a billed setup, and never writes the ledger itself', () => {
     expect(schedule).toMatch(/if \(switchSetupFee > 0 && !target\.estimateId\) \{\s*\n\s*await require\('\.\.\/services\/secure-appointment-plans'\)\.retireDirectSetupClaimForPrepay\(trx, \{/);
     expect(schedule.includes("('setup_fee_claims')")).toBe(false);
+  });
+});
+
+describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded STANDARD invoice puts the setup back (codex #3591 r44 P1)', () => {
+  const setupInvoice = (over = {}) => ({
+    id: 'inv-std', customer_id: 'cust-1', scheduled_service_id: null,
+    line_items: [
+      { description: 'Bait Station Setup — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 },
+      { description: 'First service application', quantity: 1, unit_price: 128, amount: 128 },
+    ],
+    ...over,
+  });
+  const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
+  beforeEach(() => { mockQualifyingKeys = async () => []; });
+
+  test('re-stamps the customer\'s live rodent root by CAS; a linked visit resolves through its root first', async () => {
+    const c = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }, rodentRoot], claim: null });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, setupInvoice()))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+    expect(c.writes).toEqual([
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', whereNull: 'pending_setup_fee', patch: expect.objectContaining({ pending_setup_fee: 99 }) }),
+    ]);
+    const linked = conn({ scheduledService: rodentRoot, claim: null });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(linked, setupInvoice({ scheduled_service_id: 'child-x' })))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
+  });
+
+  test('no setup line / a prepay invoice (claims-ledger row) / occupied stamp / no rodent root → no write', async () => {
+    const noLine = conn({ rootsForCoverage: [rodentRoot], claim: null });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(noLine, setupInvoice({ line_items: [{ description: 'First service application', amount: 128 }] }))).toBeNull();
+    expect(noLine.writes).toEqual([]);
+    const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' } });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, setupInvoice())).toBeNull();
+    expect(prepay.writes).toEqual([]);
+    const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0 });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(occupied, setupInvoice())).toBeNull();
+    const noRoot = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }], claim: null });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(noRoot, setupInvoice())).toBeNull();
+    expect(noRoot.writes).toEqual([]);
+  });
+
+  test('wired into the void + webhook refund transitions (source contract)', () => {
+    const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+    const webhookSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    const voidAt = invoiceSrc.indexOf('async voidInvoice(id) {');
+    const flipAt = invoiceSrc.indexOf('.update({ status: "void", updated_at: new Date() })', voidAt);
+    const restoreAt = invoiceSrc.indexOf('restoreRodentSetupObligationForReversedInvoice(trx, updated)', flipAt);
+    expect(restoreAt).toBeGreaterThan(flipAt);
+    expect(webhookSrc).toMatch(/status: 'refunded', paid_at: null, updated_at: trx\.fn\.now\(\) \}\)\s*\n\s*\.returning\('\*'\);[\s\S]{0,400}restoreRodentSetupObligationForReversedInvoice\(trx, refundFlipped\)/);
   });
 });

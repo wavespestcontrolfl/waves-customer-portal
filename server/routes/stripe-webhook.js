@@ -3338,10 +3338,17 @@ async function handleChargeRefunded(charge) {
             const rowPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
             if (refInvoice && refInvPi && rowPi && refInvPi === rowPi) {
               await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
-              await trx('invoices')
+              const [refundFlipped] = await trx('invoices')
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
-                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
+                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() })
+                .returning('*');
+              // A refunded standard invoice that billed the rodent
+              // bait-station setup restores the obligation on the living
+              // series (codex #3591 r44 P1); best-effort inside the helper.
+              if (refundFlipped) {
+                await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(trx, refundFlipped);
+              }
             } else {
               const resolvedReinstated = await trx('stripe_orphan_charges')
                 .where({ resolved: false, source: 'combined_pay_webhook' })

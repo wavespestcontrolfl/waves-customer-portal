@@ -4355,6 +4355,9 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while voiding — re-check and retry");
       }
+      // A voided standard invoice that billed the rodent bait-station setup
+      // puts the obligation back on the living series (codex #3591 r44 P1).
+      await this.restoreRodentSetupObligationForReversedInvoice(trx, updated);
       // A customer could have opened /pay and minted a NEW PaymentIntent between
       // the pre-lock triage above and this locked update. If the attached PI
       // changed, refuse — rolling back so the operator retries and the new PI gets
@@ -4983,6 +4986,69 @@ const InvoiceService = {
    * no-op. Re-stamped onto a NULL stamp only — a live or mid-mint claim is
    * never overwritten. Returns the restored descriptor or null.
    */
+  /**
+   * A STANDARD (non-prepay) invoice carrying the rodent bait-station setup
+   * line was voided/refunded while the series lives on (codex #3591 r44
+   * P1): the accept billed the setup only as this line — no claim record,
+   * no stamp — so the reversal must put the obligation back as a
+   * pending_setup_fee stamp on the series anchor or the fee is silently
+   * gone. Anchor resolution: the invoice's own scheduled_service_id's root
+   * first, else the customer's live direct rodent root. CAS onto a NULL
+   * stamp only; best-effort (never blocks the void/refund — a miss pages a
+   * human at FIX level). Prepay invoices are the claims ledger's job and
+   * are skipped here (setup_fee_claims row present).
+   */
+  async restoreRodentSetupObligationForReversedInvoice(conn, invoiceRow) {
+    try {
+      if (!invoiceRow || !invoiceRow.customer_id) return null;
+      let lines = invoiceRow.line_items;
+      if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+      const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+      if (!setupLine || !(amount > 0)) return null;
+      const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
+      if (claimRecord) return null; // prepay lane — restored via the claims ledger
+      const { authoritativeServiceKey } = require("./secure-appointment-plans");
+      let anchorId = null;
+      if (invoiceRow.scheduled_service_id) {
+        const own = await conn("scheduled_services")
+          .where({ id: invoiceRow.scheduled_service_id })
+          .first("id", "recurring_parent_id", "service_type", "service_id");
+        const root = own && own.recurring_parent_id
+          ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+          : own;
+        if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+      }
+      if (!anchorId) {
+        const roots = await conn("scheduled_services")
+          .where({ customer_id: invoiceRow.customer_id })
+          .whereNull("recurring_parent_id")
+          .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
+          .select("id", "service_type", "service_id");
+        for (const root of roots || []) {
+          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+        }
+      }
+      if (!anchorId) {
+        logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
+        return null;
+      }
+      const stamped = await conn("scheduled_services")
+        .where({ id: anchorId })
+        .whereNull("pending_setup_fee")
+        .update({ pending_setup_fee: amount, updated_at: new Date() });
+      if (stamped !== 1) {
+        logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
+        return null;
+      }
+      logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed`);
+      return { scheduledServiceId: anchorId, amount };
+    } catch (err) {
+      logger.error(`[invoice] FIX: rodent setup restore failed for reversed invoice ${invoiceRow?.id}: ${err.message} — re-bill the setup manually`);
+      return null;
+    }
+  },
+
   async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
     if (!prepayInvoiceId) return null;
     // Re-stamp + record consume run in ONE transaction with the record
@@ -5083,7 +5149,7 @@ const InvoiceService = {
             category: "Setup fee",
           }],
           notes: `Re-billed after prepay invoice ${prepayInvoiceId} was voided/refunded — the series has no future visit left to collect the setup on (visit ${parent.id}).`,
-          dueDate: new Date().toISOString().slice(0, 10),
+          dueDate: etDateString(),
         });
         await conn("setup_fee_claims").where({ id: claim.id }).delete();
         logger.info(`[invoice] setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${parent.id}, prepay ${prepayInvoiceId} refunded ($${amount.toFixed(2)})`);

@@ -717,3 +717,37 @@ describe('saved-replay rodent WaveGuard posture freeze (codex #3591 r43 P1)', ()
     expect(rodentWaveguardPostureReplaySignal({})).toBeNull();
   });
 });
+
+describe('saved-replay rodent % treatment freeze (codex #3591 r44 P1)', () => {
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const rodentPest = () => baseInput({ services: { rodentBait: {}, pest: { frequency: 'quarterly' } } });
+
+  test('frozen EXCLUDED posture keeps the % off the rodent line even while the live policy grants it', () => {
+    const frozen = generateEstimate({
+      ...rodentPest(),
+      rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: true },
+    });
+    const row = frozen.lineItems.find((i) => i.service === 'rodent_bait');
+    expect(frozen.waveGuard.qualifyingCount).toBe(2); // still tier-counted
+    expect(row.discount.effectiveDiscount).toBe(0);
+    expect(row.annualAfterDiscount).toBe(row.annual);
+    // Live pricing keeps the Silver % on the same cart.
+    const live = generateEstimate(rodentPest()).lineItems.find((i) => i.service === 'rodent_bait');
+    expect(live.discount.effectiveDiscount).toBeGreaterThan(0);
+  });
+
+  test('frozen ELIGIBLE posture keeps the % on after the live map flips to excluded (replay-only override)', () => {
+    WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+    try {
+      const fresh = generateEstimate(rodentPest()).lineItems.find((i) => i.service === 'rodent_bait');
+      expect(fresh.discount.effectiveDiscount).toBe(0); // live: excluded
+      const frozen = generateEstimate({
+        ...rodentPest(),
+        rodentWaveguardPostureReplay: { tierQualifier: true, excludeFromPctDiscount: false },
+      }).lineItems.find((i) => i.service === 'rodent_bait');
+      expect(frozen.discount.effectiveDiscount).toBeGreaterThan(0); // sent quote holds its %
+    } finally {
+      delete WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+    }
+  });
+});
