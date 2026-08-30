@@ -804,8 +804,10 @@ function hasNonNegativeNumber(value) {
 function matchGrassTrack(grassType) {
   const raw = String(grassType || '').trim();
   const compact = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Compact forms of every server GRASS_TYPE_ALIASES entry (constants.js) —
+  // a value the server accepts must never be parked as unsupported here.
   const aliases = {
-    st_augustine: ['A', 'B', 'STAUGUSTINE', 'STAUG'],
+    st_augustine: ['A', 'B', 'STAUGUSTINE', 'STAUG', 'STAUGUST', 'STAUGUSTINESHADE'],
     bermuda: ['C1', 'BERMUDA'],
     zoysia: ['C2', 'ZOYSIA'],
     bahia: ['D', 'BAHIA'],
@@ -2807,6 +2809,10 @@ export function calculateEstimate(inputs) {
       price: sp,
       baseEstimatePrice: dth.estimatedPrice ?? dth.price,
       detail: dth.detail || 'One-time service',
+      // A dethatching area derived from a guessed turf estimate carries the
+      // send-gate marker like the other turf-priced lines (a manual sqft
+      // entry grades the turf HIGH, so lowConfidenceTurf is already false).
+      ...(lowConfidenceTurf ? { requiresCustomQuote: true } : {}),
     });
   }
 
