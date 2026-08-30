@@ -326,11 +326,17 @@ function groupedState(members, now = new Date()) {
   if (rows.some((m) => status(m) === 'rescheduled')) return { state: 'pending_rebook', phase: null };
   const date = apptDateStr(rows[0]?.scheduled_date);
   if (date) {
+    // The stop stays live through the LATER of the quoted arrival promise
+    // (the visit's start + ARRIVAL_PROMISE_MINUTES — the page's own copy,
+    // like pageState) and the latest chained member's end (local codex
+    // audit r21): two overlapping 09–10 services promise arrival through
+    // 11:00 and must not go past at 10:00.
     const ends = rows.map((m) => hhmm(m.window_end)).filter(Boolean).sort();
     const starts = rows.map((m) => hhmm(m.window_start)).filter(Boolean).sort();
-    const endsAt = ends.length ? parseETDateTime(`${date}T${ends[ends.length - 1]}`)
-      : starts.length ? new Date(parseETDateTime(`${date}T${starts[0]}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000)
-        : parseETDateTime(`${date}T23:59`);
+    const bounds = [];
+    if (starts.length) bounds.push(parseETDateTime(`${date}T${starts[0]}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000);
+    if (ends.length) bounds.push(parseETDateTime(`${date}T${ends[ends.length - 1]}`).getTime());
+    const endsAt = bounds.length ? new Date(Math.max(...bounds)) : parseETDateTime(`${date}T23:59`);
     if (endsAt && endsAt < now) return { state: 'past', phase: null };
   }
   return { state: 'upcoming', phase: null };

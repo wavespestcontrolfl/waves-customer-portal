@@ -608,6 +608,13 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(groupedState([a, b], new Date('2026-08-05T16:30:00.000Z'))).toEqual({ state: 'past', phase: null }); // 12:30 ET
     expect(groupedState([a, { ...b, status: 'en_route' }], now)).toEqual({ state: 'in_progress', phase: 'en_route' });
     expect(groupedState([a, { ...b, status: 'rescheduled' }], now)).toEqual({ state: 'pending_rebook', phase: null });
+    // the quoted arrival promise (visit start + ARRIVAL_PROMISE_MINUTES) outlives short overlapping ends (local audit r21):
+    // two 09–10 services promise arrival through 11:00 ⇒ still upcoming at 10:30 ET, past at 11:30 ET
+    const o1 = { ...a, window_start: '09:00', window_end: '10:00' };
+    const o2 = { ...b, window_start: '09:00', window_end: '10:00' };
+    expect(groupedState([o1, o2], new Date('2026-08-05T14:30:00.000Z'))).toEqual({ state: 'upcoming', phase: null });
+    expect(groupedState([o1, o2], new Date('2026-08-05T15:30:00.000Z'))).toEqual({ state: 'past', phase: null });
+    expect(ARRIVAL_PROMISE_MINUTES).toBe(120);
     // no ends ⇒ arrival promise from the earliest start
     expect(groupedState([{ ...a, window_end: null }, { ...b, window_end: null }], new Date('2026-08-05T13:30:00.000Z'))).toEqual({ state: 'upcoming', phase: null }); // 09:30 ET < 10:00
     expect(groupedState([{ ...a, window_end: null }, { ...b, window_end: null }], new Date('2026-08-05T14:30:00.000Z'))).toEqual({ state: 'past', phase: null });     // 10:30 ET
