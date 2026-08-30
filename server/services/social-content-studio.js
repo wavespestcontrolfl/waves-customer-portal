@@ -690,11 +690,12 @@ async function getCampaignContext({ topic, city, service }) {
       context.linkPage = await firstLivePage(ranked.filter((entry) => entry.relevant).map((entry) => entry.row));
       // sourceFacts reads content[0]: the page we link, title and illustrate
       // must also be the page the caption quotes — so the probed row leads,
-      // ahead of any newer relevant row whose URL failed the probe.
-      const ordered = ranked.map((entry) => entry.row);
-      context.content = (context.linkPage
-        ? [context.linkPage, ...ordered.filter((row) => row !== context.linkPage)]
-        : ordered).slice(0, 8);
+      // ahead of any newer relevant row whose URL failed the probe. City-only
+      // rows never reach content at all: with no relevant row they would
+      // become content[0] and quote an unrelated service into the caption
+      // (the copy-side twin of the 08-27 Venice/termite link). No relevant
+      // row → no content fact; the caption leans on service/pest-pressure.
+      context.content = captionContentRows(ranked, context.linkPage);
     } catch {
       context.content = [];
       context.linkPage = null;
@@ -823,6 +824,15 @@ async function firstLivePage(rows = [], probe = linkIsLive) {
   const verdicts = await Promise.all(candidates.map((row) => probe(liveUrlForRow(row)).catch(() => false)));
   const index = verdicts.findIndex(Boolean);
   return index === -1 ? null : candidates[index];
+}
+
+// Rows the caption may quote: topic/service-relevant only, the probed link
+// page first. Never a city-only row (see getCampaignContext).
+function captionContentRows(ranked = [], linkPage = null) {
+  const relevantRows = ranked.filter((entry) => entry.relevant).map((entry) => entry.row);
+  return (linkPage
+    ? [linkPage, ...relevantRows.filter((row) => row !== linkPage)]
+    : relevantRows).slice(0, 8);
 }
 
 function suggestedLink(context) {
@@ -3454,6 +3464,7 @@ module.exports = {
   liveUrlForRow,
   linkIsLive,
   creativeStateSummary,
+  captionContentRows,
   rowMatchesIntentKeywords,
   legacyCardShipped,
   firstLivePage,

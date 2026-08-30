@@ -692,6 +692,23 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.rowMatchesIntentKeywords({ title: 'Approaching hurricane season lawn prep' }, kws)).toBe(false);
   });
 
+  test('captionContentRows never lets a city-only row feed the caption; probed link page leads', () => {
+    const roach = { id: 1, title: 'Roaches after Parrish rain' };
+    const roachOld = { id: 2, title: 'Garage door seal roach entry' };
+    const venice = { id: 3, title: 'Waves opens Venice office (termite)' };
+    const ranked = [
+      { row: roachOld, index: 0, relevant: true },
+      { row: roach, index: 1, relevant: true },
+      { row: venice, index: 2, relevant: false },
+    ];
+    // Probed page leads, other relevant rows follow, city-only row dropped.
+    expect(Studio.captionContentRows(ranked, roach)).toEqual([roach, roachOld]);
+    // No probe winner → relevant rows in rank order, still no city-only row.
+    expect(Studio.captionContentRows(ranked, null)).toEqual([roachOld, roach]);
+    // Only city-only rows → nothing to quote (content[0] must not be Venice/termite).
+    expect(Studio.captionContentRows([{ row: venice, index: 0, relevant: false }], null)).toEqual([]);
+  });
+
   test('creativeStateSummary names the actual engine state, never a phantom provider failure', () => {
     expect(Studio.creativeStateSummary({ enabled: false })).toMatch(/engine off/);
     expect(Studio.creativeStateSummary({ enabled: true, eligible: false })).toMatch(/not eligible/);
