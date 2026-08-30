@@ -166,9 +166,13 @@ function staffDispositionUpdates(body = {}) {
   const note = typeof body.dispositionNote === 'string' ? body.dispositionNote.trim().slice(0, 2000) : '';
   const legacyText = typeof body.declineReason === 'string' ? body.declineReason.trim() : '';
   // "Other" without any explanation is exactly the unexplained loss this
-  // taxonomy exists to end (GH codex P2). Free text that MAPPED to
-  // declined_other counts as the explanation.
-  if (code === 'declined_other' && !note && !legacyText) {
+  // taxonomy exists to end (GH codex P2 x2). An EXPLICIT normalized
+  // submission always requires the note — the shared payload builder sends
+  // declineReason:"Other" as a fixed label, never an explanation. Only the
+  // legacy free-text path (no code supplied) can satisfy it with the text
+  // that mapped here.
+  const explicitCode = body.disposition !== undefined && body.disposition !== null && body.disposition !== '';
+  if (code === 'declined_other' && !note && (explicitCode || !legacyText)) {
     return { error: "A short note is required when the reason is 'Other'." };
   }
   const updates = {
@@ -177,7 +181,7 @@ function staffDispositionUpdates(body = {}) {
     disposition_at: new Date(),
     // Free text lands in the note when the label wasn't one of the fixed
     // options — otherwise the note is whatever staff typed (may be empty).
-    disposition_note: note || (code === 'declined_other' && legacyText ? legacyText : null),
+    disposition_note: note || (code === 'declined_other' && !explicitCode && legacyText ? legacyText : null),
     competitor_name: null,
     competitor_price: null,
   };

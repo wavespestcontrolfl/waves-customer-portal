@@ -98,7 +98,14 @@ exports.up = async function up(knex) {
               AND COALESCE(i.paid_at, i.created_at) <= e.archived_at)
           OR EXISTS (SELECT 1 FROM scheduled_services ss
             WHERE ss.customer_id = e.customer_id AND ss.status = 'completed'
-              AND COALESCE(ss.completed_at, ss.scheduled_date::timestamp AT TIME ZONE 'America/New_York', ss.created_at) <= e.archived_at)
+              -- Legacy rows carry NULL completed_at; their same-day ordering
+              -- vs the archive is unknowable, so only a STRICTLY earlier
+              -- scheduled ET date counts as pre-archive evidence (GH codex
+              -- P2 — a same-day post-archive completion must not convert a
+              -- genuine unresolved loss).
+              AND ((ss.completed_at IS NOT NULL AND ss.completed_at <= e.archived_at)
+                OR (ss.completed_at IS NULL AND ss.scheduled_date IS NOT NULL
+                  AND ss.scheduled_date::date < (e.archived_at AT TIME ZONE 'America/New_York')::date)))
         )
         AND NOT EXISTS (SELECT 1 FROM invoices i
           WHERE i.customer_id = e.customer_id AND i.status = 'paid'

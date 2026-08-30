@@ -243,6 +243,7 @@ describe('resolutionDateMs fallback chain (mirrors client resolutionDate)', () =
 // source, WaveGuard tier, sent cohorts ──────────────────────────────────────
 describe('winLossSlices — audit slices', () => {
   const lawnData = { result: { recurring: { tier: 'gold', services: [{ service: 'lawn', name: 'Lawn Care', mo: 48 }] } } };
+  const wizardData = { engineResult: { waveGuard: { tier: 'silver' } } };
 
   test('why-we-lose counts stamped dispositions and derives unstamped ones; dead/won-elsewhere leave the rates', async () => {
     mockDbHandler = estimatesTable([
@@ -257,6 +258,8 @@ describe('winLossSlices — audit slices', () => {
       // Archived live row with a classification: visible in "why we lose",
       // out of the rates (archived drops stay symmetric) — codex pre-push P1.
       row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
+      // Quote-wizard shape: tier persisted ONLY at engineResult.waveGuard.
+      row({ id: 'wiz', status: 'expired', accepted_at: null, expires_at: daysAgo(1), estimate_data: wizardData, view_count: 1 }),
       // Archived converted row (the conversion sweep's shape): listed, and
       // COUNTED in excludedFromRates even though archived (GH codex P2).
       row({ id: 'conv', status: 'sent', accepted_at: null, archived_at: daysAgo(3), disposition: 'converted_other_path', disposition_at: daysAgo(3) }),
@@ -264,12 +267,12 @@ describe('winLossSlices — audit slices', () => {
 
     const result = await winLossSlices({ days: 90 });
 
-    expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 2 });
+    expect(result).toMatchObject({ resolved: 5, won: 1, lost: 4, winRatePct: 20, excludedFromRates: 2 });
     // pctOfLosses denominator = group 'lost' only (4 here); the dead lead
     // is listed for visibility with a null percentage.
     expect(result.byDisposition).toEqual([
-      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 25, group: 'lost' }),
-      expect.objectContaining({ code: 'expired_viewed', count: 1, pctOfLosses: 25 }),
+      expect.objectContaining({ code: 'expired_viewed', count: 2, pctOfLosses: 40 }),
+      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 20, group: 'lost' }),
       expect.objectContaining({ code: 'archived_unresolved', count: 1 }),
       expect.objectContaining({ code: 'converted_other_path', count: 1, group: 'won_elsewhere', pctOfLosses: null }),
       expect.objectContaining({ code: 'declined_price', count: 1 }),
@@ -282,11 +285,11 @@ describe('winLossSlices — audit slices', () => {
     expect(result.byServiceLine.find((s) => s.key === 'mosquito')).toMatchObject({ lost: 1 });
 
     expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 1, total: 2 });
-    expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 1 });
+    expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 2 }); // mosquito row + wizard row
     expect(result.byLeadSource.find((s) => s.key === 'thumbtack')).toBeUndefined(); // dead row left the rates
 
     // Column wins; falls back to the persisted recurring.tier; else "none".
-    expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1 });
+    expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1, lost: 1, total: 2 });
     expect(result.byWaveguardTier.find((t) => t.key === 'gold')).toMatchObject({ label: 'Gold', lost: 1 });
     expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 2 });
   });
@@ -368,9 +371,12 @@ describe('winLossSlices — audit slices', () => {
       }),
       // CTA mint stamped sent_at with nothing delivered → not a cohort row.
       row({ id: 'mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta', estimate_data: {} }),
-      // CTA mint an operator later really delivered → anchored on that handoff.
+      // CTA mint an operator later really delivered → anchored on that
+      // handoff; the mint-time self-redirect view (before delivery) must
+      // NOT count as an opened send.
       row({
-        id: 'mint-sent', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta',
+        id: 'mint-sent', status: 'viewed', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta',
+        viewed_at: daysAgo(8.5), view_count: 1,
         estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(8) } },
       }),
     ];

@@ -138,6 +138,9 @@ describe('staffDispositionUpdates — PATCH payload', () => {
     expect(staffDispositionUpdates({ disposition: 'declined_other' }).error).toMatch(/note is required/);
     expect(staffDispositionUpdates({ disposition: 'declined_other', dispositionNote: '  ' }).error).toMatch(/note is required/);
     expect(staffDispositionUpdates({ disposition: 'declined_other', dispositionNote: 'hated the truck color' }).updates.disposition_note).toBe('hated the truck color');
+    // The shared payload builder sends declineReason:"Other" as a fixed
+    // LABEL — an explicit code + label-only text is still unexplained.
+    expect(staffDispositionUpdates({ disposition: 'declined_other', declineReason: 'Other' }).error).toMatch(/note is required/);
     // Unknown legacy free text maps to declined_other WITH the text as note.
     expect(staffDispositionUpdates({ declineReason: 'Spouse said no' }).error).toBeUndefined();
   });

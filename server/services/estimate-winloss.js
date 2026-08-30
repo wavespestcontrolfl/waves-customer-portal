@@ -196,10 +196,17 @@ function sentCohorts(rows, { days, nowMs }) {
     // classification at all is skipped: it has no outcome to report.
     if (row.archived_at && !disposition && !RESOLVED_STATUSES.includes(row.status)) continue;
     const inBaseWindow = sentAt >= baseCutoff;
-    const firstView = ms(row.viewed_at) ?? ms(row.last_viewed_at);
+    // CTA mints self-redirect to the page at mint time, stamping view
+    // signals BEFORE any real delivery — for that source only a view at or
+    // after the delivery anchor counts as an opened send (GH codex P2).
+    const isCtaMint = String(row.source || '') === 'service_report_cta';
+    const viewCandidates = [ms(row.viewed_at), ms(row.last_viewed_at)]
+      .filter((ts) => ts != null && (!isCtaMint || ts >= sentAt));
+    const firstView = viewCandidates.length ? Math.min(...viewCandidates) : null;
     if (inBaseWindow) {
       sentTotal += 1;
-      const opened = (Number(row.view_count) || 0) > 0 || firstView != null || row.status === 'viewed';
+      const opened = firstView != null
+        || (!isCtaMint && ((Number(row.view_count) || 0) > 0 || row.status === 'viewed'));
       if (opened) viewedTotal += 1;
       if (firstView != null && firstView >= sentAt) hoursToFirstView.push((firstView - sentAt) / 3600000);
     }
@@ -377,7 +384,16 @@ async function winLossSlices({ days = 90 } = {}) {
     // of the estimate it rode on (a bundle loss is a loss for every line).
     for (const key of new Set(lines.map((l) => l.key || 'unknown'))) tallyKeyed(byServiceLine, key, isWon);
     tallyKeyed(byLeadSource, String(row.lead_source || '').trim().toLowerCase() || 'unknown', isWon);
-    const tier = String(row.waveguard_tier || estimateData?.result?.recurring?.tier || estimateData?.engineResult?.recurring?.tier || '').trim().toLowerCase();
+    // Quote-wizard drafts omit the column and persist the calculated tier
+    // at engineResult.waveGuard.tier (GH codex P2) — read every shape.
+    const tier = String(
+      row.waveguard_tier
+      || estimateData?.result?.recurring?.tier
+      || estimateData?.engineResult?.recurring?.tier
+      || estimateData?.engineResult?.waveGuard?.tier
+      || estimateData?.result?.waveGuard?.tier
+      || '',
+    ).trim().toLowerCase();
     tallyKeyed(byWaveguardTier, tier && tier !== 'none' ? tier : 'none', isWon);
 
     const profile = profileFromEstimateData(estimateData);
