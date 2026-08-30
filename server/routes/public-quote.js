@@ -946,8 +946,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // public confirmed value like 1e100 would overflow the integer column
     // and fail the insert, dropping the quote's customer linkage (codex
     // P1). Synthetic fallbacks still persist as null.
-    const persistLotSqFt = realLotSqFt != null
-      ? Math.round(Math.max(500, Math.min(LOT_CAP, realLotSqFt)))
+    // Direct-API requests keep their legacy persistence too (GH codex P1
+    // r7): the documented contract sends lotSqFt without lotSizeConfirmed,
+    // and those callers' customer-provided lot always reached
+    // customers.lot_sqft. Wizard requests persist only server-measured or
+    // confirmed values — their posted field carries the synthetic seed.
+    const persistLotSource = realLotSqFt
+      ?? (!wizardShaped && Number(lotSqFt) > 0 ? Number(lotSqFt) : null);
+    const persistLotSqFt = persistLotSource != null
+      ? Math.round(Math.max(500, Math.min(LOT_CAP, persistLotSource)))
       : null;
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
