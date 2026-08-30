@@ -25,13 +25,12 @@
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('customers'))) return;
 
-  // 1. Stale flag first, everywhere it is unambiguous: recurring_ongoing on a
-  // CANCELLED row never dispatches but can confuse series-extension sweeps.
-  await knex('scheduled_services')
-    .where({ status: 'cancelled', recurring_ongoing: true })
-    .update({ recurring_ongoing: false, updated_at: knex.fn.now() });
-
-  // 2. Churned-stage accounts still carrying live state.
+  // Churned-stage accounts still carrying live state. (The stale
+  // recurring_ongoing-on-cancelled-row flag is cleared per wound-down
+  // customer inside the loop below — NEVER globally: a recurring parent
+  // cancelled with scope='this_only' keeps its flag intentionally so the
+  // remaining series continues to extend; admin-dispatch.js leaves it
+  // intact by design.)
   const hasPerAppFee = await knex.schema.hasColumn('customers', 'per_application_fee');
   const candidates = await knex('customers')
     .where({ pipeline_stage: 'churned' })
@@ -108,6 +107,13 @@ exports.up = async function up(knex) {
       if (hasPerAppFee) update.per_application_fee = null;
     }
     await knex('customers').where({ id: customer.id }).update(update);
+    // Stale series flag, scoped to THIS wound-down account only: with no
+    // live series and no upcoming/in-progress work (guards above), a
+    // cancelled row's recurring_ongoing=true is pure residue that could
+    // still confuse series-extension sweeps.
+    await knex('scheduled_services')
+      .where({ customer_id: customer.id, status: 'cancelled', recurring_ongoing: true })
+      .update({ recurring_ongoing: false, updated_at: knex.fn.now() });
     // Independent charge rails (mirrors cancellation-processor): Stripe picks
     // a method by payment_methods.autopay_enabled ALONE, and the failed-
     // payment retry ladder never checks active/churn — disarm both.
