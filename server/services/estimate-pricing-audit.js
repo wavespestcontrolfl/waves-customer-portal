@@ -793,12 +793,24 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // dedupe by service+cadence so no priced line is silently omitted
     // (codex pre-push P1). When the alternate container is the only one
     // with lines, it becomes THE result for the whole audit.
-    const covered = new Set(rawLines.map((l) => `${l.serviceKey}|${l.cadence}`));
+    // Duplicate = the SAME priced charge represented in two containers:
+    // same service, cadence, AND net price. Distinct buildings or
+    // installations that share a key but carry different prices are
+    // separate legitimate charges and all survive (codex pre-push P1 —
+    // the earlier key-only dedupe dropped them).
+    const covered = new Map();
+    const priceKey = (l) => `${l.serviceKey}|${l.cadence}`;
+    const remember = (l) => {
+      const key = priceKey(l);
+      if (!covered.has(key)) covered.set(key, []);
+      covered.get(key).push(Number(l.price) || 0);
+    };
+    rawLines.forEach(remember);
     const merge = (extra) => {
       for (const line of extra) {
-        const key = `${line.serviceKey}|${line.cadence}`;
-        if (covered.has(key)) continue;
-        covered.add(key);
+        const prices = covered.get(priceKey(line)) || [];
+        if (prices.some((prev) => Math.abs(prev - (Number(line.price) || 0)) < 0.01)) continue;
+        remember(line);
         rawLines.push(line);
       }
     };

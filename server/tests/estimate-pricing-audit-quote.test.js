@@ -331,6 +331,21 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => l.serviceKey === 'rodent_trapping')).toMatchObject({ cadence: 'one_time', price: 350 });
   });
 
+  test('same-key different-price lines are distinct charges, not duplicates', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-multi', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '800.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [
+            { service: 'exclusion', name: 'Exclusion — Building A', price: 500, monthly: null },
+            { service: 'exclusion', name: 'Exclusion — Building B', price: 300, monthly: null },
+          ],
+        },
+      },
+    });
+    expect(audit.lines.filter((l) => l.serviceKey === 'exclusion')).toHaveLength(2);
+  });
+
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,
