@@ -22,8 +22,13 @@ PG_PORT="$(pg_local_port)"
 for _ in $(seq 1 30); do sudo -u postgres pg_isready -p "${PG_PORT}" -q && break; sleep 1; done
 sudo -u postgres pg_isready -p "${PG_PORT}"
 
-# Never serve against a remote/prod database.
+# Never serve against a remote/prod database; pins DATABASE_URL to the local PG16.
 assert_local_effective_database_url
+
+# Apply any migrations authored/checked-out since the per-boot start.sh pass —
+# this on-demand entrypoint bypasses the root `predev` hook, so run it here.
+echo "[dev] applying any pending migrations"
+npm run db:migrate
 
 echo "[dev] launching API (:3001, NODE_ENV=test — no cron/canary) + Vite client (:5173)"
 exec npx concurrently -k -n api,web -c blue,green \

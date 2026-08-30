@@ -64,35 +64,49 @@ assert_local_database_url() {
   _refuse_nonlocal_db "${host:-<unparseable>}"
 }
 
-# Resolve the EFFECTIVE Knex database URL exactly as the app will (dotenv-loaded
-# .env plus knexfile's fallback vars: DATABASE_PRIVATE_URL / DATABASE_PUBLIC_URL
-# / POSTGRES_URL / POSTGRES_PRIVATE_URL / PG* ) and:
-#   - refuse (fail closed) if it resolves to a non-local host;
-#   - if it resolves EMPTY (e.g. a preserved .env with no DATABASE_URL and no
-#     fallback vars), export the provisioned local URL so `db:migrate`/the
-#     server never fall back to the OS-user database.
-# Requires node deps (dotenv), so call it AFTER `npm install`. The export
-# persists to the caller because this runs in the caller's shell.
+# Resolve the EFFECTIVE Knex database HOST exactly as pg will (dotenv-loaded
+# .env plus knexfile's fallback vars, parsed with pg-connection-string — the
+# SAME parser pg/Knex use, so a `?host=` query override that outranks the URL
+# authority is honored, not the misleading authority host) and then:
+#   - refuse (fail closed) if the effective host is non-local;
+#   - otherwise EXPORT the canonical local URL, so migrate/the server always
+#     target the provisioned PostgreSQL 16 cluster (right port + creds) even if
+#     the effective URL is empty (preserved .env with no DATABASE_URL) or a
+#     preserved/stale .env points at a local-but-wrong port/cluster.
+# Requires node deps (pg-connection-string, a pg dependency), so call it AFTER
+# `npm install`. The export persists to the caller (runs in the caller's shell).
 assert_local_effective_database_url() {
   local host
   host="$(cd "${REPO_ROOT}/server" 2>/dev/null && node -e '
     require("./knexfile");
     const u = process.env.DATABASE_URL || "";
     if (!u) process.exit(0);
-    try { process.stdout.write(new URL(u).hostname); }
+    try { process.stdout.write(String(require("pg-connection-string").parse(u).host || "")); }
     catch { process.stdout.write("__unparseable__"); }
   ' 2>/dev/null || true)"
+
   if [ -z "$host" ]; then
     export DATABASE_URL="$(local_database_url)"
-    echo "[cloud-env] no DATABASE_URL resolved — using the local database: 127.0.0.1:$(pg_local_port)/waves_portal"
+    echo "[cloud-env] no DATABASE_URL resolved — using the local database on port $(pg_local_port)"
     return 0
   fi
+  if [ "$host" = "__unparseable__" ]; then
+    _refuse_nonlocal_db "<unparseable>"
+  fi
+
   host="${host#\[}"; host="${host%\]}"
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-  if is_local_db_host "$host"; then
-    return 0
-  fi
-  _refuse_nonlocal_db "$host"
+
+  # A leading '/' is a unix-socket directory (pg's `host=` socket form) — local.
+  case "$host" in
+    /*) : ;;
+    *) is_local_db_host "$host" || _refuse_nonlocal_db "$host" ;;
+  esac
+
+  # Local host: pin to the canonical local URL (correct PG16 port + creds) so a
+  # preserved/stale .env can never migrate/serve the wrong local cluster.
+  export DATABASE_URL="$(local_database_url)"
+  return 0
 }
 
 _refuse_nonlocal_db() {
