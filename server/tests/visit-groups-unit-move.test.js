@@ -639,7 +639,7 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
       .mockRejectedValueOnce(Object.assign(new Error('Technician is inactive'), { statusCode: 400 }));    // b
     out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(out.visitMove.moved).toEqual(['a', 'b']);
-    expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED' }]);
+    expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED', movedButUnassigned: true }]);
     expect(out.warnings.some((w) => /did not move with this stop/.test(w))).toBe(true);
     // a concurrent operator reassignment (ASSIGNMENT_STALE) is a failed member, not retried, not overwritten
     jest.clearAllMocks(); db.__calls.length = 0;

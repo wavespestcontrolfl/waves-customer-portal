@@ -1649,6 +1649,21 @@ function visitSummariesForRows(rows, {
 }
 
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// The staff repair message for an INCOMPLETE unit move (codex r44): a
+// straggler still at the old slot, a member that MOVED but could not be
+// reassigned (fixing its assignment, not re-moving it), and a failed
+// parent retarget each need different guidance — one builder so the
+// dispatch and rain-out responses never drift.
+function incompleteMoveMessage(failedEntries = [], parentRetargetFailed = false) {
+  const stragglers = failedEntries.filter((f) => f.movedButUnassigned !== true);
+  const unassigned = failedEntries.filter((f) => f.movedButUnassigned === true);
+  const parts = [];
+  if (stragglers.length) parts.push(`${stragglers.length} grouped service(s) are still on the old day/time — fix the stragglers on the board`);
+  if (unassigned.length) parts.push(`${unassigned.length} service(s) moved to the new time but could not be reassigned to the technician — fix their assignment on the board (they are NOT at the old time)`);
+  if (!parts.length || parentRetargetFailed) parts.push('the visit record still describes the old stop — re-save the stop from the board');
+  return `Only part of this stop finished moving: ${parts.join('; ')}. Then text the customer.`;
+}
+
 // The grouped stop's canonical start (earliest live member's HH:MM) — the
 // value grouped customer copy quotes (rain-out, the appointment page).
 // Shared by the last-moment notice checks so a LATER chained member's own
@@ -2057,8 +2072,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (!visit || String(visit.status) !== 'open') { repairOutcome = 'failed'; return; }
         const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).orderBy('id').forUpdate()
-          .select('id', 'scheduled_date', 'window_start', 'window_end');
+          .select('id', 'scheduled_date', 'window_start', 'window_end', 'status');
         if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) { repairOutcome = 'failed'; return; }
+        // Live residue is derived from the STALE PARENT, not the plan
+        // (codex r44): a same-day allowLive partial rewound the children
+        // to 'confirmed' before this re-save, so plan.anyLive is false and
+        // the dates match — but the parent still carries live stamps and
+        // its tracker one-shots stay consumed. Cleared only when no member
+        // is CURRENTLY live (a genuinely underway stop keeps its state).
+        const anyLiveNow = rows.some((r) => ['en_route', 'on_site'].includes(String(r.status || '').toLowerCase()));
+        const staleLiveResidue = !anyLiveNow && !!(visit.en_route_at || visit.arrived_at);
         const starts = rows.map((r) => r.window_start).filter(Boolean).sort();
         const ends = rows.map((r) => r.window_end).filter(Boolean).sort();
         const hhmm5 = (v) => (v ? String(v).slice(0, 5) : null);
@@ -2070,7 +2093,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // of a reassignment finds date/window/key healthy — the parent's
           // technician is part of the tuple, mirroring the normal
           // retarget's options.technicianId patch.
-          || (options.technicianId !== undefined && String(visit.technician_id || '') !== String(options.technicianId || ''));
+          || (options.technicianId !== undefined && String(visit.technician_id || '') !== String(options.technicianId || ''))
+          || staleLiveResidue;
         if (!stale) return;
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
@@ -2079,7 +2103,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // repaired LIVE move (allowLive) or date change must not leave the
         // parent marked underway with its tracker one-shots consumed at
         // the new stop.
-        if (plan.anyLive || newDateStr !== plan.oldDate) {
+        if (plan.anyLive || newDateStr !== plan.oldDate || staleLiveResidue) {
           patch.en_route_at = null;
           patch.arrived_at = null;
           await t('visit_effects').where({ visit_id: plan.visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
@@ -2323,8 +2347,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // A sibling that did not land (or could not be re-pointed): partial +
   // warning — the staff contract (r3); the detach seam separates the row
   // that stayed behind. (Frozen visits are refused before the first write.)
-  const failSibling = async (target, err, reason) => {
-    failed.push({ id: target.id, reason, code: err.code || null });
+  const failSibling = async (target, err, reason, extra = {}) => {
+    failed.push({ id: target.id, reason, code: err.code || null, ...extra });
     logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} failed: ${reason}`);
   };
   for (const target of ordered) {
@@ -2453,7 +2477,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           break;
         }
       }
-      await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`);
+      await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
     };
     const syncSiblingReminder = async () => {
       try {
@@ -2735,6 +2759,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 module.exports = {
   windowedMembersConnected,
   liveStopStartHHMM,
+  incompleteMoveMessage,
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,

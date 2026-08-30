@@ -1888,7 +1888,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         coverMoved(moveResult, job);
         if (moveResult?.visitMove?.visitStart) unitVisitStart = String(moveResult.visitMove.visitStart);
         if ((Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) || moveResult?.visitMove?.parentRetargetFailed === true) {
-          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id), parentRetargetFailed: moveResult.visitMove.parentRetargetFailed === true };
+          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id), failedMembers: moveResult.visitMove.failed || [], parentRetargetFailed: moveResult.visitMove.parentRetargetFailed === true };
           // Stragglers stay OUT of the rest of this batch (codex #3609 r27
           // P1): a queued sibling job retried individually could succeed and
           // text the customer even though this stop's result says nobody was
@@ -2094,9 +2094,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       ...(unitMovePartial ? {
         needsAttention: {
           code: 'VISIT_MOVE_INCOMPLETE',
-          message: unitMovePartial.memberIds.length
-            ? `Only part of this stop moved — ${unitMovePartial.memberIds.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`
-            : 'Every service moved, but the visit record could not be updated and still describes the old stop — re-save the stop from the board, then text the customer.',
+          // Shared builder (codex r44) — same guidance rules as the
+          // dispatch response, one mechanism.
+          message: require('./visit-groups').incompleteMoveMessage(unitMovePartial.failedMembers || [], unitMovePartial.parentRetargetFailed === true),
           memberIds: unitMovePartial.memberIds,
         },
       } : {}),

@@ -171,7 +171,7 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(sendRescheduleNoticeForVisit).not.toHaveBeenCalled();
     expect(body.notificationSent).toBe(false);
     expect(body.needsAttention).toMatchObject({ code: 'VISIT_MOVE_INCOMPLETE', memberIds: ['b'] });
-    expect(body.needsAttention.message).toMatch(/Only part of this stop moved/);
+    expect(body.needsAttention.message).toMatch(/Only part of this stop finished moving/);
     // the reminder sync ran as a NON-notifying move (coverDueWindows false — the sweep owns the corrected text once the stop is whole)
     const syncCall = AppointmentReminders.handleReschedule.mock.calls[0];
     expect(syncCall && syncCall[2]).toMatchObject({ sendNotification: false, coverDueWindows: false });

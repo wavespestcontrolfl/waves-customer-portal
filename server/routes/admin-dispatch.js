@@ -15096,9 +15096,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notificationError: 'grouped move incomplete — customer NOT notified',
         needsAttention: {
           code: 'VISIT_MOVE_INCOMPLETE',
-          message: stuck.length
-            ? `Only part of this stop moved — ${stuck.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`
-            : 'The services moved but the visit record could not be retargeted — re-save the stop from the board, then text the customer.',
+          // Shared builder (codex r44): a member that MOVED but could not
+          // be reassigned needs assignment guidance, never "still on the
+          // old day/time" — following that would move it AGAIN.
+          message: require('../services/visit-groups').incompleteMoveMessage(result.visitMove.failed || [], result.visitMove.parentRetargetFailed === true),
           memberIds: stuck,
         },
       });
