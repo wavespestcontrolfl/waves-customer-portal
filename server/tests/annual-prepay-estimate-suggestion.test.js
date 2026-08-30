@@ -6,8 +6,6 @@ const {
   buildAnnualPrepayEstimateSuggestion,
   pickAnnualPrepayEstimate,
   shortEstimateRef,
-  suggestionServiceMatches,
-  suggestionCoverageMatches,
 } = require('../services/annual-prepay-estimate-suggestion');
 const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-converter');
 
@@ -317,32 +315,6 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
   test('no credible estimate → null (modal renders exactly as before)', async () => {
     expect(await buildAnnualPrepayEstimateSuggestion([])).toBeNull();
     expect(await buildAnnualPrepayEstimateSuggestion([pestEstimate({ status: 'draft' })])).toBeNull();
-  });
-});
-
-describe('suggestionServiceMatches', () => {
-  test('exact identity, cadence words retained — never substring, never cross-cadence', () => {
-    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Quarterly Pest Control')).toBe(true);
-    // Cadence words are part of the identity: a monthly quote must not match
-    // a quarterly label.
-    expect(suggestionServiceMatches('Quarterly Pest Control Service', 'Monthly Pest Control Plan')).toBe(false);
-    // "Pest Control" must NOT match "Commercial Pest Control" on money.
-    expect(suggestionServiceMatches('Quarterly Pest Control', 'Commercial Pest Control')).toBe(false);
-    expect(suggestionServiceMatches('Quarterly Pest Control', 'Quarterly Mosquito Service')).toBe(false);
-    // Empty keys fail closed.
-    expect(suggestionServiceMatches('', 'Quarterly Pest Control')).toBe(false);
-    expect(suggestionServiceMatches('Quarterly Pest Control', '')).toBe(false);
-  });
-});
-
-describe('suggestionCoverageMatches', () => {
-  test('requires the estimate cadence AND visit count to agree exactly', () => {
-    const suggestion = { coverageCadence: 'quarterly', coverageVisitCount: 4 };
-    expect(suggestionCoverageMatches(suggestion, 'quarterly', 4)).toBe(true);
-    expect(suggestionCoverageMatches(suggestion, 'monthly', 12)).toBe(false);
-    expect(suggestionCoverageMatches(suggestion, 'quarterly', 6)).toBe(false);
-    expect(suggestionCoverageMatches({ coverageVisitCount: 4 }, 'quarterly', 4)).toBe(false);
-    expect(suggestionCoverageMatches(null, 'quarterly', 4)).toBe(false);
   });
 });
 

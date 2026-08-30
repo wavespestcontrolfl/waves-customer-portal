@@ -4889,20 +4889,12 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const reference = cleanOptionalText(req.body?.reference);
     const note = cleanOptionalText(req.body?.note);
 
-    // Estimate provenance (best-effort, never blocks the money recording):
-    // link the term to the estimate the prefill came from. The client's
-    // claim is only a HINT — every check (ownership, status, expiry,
-    // eligibility, quarantine, single-option pricing, consumed-term
-    // exclusion, service/cadence/visit-count agreement, exact cents
-    // agreement with the collected amount) runs inside the transaction
-    // against the locked row. Anything else skips the link rather than
-    // failing the recording.
-    const sourceEstimateIdRaw = cleanOptionalText(req.body?.sourceEstimateId);
-    const sourceEstimateId = sourceEstimateIdRaw
-      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceEstimateIdRaw)
-      ? sourceEstimateIdRaw.toLowerCase()
-      : null;
-
+    // DELIBERATELY NO estimate provenance/claim here: closing an estimate is
+    // an ACCEPTANCE, and acceptance belongs to the canonical converter
+    // (conversion, deposits, group follow-ups, lead pipeline). The
+    // estimate-derived prefill is suggestion-only; linking the term to its
+    // estimate is a follow-up that extends the manual-acceptance mechanism
+    // rather than growing a parallel accept path on this recording route.
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const invoiceNotes = [
       'Created from Customer 360 annual prepay.',
@@ -4915,31 +4907,11 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const InvoiceService = require('../services/invoice');
     let result;
-    // Re-read inside the transaction below: the pre-transaction suggestion
-    // check can race a concurrent link of the same estimate.
-    let linkEstimateId = sourceEstimateId;
-    // The estimate row claimed accepted inside the transaction (if any) —
-    // drives the post-commit lead-pipeline transition.
-    let claimedEstimate = null;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
-      // TOCTOU guard: this NEW-payment path must never update a term that
-      // already owns the source estimate (createTermForAnnualPrepay upserts
-      // by source_estimate_id and would rewrite last year's term's amount,
-      // dates, and coverage while keeping its old invoice). Re-check inside
-      // the transaction and drop the link if the estimate was claimed since
-      // the pre-transaction validation; a true concurrent double-claim after
-      // this read fails loudly on the UNIQUE constraint instead of
-      // corrupting a prior term.
-      if (linkEstimateId) {
-        const existingLink = await trx('annual_prepay_terms')
-          .where({ source_estimate_id: linkEstimateId })
-          .first('id');
-        if (existingLink) linkEstimateId = null;
-      }
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -4974,129 +4946,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
 
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-      // Close the quote the cash paid for with the SAME atomic claim the
-      // accept flows run (status flip + price lock + expiry and engine-
-      // quarantine predicates): a sent/viewed estimate linked to this paid
-      // term must not stay publicly acceptable — the standard accept lane
-      // runs no annual-prepay overlap guard and would mint fresh scheduling/
-      // invoice obligations on the already-paid year — and the follow-up
-      // cron keeps chasing sent/viewed rows. The claim MUST succeed for the
-      // link to persist: zero rows means a concurrent accept/decline/expiry
-      // won the row, so the cash recording proceeds UNLINKED (it is money
-      // already in hand, not an acceptance) and the estimate lane keeps
-      // ownership. Deliberately not the manual-acceptance converter — the
-      // term, invoice, and payment are created by THIS transaction and the
-      // converter would double-mint them; accept-side comms fire only from
-      // the accept routes, never from a status change.
-      if (linkEstimateId) {
-        // The COMPLETE validation runs here, on the locked in-trx row — the
-        // client's sourceEstimateId is only a hint, and any pre-transaction
-        // state is stale by definition. buildAnnualPrepayEstimateSuggestion
-        // over the locked row re-checks ownership (the WHERE), status,
-        // expiry, archive, eligibility, call quarantine (db: trx),
-        // single-option pricing, and consumed-term exclusion; the matchers
-        // re-check service/cadence/visit count; and the collected amount
-        // must equal the quoted prepay year to the CENT — an operator
-        // override records unlinked (the quote wasn't what was paid), and
-        // a concurrent reprice changes the suggestion and fails a check.
-        let validated = false;
-        const freshEstimate = await trx('estimates')
-          .where({ id: linkEstimateId, customer_id: customer.id })
-          .whereNull('archived_at')
-          .forUpdate()
-          .first();
-        if (freshEstimate) {
-          // The whole validation runs inside a SAVEPOINT (nested knex
-          // transaction): a failed SQL statement inside it would otherwise
-          // leave the OUTER transaction aborted (25P02) and take the term/
-          // payment writes down with it — provenance must stay best-effort.
-          // Row locks acquired inside survive the savepoint and hold
-          // through the claim.
-          try {
-            validated = await trx.transaction(async (sp) => {
-              // Engine-drafted rows: lock the linked lead and the CALL row
-              // (same accept/decline contract — staleCallLinkageReason with
-              // lockCallRow) and hold both locks through the claim, so a
-              // concurrent call reprocessing/correction can't begin after an
-              // unlocked read and find the estimate already terminal.
-              let freshData = freshEstimate.estimate_data;
-              if (typeof freshData === 'string') {
-                try { freshData = JSON.parse(freshData); } catch { freshData = null; }
-              }
-              if (freshData?.estimatorEngine?.callLogId) {
-                if (freshData?.lead_id && ['sid', 'stamp'].includes(freshData?.lead_linkage)) {
-                  await sp('leads').where({ id: String(freshData.lead_id) }).forUpdate().first('id');
-                }
-                const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
-                const staleLinkage = await staleCallLinkageReason(sp, freshData, { lockCallRow: true });
-                if (staleLinkage) throw new Error(`stale call linkage: ${staleLinkage}`);
-              }
-
-              const linkedTermRows = await sp('annual_prepay_terms')
-                .where({ customer_id: customer.id })
-                .whereNotNull('source_estimate_id')
-                .select('source_estimate_id');
-              const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
-              const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion([freshEstimate], {
-                excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
-                resolveLineCadence: cadenceFromEstimateLine,
-                db: sp,
-              });
-              return !!(suggestion && !suggestion.blocked
-                && String(suggestion.estimateId).toLowerCase() === String(linkEstimateId).toLowerCase()
-                && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
-                && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)
-                && Math.round(Number(suggestion.amount) * 100) === Math.round(Number(amount) * 100));
-            });
-          } catch (validationErr) {
-            logger.warn(`[customers:${customer.id}] annual-prepay provenance validation skipped: ${validationErr.message}`);
-            validated = false;
-          }
-        }
-        if (!validated) linkEstimateId = null;
-      }
-      if (linkEstimateId) {
-        const claimNow = trx.fn.now();
-        const [claimed] = await trx('estimates')
-          .where({ id: linkEstimateId, customer_id: customer.id })
-          // No updated_at CAS: pg's millisecond Date vs Postgres microsecond
-          // timestamps makes exact equality silently miss, and the row is
-          // already held FOR UPDATE by the validation read in this same
-          // transaction — nothing can revise it between validation and here.
-          // Archive/invalidation guards apply UNCONDITIONALLY — an archived
-          // estimate without a call id must be just as unclaimable.
-          .whereNull('archived_at')
-          .whereIn('status', ['sent', 'viewed'])
-          // A locked price means a prior accept already committed money.
-          .whereNull('price_locked_at')
-          .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
-          // Same engine-draft invalidation predicates as the accept claims.
-          .where(function engineDraftNotQuarantined() {
-            this.whereRaw("COALESCE(estimate_data #>> '{estimatorEngine,callLogId}', '') = ''")
-              .orWhere(function notQuarantined() {
-                this.whereNull('archived_at')
-                  .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-                  .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
-              });
-          })
-          .update({
-            status: 'accepted',
-            accepted_at: claimNow,
-            declined_at: null,
-            decline_reason: null,
-            updated_at: claimNow,
-            price_locked_at: claimNow,
-            price_locked_by: 'annual_prepay_record',
-            pricing_authority: 'LOCKED',
-          })
-          .returning('*');
-        if (claimed) claimedEstimate = claimed;
-        else linkEstimateId = null;
-      }
-
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
-        sourceEstimateId: linkEstimateId,
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
         monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
@@ -5181,38 +5032,6 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       termStart,
       termEnd,
     }, true);
-
-    // Post-acceptance terminal hooks for the claimed estimate — the same
-    // best-effort side effects the public/manual acceptance paths run (never
-    // fail the recording; the money is already committed): group follow-up
-    // ownership transfer, property linkage, and the lead-pipeline
-    // transition.
-    if (claimedEstimate) {
-      try {
-        await require('./estimate-public').transferGroupFollowupOwnership(claimedEstimate);
-      } catch (hookErr) {
-        logger.warn(`[customers:${customer.id}] annual-prepay follow-up ownership transfer failed for estimate ${claimedEstimate.id}: ${hookErr.message}`);
-      }
-      try {
-        await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
-          estimateId: claimedEstimate.id,
-          customerId: claimedEstimate.customer_id || customer.id,
-        });
-      } catch (hookErr) {
-        logger.warn(`[customers:${customer.id}] annual-prepay property linkage failed for estimate ${claimedEstimate.id}: ${hookErr.message}`);
-      }
-      try {
-        await require('../services/lead-estimate-link').markLinkedLeadEstimateAccepted({
-          estimateId: claimedEstimate.id,
-          customerId: claimedEstimate.customer_id || null,
-          monthlyValue: claimedEstimate.monthly_total != null ? Number(claimedEstimate.monthly_total) : null,
-          initialServiceValue: claimedEstimate.onetime_total != null ? Number(claimedEstimate.onetime_total) : null,
-          waveguardTier: claimedEstimate.waveguard_tier || null,
-        });
-      } catch (leadErr) {
-        logger.warn(`[customers:${customer.id}] annual-prepay linked-lead transition failed for estimate ${claimedEstimate.id}: ${leadErr.message}`);
-      }
-    }
 
     res.status(201).json({
       success: true,

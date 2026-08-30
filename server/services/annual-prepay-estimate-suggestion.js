@@ -70,36 +70,6 @@ function parseEstimateData(raw) {
   return {};
 }
 
-// Exact-identity service matching for the prefill and the provenance link:
-// service/plan/program filler drops out, everything else — CADENCE WORDS
-// INCLUDED — must be identical. NEVER substring — "Pest Control" must not
-// match "Commercial Pest Control", and "Monthly Pest Control" must not match
-// "Quarterly Pest Control", on a money prefill. Empty keys fail closed.
-// Label identity is necessary but not sufficient: callers must also require
-// the suggestion's coverageCadence/coverageVisitCount to agree with what is
-// being recorded (see suggestionCoverageMatches).
-function suggestionLabelKey(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/\b(service|plan|program)\b/g, ' ')
-    .replace(/[^a-z0-9]+/g, '')
-    .trim();
-}
-
-function suggestionServiceMatches(serviceLabel, serviceType) {
-  const labelKey = suggestionLabelKey(serviceLabel);
-  const typeKey = suggestionLabelKey(serviceType);
-  return !!labelKey && !!typeKey && labelKey === typeKey;
-}
-
-// The quoted annual is only valid for the quoted schedule: recording it
-// against a different cadence or visit count would credit the wrong coverage.
-function suggestionCoverageMatches(suggestion, coverageCadence, visitCount) {
-  if (!suggestion || !suggestion.coverageCadence) return false;
-  if (String(suggestion.coverageCadence) !== String(coverageCadence || '')) return false;
-  return Number(visitCount) === Number(suggestion.coverageVisitCount);
-}
-
 async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null, db = null } = {}) {
   const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
@@ -332,6 +302,4 @@ module.exports = {
   buildAnnualPrepayEstimateSuggestion,
   pickAnnualPrepayEstimate,
   shortEstimateRef,
-  suggestionServiceMatches,
-  suggestionCoverageMatches,
 };
