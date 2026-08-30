@@ -1948,15 +1948,40 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const holdRows = await t('appointment_reminders')
         .whereIn('scheduled_service_id', plan.memberIds)
         .forUpdate()
-        .select('id', 'move_hold_until');
-      if (!holdRows.length) return;
+        .select('id', 'scheduled_service_id', 'move_hold_until');
       const foreign = holdRows.find((r) => r.move_hold_until && new Date(r.move_hold_until).getTime() > Date.now());
       if (foreign) {
         throw Object.assign(new Error('another move of this stop is still in progress (or awaiting repair) — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
       }
-      await t('appointment_reminders').whereIn('id', holdRows.map((r) => r.id))
+      // A member with NO reminder row gets a HELD pre-closed placeholder
+      // (codex r29 P1): the lease must exist durably for every member —
+      // a self-heal or inline registration mid-move would otherwise create
+      // an unheld row with no held sibling to inherit from. The placeholder
+      // mechanism is the repo's own (all send legs closed in one INSERT;
+      // the sync trigger re-arms it when a real slot lands — carrying our
+      // stamp, so the re-armed row stays quiet until release/expiry), and
+      // its per-service idempotency means a racing registration finds the
+      // row instead of inserting a rival.
+      const coveredMemberIds = new Set(holdRows.map((r) => String(r.scheduled_service_id)));
+      const stubIds = [];
+      for (const memberId of plan.memberIds.map(String).filter((id) => !coveredMemberIds.has(id))) {
+        const row = await t('scheduled_services').where({ id: memberId })
+          .first('customer_id', 'scheduled_date', 'service_type', 'created_at');
+        if (!row || !row.customer_id || !row.scheduled_date) continue;
+        const { parseETDateTime } = require('../utils/datetime-et');
+        const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
+        if (!stubTime || Number.isNaN(stubTime.getTime())) continue;
+        const rec = await require('./appointment-reminders').insertPreClosedPlaceholderRowInTx(t, {
+          scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
+          serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
+        });
+        if (rec && rec.id) stubIds.push(rec.id);
+      }
+      const allIds = [...holdRows.map((r) => r.id), ...stubIds];
+      if (!allIds.length) return;
+      await t('appointment_reminders').whereIn('id', allIds)
         .update({ move_hold_until: reminderHoldUntil });
-      reminderHoldIds = holdRows.map((r) => r.id);
+      reminderHoldIds = allIds;
     });
   } catch (err) {
     reminderHoldIds = [];
@@ -2367,6 +2392,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // Partial: the up-front confirmation claims STAY — nobody is auto-texted
     // (owner ruling 2026-08-30); the dispatcher owns the message after the
     // repair (needsAttention carries the straggler ids).
+  } else if (parentRetargetFailed) {
+    // Every member landed but the visit record still describes the old stop
+    // (codex r29 P1): callers classify this as an incomplete move and hold
+    // their notices — the reminder sweep must stay quiet too. The hold is
+    // KEPT; the staff re-save that repairs the parent runs its own unit
+    // move, whose full success releases (or the stamp expires in 24h).
+    logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: parent retarget failed — reminder hold kept`);
   } else {
     // Full success: release the hold (fenced on our stamp). A failed
     // release leaves the rows quiet until the stamp expires and warns.

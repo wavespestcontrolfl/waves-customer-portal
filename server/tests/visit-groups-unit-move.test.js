@@ -784,7 +784,7 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
   });
 
   test('a durable move_hold_until is stamped on every member reminder row before the first write, released only on full success, kept on a partial, and its failure ABORTS the move (owner ruling; codex r28/r29)', async () => {
-    const reminders = { select: () => [{ id: 'rem-a' }, { id: 'rem-b' }] };
+    const reminders = { select: () => [{ id: 'rem-a', scheduled_service_id: 'a' }, { id: 'rem-b', scheduled_service_id: 'b' }] };
     // PARTIAL: the hold is stamped and NOT released
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
@@ -814,6 +814,13 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
     expect(rem[rem.length - 1].values).toEqual({ move_hold_until: null });
+    // a PARENT-RETARGET failure keeps the hold too (codex r29): the members landed but the visit record describes the old stop
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
+    db.__script.service_visits = { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : (db.__calls.filter((c) => c.table === 'service_visits' && c.op === 'first').length > 2 ? { ...VISIT, status: 'closing' } : VISIT)) };
+    const retargetOut = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(retargetOut.visitMove.parentRetargetFailed).toBe(true);
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until === null).length).toBe(0); // hold KEPT
     // an ACTIVE foreign hold (another mover mid-move / awaiting repair) is never overwritten — the move refuses (lease, codex r30)
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 3600000) }] } };
