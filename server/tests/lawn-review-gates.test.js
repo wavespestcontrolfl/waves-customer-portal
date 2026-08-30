@@ -18,6 +18,10 @@ describe('lawn grass-type substitution is loud, never silent', () => {
     expect(result.grassTypeWasDefaulted).toBe(true);
     expect(result.requiresManualReview).toBe(true);
     expect(result.manualReviewReasons).toContain('unknown_grass_type_priced_st_augustine');
+    // The ENFORCED flag the v1 mapper / delivery send guard / client deep
+    // scan key on — advisory markers alone don't block the admin send path.
+    expect(result.requiresCustomQuote).toBe(true);
+    expect(result.customQuoteReason).toBe('unknown_grass_type_priced_st_augustine');
     expect(result.notes.join(' ')).toMatch(/paspalum/i);
 
     // Same numbers as an explicit St. Augustine quote — the flag changes
@@ -42,6 +46,8 @@ describe('lawn grass-type substitution is loud, never silent', () => {
     expect(result.requestedGrassType).toBe('paspalum');
     expect(result.requiresManualReview).toBe(true);
     expect(result.manualReviewReasons).toContain('unknown_grass_type_priced_st_augustine');
+    expect(result.requiresCustomQuote).toBe(true);
+    expect(result.customQuoteReason).toBe('unknown_grass_type_priced_st_augustine');
 
     const clean = priceOneTimeLawn(property, { track: 'st_augustine' });
     expect(clean.requiresManualReview).toBe(false);
@@ -77,6 +83,7 @@ describe('low-confidence turf parks the lawn line', () => {
     );
     expect(result.requiresManualReview).toBe(true);
     expect(result.manualReviewReasons).toContain('low_confidence_turf_requires_field_verification');
+    expect(result.requiresCustomQuote).toBe(true);
   });
 
   test('MEDIUM and HIGH turfConfidence do not park on confidence alone', () => {
@@ -86,6 +93,7 @@ describe('low-confidence turf parks the lawn line', () => {
         { track: 'st_augustine' }
       );
       expect(result.requiresManualReview).toBe(false);
+      expect(result.requiresCustomQuote).toBeUndefined();
     }
   });
 });

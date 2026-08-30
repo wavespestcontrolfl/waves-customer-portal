@@ -2329,6 +2329,14 @@ function priceLawnCare(property, options = {}) {
     grassTypeWasDefaulted,
     requiresManualReview,
     manualReviewReasons,
+    // The ENFORCED flag: v1-legacy-mapper's quoteRequiredItems, the
+    // estimate-delivery send guard, and the client pages' deep scan all key
+    // on quoteRequired/requiresCustomQuote — requiresManualReview alone is
+    // advisory there (GH codex P1). Staff resolve it via the authored-
+    // proposal path (clearQuoteRequirementFlags in admin-estimates).
+    ...(requiresManualReview
+      ? { requiresCustomQuote: true, customQuoteReason: manualReviewReasons[0] }
+      : {}),
     tier: selected.tier,
     lawnSqFt,
     turfSf: lawnSqFt,
@@ -5678,10 +5686,14 @@ function priceOneTimeLawn(property, options = {}) {
     // Review contract rides through from the underlying lawn pricer —
     // a one-time-only paspalum or low-confidence-turf quote must park for
     // every consumer, not only classifyLane's track comparison (codex P1).
+    // requiresCustomQuote is the ENFORCED flag the mapper/send gates read.
     requestedGrassType: lawnResult.requestedGrassType,
     grassTypeWasDefaulted: lawnResult.grassTypeWasDefaulted,
     requiresManualReview: lawnResult.requiresManualReview,
     manualReviewReasons: lawnResult.manualReviewReasons,
+    ...(lawnResult.requiresManualReview
+      ? { requiresCustomQuote: true, customQuoteReason: lawnResult.customQuoteReason }
+      : {}),
     notes: lawnResult.notes || [],
   };
 }
