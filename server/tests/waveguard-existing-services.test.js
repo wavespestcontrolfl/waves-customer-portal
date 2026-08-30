@@ -180,3 +180,56 @@ describe('toQualifyingKeys rodent/palm exclusions', () => {
     expect(toQualifyingKeys('Palmetto Bug Pest Control')).toEqual(['pest_control']);
   });
 });
+
+describe('resolveCustomerQualifyingEvidence (codex #3591 r34 P1) — tier per property, setup waiver account-wide', () => {
+  const { resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+  const customer = { address_line1: '100 Main St', address_line2: null, city: 'Parrish', zip: '34219' };
+  const loadKeys = jest.fn(async (_db, _id, opts) => (opts?.streetScope ? ['mosquito'] : ['pest_control', 'mosquito']));
+  beforeEach(() => loadKeys.mockClear());
+
+  test('no customer → empty evidence, no lookup', async () => {
+    expect(await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: null, loadKeys }))
+      .toEqual({ tierKeys: [], setupWaiverKeys: [], groupedEstimate: false, perPropertyStreetScope: null });
+    expect(loadKeys).not.toHaveBeenCalled();
+  });
+
+  test('same property (or no address): ONE account-wide lookup serves both lists', async () => {
+    const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', address: '100 Main St, Parrish, FL 34219', loadKeys });
+    expect(out.groupedEstimate).toBe(false);
+    expect(out.tierKeys).toEqual(['pest_control', 'mosquito']);
+    expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
+    expect(loadKeys).toHaveBeenCalledTimes(1);
+    expect(loadKeys.mock.calls[0][2]).toBeUndefined();
+  });
+
+  test('a NON-primary street flips to per-property scope: tier from the street-scoped lookup, waiver from the account', async () => {
+    const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', address: '12 Second St, Parrish, FL 34219', loadKeys });
+    expect(out.groupedEstimate).toBe(true);
+    expect(out.perPropertyStreetScope).toMatchObject({ estimateStreet: expect.any(String), customerPrimaryStreet: expect.any(String) });
+    expect(out.tierKeys).toEqual(['mosquito']);
+    expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
+    expect(loadKeys).toHaveBeenCalledTimes(2);
+    expect(loadKeys.mock.calls[1][2]).toEqual({ streetScope: out.perPropertyStreetScope });
+  });
+
+  test('an explicit group anchor on the primary street keeps the account-wide waiver while scoping the tier', async () => {
+    const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), {
+      customerId: 'c1', address: '100 Main St, Parrish, FL 34219', groupedEstimate: true, loadKeys,
+    });
+    expect(out.groupedEstimate).toBe(true);
+    expect(out.tierKeys).toEqual(['mosquito']);
+    expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
+  });
+
+  test('grouped with NO parseable street: tier prices standalone, waiver evidence still account-wide', async () => {
+    const out = await resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', groupedEstimate: true, loadKeys });
+    expect(out.tierKeys).toEqual([]);
+    expect(out.setupWaiverKeys).toEqual(['pest_control', 'mosquito']);
+    expect(loadKeys).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failing key lookup propagates (callers refuse retryably, never price a member as a non-member)', async () => {
+    await expect(resolveCustomerQualifyingEvidence(fakeDb({ customer }), { customerId: 'c1', loadKeys: async () => { throw new Error('db down'); } }))
+      .rejects.toThrow('db down');
+  });
+});

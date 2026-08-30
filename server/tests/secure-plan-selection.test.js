@@ -24,7 +24,14 @@ jest.mock('../models/db', () => {
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
     chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
     chain.update = (patch) => { chain.calls.push(['update', patch]); return Promise.resolve(handlers.update ? handlers.update(chain, patch) : 1); };
-    chain.insert = (row) => { chain.calls.push(['insert', row]); return Promise.resolve(handlers.insert ? handlers.insert(chain, row) : [{ id: 'row' }]); };
+    chain.insert = (row) => {
+      chain.calls.push(['insert', row]);
+      const p = Promise.resolve(handlers.insert ? handlers.insert(chain, row) : [{ id: 'row' }]);
+      // knex thenable builder: the claims-ledger write chains
+      // .onConflict('invoice_id').ignore() before awaiting.
+      p.onConflict = () => ({ ignore: () => p });
+      return p;
+    };
     return chain;
   };
   const fn = jest.fn((table) => {
@@ -110,6 +117,12 @@ function setTables(overrides = {}) {
     activity_log: {},
     ...overrides,
   };
+}
+
+function insertsFor(table) {
+  return mockDbCalls
+    .filter((c) => c.table === table)
+    .flatMap((c) => c.calls.filter(([op]) => op === 'insert').map(([, row]) => row));
 }
 
 function updatesFor(table) {
@@ -227,6 +240,12 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
       prepayAmount: coverage,
       monthlyRate: Math.round(coverage / 12 * 100) / 100,
     });
+    // The unwaived setup that rode the prepay is ledgered against it
+    // (codex #3591 r34 P1) so a later void/refund can re-stamp the claim the
+    // mint cleared from the series parent.
+    expect(insertsFor('setup_fee_claims')).toEqual([
+      { invoice_id: 'inv-1', scheduled_service_id: rodentVisit.id, amount: setup },
+    ]);
   });
 
   test('member (another qualifying service on the account) → no stamp, no setup line', async () => {
@@ -237,6 +256,8 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
     expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
     expect(mockCreateTerm.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage });
+    // No fee billed ⇒ nothing to ledger (and nothing to restore later).
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
   });
 });
 

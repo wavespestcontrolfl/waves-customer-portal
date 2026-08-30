@@ -36,6 +36,9 @@ import React, {
   Component,
 } from "react";
 import {
+  applyServerRodentBaitBracketsPricingConfig,
+  applyServerRodentSetupFeePricingConfig,
+  applyServerRodentWaveguardPricingConfig,
   collectMarginReviewNotes,
   fmt,
   fmtInt,
@@ -2458,6 +2461,11 @@ export default function EstimateToolViewV2({
     }
   }, [form.grassType, form.bermudaSuppression]);
 
+  // Live rodent WaveGuard posture (codex #3591 r34 P1): module state the
+  // rodent pricing-config loader effect below mutates; mirrored here so the
+  // preview memo re-runs once the live rows land (the bracket helper reads
+  // the same freshly-applied module state on that re-run).
+  const [rodentWaveguardPosture, setRodentWaveguardPosture] = useState(() => rodentBaitWaveguardFlags());
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
     const commercialDetected = isCommercialEstimateInput(form);
@@ -2471,7 +2479,9 @@ export default function EstimateToolViewV2({
       // rodent_waveguard.tier_qualifier flag says so (codex #3591 r33 P1) —
       // the same mechanism calculateEstimate and the server engine read, so
       // the preview never advertises a Silver a Bronze estimate won't give.
-      ...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : []),
+      // Read from the mirrored posture state, which the loader effect
+      // refreshes after the live row applies (codex #3591 r34 P1).
+      ...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : []),
     ];
     const separateRecurringKeys = ["svcInjection", "svcFoamRecurring"];
     // ALL commercial pest-family services now auto-price as recurring lines
@@ -2661,7 +2671,7 @@ export default function EstimateToolViewV2({
       annualSavings,
       anySelected,
     };
-  }, [form]);
+  }, [form, rodentWaveguardPosture]);
 
   const [estimate, setEstimateState] = useState(null);
   // Monotonic invalidation version for the generated estimate. Every
@@ -3457,6 +3467,48 @@ export default function EstimateToolViewV2({
     };
   }, []);
 
+  // Live rodent bait pricing rows (codex #3591 r34 P1): the sidebar's tier
+  // count reads rodentBaitWaveguardFlags() and the bracket helper reads the
+  // ladder, both module state the LEGACY estimator's loader mutates through
+  // these same appliers — this view never loaded them, so it advertised the
+  // in-code default (Silver) while the server priced from the live row
+  // (Bronze). Same semantics as EstimatePage.refreshPricingConfig: a 404 is
+  // AUTHORITATIVE (row removed ⇒ reset to the in-code default via `null`),
+  // any other failure leaves the last applied state. The posture state
+  // (declared beside the preview memo) is refreshed AFTER all three rows
+  // apply, so the memo re-runs once against the live ladder + flags.
+  useEffect(() => {
+    let active = true;
+    const fetchRow = async (key) => {
+      try {
+        const r = await adminFetch(`/admin/pricing-config/${key}`);
+        if (r.status === 404) return { ok: true, data: null };
+        if (!r.ok) return { ok: false, data: null };
+        const body = await r.json();
+        return { ok: true, data: body?.data ?? null };
+      } catch {
+        return { ok: false, data: null };
+      }
+    };
+    (async () => {
+      const [bracketsRow, setupRow, waveguardRow] = await Promise.all([
+        fetchRow("rodent_bait_brackets"),
+        fetchRow("rodent_setup_fee"),
+        fetchRow("rodent_waveguard"),
+      ]);
+      if (!active) return;
+      if (bracketsRow.ok) applyServerRodentBaitBracketsPricingConfig(bracketsRow.data);
+      if (setupRow.ok) applyServerRodentSetupFeePricingConfig(setupRow.data);
+      if (waveguardRow.ok) applyServerRodentWaveguardPricingConfig(waveguardRow.data);
+      if (bracketsRow.ok || setupRow.ok || waveguardRow.ok) {
+        setRodentWaveguardPosture(rodentBaitWaveguardFlags());
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -4155,6 +4207,13 @@ export default function EstimateToolViewV2({
         // The matched account — the server derives its canonical qualifying
         // families for tier + rodent setup waiver (codex #3591 r16 P1).
         existingCustomerId: existingCustomerMatch?.id || form.customerId || null,
+        // The quoted address + group anchor let the server scope the TIER
+        // list per property (grouped / non-primary street) while the rodent
+        // setup waiver stays account-wide — the same signals the save body
+        // carries, so preview and save resolve identically (codex #3591 r34
+        // P1). A revise keeps its stored group linkage (not sent here either).
+        address: form.address || null,
+        ...(!editMode?.id && groupAnchorId ? { groupWithEstimateId: groupAnchorId } : {}),
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
         // Availability gates only the CHECKBOX (new selections); a selection
         // already in the form — e.g. seeded from a saved estimate's inputs

@@ -6,6 +6,7 @@ jest.mock('../services/waveguard-existing-services', () => {
   return { ...actual, loadExistingQualifyingServiceKeys: jest.fn(actual.loadExistingQualifyingServiceKeys) };
 });
 const mockQualifyingLookup = require('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
+const actualQualifyingLookup = jest.requireActual('../services/waveguard-existing-services').loadExistingQualifyingServiceKeys;
 
 const {
   buildEstimatePersistenceFields,
@@ -909,6 +910,56 @@ describe('admin estimate persistence', () => {
       randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
     })).rejects.toMatchObject({ statusCode: 503 });
     expect(inserts.filter((i) => i.table === 'estimates')).toHaveLength(0);
+  });
+
+  test('a SECONDARY-property rodent add-on for a member: tier evidence is property-scoped, the setup waiver is account-wide (codex #3591 r34 P1)', async () => {
+    const now = () => new Date('2026-05-15T12:00:00.000Z');
+    const { database, inserts } = makeDatabase({
+      lead: { id: 'lead-1', status: 'new', phone: '9415550101' },
+      customer: { id: 'cust-member', active: true, waveguard_tier: 'Silver', address_line1: '100 Main St', city: 'Parrish', zip: '34219' },
+    });
+    // Account-wide: a pest plan somewhere on the account. Property-scoped
+    // (streetScope passed): nothing active at the quoted property. Call
+    // history cleared so the index assertions below read THIS save's calls.
+    mockQualifyingLookup.mockClear();
+    mockQualifyingLookup.mockImplementation(async (_db, _id, opts) => (opts?.streetScope ? [] : ['pest_control']));
+
+    await createOrReuseAdminEstimate({
+      database,
+      body: {
+        ...baseBody,
+        customerId: 'cust-member',
+        // A NON-primary street on the same account (the primary is 100 Main
+        // St) — the per-property rule scopes the tier to this property.
+        address: '12 Second St, Parrish, FL 34219',
+        estimateData: {
+          engineInputs: { homeSqFt: 2000, lotSqFt: 8000, services: { rodentBait: { frequency: 'quarterly' } } },
+          inputs: { homeSqFt: 2000 },
+          result: { total: 89 },
+        },
+      },
+      technicianId: 'tech-1',
+      now,
+      randomBytes: () => Buffer.from('1234567890abcdef1234567890abcdef', 'hex'),
+    });
+
+    const estimateInsert = inserts.find((e) => e.table === 'estimates');
+    const stored = JSON.parse(estimateInsert.row.estimate_data);
+    // The first lookup is the account-wide one (no scope) — waiver evidence;
+    // the second is the street-scoped one — tier evidence.
+    expect(mockQualifyingLookup.mock.calls[0][1]).toBe('cust-member');
+    expect(mockQualifyingLookup.mock.calls[0][2]).toBeUndefined();
+    expect(mockQualifyingLookup.mock.calls[1][2]).toMatchObject({ streetScope: expect.objectContaining({ estimateStreet: expect.any(String) }) });
+    // Persisted for replay: the account-wide waiver list; NO property tier
+    // list (nothing qualifies at this property → standalone tier).
+    expect(stored.setupWaiverPriorQualifyingServices).toEqual(['pest_control']);
+    expect(stored.priorQualifyingServices).toBeUndefined();
+    // …and the engine honored it: no $99 setup row for a member.
+    const setupRow = (stored.result?.specItems || []).find((it) => it.service === 'rodent_bait_setup');
+    expect(setupRow).toBeUndefined();
+    // The replay shapes never carry a client-claimable copy.
+    expect(stored.engineInputs.setupWaiverPriorQualifyingServices).toBeUndefined();
+    mockQualifyingLookup.mockImplementation(actualQualifyingLookup);
   });
 
   test('P1-2: a verified active-plan member with NO qualifying priors keeps recurring status on the STORED replay', async () => {

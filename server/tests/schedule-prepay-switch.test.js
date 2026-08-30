@@ -147,6 +147,7 @@ function stubTables({
   childRows = [],
 } = {}) {
   stubTables.casCalls = [];
+  stubTables.inserts = [];
   stubTables.updates = [];
   stubTables.whereIns = [];
   db.transaction = jest.fn(async (cb) => cb(db));
@@ -210,7 +211,14 @@ function stubTables({
       }
       return 1;
     });
-    q.insert = jest.fn(async () => [{}]);
+    // knex insert is a thenable builder: the claims-ledger write chains
+    // .onConflict('invoice_id').ignore() before awaiting.
+    q.insert = jest.fn((row) => {
+      stubTables.inserts.push({ table, row });
+      const p = Promise.resolve([{}]);
+      p.onConflict = jest.fn(() => ({ ignore: jest.fn(async () => 1) }));
+      return p;
+    });
     q.count = jest.fn(() => { isCount = true; return q; });
     q.select = jest.fn(async () => {
       if (table === 'scheduled_services') return childRows;
@@ -667,6 +675,7 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
     // Direct series: no accept-minted draft to supersede.
     stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations', source_estimate_id: null }, invoices: [] });
     const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
     // Residential, untaxed: the minted total is the sum of BOTH lines.
     mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
       id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
@@ -684,8 +693,46 @@ describe('on-site prepay switch — the atomic switch endpoint', () => {
       expect(lineItems[1]).toMatchObject({ unit_price: 99, description: 'Bait Station Setup — one-time setup fee', category: 'Setup fee' });
       // Term = coverage money only; the setup line never enters the basis.
       expect(termSpy.mock.calls[0][0]).toMatchObject({ prepayAmount: coverage, monthlyRate: Math.round((coverage / 12) * 100) / 100 });
+      // The per-application claim on the series parent is retired under the
+      // mint (codex #3591 r34 P1): the service-side helper runs with the
+      // ANCHOR, the minted prepay, and the exact billed setup.
+      expect(retireSpy).toHaveBeenCalledTimes(1);
+      expect(retireSpy.mock.calls[0][1]).toEqual({ anchorId: 'svc-1', invoiceId: 'inv-prepay', amount: 99 });
+      expect(retireSpy.mock.calls[0][0]).toBe(db);
     } finally {
       spy.mockRestore();
+      retireSpy.mockRestore();
+    }
+  });
+
+  test('direct rodent series: a claim mid-mint (negative stamp) refuses the switch before the term exists (codex #3591 r34 P1)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    stubTables({ visit: { ...ACCEPTED_SERIES_VISIT, service_type: 'Rodent Bait Stations', source_estimate_id: null, pending_setup_fee: -99 }, invoices: [] });
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    mockCreateInvoice.mockImplementation(async ({ lineItems }) => ({
+      id: 'inv-prepay', invoice_number: 'WPC-2026-0400', token: 'tok',
+      total: lineItems.reduce((sum, li) => sum + li.unit_price * (li.quantity || 1), 0),
+    }));
+    try {
+      const { status, body } = await post('/svc-1/prepay-switch', {});
+      expect(status).toBe(409);
+      expect(body.error).toMatch(/completion in progress/);
+      expect(termSpy).not.toHaveBeenCalled();
+      expect(stubTables.inserts.filter((i) => i.table === 'setup_fee_claims')).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an ESTIMATE-anchored switch never touches the per-application claim (its setup rode the accept invoice, not a stamp)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const retireSpy = jest.spyOn(plans, 'retireDirectSetupClaimForPrepay');
+    try {
+      const { status } = await post('/svc-1/prepay-switch', {});
+      expect(status).toBe(201);
+      expect(retireSpy).not.toHaveBeenCalled();
+    } finally {
+      retireSpy.mockRestore();
     }
   });
 

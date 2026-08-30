@@ -13287,6 +13287,21 @@ router.post('/:id/prepay-switch', requireAdmin, async (req, res, next) => {
           err.switchConflict = true;
           throw err;
         }
+        // A DIRECT series may still hold the per-application setup claim an
+        // earlier secure-plan selection stamped on its parent; the line just
+        // minted bills that same setup, so the claim must not survive to the
+        // first completion after the prepaid term (codex #3591 r34 P1).
+        // Service-side (the claims ledger is server-mint-only): records the
+        // fee against this prepay — the term void/refund sync restores the
+        // claim from that record — then retires the stamp by exact-value
+        // CAS; a mid-mint (negative) stamp refuses the switch.
+        if (switchSetupFee > 0 && !target.estimateId) {
+          await require('../services/secure-appointment-plans').retireDirectSetupClaimForPrepay(trx, {
+            anchorId: anchorRowId,
+            invoiceId: invoice.id,
+            amount: switchSetupFee,
+          });
+        }
 
         // Durable pointer FROM each retired row TO the prepay that replaced
         // it (Codex P0 r7): if this prepay is later voided/refunded through

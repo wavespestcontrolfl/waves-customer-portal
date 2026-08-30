@@ -152,18 +152,30 @@ describe('_observed propertyType provenance (codex #3367 PR r10)', () => {
   });
 });
 
-describe('resolveCalculatePriorQualifyingServices (codex #3591 r16 P1)', () => {
-  const { resolveCalculatePriorQualifyingServices } = require('../routes/property-lookup-v2');
-  test('no matched customer → no prior services; a matched customer → the canonical loader keys (server-derived, client list ignored)', async () => {
-    const loader = jest.fn(async (id) => (id === 'c1' ? ['lawn_care', 'rodent_bait'] : []));
-    expect(await resolveCalculatePriorQualifyingServices({}, loader)).toEqual([]);
-    expect(loader).not.toHaveBeenCalled();
-    expect(await resolveCalculatePriorQualifyingServices({ existingCustomerId: 'c1', priorQualifyingServices: ['pest_control'] }, loader))
-      .toEqual(['lawn_care', 'rodent_bait']);
-    expect(loader).toHaveBeenCalledWith('c1');
+describe('resolveCalculateQualifyingEvidence (codex #3591 r16 P1 → r34 P1)', () => {
+  const { resolveCalculateQualifyingEvidence } = require('../routes/property-lookup-v2');
+  const empty = { priorQualifyingServices: [], setupWaiverPriorQualifyingServices: [] };
+  test('no matched customer → no evidence; a matched customer → the shared resolver\'s lists (server-derived, client list ignored)', async () => {
+    const resolver = jest.fn(async (id) => (id === 'c1'
+      ? { tierKeys: ['lawn_care', 'rodent_bait'], setupWaiverKeys: ['lawn_care', 'rodent_bait', 'pest_control'] }
+      : { tierKeys: [], setupWaiverKeys: [] }));
+    expect(await resolveCalculateQualifyingEvidence({}, resolver)).toEqual(empty);
+    expect(resolver).not.toHaveBeenCalled();
+    expect(await resolveCalculateQualifyingEvidence({ existingCustomerId: 'c1', priorQualifyingServices: ['pest_control'] }, resolver))
+      .toEqual({ priorQualifyingServices: ['lawn_care', 'rodent_bait'], setupWaiverPriorQualifyingServices: ['lawn_care', 'rodent_bait', 'pest_control'] });
+    expect(resolver).toHaveBeenCalledWith('c1', { address: null, groupedEstimate: false });
+  });
+  test('the quoted address and group anchor reach the resolver exactly as the save body carries them (tier per property, waiver account-wide)', async () => {
+    const resolver = jest.fn(async () => ({ tierKeys: [], setupWaiverKeys: ['pest_control'] }));
+    const out = await resolveCalculateQualifyingEvidence({
+      existingCustomerId: 'c1', address: ' 12 Second St, Parrish, FL 34219 ', groupWithEstimateId: 'est-anchor',
+    }, resolver);
+    expect(resolver).toHaveBeenCalledWith('c1', { address: '12 Second St, Parrish, FL 34219', groupedEstimate: true });
+    // Property-scoped tier evidence empty, account-wide waiver evidence kept.
+    expect(out).toEqual({ priorQualifyingServices: [], setupWaiverPriorQualifyingServices: ['pest_control'] });
   });
   test('a failing lookup throws (the route refuses retryably instead of previewing a different result than the save)', async () => {
-    await expect(resolveCalculatePriorQualifyingServices({ existingCustomerId: 'c1' }, async () => { throw new Error('db down'); }))
+    await expect(resolveCalculateQualifyingEvidence({ existingCustomerId: 'c1' }, async () => { throw new Error('db down'); }))
       .rejects.toThrow('db down');
   });
 });

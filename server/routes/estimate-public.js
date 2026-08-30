@@ -8253,7 +8253,8 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenRecurring = replayShapes.some((shape) => truthyRecurringFlag(shape.recurringCustomer)
       || truthyRecurringFlag(shape.isRecurringCustomer)
       || (Array.isArray(shape.priorQualifyingServices) && shape.priorQualifyingServices.length > 0))
-      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0);
+      || (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length > 0)
+      || (Array.isArray(estData.setupWaiverPriorQualifyingServices) && estData.setupWaiverPriorQualifyingServices.length > 0);
     if (!frozenSnapshot && !frozenRecurring) return;
     if (await isActivePlanCustomer(db, estimate.customer_id)) return;
     // Drop every frozen artifact derived from the stale "existing customer"
@@ -8267,9 +8268,13 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     // undercharge even after the snapshot is gone.
     delete estData.membershipSnapshot;
     delete estData.priorQualifyingServices;
+    // The account-wide setup-waiver list is member evidence too — a lapsed
+    // member's replay must re-add the rodent setup (codex #3591 r34 P1).
+    delete estData.setupWaiverPriorQualifyingServices;
     for (const shape of replayShapes) {
       delete shape.recurringCustomer;
       delete shape.isRecurringCustomer;
+      delete shape.setupWaiverPriorQualifyingServices;
       // A prior-service list NESTED in a replay shape (legacy rows predate
       // the save-time sanitizer) replays straight through extractEngineInputs
       // and restores the combined-tier discount the top-level delete just
@@ -14830,6 +14835,13 @@ function extractEngineInputs(estData) {
   // alone. Shallow copy so the stored object isn't mutated.
   if (Array.isArray(estData.priorQualifyingServices) && estData.priorQualifyingServices.length) {
     out.priorQualifyingServices = estData.priorQualifyingServices;
+  }
+  // Account-wide setup-waiver evidence (codex #3591 r34 P1): persisted
+  // separately from the property-scoped tier list, same server-only
+  // round-trip rule — a grouped/secondary-property rodent quote must not
+  // re-add the $99 setup on replay when the account holds another plan.
+  if (Array.isArray(estData.setupWaiverPriorQualifyingServices) && estData.setupWaiverPriorQualifyingServices.length) {
+    out.setupWaiverPriorQualifyingServices = estData.setupWaiverPriorQualifyingServices;
   }
   // Operator-stated price adjustment (agent flows, owner decision 2026-07-23):
   // persisted OUTSIDE engineInputs (same round-trip rule as
@@ -22207,6 +22219,21 @@ async function buildPricingBundleInner(estimate) {
     ? JSON.parse(estimate.estimate_data)
     : estimate.estimate_data;
   const storedOneTimeBreakdown = normalizeOneTimeBreakdown(estData);
+  // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
+  // accept paths bill this frozen figure UP FRONT beside the first
+  // application (never waived by prepay), so the payment choice previews
+  // it as an invoice row and the after-completion extras note excludes
+  // it. Deliberately NOT a firstVisitFees row — those drive the fee cards
+  // and the breakdown exclusions; this row stays in the breakdown. Resolved
+  // ONCE here and attached to EVERY bundle shape (codex #3591 r34 P1): a
+  // quote-wizard save persists engineResult (engine_invocation shape) and a
+  // legacy row may carry only stored totals — acceptance bills the frozen
+  // setup for all of them, so all of them must preview it. Omitted entirely
+  // when no setup was disclosed (payload byte-identical).
+  const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
+  const rodentBaitSetupFeeField = frozenRodentSetupForPreview > 0
+    ? { rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false } }
+    : {};
   const withManualDiscount = (payload = {}) => {
     const manual = normalizeManualDiscountSummary(estData);
     if (!manual) return payload;
@@ -22438,10 +22465,6 @@ async function buildPricingBundleInner(estimate) {
         });
       }
     }
-    const frozenRodentSetupForPreview = require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData);
-    const rodentBaitSetupFee = frozenRodentSetupForPreview > 0
-      ? { service: 'rodent_bait_setup', amount: frozenRodentSetupForPreview, label: 'Bait Station Setup', waivedWithPrepay: false }
-      : null;
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
     if (initialRoachItem) {
       firstVisitFees.push({
@@ -22499,14 +22522,7 @@ async function buildPricingBundleInner(estimate) {
       // for any older client build still reading the singular field.
       setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
-      // Disclosed non-member bait-station setup (codex #3591 r33 P1): BOTH
-      // accept paths bill this frozen figure UP FRONT beside the first
-      // application (never waived by prepay), so the payment choice previews
-      // it as an invoice row and the after-completion extras note excludes
-      // it. Deliberately NOT a firstVisitFees row — those drive the fee
-      // cards and the breakdown exclusions; this row stays in the breakdown.
-      // Omitted entirely when no setup was disclosed (payload byte-identical).
-      ...(rodentBaitSetupFee ? { rodentBaitSetupFee } : {}),
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
       source: 'v1_engine_shape',
@@ -22600,6 +22616,7 @@ async function buildPricingBundleInner(estimate) {
         ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
       setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
+      ...rodentBaitSetupFeeField,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }), estimate, estData);
@@ -22794,6 +22811,7 @@ async function buildPricingBundleInner(estimate) {
     oneTimeBreakdown,
     setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
+    ...rodentBaitSetupFeeField,
     source: 'engine_invocation',
   }), estimate, estData, { anchorEngineResult });
   setEstimatePricingCache(estimate, payload);

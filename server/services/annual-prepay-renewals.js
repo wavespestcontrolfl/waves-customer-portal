@@ -2709,6 +2709,15 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
             // here was a permanent silent AR loss).
             logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
           }
+          // A DIRECT rodent series' setup rode this prepay as its own line
+          // and the mint retired the parent's per-application claim; the
+          // fee is owed again now (codex #3591 r34 P1). Record-keyed and
+          // one-shot; best-effort, never blocks the void/refund sync.
+          try {
+            await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, conn);
+          } catch (err) {
+            logger.error(`[annual-prepay] FIX: retired setup-fee claim restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The series parent's pending_setup_fee is still clear — re-stamp it or bill the bait-station setup manually.`);
+          }
         }
       }
     }
@@ -2857,6 +2866,14 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(decided.prepay_invoice_id, conn);
         } catch (err) {
           logger.error(`[annual-prepay] FIX: switch-superseded restore FAILED for decided term ${decided.id} (prepay invoice ${decided.prepay_invoice_id}): ${err.message}. The customer's per-application invoice is still void — re-run POST /admin/schedule/<visitId>/prepay-switch/undo or rebuild it from Invoices.`);
+        }
+        // Same one-shot claim restore as the true-void branch (codex #3591
+        // r34 P1) — a decided term's refund removes the prepay that billed
+        // the direct rodent setup, so the per-application claim comes back.
+        try {
+          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(decided.prepay_invoice_id, conn);
+        } catch (err) {
+          logger.error(`[annual-prepay] FIX: retired setup-fee claim restore FAILED for decided term ${decided.id} (prepay invoice ${decided.prepay_invoice_id}): ${err.message}. The series parent's pending_setup_fee is still clear — re-stamp it or bill the bait-station setup manually.`);
         }
       }
     }

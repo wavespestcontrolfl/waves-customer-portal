@@ -4972,6 +4972,44 @@ const InvoiceService = {
    * NEVER reopens a cash-paid invoice. Best-effort per invoice.
    */
   /**
+   * Put back the durable per-application setup claim a prepay mint retired
+   * (codex #3591 r34 P1). The on-site switch and the secure-plan prepay bill
+   * a DIRECT rodent series' unwaived setup on the prepay invoice and retire
+   * the series parent's pending_setup_fee so the next completion cannot
+   * bill it twice; when that prepay is voided/refunded the fee is owed
+   * again and nothing else ever re-stamps it. Keyed by the immutable
+   * setup_fee_claims record the mint wrote for the prepay invoice; the
+   * record is consumed on restore so a re-run of the cancel sync is a
+   * no-op. Only a still-direct series (no estimate origin) is re-stamped,
+   * and only onto a NULL stamp — a live or mid-mint claim is never
+   * overwritten. Returns the restored descriptor or null.
+   */
+  async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db) {
+    if (!prepayInvoiceId) return null;
+    const claim = await conn("setup_fee_claims")
+      .where({ invoice_id: prepayInvoiceId })
+      .first("id", "scheduled_service_id", "amount");
+    if (!claim || !claim.scheduled_service_id) return null;
+    const amount = Math.round(Number(claim.amount) * 100) / 100;
+    if (!(amount > 0)) return null;
+    const parent = await conn("scheduled_services")
+      .where({ id: claim.scheduled_service_id })
+      .first("id", "source_estimate_id", "pending_setup_fee");
+    if (!parent || parent.source_estimate_id) return null;
+    const restored = await conn("scheduled_services")
+      .where({ id: parent.id })
+      .whereNull("pending_setup_fee")
+      .update({ pending_setup_fee: amount, updated_at: new Date() });
+    if (restored !== 1) {
+      logger.warn(`[invoice] retired setup-fee claim NOT restored on series ${parent.id}: stamp already ${parent.pending_setup_fee} — prepay ${prepayInvoiceId} dead, record kept`);
+      return null;
+    }
+    await conn("setup_fee_claims").where({ id: claim.id }).delete();
+    logger.info(`[invoice] setup-fee claim restored on series ${parent.id} ($${amount.toFixed(2)}) — prepay ${prepayInvoiceId} is dead`);
+    return { scheduledServiceId: parent.id, amount };
+  },
+
+  /**
    * Restore invoices the ON-SITE PREPAY SWITCH retired, keyed by the prepay
    * invoice that superseded them (the switch stamps each voided row with
    * prepaySwitchSupersededByMarker(prepayInvoiceId)). Called from the

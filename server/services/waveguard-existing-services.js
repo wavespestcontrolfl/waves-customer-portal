@@ -385,6 +385,61 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
   return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
 }
 
+// Existing-customer qualifying evidence for an estimate, split by PURPOSE
+// (codex #3591 r34 P1) — one resolver for the save
+// (admin-estimate-persistence) and the estimator preview
+// (/calculate-estimate) so the two can never scope differently:
+//   • tierKeys — the WaveGuard TIER context. Per-property (codex #3244
+//     r1/r5/r6; owner ruling 2026-08-06: each property is its OWN plan at
+//     its OWN service-count tier): a grouped estimate, or one quoting a
+//     NON-primary street, counts only the qualifying services already
+//     active at THAT street; other properties' plans stay excluded.
+//   • setupWaiverKeys — the rodent bait-station SETUP WAIVER. ACCOUNT-wide
+//     (owner 2026-08-29: "member" = any OTHER qualifying recurring service on
+//     the account, on the estimate or already active), so a plan at another
+//     address still waives the $99.
+// Both streets must parse cleanly to flip to per-property scope — parse
+// uncertainty keeps the long-standing combined behavior for same-property
+// requotes with formatting drift (address check is best-effort; the key
+// LOOKUPS throw so callers refuse retryably instead of pricing a member as
+// a non-member). `loadKeys` lets a caller thread its own (mockable) loader.
+async function resolveCustomerQualifyingEvidence(database, {
+  customerId,
+  address = null,
+  groupedEstimate = false,
+  logger = null,
+  loadKeys = null,
+} = {}) {
+  const out = { tierKeys: [], setupWaiverKeys: [], groupedEstimate: !!groupedEstimate, perPropertyStreetScope: null };
+  if (customerId == null || String(customerId).trim() === '') return out;
+  const load = loadKeys || module.exports.loadExistingQualifyingServiceKeys;
+  if (address) {
+    try {
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+      const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+      const estimateStreet = normalizedEstimateStreet(address);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+      if (estimateStreet) {
+        out.perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
+      }
+      if (!out.groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
+        out.groupedEstimate = true;
+      }
+    } catch (err) {
+      if (logger) logger.warn(`[waveguard-existing-services] per-property tier address check skipped: ${err.message}`);
+    }
+  }
+  const clean = (keys) => (Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : []);
+  const accountKeys = clean(await load(database, customerId));
+  out.setupWaiverKeys = accountKeys;
+  if (!out.groupedEstimate) {
+    out.tierKeys = accountKeys;
+  } else if (out.perPropertyStreetScope) {
+    out.tierKeys = clean(await load(database, customerId, { streetScope: out.perPropertyStreetScope }));
+  }
+  return out;
+}
+
 // One street filter for every per-property consumer (qualifying keys AND the
 // pricing-AI ownership set below) — a second copy of the stamped → creating
 // estimate → primary-street resolution would drift from this one. Matching
@@ -618,6 +673,7 @@ module.exports = {
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
+  resolveCustomerQualifyingEvidence,
   loadOwnedRecurringServiceKeys,
   ownershipKeysForRow,
   isMembershipCustomerRow,

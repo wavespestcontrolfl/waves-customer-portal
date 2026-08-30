@@ -227,6 +227,52 @@ async function resolveDirectRodentSetupObligation(database, visit = {}) {
   return directRodentSetupForRow(database, row);
 }
 
+// Immutable ledger row for a setup fee that rode a PREPAY invoice as its own
+// line (codex #3591 r34 P1). Same table the completion mint writes (server
+// only, exact cents): it is the Auto Pay rail's crash-resume evidence for
+// that invoice AND the key the term void/refund sync uses to put the
+// per-application claim back on the series parent
+// (InvoiceService.restoreRetiredSetupFeeClaimForPrepay). Idempotent on the
+// invoice id.
+async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount }) {
+  const fee = cents(Math.max(0, Number(amount) || 0));
+  if (!invoiceId || !(fee > 0)) return false;
+  await trx('setup_fee_claims')
+    .insert({ invoice_id: invoiceId, scheduled_service_id: anchorId || null, amount: fee })
+    .onConflict('invoice_id')
+    .ignore();
+  return true;
+}
+
+// The on-site prepay switch bills a DIRECT rodent series' unwaived setup as
+// its own prepay line (codex #3591 r33 P1). The series parent may ALSO hold
+// the durable per-application claim (pending_setup_fee) an earlier
+// secure-plan selection stamped — left in place, the first billable
+// completion after the prepaid term would consume it and charge the setup a
+// SECOND time (codex #3591 r34 P1). Under the mint's transaction: record the
+// fee against the prepay (restore key), then retire the positive claim by
+// exact-value CAS. A NEGATIVE stamp is a completion mint mid-claim — refuse
+// the switch rather than race it (the operator retries once it settles).
+async function retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount }) {
+  const fee = cents(Math.max(0, Number(amount) || 0));
+  if (!anchorId || !invoiceId || !(fee > 0)) return { recorded: false, retired: false };
+  const parent = await trx('scheduled_services').where({ id: anchorId }).first('id', 'pending_setup_fee');
+  const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+  if (stamp != null && stamp < 0) {
+    const err = new Error('The bait-station setup is being billed by a completion in progress — retry in a moment');
+    err.switchConflict = true;
+    throw err;
+  }
+  await recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount: fee });
+  let retired = 0;
+  if (stamp != null && stamp > 0) {
+    retired = await trx('scheduled_services')
+      .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
+      .update({ pending_setup_fee: null, updated_at: new Date() });
+  }
+  return { recorded: true, retired: retired === 1 };
+}
+
 // consumeDisclosure: the SELECTION path (selectSecurePlan). There a NULL
 // accepted_setup_fee means the setup was never shown on any render of this
 // request — a page rendered before the column shipped (migration
@@ -685,6 +731,13 @@ async function selectSecurePlan({ token, plan }) {
         .where({ id: anchorId })
         .whereNotNull('pending_setup_fee')
         .update({ pending_setup_fee: null, updated_at: new Date() });
+      // An UNWAIVED (rodent) setup rode this prepay as its own line — ledger
+      // it so a later void/refund of the prepay re-stamps the claim the
+      // clear above retired (codex #3591 r34 P1). Nothing to ledger for the
+      // waived WaveGuard class (no fee was billed).
+      if (setupAmount > 0) {
+        await recordSetupFeeClaimForInvoice(trx, { invoiceId: invoice.id, anchorId, amount: setupAmount });
+      }
 
       await trx('activity_log').insert({
         customer_id: visit.customer_id,
@@ -795,6 +848,8 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 }
 
 module.exports = {
+  recordSetupFeeClaimForInvoice,
+  retireDirectSetupClaimForPrepay,
   buildSecurePlanContext,
   deriveSecurePlanContext,
   prepaySelectionState,

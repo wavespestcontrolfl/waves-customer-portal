@@ -2094,6 +2094,11 @@ function EstimateToolView() {
           // qualifying families for tier + rodent setup waiver (codex #3591
           // r16 P1); never a client-supplied key list.
           existingCustomerId: existingCustomerMatch?.id || null,
+          // The quoted address lets the server scope the TIER list per
+          // property (non-primary street) while the rodent setup waiver
+          // stays account-wide — same signal the save body carries (codex
+          // #3591 r34 P1).
+          address: form.address || null,
           plugArea: parseInt(form.plugArea) || 0,
           plugSpacing: parseInt(form.plugSpacing) || 12,
           dethatchingCleanupLevel: form.dethatchingCleanupLevel || "none",

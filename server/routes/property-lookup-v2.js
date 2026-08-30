@@ -4291,16 +4291,30 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
 // canonical loader (waveguard-existing-services). Empty when no customer is
 // matched; the loader is injectable for tests. Throws on lookup failure
 // (the route refuses retryably).
-async function resolveCalculatePriorQualifyingServices(options = {}, loader = null) {
+// Existing-customer evidence for the estimator preview, split by purpose
+// exactly as the save splits it (codex #3591 r34 P1): the TIER list is
+// property-scoped (grouped estimate / non-primary street → only that
+// street's plans count) while the rodent SETUP-WAIVER list is account-wide.
+// Same shared resolver as admin-estimate-persistence, fed the same signals
+// the save body carries (address + group anchor) — never a client key list.
+async function resolveCalculateQualifyingEvidence(options = {}, resolver = null) {
+  const empty = { priorQualifyingServices: [], setupWaiverPriorQualifyingServices: [] };
   const customerId = options?.existingCustomerId;
-  if (customerId == null || String(customerId).trim() === '') return [];
-  const load = loader || (async (id) => {
+  if (customerId == null || String(customerId).trim() === '') return empty;
+  const resolve = resolver || (async (id, scope) => {
     const db = require('../models/db');
-    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
-    return loadExistingQualifyingServiceKeys(db, id);
+    const { resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+    return resolveCustomerQualifyingEvidence(db, { customerId: id, ...scope, logger });
   });
-  const keys = await load(String(customerId));
-  return Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : [];
+  const evidence = await resolve(String(customerId), {
+    address: typeof options.address === 'string' && options.address.trim() ? options.address.trim() : null,
+    groupedEstimate: !!(options.groupWithEstimateId || options.estimateGroupId),
+  });
+  const clean = (keys) => (Array.isArray(keys) ? keys.filter((k) => typeof k === 'string' && k) : []);
+  return {
+    priorQualifyingServices: clean(evidence?.tierKeys),
+    setupWaiverPriorQualifyingServices: clean(evidence?.setupWaiverKeys),
+  };
 }
 
 router.post('/calculate-estimate', async (req, res) => {
@@ -4323,15 +4337,17 @@ router.post('/calculate-estimate', async (req, res) => {
     }
     const v1Input = translateV2CallToV1Input(profile, selectedServices || [], options || {});
     // Canonical qualifying families of the MATCHED account (codex #3591 r16
-    // P1): the estimator forwards only existingCustomerId; the keys are
-    // derived server-side through the same loader estimate conversion uses
-    // (never a client-supplied list), so a rodent-only addition for a
-    // customer who owns another qualifying service waives the setup — and
-    // prices its tier — exactly as the save-time recompute will. A lookup
-    // failure refuses (retryable) rather than previewing a different result
-    // than the save persists.
+    // P1): the estimator forwards only existingCustomerId (+ the quoted
+    // address / group anchor); the keys are derived server-side through the
+    // same resolver the save uses (never a client-supplied list) — the TIER
+    // list property-scoped, the rodent SETUP-WAIVER list account-wide
+    // (codex #3591 r34 P1) — so the preview prices exactly as the save-time
+    // recompute will. A lookup failure refuses (retryable) rather than
+    // previewing a different result than the save persists.
     try {
-      v1Input.priorQualifyingServices = await resolveCalculatePriorQualifyingServices(options || {});
+      const evidence = await resolveCalculateQualifyingEvidence(options || {});
+      v1Input.priorQualifyingServices = evidence.priorQualifyingServices;
+      v1Input.setupWaiverPriorQualifyingServices = evidence.setupWaiverPriorQualifyingServices;
     } catch (lookupErr) {
       return res.status(503).json({
         error: 'Account service lookup is temporarily unavailable — please retry in a moment.',
@@ -4748,7 +4764,7 @@ module.exports.performPropertyLookup = performPropertyLookup;
 module.exports.buildEnrichedProfile = buildEnrichedProfile;
 module.exports.translateV2CallToV1Input = translateV2CallToV1Input;
 module.exports.needsTurfManualConfirmation = needsTurfManualConfirmation;
-module.exports.resolveCalculatePriorQualifyingServices = resolveCalculatePriorQualifyingServices;
+module.exports.resolveCalculateQualifyingEvidence = resolveCalculateQualifyingEvidence;
 module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
