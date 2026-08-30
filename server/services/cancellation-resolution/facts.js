@@ -172,19 +172,27 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where({ customer_id: customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .first('id'), 'error'),
+    // COMPLETED records only, and rows carry structured_notes so the
+    // customer-visibility filter below can exclude internal-only typed
+    // reports (typedReportDelivery != 'auto_send') — same egress rule as
+    // service-report/report-copy-context.js. Fetch extra rows so filtering
+    // still yields candidates.
     leg('findings', () => db('service_findings as f')
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
+      .where('r.status', 'completed')
       .orderBy([{ column: 'r.service_date', order: 'desc' }, { column: 'f.created_at', order: 'desc' }])
-      .limit(5)
-      .select('f.title', 'f.detail', 'f.category', 'f.severity', 'r.service_date', 'r.service_line'), []),
+      .limit(20)
+      .select('f.title', 'f.detail', 'f.category', 'f.severity', 'r.service_date', 'r.service_line', 'r.structured_notes'), []),
     // The OLDEST finding queried separately — the "your first visit found"
     // card must never quote a merely-less-recent finding as the first one.
     leg('earliestFinding', () => db('service_findings as f')
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
+      .where('r.status', 'completed')
       .orderBy([{ column: 'r.service_date', order: 'asc' }, { column: 'f.created_at', order: 'asc' }])
-      .first('f.title', 'f.detail', 'r.service_date', 'r.service_line'), null),
+      .limit(5)
+      .select('f.title', 'f.detail', 'r.service_date', 'r.service_line', 'r.structured_notes'), []),
     leg('complaintRequest', () => db('service_requests')
       .where({ customer_id: customerId })
       .whereIn('category', COMPLAINT_CATEGORIES)
@@ -218,9 +226,13 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
         .first('created_at');
       return row ? { updated_at: row.created_at } : null;
     }, 'error'),
+    // Only cases whose card was actually SHOWN (or acted on) suppress a
+    // repeat — a server-resolved-but-never-displayed card (outcome 'none')
+    // must not burn the customer's once-per-12-months slot.
     leg('shownCases', () => db('cancellation_cases')
       .where({ customer_id: customerId })
       .whereNotNull('resolution_template_id')
+      .whereIn('resolution_outcome', ['shown', 'accepted', 'declined'])
       .where('created_at', '>=', since12mo)
       .select('resolution_template_id'), []),
     leg('termite', () => db('termite_stations')
@@ -240,14 +252,23 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     leg('families', () => loadFamilies(customerId, today), []),
   ]);
 
-  const findingRows = Array.isArray(findings) ? findings : [];
+  // Customer-visibility filter (mirrors report-copy-context.js): a typed
+  // report suppressed from customer surfaces must not feed retention copy.
+  const customerVisible = (row) => {
+    let sn = row.structured_notes;
+    if (typeof sn === 'string') { try { sn = JSON.parse(sn); } catch { sn = null; } }
+    const mode = sn && typeof sn === 'object' ? sn.typedReportDelivery : null;
+    return !(mode && mode !== 'auto_send');
+  };
+  const findingRows = (Array.isArray(findings) ? findings : []).filter(customerVisible);
+  const earliestRows = (Array.isArray(earliestFinding) ? earliestFinding : []).filter(customerVisible);
   const toFinding = (row) => (row ? {
     text: [row.title, row.detail].filter(Boolean).join(' — ').slice(0, 160),
     lane: laneForServiceLine(row.service_line),
     date: dateOnly(row.service_date),
   } : null);
   const lastFinding = toFinding(findingRows[0]);
-  const firstFinding = toFinding(earliestFinding && earliestFinding !== 'error' ? earliestFinding : null);
+  const firstFinding = toFinding(earliestRows[0] || null);
 
   const complaintMsg = (Array.isArray(lastComplaint) ? lastComplaint : []).find((m) => COMPLAINT_KEYWORDS.test(String(m.body || '')));
 

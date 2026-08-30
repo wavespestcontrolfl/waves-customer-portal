@@ -119,7 +119,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -191,6 +191,12 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
+        // Repeat churn (admin stage-flip residue): the first churn may never
+        // have stamped churn_mrr — snapshot the rate before clearing it, or
+        // the reporting dollars are gone for good.
+        if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
+          update.churn_mrr = Number(customer.monthly_rate);
+        }
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
         const ledgerAuthoritative = planRateLedgerEnabled();
         await db.transaction(async (trx) => {

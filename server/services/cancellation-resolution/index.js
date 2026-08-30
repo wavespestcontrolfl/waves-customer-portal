@@ -96,7 +96,10 @@ async function openCancellationCase({
     resolution_template_id: card ? card.templateId : null,
     resolution_slots: card ? JSON.stringify(card.slots) : null,
     resolution_action: card ? JSON.stringify(card.action) : null,
-    resolution_outcome: card ? (resolutionOutcome || 'shown') : 'none',
+    // Only an explicit caller-claimed outcome that survived the route's
+    // template-match check counts as an impression; the server having
+    // RESOLVED a card is not proof the customer SAW it.
+    resolution_outcome: card && ['shown', 'accepted', 'declined'].includes(resolutionOutcome) ? resolutionOutcome : 'none',
     snapshot: JSON.stringify(snapshot || {}),
     status: processed ? 'committed' : 'open',
   };
