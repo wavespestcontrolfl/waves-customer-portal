@@ -42,7 +42,14 @@ function rodentRealignmentRolloutMs(database) {
       .then((row) => {
         const ts = new Date(row?.migration_time ?? NaN).getTime();
         if (!Number.isFinite(ts) || ts <= 0) { rolloutCache.delete(database); return 0; }
-        return ts;
+        // DEPLOY-OVERLAP DRAIN (codex #3591 r51 P1): Railway runs this
+        // migration as preDeployCommand while the PREVIOUS instance still
+        // takes traffic — a legacy writer can create a direct series for
+        // minutes after migration_time. Rows born in the drain window are
+        // treated as grandfathered (fail toward not re-pricing / not
+        // charging), so the boundary is the migration instant PLUS the
+        // window that outlives any realistic old-writer overlap.
+        return ts + 30 * 60 * 1000;
       })
       .catch(() => { rolloutCache.delete(database); return 0; });
     rolloutCache.set(database, pending);

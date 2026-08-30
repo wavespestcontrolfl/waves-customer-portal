@@ -5070,6 +5070,17 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           throw driftErr;
         }
       }
+      // The entered amount is the COLLECTED TOTAL (codex #3591 r51 P1):
+      // the setup rides INSIDE it as its own line, never on top — coverage
+      // is the remainder.
+      const collectedCoverage = collectedSetupFee > 0
+        ? Math.round((amount - collectedSetupFee) * 100) / 100
+        : amount;
+      if (!(collectedCoverage > 0)) {
+        const coverageErr = new Error(`The collected total ($${amount.toFixed(2)}) must exceed the $${collectedSetupFee.toFixed(2)} bait-station setup it includes.`);
+        coverageErr.switchConflict = true;
+        throw coverageErr;
+      }
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -5082,7 +5093,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         lineItems: [{
           description: `${coverageServiceType} - ${visitCount} prepaid application${visitCount === 1 ? '' : 's'}`,
           quantity: 1,
-          unit_price: amount,
+          unit_price: collectedCoverage,
           category: 'Annual prepay',
         },
         ...(collectedSetupFee > 0 ? [{
@@ -5132,15 +5143,15 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       }
       // The setup line's tax-proportional share of the PAID total never
       // enters the coverage basis the term slices across visits.
-      const collectedSetupShare = collectedSetupFee > 0 && (amount + collectedSetupFee) > 0
-        ? Math.round((Number(updatedInvoice.total) * (collectedSetupFee / (amount + collectedSetupFee))) * 100) / 100
+      const collectedSetupShare = collectedSetupFee > 0 && amount > 0
+        ? Math.round((Number(updatedInvoice.total) * (collectedSetupFee / amount)) * 100) / 100
         : 0;
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
-        monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
+        monthlyRate: Number(customer.monthly_rate || 0) || Math.round((collectedCoverage / 12) * 100) / 100,
         // Match the recorded payment (inserted below as updatedInvoice.total) and
         // the coverage ledger: commercial invoices add county tax, so the pretax
         // request amount would under-credit the prepaid visits. Coverage

@@ -879,3 +879,19 @@ describe('r50 — statement anchors, guarded-void claim preservation, collected-
     expect(customersSrc.slice(routeAt, trxAt)).toMatch(/setupFeeRequired: true/);
   });
 });
+
+describe('r51 local audit — ambiguous multi-series anchors stay untouched (codex #3591 r51 local P0)', () => {
+  test('a customer with TWO rodent roots: the fallback resolves NO anchor (reversal pages, revival re-ledgers anchor-less)', async () => {
+    mockQualifyingKeys = async () => ['rodent_bait'];
+    const twoRoots = [
+      { id: 'root-a', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null },
+      { id: 'root-b', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null },
+    ];
+    const reversal = conn({ rootsForCoverage: twoRoots, claim: null, scheduledService: { id: 'x', status: 'confirmed' } });
+    expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(reversal, {
+      id: 'inv-std', customer_id: 'cust-1', scheduled_service_id: null,
+      line_items: [{ description: 'Bait Station Setup — one-time setup fee', amount: 99 }],
+    })).toBeNull();
+    expect(reversal.writes.filter((w) => w.table === 'scheduled_services')).toEqual([]);
+  });
+});

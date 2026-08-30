@@ -5053,9 +5053,14 @@ const InvoiceService = {
         .whereNull("recurring_parent_id")
         .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
         .select("id", "service_type", "service_id");
+      const baitRoots = [];
       for (const root of roots || []) {
-        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
       }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (baitRoots.length === 1) anchorId = baitRoots[0];
     }
     if (!anchorId) {
       logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
@@ -5141,9 +5146,14 @@ const InvoiceService = {
         .whereNull("recurring_parent_id")
         .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
         .select("id", "service_type", "service_id");
+      const baitRoots = [];
       for (const root of roots || []) {
-        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
       }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (baitRoots.length === 1) anchorId = baitRoots[0];
     }
     // (sibling-completion retire happens after anchor resolution below)
     // The marker sweep runs regardless of an anchor (codex #3591 r47 P1):
@@ -5183,7 +5193,7 @@ const InvoiceService = {
         // a lost CAS means money arrived mid-flight and a human reconciles.
         const sibVoided = await conn("invoices")
           .where({ id: sib.id, status: sib.status })
-          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
           .update({ status: "void", updated_at: new Date() });
         if (sibVoided === 1) {
           await conn("setup_fee_claims").where({ id: sc.id }).delete();
@@ -5252,7 +5262,7 @@ const InvoiceService = {
       if (!moneyAttached) {
         voided += await conn("invoices")
           .where({ id: rb.id, status: rb.status })
-          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
           .update({ status: "void", updated_at: new Date() });
       } else {
         logger.error(`[invoice] FIX: replacement setup invoice ${rb.id} for reversed invoice ${sourceInvoiceId} has money attached (${rb.status}) — refund/reconcile so the setup is not collected twice`);
@@ -5297,9 +5307,14 @@ const InvoiceService = {
         .whereNull("recurring_parent_id")
         .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
         .select("id", "service_type", "service_id");
+      const baitRoots = [];
       for (const root of roots || []) {
-        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) { anchorId = root.id; break; }
+        if (require("./secure-appointment-plans").isRodentBaitProgramKey(await authoritativeServiceKey(conn, root))) baitRoots.push(root.id);
       }
+      // A UNIQUE match only (codex #3591 r51 local P0): a customer with
+      // multiple rodent series must never have an unrelated series'
+      // stamp/claim mutated — ambiguity stays anchor-less/paged.
+      if (baitRoots.length === 1) anchorId = baitRoots[0];
     }
     let retired = 0;
     if (anchorId) {
@@ -5338,7 +5353,7 @@ const InvoiceService = {
         } else if (!moneyAttached) {
           const sibVoided = await conn("invoices")
             .where({ id: sib.id, status: sib.status })
-            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
+            .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
             .update({ status: "void", updated_at: new Date() });
           if (sibVoided === 1) {
             await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();

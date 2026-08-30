@@ -619,6 +619,27 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       logger.info(`[appt-card-request] existing-customer gate bypassed for visit ${visit.id} — direct rodent series owes its bait-station setup (owner ruling 2026-08-30)`);
     }
 
+    // COMMERCIAL bait obligations never take the /secure rail — including a
+    // FIRST-TIME customer with no saved card (codex #3591 r51 local P0): the
+    // page rejects commercial customers, so the normal ask would dead-end
+    // with the setup silently lost. Fail closed for rodent-labeled rows
+    // whose classification cannot be read.
+    if (!rodentSetupNeedsDisclosure) {
+      try {
+        if (await visitIsCommercialBait()) {
+          const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+          const commercialOwed = await resolveDirectRodentSetupObligation(db, { id: visit.id });
+          if (commercialOwed > 0) return commercialBaitStaffReview(commercialOwed);
+        }
+      } catch (err) {
+        if (/rodent|bait/i.test(String(visit.service_type || ''))) {
+          logger.warn(`[appt-card-request] commercial-bait classification failed for rodent-labeled visit ${visit.id} — failing closed to staff review: ${err.message}`);
+          return commercialBaitStaffReview('unknown');
+        }
+        logger.warn(`[appt-card-request] commercial-bait probe failed for visit ${visit.id} — proceeding to the ordinary ask: ${err.message}`);
+      }
+    }
+
     // 3. Existing pending/complete capture for this appointment. An inline
     // caller re-running (page refresh, booking retry) gets the SAME pending
     // link back — idempotent, never a second row.

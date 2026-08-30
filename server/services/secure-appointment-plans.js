@@ -704,6 +704,20 @@ async function selectSecurePlan({ token, plan }) {
     await db.transaction(async (trx) => {
       // Lock + re-read the disclosure BEFORE the CAS (codex #3591 r31 P1).
       const lockedSetup = await lockedDisclosedSetupAmount(trx, request, context.setupFee);
+      // …and re-derive the CURRENT obligation under the transaction (codex
+      // #3591 r51 local P0): a qualifying family added between render and
+      // selection waives the fee — never stamp above what is owed NOW,
+      // capped by the disclosure. Failure refuses (retryable), never a
+      // silent stamp.
+      let owedNowCap = null;
+      if (context.setupFee && context.setupFee.waivedWithPrepay === false) {
+        try {
+          owedNowCap = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });
+        } catch (owedErr) {
+          logger.warn(`[secure-plans] in-trx setup re-derivation failed for visit ${visit.id}: ${owedErr.message}`);
+          throw fail('plan_unavailable');
+        }
+      }
       const stamped = await trx('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
         .update({ selected_plan: 'per_application', plan_selected_at: stamp, updated_at: stamp });
@@ -720,7 +734,8 @@ async function selectSecurePlan({ token, plan }) {
       // the SERIES PARENT — the completion mint's atomic claim always reads
       // the parent, so a child-attached link must not stamp the child.
       // Guarded so a re-selection never re-stamps a consumed fee.
-      const setupToStamp = lockedSetup == null ? (context.setupFee ? context.setupFee.amount : 0) : lockedSetup;
+      let setupToStamp = lockedSetup == null ? (context.setupFee ? context.setupFee.amount : 0) : lockedSetup;
+      if (owedNowCap != null) setupToStamp = Math.min(setupToStamp, owedNowCap);
       if (context.setupFee && setupToStamp > 0) {
         await trx('scheduled_services')
           .where({ id: seriesAnchorId(visit) })
@@ -798,8 +813,21 @@ async function selectSecurePlan({ token, plan }) {
       const lockedSetup = await lockedDisclosedSetupAmount(trx, request, context.setupFee);
       if (lockedSetup != null) {
         setupAmount = lockedSetup;
-        amount = cents(coverageAmount + setupAmount);
       }
+      // Re-derive under the transaction (codex #3591 r51 local P0): a
+      // family added since render waives the fee — bill min(disclosed,
+      // owed-now); failure refuses rather than minting a stale fee.
+      if (setupAmount > 0) {
+        let owedNow;
+        try {
+          owedNow = await module.exports.resolveDirectRodentSetupObligation(trx, { id: visit.id });
+        } catch (owedErr) {
+          logger.warn(`[secure-plans] in-trx setup re-derivation failed for visit ${visit.id}: ${owedErr.message}`);
+          throw fail('plan_unavailable');
+        }
+        setupAmount = cents(Math.min(setupAmount, Math.max(0, Number(owedNow) || 0)));
+      }
+      amount = cents(coverageAmount + setupAmount);
       // Term starts at the first UPCOMING live visit of the series —
       // coverage must span the visits the customer is prepaying, not the
       // send date. Anchored on the series PARENT and derived INSIDE the

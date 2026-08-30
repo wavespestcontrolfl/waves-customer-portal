@@ -278,6 +278,22 @@ describe('selectSecurePlan — direct rodent bait series (non-member setup, code
     expect(clears[0].calls.some(([op]) => op === 'whereNotNull')).toBe(false);
   });
 
+  test('a qualifying family gained BETWEEN render and selection waives the fee under the transaction — no stamp, no setup line (codex #3591 r51 local P0)', async () => {
+    // First resolver run (context derivation) sees no families; the in-trx
+    // re-derivation sees the freshly added pest plan.
+    let calls = 0;
+    mockQualifyingKeys = async () => (++calls <= 1 ? [] : ['pest_control']);
+    await selectSecurePlan({ token: 'tok', plan: 'per_application' });
+    const stamps = updatesFor('scheduled_services').filter((p) => p && 'pending_setup_fee' in p && p.pending_setup_fee !== null);
+    expect(stamps).toEqual([]);
+    mockDbCalls = [];
+    calls = 0;
+    mockQualifyingKeys = async () => (++calls <= 1 ? [] : ['pest_control']);
+    await selectSecurePlan({ token: 'tok', plan: 'prepay_annual' });
+    expect(mockInvoiceCreate.mock.calls[0][0].lineItems).toHaveLength(1);
+    expect(insertsFor('setup_fee_claims')).toEqual([]);
+  });
+
   test('member (another qualifying service on the account) → no stamp, no setup line', async () => {
     mockQualifyingKeys = async () => ['pest_control'];
     await selectSecurePlan({ token: 'tok', plan: 'per_application' });

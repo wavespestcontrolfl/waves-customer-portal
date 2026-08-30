@@ -1225,9 +1225,20 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
         const ruleUpdates = { updated_at: new Date() };
         if (typeof normalizedData.tier_qualifier === 'boolean') ruleUpdates.tier_qualifier = normalizedData.tier_qualifier;
         if (typeof normalizedData.exclude_from_pct_discount === 'boolean') ruleUpdates.exclude_from_pct_discount = normalizedData.exclude_from_pct_discount;
-        const mirrored = await trx('service_discount_rules')
+        let mirrored = await trx('service_discount_rules')
           .where({ service_key: 'rodent_bait' })
           .update(ruleUpdates);
+        if (!mirrored) {
+          // No rule row yet (codex #3591 r51 P1): a zero-row update silently
+          // split the policies — UPSERT so the mirror always lands.
+          await trx('service_discount_rules').insert({
+            service_key: 'rodent_bait',
+            tier_qualifier: typeof normalizedData.tier_qualifier === 'boolean' ? normalizedData.tier_qualifier : true,
+            exclude_from_pct_discount: typeof normalizedData.exclude_from_pct_discount === 'boolean' ? normalizedData.exclude_from_pct_discount : false,
+            updated_at: new Date(),
+          });
+          mirrored = 1;
+        }
         if (mirrored) {
           await insertPricingAudit({
             configKey: 'discount_rules:rodent_bait',

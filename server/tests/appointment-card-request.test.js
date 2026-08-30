@@ -341,6 +341,21 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     }
   });
 
+  test('FIRST-TIME commercial bait booking with no saved card routes to staff review, never the dead-end /secure link (codex #3591 r51 local P0)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const keySpy = jest.spyOn(plans, 'authoritativeServiceKey').mockResolvedValue('commercial_rodent_bait');
+    const feeSpy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).toBe('commercial_rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      keySpy.mockRestore();
+      feeSpy.mockRestore();
+    }
+  });
+
   test('no obligation (0) → saved-card auto-secure proceeds, no scheduled_services stamp', async () => {
     const plans = require('../services/secure-appointment-plans');
     const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValueOnce(0);

@@ -2300,17 +2300,19 @@ describe('existing-service tier extension snapshot', () => {
     // whose ROOT was created at/after the realignment ROLLOUT INSTANT (the
     // 20260829000040 migration_time in THIS database) is bracket-priced
     // new-model and DOES extend (codex #3591 r36/r37 P1)…
+    // rolloutMs = migration_time + the 30-min deploy-overlap drain (r51).
     const rollout = { migration_time: '2026-08-29T18:30:00.000Z' };
     const directNew = await computeMembershipContext(fakeDb({
       migrationRow: rollout,
-      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T18:30:01.000Z' })),
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T19:00:01.000Z' })),
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(directNew.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
-    // …while a direct series booked the SAME DAY but before the deploy (a
-    // calendar cutoff would have misread it) keeps its snapshotted rate…
+    // …while a direct series booked the SAME DAY but before the deploy —
+    // or INSIDE the 30-min old-writer drain window (r51) — keeps its
+    // snapshotted rate…
     const directOld = await computeMembershipContext(fakeDb({
       migrationRow: rollout,
-      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T14:00:00.000Z' })),
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T18:45:00.000Z' })),
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(directOld.existingServices).toEqual([]);
     // …and with NO migration row (env never rolled out) nothing qualifies.
