@@ -2957,6 +2957,20 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_terms: ${e.message}`); return []; });
 
+    // The COMPLETE consumed-estimate set for the prefill exclusion — the
+    // display list above is capped at 5, and an estimate linked to an older
+    // term must still never suggest again. A read failure poisons the set
+    // (null) so the suggestion is skipped entirely rather than built from an
+    // incomplete exclusion list.
+    const consumedEstimateIdsPromise = db.schema.hasTable('annual_prepay_terms')
+      .then((exists) => exists
+        ? db('annual_prepay_terms')
+          .where({ customer_id: c.id })
+          .whereNotNull('source_estimate_id')
+          .pluck('source_estimate_id')
+        : [])
+      .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
+
     const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
@@ -3236,12 +3250,14 @@ router.get('/:id', async (req, res, next) => {
       // the 360 payload.
       annualPrepayEstimateSuggestion: await (async () => {
         try {
+          // A null consumed set means the exclusion read failed — skip the
+          // suggestion rather than build it from an incomplete list.
+          const consumedEstimateIds = await consumedEstimateIdsPromise;
+          if (consumedEstimateIds === null) return null;
           return await require('../services/annual-prepay-estimate-suggestion')
             .buildAnnualPrepayEstimateSuggestion(estimates, {
-              // Estimates already consumed by a term priced a PRIOR year.
-              excludeEstimateIds: (annualPrepayTerms || [])
-                .map((term) => term.source_estimate_id)
-                .filter(Boolean),
+              // Estimates already consumed by ANY term priced a PRIOR year.
+              excludeEstimateIds: consumedEstimateIds,
             });
         } catch (e) {
           logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
