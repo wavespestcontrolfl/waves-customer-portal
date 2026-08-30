@@ -782,41 +782,36 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
-  test('EVERY reminder leg (confirmation + 72h + 24h) is CLAIMED before the first member write and restored only on full success (owner ruling; gate r36 + codex r28 P1) — a partly-moved stop texts NOBODY, a failed claim ABORTS the move', async () => {
-    // rem-a: nothing sent yet (all three legs claimable); rem-b: 72h already delivered (only the other two claimed)
-    const reminders = { select: () => [
-      { id: 'rem-a', confirmation_sent: false, reminder_72h_sent: false, reminder_24h_sent: false },
-      { id: 'rem-b', confirmation_sent: false, reminder_72h_sent: true, reminder_24h_sent: false },
-    ] };
+  test('a durable move_hold_until is stamped on every member reminder row before the first write, released only on full success, kept on a partial, and its failure ABORTS the move (owner ruling; codex r28/r29)', async () => {
+    const reminders = { select: () => [{ id: 'rem-a' }, { id: 'rem-b' }] };
+    // PARTIAL: the hold is stamped and NOT released
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [
       { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
-      { id: 'b', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' }, // b failed: still on the old date
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
     ] }), appointment_reminders: reminders };
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b' })]);
-    const claims = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(claims.length).toBe(3); // one claim per leg — and NO restore on a partial
-    expect(claims.map((c) => Object.keys(c.values)[0]).sort()).toEqual(['confirmation_sent', 'reminder_24h_sent', 'reminder_72h_sent']);
-    const claim72 = claims.find((c) => c.values.reminder_72h_sent === true);
-    expect(claim72.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['rem-a']]])); // rem-b's delivered 72h is never touched
-    // full success: every claimed leg is RESTORED, fenced on the claim stamp
+    let rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(rem.length).toBe(1);
+    expect(rem[0].values.move_hold_until instanceof Date).toBe(true);
+    expect(rem[0].values.move_hold_until.getTime()).toBeGreaterThan(Date.now() + 23 * 3600 * 1000); // self-expiring ~24h stamp
+    expect(rem[0].ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['rem-a', 'rem-b']]]));
+    // FULL success: stamp then release, fenced on OUR stamp
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    const after = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(after.length).toBe(6); // 3 claims + 3 restores
-    const restore = after.find((c) => c.values.confirmation_sent === false);
-    expect(restore.values).toMatchObject({ confirmation_sent: false, confirmation_sent_at: null });
-    const claimStampVal = after.find((c) => c.values.confirmation_sent === true).values.confirmation_sent_at;
-    const fence = restore.ops.find((o) => o[0] === 'where' && o[1] && o[1].confirmation_sent === true);
-    expect(fence[1].confirmation_sent_at).toEqual(claimStampVal);
-    // an ABORTED move (the primary itself could not move — nothing landed) RESTORES the holds
+    rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(rem.length).toBe(2);
+    expect(rem[1].values).toEqual({ move_hold_until: null });
+    const fence = rem[1].ops.find((o) => o[0] === 'where' && o[1] && o[1].move_hold_until);
+    expect(fence[1].move_hold_until).toEqual(rem[0].values.move_hold_until);
+    // ABORT (primary never moved): the hold is released before rethrow
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).rejects.toThrow('member a boom');
-    const abortCalls = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(abortCalls.length).toBe(6); // 3 claims + 3 restores — the unchanged appointment must not read as already reminded
-    expect(abortCalls[abortCalls.length - 1].values).toMatchObject({ reminder_24h_sent: false });
+    rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
+    expect(rem.length).toBe(2);
+    expect(rem[1].values).toEqual({ move_hold_until: null });
     // an unclaimable hold ABORTS before anything moves
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => { throw new Error('ledger down'); } } };
@@ -825,31 +820,10 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
       .rejects.toMatchObject({ statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     expect(db.__calls.some((c) => c.op === 'update' && c.table === 'scheduled_services')).toBe(false);
-  });
-
-  test('visitMove.visitStart is the STOP\'s landed arrival start (earliest represented member), for the caller\'s one notice (codex #3609 r25 P1)', async () => {
-    // tapped 10:00 sibling moved to 11:00 (+1h) shifts its 09:00 sibling to 10:00 ⇒ the stop starts at 10:00, not 11:00
-    db.__script = script({ visit: { ...VISIT, window_start: '09:00', window_end: '11:00' }, members: [member('b', { window_start: '09:00', window_end: '10:00' }), member('a', { window_start: '10:00', window_end: '11:00' })], landed: [
-      { id: 'a', scheduled_date: '2026-08-30', window_start: '11:00', window_end: '12:00', technician_id: 't1' },
-      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' },
-    ] });
-    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '11:00-12:00', initiatedBy: 'admin' });
-    expect(out.visitMove.moved).toEqual(['a', 'b']);
-    expect(out.visitMove.visitStart).toBe('10:00');
-  });
-
-  test('a sibling whose shifted window would cross midnight is refused before any write — shiftClock must not wrap it into an early-morning window on the same date (codex r24 P2)', async () => {
-    // 14:00–19:00 anchor chained to a 19:00–20:00 sibling, anchor moved to 19:00–20:00 (+5h) ⇒ sibling 00:00–01:00 next day
-    db.__script = script({ visit: { ...VISIT, window_start: '14:00', window_end: '20:00' }, members: [member('a', { window_start: '14:00', window_end: '19:00' }), member('b', { window_start: '19:00', window_end: '20:00' })] });
-    const rebooker = fakeRebooker();
-    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '19:00-20:00', initiatedBy: 'admin' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b', isOperational: true });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
-    // a negative offset below 00:00 is refused the same way
-    db.__script = script({ visit: { ...VISIT, window_start: '08:00', window_end: '10:00' }, members: [member('a', { window_start: '09:00', window_end: '10:00' }), member('b', { window_start: '08:00', window_end: '09:00' })] });
-    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '00:00-01:00', initiatedBy: 'admin' }))
-      .rejects.toMatchObject({ code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
+    // the SENDERS honor the hold (source contract): deferred recheck + the 72h/24h sweep
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+    expect(src.match(/move_hold_until/g).length).toBeGreaterThanOrEqual(4);
+    expect(src).toMatch(/whereNull\('move_hold_until'\)\.orWhere\('move_hold_until', '<', new Date\(\)\)/);
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {

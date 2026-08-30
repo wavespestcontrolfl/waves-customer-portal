@@ -1494,8 +1494,12 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
     // sweep resends the new time); the mark itself is fenced on the time.
     let fence = {};
     if (recheckBeforeSend) {
-      const fresh = await db('appointment_reminders').where({ id: record.id }).first('appointment_time', 'cancelled', 'confirmation_sent');
+      const fresh = await db('appointment_reminders').where({ id: record.id }).first('appointment_time', 'cancelled', 'confirmation_sent', 'move_hold_until');
       if (!fresh || fresh.cancelled || fresh.confirmation_sent) return false;
+      // A grouped unit move holds this row (move_hold_until, codex #3609
+      // r29): skip WITHOUT marking — the sweep retries once the hold clears
+      // (full move) or expires (abandoned partial).
+      if (fresh.move_hold_until && new Date(fresh.move_hold_until).getTime() > Date.now()) return false;
       const freshAt = fresh.appointment_time ? new Date(fresh.appointment_time).getTime() : null;
       if (freshAt != null && freshAt !== apptTime.getTime()) {
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — the appointment moved to a new time under the send; the sweep resends with the new time`);
@@ -1534,6 +1538,12 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         const fresh = await db('appointment_reminders').where({ id: record.id }).first();
         if (!fresh || fresh.cancelled || fresh.confirmation_sent) {
           logger.info(`[appt-remind] Confirmation superseded by cancel/reschedule for ${scheduledServiceId}`);
+          return false;
+        }
+        // Held by a grouped unit move (move_hold_until, codex #3609 r29):
+        // skip WITHOUT marking; the sweep re-delivers after the hold.
+        if (fresh.move_hold_until && new Date(fresh.move_hold_until).getTime() > Date.now()) {
+          logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — grouped move in progress`);
           return false;
         }
         // A silent move that KEPT the confirmation pending (keepPendingConfirmation
@@ -2382,6 +2392,12 @@ const AppointmentReminders = {
         .where({ windows_preclosed: false })
         .where(function () {
           this.where({ reminder_72h_sent: false }).orWhere({ reminder_24h_sent: false });
+        })
+        // A grouped unit move holds its members' rows (move_hold_until,
+        // codex #3609 r29): quiet while held; an abandoned partial's hold
+        // expires on its own and the row re-enters this scan.
+        .where(function () {
+          this.whereNull('move_hold_until').orWhere('move_hold_until', '<', new Date());
         })
         .whereNotExists(function () {
           this.select(1)
