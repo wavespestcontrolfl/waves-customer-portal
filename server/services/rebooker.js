@@ -1226,6 +1226,15 @@ class SmartRebooker {
           throw Object.assign(new Error('Cannot reschedule — the visit changed concurrently'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
         }
         const visit = currentVisitId ? await trx('service_visits').where({ id: currentVisitId }).first('status') : null;
+        // A visit that entered FINALIZATION (closing, …) after the plan
+        // observed one member must not lose that member (local codex gate
+        // P0): the detach seam ignores non-open visits, so the solo move
+        // would strand the parent and its issued/payment artifacts at the
+        // old stop. Anything other than open or dissolved is frozen —
+        // the same verdict visit-groups' guards give.
+        if (visit && String(visit.status) !== 'open' && String(visit.status) !== 'dissolved') {
+          throw Object.assign(new Error('This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'visit_not_open' });
+        }
         if (visit && String(visit.status) === 'open') {
           const members = await vg.openMembers(trx, currentVisitId);
           if (members.some((m) => String(m.id) !== String(serviceId))) {

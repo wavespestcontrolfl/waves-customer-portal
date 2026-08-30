@@ -228,8 +228,13 @@ function TechBlock({ tech }) {
   );
 }
 
-function PlanNote({ plan }) {
+function PlanNote({ plan, grouped }) {
   if (!plan) return null;
+  // A grouped one-time row shares its stop with other services — "a single
+  // scheduled service" would contradict the visit list right above (codex
+  // #3609 r34). The recurring copy talks about the plan, not the visit's
+  // service count, so it stays; the one-time sentence is suppressed.
+  if (grouped && !plan.isRecurring) return null;
   return (
     <div data-glass="soft" style={{
       display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 8,
@@ -475,7 +480,7 @@ export default function AppointmentPage() {
         ) : null}
 
         <TechBlock tech={data.tech} />
-        <PlanNote plan={data.plan} />
+        <PlanNote plan={data.plan} grouped={!!data.service?.visit} />
 
         {/* The server's confirmable flag mirrors the POST guard exactly
             (pending only, not dispatch-owned) — rendering on anything less

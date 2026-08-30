@@ -365,7 +365,10 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     const reminderRecord = await AppointmentReminders.handleReschedule(
       service.id,
       `${best.date}T${best.start_time || '08:00'}`,
-      { sendNotification: false },
+      // preserveMoveHold: this sync is part of the move machinery itself —
+      // on a PARTIAL grouped move the retained cohort hold must survive it
+      // (staff repair, not this sync, releases it — codex #3609 r34).
+      { sendNotification: false, preserveMoveHold: true },
     );
     // handleReschedule flips confirmation_sent→true assuming a reschedule notice
     // will follow; auto-dispatch sends none. If a creation confirmation was still

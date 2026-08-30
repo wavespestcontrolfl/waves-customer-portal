@@ -653,6 +653,32 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     if (Number(stamped) !== unattachedIds.length) {
       throw new Error('visit membership conflict: a row is attached to another visit');
     }
+    // A joiner INHERITS an active unit-move hold (codex #3609 r34 P1):
+    // when this join lands between a running move's phases (the mover's
+    // lease is claimed in its own trx, not under this stop lock for the
+    // whole move), an existing member's live move_hold_until must cover
+    // the new member too — otherwise a partial move leaves every planned
+    // member suppressed while the late joiner texts freely. Same inherit
+    // shape the registration self-heal uses; best-effort (the mover's
+    // per-member re-stamp and the senders' checks stay authoritative).
+    if (unattachedIds.length) {
+      try {
+        const heldSibling = await t('appointment_reminders as ar')
+          .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+          .where('ss.visit_id', visit.id)
+          .where('ar.move_hold_until', '>', new Date())
+          .orderBy('ar.move_hold_until', 'desc')
+          .first('ar.move_hold_until');
+        if (heldSibling) {
+          await t('appointment_reminders')
+            .whereIn('scheduled_service_id', unattachedIds)
+            .where((q) => { q.whereNull('move_hold_until').orWhere('move_hold_until', '<', heldSibling.move_hold_until); })
+            .update({ move_hold_until: heldSibling.move_hold_until });
+        }
+      } catch (holdErr) {
+        require('./logger').warn(`[visit-groups] join hold-inherit for visit ${visit.id} failed: ${holdErr.message}`);
+      }
+    }
     if (visit.technician_id) {
       for (const r of fresh) {
         if (!r.visit_id && !r.technician_id) await alignMemberTechnician(t, r.id, visit.technician_id);
@@ -1968,7 +1994,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // staff repair the stop — and it expires on its own in 24h so a
   // forgotten repair can never silence a customer forever. The stamp
   // itself failing ABORTS the move before anything is written.
-  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS);
+  // The stamp doubles as the COHORT IDENTITY for the repair-release
+  // (handleReschedule clears every row carrying this exact value — codex
+  // r34): a random sub-second jitter makes two moves started in the same
+  // millisecond produce distinct stamps, so one repair can never release
+  // another move's cohort. The jitter is invisible to the lease math (the
+  // takeover grace is 5 minutes; expiry moves by <1s).
+  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS + require('crypto').randomInt(0, 1000));
   let reminderHoldIds = [];
   try {
     await db.transaction(async (t) => {
@@ -2285,6 +2317,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         await require('./appointment-reminders').handleReschedule(target.id, `${newDateStr}T${target.startHHMM || '08:00'}`, {
           sendNotification: false,
           keepPendingConfirmation: true,
+          // This sync runs INSIDE the unit move — the repair-release must
+          // not fire off it and un-hold the cohort mid-move (codex r34).
+          preserveMoveHold: true,
           expectSchedule: { date: newDateStr, windowStart: target.startHHMM || null },
         });
       } catch (remErr) {

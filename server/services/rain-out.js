@@ -1874,7 +1874,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         coverMoved(moveResult, job);
         if (moveResult?.visitMove?.visitStart) unitVisitStart = String(moveResult.visitMove.visitStart);
         if ((Array.isArray(moveResult?.visitMove?.failed) && moveResult.visitMove.failed.length) || moveResult?.visitMove?.parentRetargetFailed === true) {
-          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id) };
+          unitMovePartial = { visitId: moveResult.visitMove.visitId, memberIds: (moveResult.visitMove.failed || []).map((f) => f.id), parentRetargetFailed: moveResult.visitMove.parentRetargetFailed === true };
           // Stragglers stay OUT of the rest of this batch (codex #3609 r27
           // P1): a queued sibling job retried individually could succeed and
           // text the customer even though this stop's result says nobody was
@@ -2071,7 +2071,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     results.push({
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
-      ...(unitMovePartial ? { needsAttention: { code: 'VISIT_MOVE_INCOMPLETE', message: `Only part of this stop moved — ${unitMovePartial.memberIds.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`, memberIds: unitMovePartial.memberIds } } : {}),
+      // The repair the alert names must match the actual failure (codex
+      // #3609 r34): a parent-retarget failure has ZERO stragglers — every
+      // service moved but the visit record still describes the old stop —
+      // so "fix the stragglers" would send staff hunting rows that are
+      // fine. Re-saving the stop rewrites the visit record (and a full
+      // success releases the retained reminder hold).
+      ...(unitMovePartial ? {
+        needsAttention: {
+          code: 'VISIT_MOVE_INCOMPLETE',
+          message: unitMovePartial.memberIds.length
+            ? `Only part of this stop moved — ${unitMovePartial.memberIds.length} grouped service(s) are still on the old day/time. Fix the stragglers on the board, then text the customer.`
+            : 'Every service moved, but the visit record could not be updated and still describes the old stop — re-save the stop from the board, then text the customer.',
+          memberIds: unitMovePartial.memberIds,
+        },
+      } : {}),
     });
   }
 

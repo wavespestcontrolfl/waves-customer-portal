@@ -13108,23 +13108,42 @@ const CallRecordingProcessor = {
                         });
                         if (emailRes?.held) {
                           // Grouped move stamped the hold while this email
-                          // was being prepared (codex #3609 r33 P1): this
-                          // booking registered sendConfirmation:false, so
-                          // without a re-arm nothing would ever retry the
-                          // email-only contact. Re-arm the reminder row —
-                          // the stranded-confirmation sweep then delivers
-                          // the standard confirmation with the POST-move
-                          // time to every appointment contact once the
-                          // hold clears (the primary's pre-hold text
-                          // described a slot the move is changing, so the
-                          // corrected notice is right, not a duplicate).
-                          try {
-                            await db('appointment_reminders')
-                              .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
-                              .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-                            logger.info(`[call-proc] Email-only confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
-                          } catch (rearmErr) {
-                            logger.error(`[call-proc] held email-only confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+                          // was being prepared (codex #3609 r33/r34): the
+                          // primary SMS already delivered, so re-arming the
+                          // whole confirmation would double-text them (a
+                          // tech-only move never changes the time). Retry
+                          // ONLY the held email leg — a unit move completes
+                          // in seconds, the send is idempotent per
+                          // occurrence, and this is a background processor,
+                          // so a short bounded wait is fine. Exhaustion
+                          // hands the obligation to the office lane as a
+                          // durable admin notification (the same exception
+                          // rail the held-contact requeue uses).
+                          let emailRetried = null;
+                          for (let attempt = 1; attempt <= 3; attempt += 1) {
+                            await new Promise((r) => setTimeout(r, attempt * 15000));
+                            emailRetried = await AppointmentEmail.sendAppointmentConfirmationEmail({
+                              customerId,
+                              scheduledServiceId,
+                              appointmentTime: parseETDateTime(extracted.preferred_date_time),
+                              serviceLabel: serviceType,
+                              recipientFilter: emailOnlySlots.map((s) => s.email),
+                            });
+                            if (!emailRetried?.held) break;
+                          }
+                          if (emailRetried?.held) {
+                            logger.warn(`[call-proc] email-only confirmation for ${scheduledServiceId} still held after retries — handing to the office lane`);
+                            try {
+                              await require('./notification-service').notifyAdmin(
+                                'comms',
+                                'Held confirmation email needs a manual send',
+                                `The appointment confirmation email to ${emailOnlySlots.length} email-only service contact(s) was held by an in-progress visit move and could not be retried through — send it from the composer once the stop settles (service ${scheduledServiceId}).`,
+                              );
+                            } catch (notifyErr) {
+                              logger.error(`[call-proc] held-email admin notification failed for ${scheduledServiceId}: ${notifyErr.message}`);
+                            }
+                          } else {
+                            logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId} (after move-hold retry)`);
                           }
                         } else {
                           logger.info(`[call-proc] Appointment confirmation emailed to ${emailOnlySlots.length} email-only service contact(s) for customer ${customerId}`);

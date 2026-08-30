@@ -117,7 +117,7 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule.mock.calls[1][5].excludeServiceIds).toEqual(['a']);
     // every moved SIBLING gets its reminder row synced (notice suppressed); the primary's is the caller's job
     expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
-    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, preserveMoveHold: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
     // parent retarget AFTER the moves: both stop keys locked in sorted order, patch from the landed rows, lifecycle reset + tracker effects re-armed on the date change, technician carried
     const rawKeys = db.__rawCalls.map((a) => a[1][1]);
     const pairIdx = rawKeys.findIndex((k, i) => k === 'p1:2026-08-30' && rawKeys[i + 1] === 'p1:2026-09-02');
@@ -274,7 +274,7 @@ describe('moveVisitAsUnit', () => {
   test('sibling reminder sync is fenced with expectSchedule against a newer move', async () => {
     db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
-    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('b', '2026-09-02T14:00', { sendNotification: false, keepPendingConfirmation: true, preserveMoveHold: true, expectSchedule: { date: '2026-09-02', windowStart: '14:00' } });
   });
 
   test('exact retry of a committed move on a recurring primary re-enters the rebooker (series replay contract) ONLY when the request could have created a series operation', async () => {
@@ -861,8 +861,8 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     // after the guarded sync committed.
     const resched = src.slice(src.indexOf('async handleReschedule'), src.indexOf('if (!sendNotification)'));
     expect(resched).toMatch(/record\.move_hold_until && syncedRows > 0/);
-    expect(resched).toMatch(/\.where\(\{ move_hold_until: record\.move_hold_until \}\)/);
-    expect(resched).toMatch(/whereNull\('scheduled_services\.visit_id'\)/);
+    expect(resched).toMatch(/\.where\(\{ move_hold_until: record\.move_hold_until, customer_id: record\.customer_id \}\)/);
+    expect(resched).toMatch(/options\.preserveMoveHold !== true/);
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {

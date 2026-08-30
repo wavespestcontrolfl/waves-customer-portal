@@ -827,9 +827,12 @@ describe('reschedule — visit membership fence (codex #3609 r13 P2)', () => {
       ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
       await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).resolves.toMatchObject({ success: true });
       expect(trxScheduled.update).toHaveBeenCalled();
-      // a visit that is no longer open never re-enters (the mover would decline it again)
+      // a visit that entered FINALIZATION after the plan is REFUSED (local
+      // codex gate P0): the detach seam ignores non-open visits, so moving
+      // the member would strand the parent and its issued artifacts.
       ({ trxScheduled } = wire('closing', [{ id: 'svc-1' }, { id: 'svc-2' }]));
-      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).resolves.toMatchObject({ success: true });
+      await expect(SmartRebooker.rescheduleOnce('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'rain', 'admin')).rejects.toMatchObject({ code: 'VISIT_FROZEN_MOVE_UNSUPPORTED' });
+      expect(trxScheduled.update).not.toHaveBeenCalled();
       // the stop moved under us ⇒ same re-entry remedy
       ({ trxScheduled } = wire('open', [{ id: 'svc-1' }]));
       lockSpy.mockRejectedValueOnce(Object.assign(new Error('moved'), { code: 'VISIT_STOP_MOVED' }));

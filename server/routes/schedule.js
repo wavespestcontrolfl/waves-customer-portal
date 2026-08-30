@@ -38,6 +38,12 @@ function calendarUrlFor(row, now = new Date()) {
 async function groupedCalendarVerdict(visitId) {
   try {
     const members = await require('../services/visit-groups').openMembers(db, visitId);
+    // Fewer than two live members is NOT a grouped stop for calendar
+    // purposes (codex #3609 r34): groupedVisit() answers true for a FROZEN
+    // singleton too (that verdict blocks rescheduling), but the public ICS
+    // route serves that row's own file — so the link must come from the
+    // row path (null), never a blocked grouped verdict that hides it.
+    if (!Array.isArray(members) || members.length < 2) return null;
     return groupedIcsVerdict(members);
   } catch {
     return { blocked: true, endsAt: null };

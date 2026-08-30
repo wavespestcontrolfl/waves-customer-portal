@@ -3131,30 +3131,28 @@ const AppointmentReminders = {
         return { skippedStale: true };
       }
       // Repair-release for a retained unit-move hold (codex #3609 uncapped
-      // audit + r33 P1s): a PARTIAL move retains move_hold_until on every
-      // planned member — the detached straggler AND the already-landed
-      // members (often ungrouped once the seam dissolves the visit) — and
-      // neither a later unit move (releases current members only) nor this
-      // sync cleared them, so a repaired stop stayed silent for the full
-      // 24h TTL. A successful reschedule of a held row IS the repair
-      // completing, so release the WHOLE cohort: every reminder row still
-      // carrying THIS EXACT stamp (all planned members were stamped with
-      // one value — the stamp equality is the fence: a row re-grouped into
-      // another mover carries that mover's NEWER stamp and is untouched)
-      // whose service row is UNGROUPED (a still-grouped member's lease
-      // belongs to its visit's own mover). Best-effort after the committed
-      // sync — a failed release leaves rows quiet until the TTL, the safe
-      // direction, and the senders' own hold checks stay authoritative.
-      if (record.move_hold_until && syncedRows > 0 && new Date(record.move_hold_until).getTime() > Date.now()) {
+      // audit + r33/r34 P1s): a PARTIAL move retains move_hold_until on
+      // every planned member — the detached straggler AND the landed
+      // members (which can STAY GROUPED when 2+ remain) — and neither a
+      // later unit move (releases current members only) nor this sync
+      // cleared them, so a repaired stop stayed silent for the full 24h
+      // TTL. A successful reschedule of a held row IS the repair
+      // completing, so release the WHOLE cohort — landed still-grouped
+      // remainder included. Cohort identity = the exact stamp (every
+      // planned member was stamped with one jittered value — see
+      // MOVE_HOLD_TTL jitter in visit-groups — so a row re-stamped by a
+      // newer mover, or a different move's cohort, never matches) PLUS the
+      // customer (a visit stop is per-customer; belt against a stamp
+      // collision). NOT run for the unit mover's own in-flight sibling
+      // syncs (options.preserveMoveHold) — releasing mid-move would
+      // un-hold the very move the stamp protects. Best-effort after the
+      // committed sync — a failed release leaves rows quiet until the TTL,
+      // the safe direction, and the senders' own checks stay authoritative.
+      if (record.move_hold_until && syncedRows > 0 && options.preserveMoveHold !== true
+        && new Date(record.move_hold_until).getTime() > Date.now()) {
         try {
           const released = await db('appointment_reminders')
-            .where({ move_hold_until: record.move_hold_until })
-            .whereExists(function serviceUngrouped() {
-              this.select(1)
-                .from('scheduled_services')
-                .whereRaw('scheduled_services.id = appointment_reminders.scheduled_service_id')
-                .whereNull('scheduled_services.visit_id');
-            })
+            .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
             .update({ move_hold_until: null, updated_at: new Date() });
           if (released > 0) {
             logger.info(`[appt-remind] Reschedule of ${scheduledServiceId} released the retained move hold on ${released} row(s) of its partial-move cohort`);
