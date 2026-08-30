@@ -52,6 +52,8 @@ function fakeDb({
   prepaidTerms = [],
   prepaidTermsQueryThrows = false,
   cadenceQueryThrows = false,
+  // knex_migrations row for the rodent realignment — the rollout instant.
+  migrationRow = null,
 } = {}) {
   const db = (table) => {
     // Per-call state: the extension's minted-invoice probe is the only
@@ -95,6 +97,7 @@ function fakeDb({
       first: async () => {
         if (table === 'customers') return customer;
         if (table === 'annual_prepay_terms') return prepaidTerm;
+        if (table === 'knex_migrations') return migrationRow;
         return null;
       },
       select: async (...cols) => {
@@ -2294,17 +2297,37 @@ describe('existing-service tier extension snapshot', () => {
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(unsourced.existingServices).toEqual([]);
     // A DIRECT series (admin/call/secure booking — no estimate by design)
-    // whose ROOT was created on/after the 2026-08-29 realignment is
-    // bracket-priced new-model and DOES extend (codex #3591 r36 P1)…
+    // whose ROOT was created at/after the realignment ROLLOUT INSTANT (the
+    // 20260829000040 migration_time in THIS database) is bracket-priced
+    // new-model and DOES extend (codex #3591 r36/r37 P1)…
+    const rollout = { migration_time: '2026-08-29T18:30:00.000Z' };
     const directNew = await computeMembershipContext(fakeDb({
-      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-02T14:00:00.000Z' })),
+      migrationRow: rollout,
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T18:30:01.000Z' })),
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(directNew.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
-    // …while a direct series booked BEFORE the cutoff keeps its snapshotted rate.
+    // …while a direct series booked the SAME DAY but before the deploy (a
+    // calendar cutoff would have misread it) keeps its snapshotted rate…
     const directOld = await computeMembershipContext(fakeDb({
-      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-07-14T14:00:00.000Z' })),
+      migrationRow: rollout,
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-08-29T14:00:00.000Z' })),
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(directOld.existingServices).toEqual([]);
+    // …and with NO migration row (env never rolled out) nothing qualifies.
+    const noRollout = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-02T14:00:00.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(noRollout.existingServices).toEqual([]);
+    // Future CHILDREN with no stamp under a completed estimate-origin ROOT
+    // classify through the root's estimate (codex #3591 r37 P1).
+    const childrenUnderRoot = await computeMembershipContext(fakeDb({
+      estimateRows: [newEstimate],
+      scheduledRows: [
+        { id: 'root', service_type: 'Rodent Bait Stations', scheduled_date: '2026-02-05', status: 'completed', estimated_price: 89, source_estimate_id: 'est-new', recurring_parent_id: null },
+        ...newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: 'root' })),
+      ],
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(childrenUnderRoot.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', rowIds: ['r1', 'r2'] })]);
     const failed = await computeMembershipContext(fakeDb({
       scheduledRows: newRows, estimateRows: [newEstimate], estimatesQueryThrows: true,
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });

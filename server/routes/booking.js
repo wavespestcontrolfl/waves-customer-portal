@@ -2959,6 +2959,24 @@ async function createSelfBooking(payload = {}) {
                   await retireOrWaiveDraft('existing_member');
                   return;
                 }
+                // Rodent setup: the waiver is "any OTHER qualifying family on
+                // the account", not plan membership — and the account can have
+                // gained one between /calculate and this booking (a pest plan
+                // accepted in another tab), leaving no pending claim for the
+                // queuedElsewhere probe below to see (codex #3591 r37 P1).
+                // Re-read the canonical qualifying keys under this lock and
+                // waive when any family other than rodent_bait is present. A
+                // lookup failure throws (fail closed — never stamps a fee the
+                // rule may waive; the accept-side probes take the same posture).
+                if (rodentSetupQuote) {
+                  const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
+                  const otherFamilies = (await loadExistingQualifyingServiceKeys(sp, custId) || [])
+                    .filter((key) => key !== 'rodent_bait');
+                  if (otherFamilies.length > 0) {
+                    await retireOrWaiveDraft('existing_member');
+                    return;
+                  }
+                }
                 // Stamp the obligation AND correlate it: source_estimate_id
                 // links the parent to the quote that disclosed the fee (the
                 // unminted-setup-fee obligation machinery keys off it), and

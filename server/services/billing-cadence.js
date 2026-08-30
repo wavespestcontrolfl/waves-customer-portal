@@ -166,8 +166,40 @@ function isPinnedLegacyRodentRow(svc = {}) {
     && svc?.perApplicationBilled !== true;
 }
 
+// New-model evidence on a rodent row (mirrors rodentBaitLegacyReplaySignal's
+// own test): the bracket engine stamps every row it prices with at least one
+// of these; a pre-realignment row carries none.
+function rodentRowHasNewModelMarker(svc = {}) {
+  return svc?.perApplicationBilled === true
+    || Number(svc?.stations) > 0
+    || svc?.pricingBasis === 'RODENT_BAIT_BRACKET';
+}
+
+// Legacy-rodent predicate for a STORED estimate (codex #3591 r37 P0): the
+// replay paths pin a pre-realignment row (legacyPinnedReplay) before it
+// reaches billing/conversion, but a manual "mark as won" hands the STORED
+// shape straight over — a pre-realignment quote-wizard row then has neither
+// the pin nor a new-model marker, and a disclosed $49/mo plan would be
+// stamped per-application at ~$147/completion. So the stored estimate's own
+// legacy signal (rodentBaitLegacyReplaySignal) also classifies: when the
+// stored result reads as legacy, every rodent_bait row without new-model
+// evidence IS the legacy monthly plan. Returns a row predicate.
+function legacyRodentRowPredicateFor(estimateData) {
+  const data = parseEstimateData(estimateData);
+  let storedLegacy = null;
+  try {
+    storedLegacy = require('./rodent-bait-legacy-replay').rodentBaitLegacyReplaySignal(data);
+  } catch { storedLegacy = null; }
+  return (svc = {}) => {
+    if (isPinnedLegacyRodentRow(svc)) return true;
+    if (!storedLegacy) return false;
+    return String(svc?.service || '').toLowerCase() === 'rodent_bait' && !rodentRowHasNewModelMarker(svc);
+  };
+}
+
 function collectRecurringServices(estimateData) {
   const data = parseEstimateData(estimateData);
+  const isLegacyRodentRow = legacyRodentRowPredicateFor(data);
   const lists = [
     data.result?.recurring?.services,
     data.recurring?.services,
@@ -175,7 +207,7 @@ function collectRecurringServices(estimateData) {
     data.services,
   ];
   return lists.flatMap((list) => (Array.isArray(list) ? list : []))
-    .filter((svc) => !isPinnedLegacyRodentRow(svc));
+    .filter((svc) => !isLegacyRodentRow(svc));
 }
 
 function inferFrequencyKeyFromEstimateData(estimateData) {
@@ -305,6 +337,8 @@ module.exports = {
   customerPreservesMonthlyMembership,
   displayForFrequencyKey,
   isPinnedLegacyRodentRow,
+  rodentRowHasNewModelMarker,
+  legacyRodentRowPredicateFor,
   frequencyKeyFromVisitsPerYear,
   inferFrequencyKeyFromEstimateData,
   intervalPriceFromAnnual,

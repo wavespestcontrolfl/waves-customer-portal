@@ -21,22 +21,33 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => undefined),
 }));
 jest.mock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined) }));
-jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn(async () => undefined) }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  syncTermForInvoicePayment: jest.fn(async () => undefined),
+}));
 jest.mock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnualPrepayOverlap: jest.fn(async () => {}) } }));
+// The coverage-series obligation runs the shared qualifying-keys loader;
+// mocked so the fake connection never has to serve the tier query.
+let mockQualifyingKeys = async () => [];
+jest.mock('../services/waveguard-existing-services', () => ({
+  ...jest.requireActual('../services/waveguard-existing-services'),
+  loadExistingQualifyingServiceKeys: (...args) => mockQualifyingKeys(...args),
+}));
 
 const fs = require('fs');
 const path = require('path');
 const InvoiceService = require('../services/invoice');
 const plans = require('../services/secure-appointment-plans');
-const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePrepayOnBookSetupClaim } = plans;
+const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePrepayOnBookSetupClaim, findDirectRodentSetupObligationForCoverage } = plans;
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
-function conn({ scheduledService = null, claim = null, updateResult = 1 } = {}) {
+function conn({ scheduledService = null, claim = null, updateResult = 1, rootsForCoverage = null } = {}) {
   const writes = [];
   const trx = (table) => {
     const q = { _where: null };
-    q.where = (w) => { q._where = w; return q; };
+    q.where = (w) => { if (typeof w === 'function') { w.call(q); return q; } q._where = w; return q; };
+    q.orWhereNotNull = () => q;
     q.whereNull = (col) => { q._whereNull = col; return q; };
     q.first = async () => {
       if (table === 'scheduled_services') return scheduledService;
@@ -45,6 +56,9 @@ function conn({ scheduledService = null, claim = null, updateResult = 1 } = {}) 
     };
     q.update = async (patch) => { writes.push({ table, op: 'update', where: q._where, whereNull: q._whereNull, patch }); return updateResult; };
     q.delete = async () => { writes.push({ table, op: 'delete', where: q._where }); return 1; };
+    q.whereNotIn = () => q;
+    q.orderBy = () => q;
+    q.select = async () => (table === 'scheduled_services' ? (rootsForCoverage || []) : []);
     q.insert = (row) => {
       writes.push({ table, op: 'insert', row });
       const p = Promise.resolve([{}]);
@@ -151,10 +165,10 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
     expect(c.writes.map((w) => w.op)).toEqual(['update']);
   });
 
-  test('an estimate-origin series restores nothing (its setup rode the accept invoice, not a stamp)', async () => {
+  test('an ESTIMATE-origin series restores too — the ledger record is the provenance (estimate-accept prepay billed the setup; codex #3591 r37 P1)', async () => {
     const c = conn({ claim, scheduledService: { id: 'svc-parent', source_estimate_id: 'est-1', pending_setup_fee: null } });
-    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c)).toBeNull();
-    expect(c.writes).toEqual([]);
+    expect(await InvoiceService.restoreRetiredSetupFeeClaimForPrepay('inv-prepay', c)).toEqual({ scheduledServiceId: 'svc-parent', amount: 99 });
+    expect(c.writes.map((w) => w.op)).toEqual(['update', 'delete']);
   });
 
   test('no record for the prepay (nothing was billed) / no prepay id → nothing happens', async () => {
@@ -165,7 +179,66 @@ describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => 
   });
 });
 
+describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog names only a coverage type (codex #3591 r37 P1)', () => {
+  const rodentRoot = { id: 'root-rb', customer_id: 'cust-1', service_type: 'Rodent Bait Stations', service_id: null, source_estimate_id: null, recurring_parent_id: null };
+  const pestRoot = { id: 'root-pest', customer_id: 'cust-1', service_type: 'Quarterly Pest Control', service_id: null, source_estimate_id: null, recurring_parent_id: null };
+  beforeEach(() => { mockQualifyingKeys = async () => ['rodent_bait']; });
+
+  test('a live direct rodent series matching the coverage, on a non-member account, owes the setup — anchor + amount returned', async () => {
+    const c = conn({ rootsForCoverage: [pestRoot, rodentRoot] });
+    expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' }))
+      .toEqual({ anchorId: 'root-rb', amount: 99 });
+  });
+
+  test('coverage naming another family, a member account, or no customer/coverage → null', async () => {
+    const c = conn({ rootsForCoverage: [pestRoot, rodentRoot] });
+    expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Quarterly Pest Control' })).toBeNull();
+    mockQualifyingKeys = async () => ['rodent_bait', 'pest_control'];
+    expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+    expect(await findDirectRodentSetupObligationForCoverage(c, { customerId: null, coverageServiceType: 'Rodent Bait Stations' })).toBeNull();
+  });
+
+  test('a failing lookup propagates (the mint refuses retryably, never reads it as a waiver)', async () => {
+    const c = conn({ rootsForCoverage: [rodentRoot] });
+    mockQualifyingKeys = async () => { throw new Error('db down'); };
+    await expect(findDirectRodentSetupObligationForCoverage(c, { customerId: 'cust-1', coverageServiceType: 'Rodent Bait Stations' })).rejects.toThrow('db down');
+  });
+});
+
 describe('source contracts — where the lifecycle is wired', () => {
+  const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
+  const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');
+  const invoice = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+
+  test('booking re-reads the canonical qualifying families under the stamp lock and waives on any OTHER family (codex #3591 r37 P1)', () => {
+    const at = booking.indexOf("const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';");
+    const queued = booking.indexOf('const queuedElsewhere = await sp(', at);
+    const reload = booking.indexOf('loadExistingQualifyingServiceKeys(sp, custId)', at);
+    expect(at).toBeGreaterThan(-1);
+    expect(reload).toBeGreaterThan(at);
+    expect(reload).toBeLessThan(queued);
+    expect(booking.slice(reload, queued)).toMatch(/\.filter\(\(key\) => key !== 'rodent_bait'\)[\s\S]*retireOrWaiveDraft\('existing_member'\)/);
+  });
+
+  test('the estimate-accept prepay ledgers the billed rodent setup on the scheduled rodent root, inside the accept transaction (codex #3591 r37 P1)', () => {
+    expect(converter).toMatch(/if \(billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount\(estimateData\) > 0\) \{/);
+    expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot\.id,/);
+    // …and the restore no longer refuses an estimate-origin parent.
+    expect(invoice).not.toMatch(/if \(!parent \|\| parent\.source_estimate_id\) return null;/);
+  });
+
+  test('the Customer 360 mint derives the coverage series\' obligation when the dialog omits the setup and refuses with the figure + anchor (codex #3591 r37 P1)', () => {
+    const customers = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    const mintAt = customers.indexOf("router.post('/:id/annual-prepay-invoice'");
+    const derive = customers.indexOf('findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType })', mintAt);
+    const refuse = customers.indexOf('setupFeeRequired: true,', derive);
+    const trxAt = customers.indexOf('await db.transaction(async (trx) => {', mintAt);
+    expect(derive).toBeGreaterThan(mintAt);
+    expect(refuse).toBeGreaterThan(derive);
+    expect(refuse).toBeLessThan(trxAt);
+    expect(customers.slice(mintAt, trxAt)).toMatch(/if \(!\(setupFeeAmount > 0\) && !setupScheduledServiceId\) \{/);
+  });
+
   const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
   const schedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
 

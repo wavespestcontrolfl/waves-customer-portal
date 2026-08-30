@@ -597,3 +597,29 @@ describe('combined-name downstream keys', () => {
     )).toBe(60);
   });
 });
+
+describe('manual accept of a pre-realignment quote-wizard rodent row (codex #3591 r37 P0)', () => {
+  const converter = require('../services/estimate-converter');
+  const { legacyRodentRowPredicateFor } = require('../services/billing-cadence');
+  const storedLegacy = { result: { recurring: { services: [
+    { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, visitsPerYear: 4 },
+  ] } } };
+  test('the unpinned monthly row rides the legacy supplement lane and reads as a legacy-only plan', () => {
+    const rows = storedLegacy.result.recurring.services;
+    const isLegacy = legacyRodentRowPredicateFor(storedLegacy);
+    expect(converter.supplementalCompanionLines(storedLegacy)).toEqual([
+      { name: 'Rodent Bait Stations', service: 'rodent_bait', monthly: 49 },
+    ]);
+    expect(converter.isPinnedLegacyRodentOnlyPlan(rows, isLegacy)).toBe(true);
+    // Pin-only check (the pre-r37 default) could not see it — the stored
+    // signal is what closes the manual-accept gap.
+    expect(converter.isPinnedLegacyRodentOnlyPlan(rows)).toBe(false);
+  });
+  test('a bracket-priced row is neither a supplement nor a legacy plan', () => {
+    const storedNew = { result: { recurring: { services: [
+      { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 },
+    ] } } };
+    expect(converter.supplementalCompanionLines(storedNew)).toEqual([]);
+    expect(converter.isPinnedLegacyRodentOnlyPlan(storedNew.result.recurring.services, legacyRodentRowPredicateFor(storedNew))).toBe(false);
+  });
+});

@@ -106,3 +106,33 @@ describe('pinned legacy rodent rows never drive the billing cadence (codex #3591
     expect(cadence.amount).toBe(89);
   });
 });
+
+describe('stored-legacy rodent rows classify without a pin (codex #3591 r37 P0)', () => {
+  const { legacyRodentRowPredicateFor, collectRecurringServices, rodentRowHasNewModelMarker } = require('../services/billing-cadence');
+  // A pre-realignment quote-wizard save handed straight to conversion by a
+  // manual "mark as won": monthly row, no pin, no new-model marker.
+  const storedLegacy = { result: { recurring: { services: [
+    { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 49, visitsPerYear: 4 },
+  ] } } };
+  const storedNew = { result: { recurring: { services: [
+    { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 29.67, perApplicationBilled: true, stations: 5 },
+  ] } } };
+
+  test('the stored estimate\'s legacy signal classifies an unpinned monthly rodent row as legacy; a bracket row never is', () => {
+    const legacyRow = storedLegacy.result.recurring.services[0];
+    const newRow = storedNew.result.recurring.services[0];
+    expect(rodentRowHasNewModelMarker(legacyRow)).toBe(false);
+    expect(rodentRowHasNewModelMarker(newRow)).toBe(true);
+    expect(legacyRodentRowPredicateFor(storedLegacy)(legacyRow)).toBe(true);
+    expect(legacyRodentRowPredicateFor(storedNew)(newRow)).toBe(false);
+    // The signal is per-ESTIMATE: a marker-less row under a new-model
+    // estimate is not reclassified, and a pest row is never touched.
+    expect(legacyRodentRowPredicateFor(storedNew)(legacyRow)).toBe(false);
+    expect(legacyRodentRowPredicateFor(storedLegacy)({ service: 'pest_control', mo: 45 })).toBe(false);
+  });
+
+  test('collectRecurringServices drops the unpinned legacy row exactly like a pinned one — it never drives the billing cadence', () => {
+    expect(collectRecurringServices(storedLegacy)).toEqual([]);
+    expect(collectRecurringServices(storedNew)).toHaveLength(1);
+  });
+});

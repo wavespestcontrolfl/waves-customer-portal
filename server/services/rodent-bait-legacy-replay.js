@@ -17,13 +17,38 @@
 // commercial-floor-replay.js.
 // ============================================================
 
-// The realignment cutoff (owner directive 2026-08-29; migration
-// 20260829000040). A DIRECT rodent bait series (no source estimate — admin
-// booking, call booking, /secure) created on/after this date can only have
-// been priced by the bracket ladder, so its ROOT row's created_at is the
-// durable new-model signal for rows that carry no estimate provenance
-// (codex #3591 r36 P1). Pre-cutoff roots keep their snapshotted rate.
-const RODENT_BAIT_REALIGNMENT_DATE = '2026-08-29';
+// The realignment ROLLOUT INSTANT (owner directive 2026-08-29): the moment
+// migration 20260829000040 ran in THIS database (knex_migrations.migration_time
+// — the same rollout-instant source estimate-learning and review-reply read).
+// A DIRECT rodent bait series (no source estimate — admin booking, call
+// booking, /secure) whose ROOT row was created at/after that instant can only
+// have been priced by the bracket ladder, so it is new-model; a root created
+// before it keeps its snapshotted rate (codex #3591 r36/r37 P1 — a calendar
+// date read through UTC mislabeled a legacy series booked the same day
+// before the deploy, or after 20:00 ET the evening before). No migration row
+// (env never migrated) or an unreadable one → 0 → nothing qualifies (fail
+// closed). Cached per database handle; a failed lookup is not cached.
+const RODENT_BAIT_REALIGNMENT_MIGRATION = '20260829000040_rodent_bait_bracket_realignment';
+const rolloutCache = new WeakMap();
+function rodentRealignmentRolloutMs(database) {
+  if (!database || (typeof database !== 'function' && typeof database !== 'object')) return Promise.resolve(0);
+  let pending = rolloutCache.get(database);
+  if (!pending) {
+    pending = Promise.resolve()
+      .then(() => database('knex_migrations')
+        .where('name', 'like', `${RODENT_BAIT_REALIGNMENT_MIGRATION}%`)
+        .orderBy('id', 'asc')
+        .first('migration_time'))
+      .then((row) => {
+        const ts = new Date(row?.migration_time ?? NaN).getTime();
+        if (!Number.isFinite(ts) || ts <= 0) { rolloutCache.delete(database); return 0; }
+        return ts;
+      })
+      .catch(() => { rolloutCache.delete(database); return 0; });
+    rolloutCache.set(database, pending);
+  }
+  return pending;
+}
 
 function firstPositiveNumber(...values) {
   for (const value of values) {
@@ -71,4 +96,4 @@ function rodentBaitLegacyReplaySignal(estData = {}) {
   return null;
 }
 
-module.exports = { rodentBaitLegacyReplaySignal, RODENT_BAIT_REALIGNMENT_DATE };
+module.exports = { rodentBaitLegacyReplaySignal, RODENT_BAIT_REALIGNMENT_MIGRATION, rodentRealignmentRolloutMs };

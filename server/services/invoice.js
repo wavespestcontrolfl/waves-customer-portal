@@ -4980,9 +4980,8 @@ const InvoiceService = {
    * again and nothing else ever re-stamps it. Keyed by the immutable
    * setup_fee_claims record the mint wrote for the prepay invoice; the
    * record is consumed on restore so a re-run of the cancel sync is a
-   * no-op. Only a still-direct series (no estimate origin) is re-stamped,
-   * and only onto a NULL stamp — a live or mid-mint claim is never
-   * overwritten. Returns the restored descriptor or null.
+   * no-op. Re-stamped onto a NULL stamp only — a live or mid-mint claim is
+   * never overwritten. Returns the restored descriptor or null.
    */
   async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db) {
     if (!prepayInvoiceId) return null;
@@ -4992,10 +4991,15 @@ const InvoiceService = {
     if (!claim || !claim.scheduled_service_id) return null;
     const amount = Math.round(Number(claim.amount) * 100) / 100;
     if (!(amount > 0)) return null;
+    // The record itself is the provenance (codex #3591 r37 P1): only the
+    // prepay mints that billed the setup as their own line write one (switch,
+    // secure-plan, prepay-on-book, estimate-accept prepay), so an
+    // estimate-origin parent restores exactly like a direct one — a standard
+    // accept never writes a record and never lands here.
     const parent = await conn("scheduled_services")
       .where({ id: claim.scheduled_service_id })
       .first("id", "source_estimate_id", "pending_setup_fee");
-    if (!parent || parent.source_estimate_id) return null;
+    if (!parent) return null;
     const restored = await conn("scheduled_services")
       .where({ id: parent.id })
       .whereNull("pending_setup_fee")

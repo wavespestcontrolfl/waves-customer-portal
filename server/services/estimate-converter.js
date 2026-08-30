@@ -508,7 +508,7 @@ function explicitServiceCadence(svc = {}) {
 // never as the single recurring unit the per-application stamp is derived
 // from (codex #3591 r19 P0: a disclosed $49/mo plan would otherwise become
 // a $147 per-completion charge under billing_mode per_application).
-const { isPinnedLegacyRodentRow } = require('./billing-cadence');
+const { isPinnedLegacyRodentRow, legacyRodentRowPredicateFor } = require('./billing-cadence');
 
 // The whole recurring plan is a pinned pre-realignment rodent bait plan —
 // the legacy MONTHLY DUES product (billed monthly, visits covered by dues).
@@ -517,9 +517,13 @@ const { isPinnedLegacyRodentRow } = require('./billing-cadence');
 // cron skips the customer and completion collects the monthly figure only
 // four times a year (codex #3591 r21 P0). Mixed plans (pest + pinned rodent)
 // keep the per-application stamp — the pest half always billed per visit.
-function isPinnedLegacyRodentOnlyPlan(recurringServices = []) {
+// `isLegacyRow` defaults to the pin-only check; the converter passes the
+// stored-signal-aware predicate (legacyRodentRowPredicateFor) so a manual
+// accept of a pre-realignment quote-wizard row classifies identically to a
+// replayed/pinned one (codex #3591 r37 P0).
+function isPinnedLegacyRodentOnlyPlan(recurringServices = [], isLegacyRow = isPinnedLegacyRodentRow) {
   const rows = (Array.isArray(recurringServices) ? recurringServices : []).filter((r) => r && typeof r === 'object');
-  return rows.length > 0 && rows.every(isPinnedLegacyRodentRow);
+  return rows.length > 0 && rows.every(isLegacyRow);
 }
 
 function supplementalCompanionLines(estimateData = {}) {
@@ -527,7 +531,10 @@ function supplementalCompanionLines(estimateData = {}) {
   const recurring = estimateData.recurring || result.recurring || {};
   const resultStats = estimateData.results || result.results || {};
   const lines = [];
-  const pinnedRow = (Array.isArray(recurring.services) ? recurring.services : []).find(isPinnedLegacyRodentRow);
+  // Pinned OR stored-legacy (unpinned manual-accept shape) rodent row — the
+  // same predicate the conversion filter drops it with (codex #3591 r37 P0).
+  const isLegacyRow = legacyRodentRowPredicateFor(estimateData);
+  const pinnedRow = (Array.isArray(recurring.services) ? recurring.services : []).find(isLegacyRow);
   const rodentMonthly = firstPositiveNumber(
     recurring.rodentBaitMo,
     resultStats.rodBaitMo,
@@ -3651,10 +3658,15 @@ const EstimateConverter = {
     // Pinned legacy rodent rows leave the conversion line set and ride as
     // the legacy supplement instead (supplementalCompanionLines) — same
     // monthly lane the pre-realignment scalar took (codex #3591 r19 P0).
+    // Stored-signal-aware legacy predicate (codex #3591 r37 P0): a manual
+    // "mark as won" hands the STORED shape here without either replay path,
+    // so a pre-realignment quote-wizard row carries no pin — the stored
+    // estimate's own legacy signal classifies it instead.
+    const isLegacyRodentRow = legacyRodentRowPredicateFor(estimateData);
     const recurringServicesForConversion = suppressRecurringConversion
       ? []
-      : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isPinnedLegacyRodentRow(svc));
-    const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices);
+      : foldTermiteRentalIntoBait(recurringServices).filter((svc) => !isLegacyRodentRow(svc));
+    const pinnedLegacyRodentOnlyPlan = !suppressRecurringConversion && isPinnedLegacyRodentOnlyPlan(recurringServices, isLegacyRodentRow);
     // Read BEFORE the filter drops the line — this is the only signal that
     // the sold program rents its stations, and it has to outlive conversion
     // (see the customers.termite_stations_rented stamp below).
@@ -5944,6 +5956,37 @@ const EstimateConverter = {
           // after-credit total — the same figure the /pay page collects.
           draftInvoiceAmount = inv ? (Number(inv.total) || 0) : invoiceSubtotal;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
+        }
+      }
+      // An estimate-accept ANNUAL PREPAY billed the non-member rodent setup as
+      // its own line (frozenRodentBaitSetupAmount). Ledger it against the
+      // prepay on the rodent series root the scheduling above created
+      // (codex #3591 r37 P1) — the same setup_fee_claims record the switch /
+      // secure / prepay-on-book mints write — so a later void/refund of this
+      // prepay re-stamps the per-application claim
+      // (InvoiceService.restoreRetiredSetupFeeClaimForPrepay) instead of
+      // silently forgiving the setup. Fail closed: inside the accept
+      // transaction, a ledger failure fails the accept rather than minting a
+      // prepay whose setup could never be restored.
+      if (billingTerm === 'prepay_annual' && draftInvoiceId && frozenRodentBaitSetupAmount(estimateData) > 0) {
+        const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require('./secure-appointment-plans');
+        const roots = await database('scheduled_services')
+          .where({ source_estimate_id: estimateId, customer_id: customerId })
+          .whereNull('recurring_parent_id')
+          .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+          .select('id', 'service_type', 'service_id');
+        let rodentRoot = null;
+        for (const root of roots || []) {
+          if ((await authoritativeServiceKey(database, root)) === 'rodent_bait') { rodentRoot = root; break; }
+        }
+        if (rodentRoot) {
+          await recordSetupFeeClaimForInvoice(database, {
+            invoiceId: draftInvoiceId,
+            anchorId: rodentRoot.id,
+            amount: frozenRodentBaitSetupAmount(estimateData),
+          });
+        } else {
+          logger.warn(`[estimate-converter] Estimate ${estimateId}: prepay billed a rodent setup but no rodent series root was scheduled — setup claim not ledgered`);
         }
       }
       if (draftInvoiceId && autoSendInvoice && canAutoSendDraftInvoice({ billingTerm, annualPrepayTermId })) {

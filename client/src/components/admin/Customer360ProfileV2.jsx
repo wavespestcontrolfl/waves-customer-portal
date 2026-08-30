@@ -120,6 +120,9 @@ function adminFetch(path, options = {}) {
       }
       const err = new Error(serverMsg || `HTTP ${r.status}`);
       err.status = r.status;
+      // Structured refusals (e.g. the annual-prepay mint's 409 naming an
+      // owed setup + anchor) ride along so a caller can act on them.
+      try { err.body = await r.clone().json(); } catch { /* not JSON */ }
       throw err;
     }
     if (r.status === 204) return null;
@@ -4089,14 +4092,42 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     setAmount(value);
   };
 
+  // The mint refuses (409, setupFeeRequired) when the coverage series is a
+  // direct non-member rodent plan that still owes its bait-station setup —
+  // omission is not a waiver (codex #3591 r37 P1). Confirm the extra line
+  // with staff and re-submit carrying the server-derived figure + anchor.
+  const mintAnnualPrepay = async (payload) => {
+    try {
+      return await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      const refusal = err?.body;
+      if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0 && refusal.scheduledServiceId) {
+        const ok = window.confirm(
+          `${refusal.error}\n\nAdd the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup line to this invoice?`,
+        );
+        if (!ok) throw new Error("Annual prepay not created — the bait-station setup must ride the invoice.");
+        return adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            setupFeeAmount: Number(refusal.setupFeeAmount),
+            scheduledServiceId: String(refusal.scheduledServiceId),
+          }),
+        });
+      }
+      throw err;
+    }
+  };
+
   const handleSubmit = async () => {
     if (submitDisabled) return;
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
-        method: "POST",
-        body: JSON.stringify({
+      const result = await mintAnnualPrepay({
           amount: Number(amount),
           serviceType: serviceType.trim(),
           visitCount: Number.parseInt(visitCount, 10),
@@ -4116,7 +4147,6 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           ...(depositCredit && !depositCredit.payerBilled && applyCredit
             ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
-        }),
       });
       // Advisory warnings (the promised first visit overlaps another job) —
       // blocking on purpose, and BEFORE the delivery check: the invoice and
@@ -4144,9 +4174,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay-invoice`, {
-        method: "POST",
-        body: JSON.stringify({
+      const result = await mintAnnualPrepay({
           amount: Number(amount),
           serviceType: serviceType.trim(),
           visitCount: Number.parseInt(visitCount, 10),
@@ -4164,7 +4192,6 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
           chargeInPerson: true,
-        }),
       });
       // Same advisory-overlap surfacing as the send path (blocking: the
       // modal closes / hands off to the payment sheet right after).

@@ -244,6 +244,33 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount 
   return true;
 }
 
+// Customer 360 Annual Prepay dialog (codex #3591 r37 P1): the general mint
+// names only a coverage service type — no anchor, no setup. Omission must
+// not read as a waiver: derive the obligation from the customer's LIVE direct
+// rodent series matching that coverage (same shared resolver every other
+// lane runs). Returns { anchorId, amount } for the first root that owes a
+// setup, or null. Lookup failures throw (callers refuse retryably).
+async function findDirectRodentSetupObligationForCoverage(database, { customerId, coverageServiceType }) {
+  if (!customerId || !coverageServiceType) return null;
+  const { serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  const roots = await database('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('recurring_parent_id')
+    .whereNull('source_estimate_id')
+    .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled', 'completed', 'skipped', 'no_show'])
+    .where(function recurringRoots() {
+      this.where('is_recurring', true).orWhereNotNull('recurring_pattern');
+    })
+    .orderBy('scheduled_date', 'asc')
+    .select(...SETUP_VISIT_COLUMNS);
+  for (const root of roots || []) {
+    if (!serviceMatchesCoverage(root, coverageServiceType)) continue;
+    const owed = await directRodentSetupForRow(database, root);
+    if (owed > 0) return { anchorId: root.id, amount: owed };
+  }
+  return null;
+}
+
 // Customer 360 / prepay-on-book mint (codex #3591 r36 P1): the modal relays
 // the preview's mintPayload, whose setupFeeAmount is a CLIENT-carried number.
 // Re-derive the obligation from the persisted series anchor (must belong to
@@ -877,6 +904,7 @@ module.exports = {
   recordSetupFeeClaimForInvoice,
   retireDirectSetupClaimForPrepay,
   retirePrepayOnBookSetupClaim,
+  findDirectRodentSetupObligationForCoverage,
   buildSecurePlanContext,
   deriveSecurePlanContext,
   prepaySelectionState,

@@ -4467,6 +4467,29 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Omission is not a waiver (codex #3591 r37 P1): the Customer 360 dialog
+    // names only the coverage service, so derive the setup a LIVE direct
+    // rodent series matching it still owes and refuse (409, with the figure
+    // and anchor) rather than mint a prepaid year without it — the dialog
+    // re-submits with both. A lookup failure refuses retryably.
+    if (!(setupFeeAmount > 0) && !setupScheduledServiceId) {
+      let owed;
+      try {
+        owed = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
+      } catch (lookupErr) {
+        logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
+      }
+      if (owed) {
+        return res.status(409).json({
+          error: `This customer's ${coverageServiceType} series owes a $${owed.amount.toFixed(2)} bait-station setup (non-member) — it must ride the prepay invoice as its own line.`,
+          setupFeeRequired: true,
+          setupFeeAmount: owed.amount,
+          scheduledServiceId: String(owed.anchorId),
+        });
+      }
+    }
 
     const activeTerm = await db('annual_prepay_terms')
       .where({ customer_id: customer.id })
