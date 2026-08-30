@@ -546,6 +546,30 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(out.visit.anyConfirmable).toBe(false);
   });
 
+  test('members that no longer share one stop fail closed — on the page (visitUnknown) and under the confirm locks (CHANGED) (local audit)', async () => {
+    const { visitServicesFor, membersOneStop, membersMatchShown, membershipKeyFor } = appointmentRouter._test;
+    expect(membersOneStop([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '11:00' }])).toBe(true);
+    expect(membersOneStop([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-06', window_start: '10:00', window_end: '11:00' }])).toBe(false); // split dates
+    expect(membersOneStop([{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '13:00', window_end: '14:00' }])).toBe(false); // disconnected windows
+    // page: mixed dates ⇒ visitUnknown (never a grouped payload over a date the customer did not see)
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async () => [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2026-08-05', window_start: '09:00:00', window_end: '10:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, scheduled_date: '2026-08-06', window_start: '09:00:00', window_end: '10:00:00' },
+        ],
+        first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
+      };
+      return api;
+    });
+    expect(await visitServicesFor({ id: 'a', visit_id: 'v1' })).toEqual({ visitUnknown: true });
+    // confirm: the key can match a drifted set only if the page was built from it — the invariant is repeated under the locks anyway
+    const drifted = [{ id: 'a', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '10:00' }, { id: 'b', scheduled_date: '2026-08-05', window_start: '13:00', window_end: '14:00' }];
+    const api = { where: () => api, whereNotIn: () => api, forUpdate: () => api, select: async () => drifted };
+    await expect(membersMatchShown(jest.fn(() => api), { id: 'a', visit_id: 'v1' }, { membershipKey: membershipKeyFor(drifted) })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+  });
+
   test('an unreadable member lookup fails closed: visitUnknown, never an ungrouped payload', async () => {
     const { visitServicesFor } = appointmentRouter._test;
     mockDb.mockImplementation(() => ({ where: () => ({ whereNotIn: () => ({ orderBy: () => ({ select: async () => { throw new Error('db down'); } }) }) }) }));
@@ -554,7 +578,7 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
 
   test('a lost-race grouped confirm re-proves the membership key and reports the aggregate under the stop lock (local audit)', async () => {
     const { groupedAggregateUnderLock, membershipKeyFor } = appointmentRouter._test;
-    const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'b', status: bStatus, scheduled_date: '2026-08-05', window_start: '10:00' }];
+    const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: bStatus, scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00' }];
     const wire = (live) => {
       const api = {
         where: () => api, whereNotIn: () => api, forUpdate: () => api,
@@ -573,7 +597,7 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     trx = wire(members('confirmed'));
     expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: membershipKeyFor(members('confirmed')) })).toEqual({ ok: true, confirmed: true });
     // membership changed (that is what made the CAS miss) ⇒ not ok ⇒ CHANGED
-    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00' }, { id: 'c', status: 'pending', scheduled_date: '2026-08-05', window_start: '10:00' }]);
+    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'c', status: 'pending', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00' }]);
     expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: false, confirmed: null });
   });
 

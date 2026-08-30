@@ -2096,6 +2096,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  windowedMembersConnected,
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,

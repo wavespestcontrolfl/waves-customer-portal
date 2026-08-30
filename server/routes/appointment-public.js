@@ -241,8 +241,18 @@ async function visitServicesFor(svc) {
       .where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .orderBy('window_start', 'asc')
-      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start');
+      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end');
     if (members.length < 2) return {};
+    // The members must still form ONE stop (local codex audit): the unit
+    // mover commits members in separate transactions and a failed detach
+    // can leave rows sharing a visit_id on different dates or disconnected
+    // windows. The page shows one date and one window, so it must not
+    // present — and the confirm must not fan out over — work on a date the
+    // customer never saw. Fail closed.
+    if (!membersOneStop(members)) {
+      logger.warn(`[appointment-public] visit ${svc.visit_id} members no longer share one stop — page fails closed`);
+      return { visitUnknown: true };
+    }
     // The stop's canonical start (service_visits.window_start — the
     // earliest member's) drives the arrival promise: two links to the same
     // physical visit must quote the same window (codex r10).
@@ -285,6 +295,14 @@ async function visitServicesFor(svc) {
   }
 }
 
+// Do these live members still form one stop — one date, windows forming a
+// single connected chain (visit-groups' own connectivity rule)?
+function membersOneStop(members) {
+  const dates = new Set((members || []).map((m) => apptDateStr(m.scheduled_date) || ''));
+  if (dates.size > 1) return false;
+  return require('../services/visit-groups').windowedMembersConnected(members || []);
+}
+
 // Opaque identity of a member SET (sorted ids, hashed): the page carries it
 // and the confirm POST hands it back, so the server can prove the customer
 // saw exactly the services it is about to confirm — a count cannot tell
@@ -313,6 +331,12 @@ async function membersMatchShown(trx, svc, shown) {
   const shownKey = typeof shown?.membershipKey === 'string' && /^[0-9a-f]{16}$/.test(shown.membershipKey) ? shown.membershipKey : null;
   if (membershipKeyFor(members) !== shownKey) {
     throw Object.assign(new Error('visit membership differs from the page'), { code: 'VISIT_STOP_MOVED' });
+  }
+  // Same stop invariant the page applied, repeated under the locks (local
+  // codex audit): members that drifted onto different dates / disconnected
+  // windows since the page loaded must reload, never be confirmed together.
+  if (members.length >= 2 && !membersOneStop(members)) {
+    throw Object.assign(new Error('visit members no longer share one stop'), { code: 'VISIT_STOP_MOVED' });
   }
   return members;
 }
@@ -971,6 +995,7 @@ router._test = {
   groupedAggregateUnderLock,
   membersMatchShown,
   membershipKeyFor,
+  membersOneStop,
   memberServiceLabel,
   confirmedRowStillShown,
 };
