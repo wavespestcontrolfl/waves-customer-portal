@@ -5006,40 +5006,48 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           .forUpdate()
           .first();
         if (freshEstimate) {
+          // The whole validation runs inside a SAVEPOINT (nested knex
+          // transaction): a failed SQL statement inside it would otherwise
+          // leave the OUTER transaction aborted (25P02) and take the term/
+          // payment writes down with it — provenance must stay best-effort.
+          // Row locks acquired inside survive the savepoint and hold
+          // through the claim.
           try {
-            // Engine-drafted rows: lock the linked lead and the CALL row
-            // (same accept/decline contract — staleCallLinkageReason with
-            // lockCallRow) and hold both locks through the claim, so a
-            // concurrent call reprocessing/correction can't begin after an
-            // unlocked read and find the estimate already terminal.
-            let freshData = freshEstimate.estimate_data;
-            if (typeof freshData === 'string') {
-              try { freshData = JSON.parse(freshData); } catch { freshData = null; }
-            }
-            if (freshData?.estimatorEngine?.callLogId) {
-              if (freshData?.lead_id && ['sid', 'stamp'].includes(freshData?.lead_linkage)) {
-                await trx('leads').where({ id: String(freshData.lead_id) }).forUpdate().first('id');
+            validated = await trx.transaction(async (sp) => {
+              // Engine-drafted rows: lock the linked lead and the CALL row
+              // (same accept/decline contract — staleCallLinkageReason with
+              // lockCallRow) and hold both locks through the claim, so a
+              // concurrent call reprocessing/correction can't begin after an
+              // unlocked read and find the estimate already terminal.
+              let freshData = freshEstimate.estimate_data;
+              if (typeof freshData === 'string') {
+                try { freshData = JSON.parse(freshData); } catch { freshData = null; }
               }
-              const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
-              const staleLinkage = await staleCallLinkageReason(trx, freshData, { lockCallRow: true });
-              if (staleLinkage) throw new Error(`stale call linkage: ${staleLinkage}`);
-            }
+              if (freshData?.estimatorEngine?.callLogId) {
+                if (freshData?.lead_id && ['sid', 'stamp'].includes(freshData?.lead_linkage)) {
+                  await sp('leads').where({ id: String(freshData.lead_id) }).forUpdate().first('id');
+                }
+                const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+                const staleLinkage = await staleCallLinkageReason(sp, freshData, { lockCallRow: true });
+                if (staleLinkage) throw new Error(`stale call linkage: ${staleLinkage}`);
+              }
 
-            const linkedTermRows = await trx('annual_prepay_terms')
-              .where({ customer_id: customer.id })
-              .whereNotNull('source_estimate_id')
-              .select('source_estimate_id');
-            const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
-            const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion([freshEstimate], {
-              excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
-              resolveLineCadence: cadenceFromEstimateLine,
-              db: trx,
+              const linkedTermRows = await sp('annual_prepay_terms')
+                .where({ customer_id: customer.id })
+                .whereNotNull('source_estimate_id')
+                .select('source_estimate_id');
+              const EstimateSuggestion = require('../services/annual-prepay-estimate-suggestion');
+              const suggestion = await EstimateSuggestion.buildAnnualPrepayEstimateSuggestion([freshEstimate], {
+                excludeEstimateIds: linkedTermRows.map((row) => row.source_estimate_id),
+                resolveLineCadence: cadenceFromEstimateLine,
+                db: sp,
+              });
+              return !!(suggestion && !suggestion.blocked
+                && String(suggestion.estimateId).toLowerCase() === String(linkEstimateId).toLowerCase()
+                && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
+                && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)
+                && Math.round(Number(suggestion.amount) * 100) === Math.round(Number(amount) * 100));
             });
-            validated = !!(suggestion && !suggestion.blocked
-              && String(suggestion.estimateId).toLowerCase() === String(linkEstimateId).toLowerCase()
-              && EstimateSuggestion.suggestionServiceMatches(suggestion.serviceLabel, coverageServiceType)
-              && EstimateSuggestion.suggestionCoverageMatches(suggestion, coverageCadence, visitCount)
-              && Math.round(Number(suggestion.amount) * 100) === Math.round(Number(amount) * 100));
           } catch (validationErr) {
             logger.warn(`[customers:${customer.id}] annual-prepay provenance validation skipped: ${validationErr.message}`);
             validated = false;
@@ -5174,10 +5182,25 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       termEnd,
     }, true);
 
-    // Lead-pipeline transition for the claimed estimate — the same
-    // best-effort side effect the manual-acceptance path runs (never fails
-    // the recording; the money is already committed).
+    // Post-acceptance terminal hooks for the claimed estimate — the same
+    // best-effort side effects the public/manual acceptance paths run (never
+    // fail the recording; the money is already committed): group follow-up
+    // ownership transfer, property linkage, and the lead-pipeline
+    // transition.
     if (claimedEstimate) {
+      try {
+        await require('./estimate-public').transferGroupFollowupOwnership(claimedEstimate);
+      } catch (hookErr) {
+        logger.warn(`[customers:${customer.id}] annual-prepay follow-up ownership transfer failed for estimate ${claimedEstimate.id}: ${hookErr.message}`);
+      }
+      try {
+        await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
+          estimateId: claimedEstimate.id,
+          customerId: claimedEstimate.customer_id || customer.id,
+        });
+      } catch (hookErr) {
+        logger.warn(`[customers:${customer.id}] annual-prepay property linkage failed for estimate ${claimedEstimate.id}: ${hookErr.message}`);
+      }
       try {
         await require('../services/lead-estimate-link').markLinkedLeadEstimateAccepted({
           estimateId: claimedEstimate.id,
