@@ -587,91 +587,15 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
     }
   }
 
-  // Per-application lane wind-down — AFTER the sweep, as ONE atomic
-  // conditional UPDATE so no service transition can race it: the fields
-  // clear only if, at the instant of the update, the account has no
-  // in-progress visit and no completed-but-uninvoiced application (billing
-  // recovery prices those from these fields; same straggler-completion rail
-  // as customer-offboarding). Unsettled work keeps the price; the account
-  // is already flagged for review by the in_progress/unresolved errors.
-  if (churned && gateEnvValue('GATE_CANCEL_FLOW_V2')) {
-    try {
-      let priorFee = null;
-      const cleared = await db.transaction(async (trx) => {
-        // LOCK ORDER matches every booking writer that locks the customer
-        // row (customers FIRST, then scheduled_services — migration 41
-        // uses the same order): a booking holding the customer row while
-        // waiting on its visit insert would deadlock against the reverse
-        // order.
-        const lockedRow = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'per_application_fee');
-        priorFee = lockedRow ? lockedRow.per_application_fee : null;
-        // Then serialize against service INSERTS: the correlated-subquery
-        // UPDATE alone snapshots at READ COMMITTED and a booking committing
-        // after that snapshot could strand a new visit priceless. SHARE ROW
-        // EXCLUSIVE conflicts with every writer's ROW EXCLUSIVE lock; held
-        // for one UPDATE (~ms) on a rare path. Lock/timeout errors land in
-        // the catch below → per_application_lane review flag, never a
-        // stuck cancel.
-        await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
-        return trx('customers')
-        .where({ id: customerId, billing_mode: 'per_application' })
-        .whereNotExists(function unsettledWork() {
-          this.select(1).from('scheduled_services as s')
-            .whereRaw('s.customer_id = customers.id')
-            .where(function unsettled() {
-              // Anything not fully settled blocks the clear: a cancellable
-              // visit the sweep failed to flip (transitionJobStatus error →
-              // manual review), live in-progress work, or a completed
-              // application not yet invoiced. Only 'cancelled' rows and
-              // invoiced completions are settled.
-              this.whereIn('s.status', ['pending', 'confirmed', 'rescheduled', 'scheduled', 'en_route', 'on_site'])
-                .orWhereIn('s.track_state', LIVE_TRACK_STATES)
-                .orWhere(function completedUninvoiced() {
-                  this.where('s.status', 'completed')
-                    .whereNotExists(function invoiced() {
-                      this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
-                    });
-                });
-            });
-        })
-        .update({ billing_mode: null, per_application_fee: null, updated_at: new Date() });
-      });
-      if (cleared === 0) {
-        logger.info(`[cancellation-processor] per-application lane left intact for ${customerId} (not per-application, or unsettled work keeps the price)`);
-      } else {
-        // COMPENSATION for the writers the locks cannot see: a booking path
-        // that never locks the customer row can queue behind the table lock
-        // and insert right after this commit. Re-check now — if unsettled
-        // work appeared, RESTORE the lane fields from the pre-clear
-        // snapshot (the account is churned, nothing else rewrites them) and
-        // flag the account for office review.
-        const lateWork = await db('scheduled_services as s')
-          .where('s.customer_id', customerId)
-          .where(function unsettled() {
-            this.whereIn('s.status', ['pending', 'confirmed', 'rescheduled', 'scheduled', 'en_route', 'on_site'])
-              .orWhereIn('s.track_state', LIVE_TRACK_STATES)
-              .orWhere(function completedUninvoiced() {
-                this.where('s.status', 'completed')
-                  .whereNotExists(function invoiced() {
-                    this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
-                  });
-              });
-          })
-          .first('s.id');
-        if (lateWork) {
-          await db('customers')
-            .where({ id: customerId })
-            .whereNull('billing_mode')
-            .update({ billing_mode: 'per_application', per_application_fee: priorFee, updated_at: new Date() });
-          errors.push('per_application_lane');
-          logger.warn(`[cancellation-processor] per-application lane RESTORED for ${customerId} — a booking raced the wind-down; office review required`);
-        }
-      }
-    } catch (laneErr) {
-      errors.push('per_application_lane');
-      logger.error(`[cancellation-processor] per-application lane wind-down failed for ${customerId}: ${laneErr.message}`);
-    }
-  }
+  // Per-application lane fields (billing_mode + per_application_fee) are
+  // deliberately RETAINED at churn (codex rounds 14→34 converged here):
+  // they are the price authority for any straggler completion or a
+  // deliberately rebooked visit on the churned account, and no clear can
+  // be made race-free without every booking writer joining a shared lock
+  // protocol. NULL rate + autopay off already stop all automatic billing;
+  // the residue is visible in audit-churned-accounts-live-state.js and the
+  // office clears the lane after quiescence (ops/agents/
+  // churn-residue-backfill.js does it with guards for the backlog).
 
   // Audit trail on the customer timeline — only the first time we churn, and
   // written AFTER the sweep so the note carries the final visit count.

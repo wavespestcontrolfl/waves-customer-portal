@@ -446,8 +446,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // the post-processor call below only promotes open→committed.
       {
         const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
+        // Outcome honesty: only an EXPLICIT claim matching the server card
+        // counts, and never 'accepted' on this path — the commit performs no
+        // card action, so an accepted-offer claim would record money state
+        // that does not exist (acceptance ships atomically with its action
+        // in C1). Omission records 'none', never an inferred impression.
         const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
-          ? (value.resolutionOutcome || 'shown')
+          && ['shown', 'declined'].includes(value.resolutionOutcome)
+          ? value.resolutionOutcome
           : null;
         await recordCancellationCase({
           customerId: req.customer.id,
@@ -522,8 +528,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // — the resolution is the server's, recomputed before churn.
       if (caseOpened || CancellationResolution.cancelFlowV2Enabled()) {
         const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
+        // Same outcome rule as the pre-write above: explicit, matching,
+        // never 'accepted' on this path.
         const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
-          ? (value.resolutionOutcome || 'shown')
+          && ['shown', 'declined'].includes(value.resolutionOutcome)
+          ? value.resolutionOutcome
           : null;
         await recordCancellationCase({
           customerId: req.customer.id,
