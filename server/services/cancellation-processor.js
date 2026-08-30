@@ -596,7 +596,17 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // is already flagged for review by the in_progress/unresolved errors.
   if (churned && gateEnvValue('GATE_CANCEL_FLOW_V2')) {
     try {
-      const cleared = await db('customers')
+      const cleared = await db.transaction(async (trx) => {
+        // Serialize against service INSERTS the same way migration 41 does:
+        // the correlated-subquery UPDATE alone snapshots at READ COMMITTED
+        // and a booking committing after that snapshot could strand a new
+        // visit priceless. SHARE ROW EXCLUSIVE conflicts with every
+        // writer's ROW EXCLUSIVE lock; held for one UPDATE (~ms) on a rare
+        // path (a handful of cancels a week). Lock/timeout errors land in
+        // the catch below → per_application_lane review flag, never a
+        // stuck cancel.
+        await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
+        return trx('customers')
         .where({ id: customerId, billing_mode: 'per_application' })
         .whereNotExists(function unsettledWork() {
           this.select(1).from('scheduled_services as s')
@@ -618,6 +628,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
             });
         })
         .update({ billing_mode: null, per_application_fee: null, updated_at: new Date() });
+      });
       if (cleared === 0) {
         logger.info(`[cancellation-processor] per-application lane left intact for ${customerId} (not per-application, or unsettled work keeps the price)`);
       }

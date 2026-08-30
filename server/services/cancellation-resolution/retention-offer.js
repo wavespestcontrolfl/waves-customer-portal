@@ -80,8 +80,13 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
  * the same cancellation case returns the existing row. Caller passes a trx
  * when the grant is part of a larger commit.
  */
-async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }, dbh = db) {
+async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, reasonCode }, dbh = db) {
   if (!customerId || !familyKey) throw new Error('grantRetentionOffer requires customerId and familyKey');
+  if (!OFFER_FAMILIES.includes(familyKey)) {
+    const err = new Error('retention_offer_family_excluded');
+    err.code = 'retention_offer_family_excluded';
+    throw err;
+  }
   const run = async (trx) => {
     // Per-customer advisory lock: two concurrent cancel commits for the same
     // customer serialize here, so the once-per-18-months rule holds even
@@ -90,6 +95,19 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }
     if (cancellationCaseId) {
       const existing = await trx('retention_offers').where({ cancellation_case_id: cancellationCaseId }).first();
       if (existing) return existing;
+    }
+    // Re-derive FULL eligibility from fresh facts under the advisory lock —
+    // the preview verdict is stale by commit time and callers are never
+    // trusted with money (tenure, paid visits, balance, complaints,
+    // callbacks, lane, family can all have changed).
+    const { loadCancellationFacts } = require('./facts');
+    const facts = await loadCancellationFacts(customerId);
+    const verdict = facts ? offerEligibility(facts, { reasonCode, families: [familyKey] }) : { eligible: false, blockers: ['no_facts'] };
+    if (!verdict.eligible || verdict.familyKey !== familyKey) {
+      const err = new Error('retention_offer_ineligible');
+      err.code = 'retention_offer_ineligible';
+      err.blockers = verdict.blockers;
+      throw err;
     }
     const now = new Date();
     const floor = cooldownFloor(now);
