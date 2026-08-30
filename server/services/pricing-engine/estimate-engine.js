@@ -1503,7 +1503,9 @@ function generateEstimate(input) {
     );
     (result.manualReviewReasons || []).forEach(addManualReviewReason);
     (result.warnings || []).forEach(addRoutingWarning);
-    lineItems.push(stampTurfReview(result, !dethatchingOptions.lawnSqFt));
+    // Exemption requires a POSITIVE explicit area — a negative or zero entry
+    // is not an exact measurement (codex P1: negative was truthy-exempt).
+    lineItems.push(stampTurfReview(result, !(Number(dethatchingOptions.lawnSqFt) > 0)));
   }
   if (services.plugging && !useCommercialManualQuote(services.plugging, 'lawn_care')) {
     const result = pricePlugging(
@@ -1514,7 +1516,7 @@ function generateEstimate(input) {
         afterHours: services.plugging.afterHours || false,
       }
     );
-    lineItems.push(stampTurfReview(result, !services.plugging.area));
+    lineItems.push(stampTurfReview(result, !(Number(services.plugging.area) > 0)));
   }
   // Commercial bypass only with a POSITIVE explicit point count (pre-audit of
   // the codex #3594 r4 pattern): priceFoamDrill defaults to 5 points when the

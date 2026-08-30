@@ -934,30 +934,35 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       },
       services: {},
     };
+    // Only accept non-empty numeric values. Number(null)/Number('') are 0
+    // (finite), so a missing measuredTurfSf would otherwise coerce to an
+    // authoritative measured turf of 0 and suppress the estimatedTurfSf.
+    const num = (v) => {
+      if (v === null || v === undefined || v === '') return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    // Turf figures + PROVENANCE forward for EVERY property (residential was
+    // lot-derived-only until the low-confidence review gate landed — GH codex
+    // P1 on #3622: with the gate, a residential lawn key advertised as
+    // instant would otherwise always price from the LOW lot fallback and
+    // park instead of quoting). The engine grades by provenance: a vision
+    // estimate quotes instantly at MEDIUM; a county-prior or turf-less
+    // lookup grades LOW and routes to review — the audit's intent.
+    // Provenance rides with the figure (codex #3376 final head): a
+    // county-prior or parcel-capped lookup profile stripped of these
+    // fields would re-grade as a plain vision measurement downstream and
+    // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
+    // number — the exact over-claim the source mapping exists to prevent.
+    engineInput.measuredTurfSf = num(ep.measuredTurfSf);
+    engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
+    if (ep.turfSource) engineInput.turfSource = ep.turfSource;
+    if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
     if (commercialDetected) {
-      // The commercial auto-pricers price directly from measured turf / bed /
-      // tree dimensions. Pass the property-lookup measurements through so the
-      // profile doesn't fall back to lot-derived estimates and mis-quote (then
-      // persist/book/invoice the wrong commercial price). Residential public
-      // quotes intentionally keep their lot-derived turf basis, so this is
-      // commercial-only and doesn't shift any existing residential price.
-      // Only accept non-empty numeric values. Number(null)/Number('') are 0
-      // (finite), so a missing measuredTurfSf would otherwise coerce to an
-      // authoritative measured turf of 0 and suppress the estimatedTurfSf.
-      const num = (v) => {
-        if (v === null || v === undefined || v === '') return undefined;
-        const n = Number(v);
-        return Number.isFinite(n) ? n : undefined;
-      };
-      engineInput.measuredTurfSf = num(ep.measuredTurfSf);
-      engineInput.estimatedTurfSf = num(ep.estimatedTurfSf);
-      // Turf PROVENANCE rides with the figure (codex #3376 final head): a
-      // county-prior or parcel-capped lookup profile stripped of these
-      // fields would re-grade as a plain vision measurement downstream and
-      // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
-      // number — the exact over-claim the source mapping exists to prevent.
-      if (ep.turfSource) engineInput.turfSource = ep.turfSource;
-      if (ep.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+      // The commercial auto-pricers additionally price directly from bed /
+      // tree / impervious dimensions. Pass those through so the profile
+      // doesn't fall back to lot-derived estimates and mis-quote (then
+      // persist/book/invoice the wrong commercial price).
       engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
       engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
       engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);

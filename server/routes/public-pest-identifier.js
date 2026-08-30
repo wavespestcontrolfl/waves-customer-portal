@@ -133,10 +133,17 @@ async function buildPestPricingSnapshot(serviceKey) {
     const { syncConstantsFromDB, generateEstimate } = require('../services/pricing-engine');
     await syncConstantsFromDB(db);
     // Typical-home basis: the funnel has no property lookup, so price the
-    // reference profile and label it honestly; the quote step re-prices exactly.
-    const estimate = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, services: config.engineServices });
+    // reference profile and label it honestly; the quote step re-prices
+    // exactly. The explicit lawnSqFt is the reference turf figure (the
+    // engine's 4,500 sq ft anchor) — a REFERENCE profile is not a guessed
+    // customer property, so it must not trip the low-confidence turf review
+    // gate that parks lot-derived quotes (GH codex P1 on #3622).
+    const estimate = generateEstimate({ homeSqFt: 2000, lotSqFt: 8000, lawnSqFt: 4500, services: config.engineServices });
     const line = (estimate.lineItems || [])[0];
     if (!line) return null;
+    // Belt-and-suspenders: never publish a price the engine marked
+    // review-required, whatever the reason.
+    if (line.requiresCustomQuote === true || line.requiresManualReview === true || line.quoteRequired === true) return null;
     const monthly = Number.isFinite(Number(line.monthly)) ? Number(line.monthly) : null;
     const annual = Number.isFinite(Number(line.annual)) ? Number(line.annual) : null;
     // One-time packages carry total (priceFlea) or price (priceOneTimeLawn)
