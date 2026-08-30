@@ -23,6 +23,7 @@ const mockCancelPendingAction = jest.fn();
 const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
+const mockResolveTechnician = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -46,6 +47,7 @@ jest.mock('../config/models', () => ({ FLAGSHIP: 'test-model' }));
 jest.mock('../services/intelligence-bar/tools', () => ({
   TOOLS: [],
   executeTool: (...args) => mockExecuteTool(...args),
+  resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -289,6 +291,25 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     const firstUserTurn = mockMessagesCreate.mock.calls[0][0].messages.at(-1);
     expect(JSON.stringify(firstUserTurn.content)).toContain('CURRENT PAGE STATE');
     expect(JSON.stringify(firstUserTurn.content)).toContain('open_jobs');
+  });
+
+  test('gate is FAIL-CLOSED: env unset still proposes instead of executing (owner ruling 2026-08-30)', async () => {
+    // An unset/missing env var must behave as gate ON — only the explicit
+    // 'false' kill switch restores legacy direct execution.
+    delete process.env.GATE_IB_UI_CONFIRM;
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'update_customer', input: { customer_id: 'c1', updates: { city: 'Venice' } } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { status, body } = await postQuery(baseUrl, { prompt: 'move them to Venice', context: 'customers' });
+      expect(status).toBe(200);
+      // Legacy bare write: never executed from the loop under the gate.
+      expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      expect(body.pendingActions).toHaveLength(1);
+    });
   });
 
   test('gate off: legacy behavior unchanged, no pendingActions field', async () => {
@@ -665,6 +686,51 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.recipient).toBe('Testa Alpha (…1234)');
+    });
+  });
+
+  test('create_appointment by tech name: pinned technician_id in stored params, tech NAME on the card', async () => {
+    mockResolveTechnician.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_name: 'testd' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it with testd', context: 'schedule' });
+      expect(mockResolveTechnician).toHaveBeenCalledWith('testd');
+
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.technician_id).toBe('tech-uuid-9');
+      expect(stored.params.technician_name).toBe('Testd Tech');
+
+      expect(body.pendingActions).toHaveLength(1);
+      // The card names the tech; the opaque uuid stays off the display.
+      expect(body.pendingActions[0].params.technician).toBe('Testd Tech');
+      expect(body.pendingActions[0].params.technician_id).toBeUndefined();
+    });
+  });
+
+  test('create_appointment ambiguous tech name: no pending action, ambiguity error to the model', async () => {
+    mockResolveTechnician.mockResolvedValue({
+      error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
+      ambiguous: true,
+      candidates: [{ id: 't1', name: 'Testd A' }, { id: 't2', name: 'Testd B' }],
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_name: 'testd' } }],
+      [{ type: 'text', text: 'Which one?' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it with testd', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult.ambiguous).toBe(true);
+      expect(toolResult.candidates).toHaveLength(2);
     });
   });
 

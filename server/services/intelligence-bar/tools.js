@@ -267,10 +267,23 @@ time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
         scheduled_date: { type: 'string', description: 'YYYY-MM-DD' },
         service_type: { type: 'string' },
         technician_name: { type: 'string', description: 'Optional tech name' },
+        technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
+    },
+  },
+  {
+    name: 'get_recent_completions',
+    description: `The most recently completed visits, newest first — resolves "the customer we just finished" and "what did we complete today". Returns customer, service, technician, and completion time.
+Use for: "build the report for the customer we just finished", "who did we finish today?", "what was the last completed stop?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max results (default 5, max 20)' },
+        days: { type: 'number', description: 'Look back this many days (default 2, max 30)' },
+      },
     },
   },
   {
@@ -333,6 +346,7 @@ async function executeTool(toolName, input) {
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'create_appointment': return await createAppointment(input);
+      case 'get_recent_completions': return await getRecentCompletions(input);
       case 'reschedule_appointment': return await rescheduleAppointment(input);
       case 'cancel_appointment': return await cancelAppointment(input);
       case 'draft_sms': return await draftSms(input);
@@ -1623,6 +1637,61 @@ function parseTimeWindowStart(timeWindow) {
 // non-positive span invisible to the overlap predicates and nonsense to the
 // elapsed guard.
 
+// Recency resolver for "the customer we just finished": completed visits,
+// newest first. Ordering coalesces to updated_at because the tracker's
+// completed_at can carry a backdated service DAY (see admin-dispatch
+// BACKFILL_RECORD_END_FIELDS notes) and older rows predate the column —
+// "most recently closed out" is the honest recency signal either way.
+async function getRecentCompletions(input = {}) {
+  const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 20);
+  const days = Math.min(Math.max(Number(input.days) || 2, 1), 30);
+  const rows = await db('scheduled_services as ss')
+    .join('customers as c', 'c.id', 'ss.customer_id')
+    .leftJoin('technicians as t', 't.id', 'ss.technician_id')
+    .where('ss.status', 'completed')
+    .whereRaw("COALESCE(ss.completed_at, ss.updated_at) >= NOW() - (? || ' days')::interval", [days])
+    .orderByRaw('COALESCE(ss.completed_at, ss.updated_at) DESC')
+    .limit(limit)
+    .select(
+      'ss.id', 'ss.customer_id', 'c.first_name', 'c.last_name',
+      'ss.service_type', 'ss.scheduled_date', 'ss.completed_at', 'ss.updated_at',
+      't.name as technician_name',
+    );
+  return {
+    completions: rows.map(r => ({
+      scheduled_service_id: r.id,
+      customer_id: r.customer_id,
+      customer: `${r.first_name} ${r.last_name || ''}`.trim(),
+      service_type: r.service_type,
+      scheduled_date: r.scheduled_date,
+      completed_at: r.completed_at || r.updated_at,
+      technician: r.technician_name || null,
+    })),
+    total: rows.length,
+    days_searched: days,
+  };
+}
+
+// A technician name match must be UNIQUE among active technicians before an
+// appointment binds to it (mirrors comms-tools resolveCustomer). Returns a
+// row, null (no match), or { error, ambiguous, candidates }. The error
+// string is persisted in tool-health telemetry, so it carries no typed name;
+// the candidates array holds the detail and only reaches the operator.
+async function resolveTechnicianByName(name) {
+  const matches = await db('technicians')
+    .whereILike('name', `%${name}%`)
+    .where('active', true)
+    .limit(2);
+  if (matches.length > 1) {
+    return {
+      error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
+      ambiguous: true,
+      candidates: matches.map(t => ({ id: t.id, name: t.name })),
+    };
+  }
+  return matches[0] || null;
+}
+
 async function createAppointment(input) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -1658,11 +1727,21 @@ async function createAppointment(input) {
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
 
-  // Find technician if specified
+  // Resolve the technician BEFORE any write. The old `.first()` on an
+  // unordered ILIKE silently picked an arbitrary tech on multiple matches,
+  // and a no-match silently created the visit UNASSIGNED — both surprises
+  // the operator never approved. A pinned technician_id (set at proposal
+  // time so the confirmation card names the tech) resolves by immutable id.
   let technician_id = null;
-  if (technician_name) {
-    const tech = await db('technicians').whereILike('name', `%${technician_name}%`).first();
-    if (tech) technician_id = tech.id;
+  if (input.technician_id) {
+    const tech = await db('technicians').where('id', input.technician_id).first();
+    if (!tech) return { error: 'Technician not found' };
+    technician_id = tech.id;
+  } else if (technician_name) {
+    const tech = await resolveTechnicianByName(technician_name);
+    if (!tech) return { error: 'No technician matches that name — nothing was created. Retry with a corrected name, a technician_id, or omit the technician to leave the visit unassigned.' };
+    if (tech.error) return tech;
+    technician_id = tech.id;
   }
 
   // A today target whose window already elapsed in ET is unreachable — the
@@ -2402,4 +2481,4 @@ async function searchFieldIntelligence(input) {
   };
 }
 
-module.exports = { TOOLS, executeTool };
+module.exports = { TOOLS, executeTool, resolveTechnicianByName };

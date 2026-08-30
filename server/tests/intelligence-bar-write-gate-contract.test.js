@@ -192,6 +192,7 @@ const READ_ONLY = [
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
+  'get_recent_completions',
   'find_schedule_gaps', 'get_day_summary', 'get_zone_density', 'find_available_slots',
   'cancel_and_reschedule_far_out',
   'get_kpi_snapshot', 'compare_periods', 'get_mrr_trend', 'get_revenue_breakdown',

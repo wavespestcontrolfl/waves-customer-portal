@@ -16,7 +16,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { TOOLS, executeTool } = require('../services/intelligence-bar/tools');
+const { TOOLS, executeTool, resolveTechnicianByName } = require('../services/intelligence-bar/tools');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -406,10 +406,14 @@ function withCacheBreakpoint(messages) {
   return [...messages.slice(0, -1), { ...last, content }];
 }
 
-// UI-backed write confirmation (issue #1568). Dark until the Railway env
-// flips it on; read per-request so it can be toggled without a restart.
+// UI-backed write confirmation (issue #1568). FAIL-CLOSED (owner ruling
+// 2026-08-30): the gate is ON unless GATE_IB_UI_CONFIRM is explicitly
+// 'false' — an unset/typo'd env var must never silently let the legacy bare
+// writes (SMS/email sends included) execute straight from the model loop.
+// 'false' is the kill switch; read per-request so it can be toggled without
+// a restart.
 function uiConfirmEnabled() {
-  return process.env.GATE_IB_UI_CONFIRM === 'true';
+  return process.env.GATE_IB_UI_CONFIRM !== 'false';
 }
 
 async function agentEstimateEnabled(req) {
@@ -483,6 +487,12 @@ function confirmationDisplayParams(toolName, params, preview) {
     // identity resolved at proposal time, not a raw partial name that
     // /confirm-action would re-resolve to somebody else.
     return { ...params, recipient: `${preview.pinned_recipient.name} (…${preview.pinned_recipient.phone_last4 || '????'})` };
+  }
+  if (toolName === 'create_appointment' && preview?.pinned_technician) {
+    // Show the pinned tech by NAME (the id is opaque on a card) — the visit
+    // binds to exactly this technician at commit.
+    const { technician_id, technician_name, ...rest } = params;
+    return { ...rest, technician: preview.pinned_technician.name };
   }
   if (toolName === 'update_lead_status' && preview?.pinned_lead) {
     return { ...params, lead: `${preview.pinned_lead.name} — ${preview.pinned_lead.current_status} → ${params.new_status}` };
@@ -603,6 +613,19 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: (customer.phone || '').replace(/\D/g, '').slice(-4) || null,
         },
       };
+    }
+    if (toolUse.name === 'create_appointment' && params.technician_name && !params.technician_id) {
+      // Pin the technician like send_sms pins the recipient: name→id
+      // resolution happens NOW, so the card names the exact tech the visit
+      // binds to and /confirm-action can never re-resolve "Adam" to a
+      // different row than the operator approved. Ambiguity (or no match)
+      // fails the proposal instead of silently mis-assigning.
+      const tech = await resolveTechnicianByName(params.technician_name);
+      if (!tech) return { failed: true, modelResult: { error: 'No technician matches that name — nothing was proposed. Retry with a corrected name or omit the technician.' } };
+      if (tech.error) return { failed: true, modelResult: tech };
+      params.technician_id = tech.id;
+      params.technician_name = tech.name;
+      preview = { ...preview, pinned_technician: { id: tech.id, name: tech.name } };
     }
     if (toolUse.name === 'update_lead_status' && !params.lead_id && params.lead_name) {
       const lead = await resolveLeadForUpdate(params);

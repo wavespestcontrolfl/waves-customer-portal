@@ -53,7 +53,27 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     setErrorById({});
   }, [actions]);
 
+  // Tick for the expiry countdown — the server enforces the 10-minute TTL
+  // on the claim, so an un-refreshed card must go visibly stale instead of
+  // offering a Confirm that can only 409.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!actions || actions.length === 0) return undefined;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [actions]);
+
   if (!actions || actions.length === 0) return null;
+
+  const msLeft = (action) => {
+    if (!action.expiresAt) return null;
+    const at = new Date(action.expiresAt).getTime();
+    return Number.isFinite(at) ? at - now : null;
+  };
+  const countdownLabel = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
 
   const setStatus = (id, status, error) => {
     setStatusById((prev) => ({ ...prev, [id]: status }));
@@ -107,6 +127,8 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
         const status = statusById[action.id];
         const settled = status === "confirmed" || status === "cancelled" || status === "failed";
         const busy = status === "confirming" || status === "cancelling";
+        const remaining = msLeft(action);
+        const expired = !settled && !busy && remaining !== null && remaining <= 0;
 
         return (
           <div
@@ -128,6 +150,15 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               {status === "confirmed" ? "✓ " : ""}Awaiting your confirmation: {action.tool}
             </div>
 
+            {action.summary && (
+              <div
+                style={dark ? { fontSize: 14, color: D.text, marginBottom: 8, wordBreak: "break-word" } : undefined}
+                className={dark ? undefined : "text-[14px] text-zinc-700 mb-2 break-words"}
+              >
+                {action.summary}
+              </div>
+            )}
+
             <div
               style={dark ? { fontSize: 14, color: D.muted, marginBottom: 10 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-500 mb-2.5"}
@@ -148,7 +179,23 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               </div>
             )}
 
-            {!settled ? (
+            {expired ? (
+              <div
+                style={dark ? { fontSize: 14, fontWeight: 500, color: D.amber } : undefined}
+                className={dark ? undefined : "text-[14px] font-medium text-zinc-500"}
+              >
+                Expired — this proposal is no longer confirmable. Ask again to re-propose it.
+              </div>
+            ) : !settled ? (
+              <div style={dark ? { display: "flex", flexDirection: "column", gap: 8 } : undefined} className={dark ? undefined : "flex flex-col gap-2"}>
+                {remaining !== null && (
+                  <div
+                    style={dark ? { fontSize: 14, color: D.muted } : undefined}
+                    className={dark ? undefined : "text-[14px] text-zinc-500"}
+                  >
+                    {countdownLabel(remaining)}
+                  </div>
+                )}
               <div style={dark ? { display: "flex", gap: 8 } : undefined} className={dark ? undefined : "flex gap-2"}>
                 <button
                   type="button"
@@ -176,6 +223,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                 >
                   {status === "cancelling" ? statusLabel.cancelling : "Cancel"}
                 </button>
+              </div>
               </div>
             ) : (
               <div
