@@ -26,9 +26,31 @@ async function getRecap(scheduledServiceId, knex = db) {
   }
 }
 
+// Callback recaps are retired under the re-service copy gate (codex P1
+// #3631, extending the payload-side block): the public report/video paths
+// hide and 404 them, so approving or SENDING one would text the customer a
+// link to a player that no longer exists. Enforced at enqueue, approval,
+// delivery, and the staff card. A LOOKUP ERROR retires (fail closed): the
+// only cost is a blocked, retryable staff action — never a dead-link SMS.
+// No completed record = nothing deliverable either way → not retired.
+async function callbackRecapRetired(scheduledServiceId, knex = db) {
+  const { reserviceReportCopyGateOn } = require('./reservice-report');
+  if (!reserviceReportCopyGateOn()) return false;
+  try {
+    const rec = await knex('service_records')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .orderBy('created_at', 'desc')
+      .first('is_callback');
+    return Boolean(rec && rec.is_callback === true);
+  } catch { return true; }
+}
+
 // Queue (or re-queue) a recap render. force=true regenerates a ready/failed one.
 async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {}) {
   if (!scheduledServiceId) throw new Error('scheduledServiceId is required');
+  if (await callbackRecapRetired(scheduledServiceId, knex)) {
+    return { ok: false, retired: true };
+  }
   const now = new Date();
   try {
     const existing = await knex('service_recaps').where({ scheduled_service_id: scheduledServiceId }).first();
@@ -59,6 +81,9 @@ async function enqueueRecap(scheduledServiceId, { force = false, knex = db } = {
 }
 
 async function approveRecap(scheduledServiceId, { approvedBy = null, knex = db } = {}) {
+  if (await callbackRecapRetired(scheduledServiceId, knex)) {
+    return { ok: false, error: 'callback_recap_retired' };
+  }
   const recap = await getRecap(scheduledServiceId, knex);
   if (!recap) return { ok: false, error: 'not_found' };
   // Already approved but the SMS never went out → idempotent OK so the caller can
@@ -161,6 +186,6 @@ async function processDueRecaps({ now = new Date(), limit = CLAIM_LIMIT } = {}, 
 
 module.exports = {
   CLAIM_LIMIT, DEFAULT_MAX_ATTEMPTS, RETRY_DELAYS_MINUTES,
-  getRecap, enqueueRecap, approveRecap,
+  getRecap, enqueueRecap, approveRecap, callbackRecapRetired,
   claimDueRecaps, recoverStaleRecaps, processRecap, processDueRecaps,
 };

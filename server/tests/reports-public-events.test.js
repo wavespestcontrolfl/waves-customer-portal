@@ -533,7 +533,11 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
   });
 
   test('composition is gated on it, not on live mode alone', () => {
-    expect(src).toMatch(/if \(mode === 'live' && composeOffers\)/);
+    expect(src).toMatch(/if \(mode === 'live' && composeOffers && !callbackSuppressesOffers\)/);
+  });
+
+  test('callback reports suppress both offer cards under the re-service gate (owner 2026-08-30)', () => {
+    expect(src).toMatch(/callbackSuppressesOffers = reserviceReportCopyGateOn\(\) && data\.isCallback === true/);
   });
 
   test('exactly one call site opts in, and it is the /data render', () => {

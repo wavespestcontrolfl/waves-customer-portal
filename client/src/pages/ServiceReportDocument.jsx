@@ -466,7 +466,15 @@ export default function ServiceReportDocument({ data, token }) {
   // script or fetch anything, so no markup from the payload is ever injected
   // into this document. Inline over the /map.svg endpoint: no network fetch
   // to race the PDF capture.
-  const schematicSvg = data.treatmentMap?.schematic?.svg || data.mapSvg || null;
+  // Callback PDFs follow the report's "traced map or nothing" rule (codex
+  // P1 #3631): with the re-service gate on, a callback with no saved trace
+  // prints NO generated schematic — the live report already suppresses the
+  // invented spatial story, and Download PDF must not contradict it. A real
+  // traced map still prints (tracedMapUrl wins below either way).
+  const callbackSchematicSuppressed = data.isCallback === true && data.reserviceGateOn === true;
+  const schematicSvg = callbackSchematicSuppressed
+    ? null
+    : (data.treatmentMap?.schematic?.svg || data.mapSvg || null);
   const schematicSrc = schematicSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(schematicSvg)}`
     : null;
