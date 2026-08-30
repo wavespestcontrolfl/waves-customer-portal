@@ -266,7 +266,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     });
     // Proposal itemization is authoritative — the stale engine line is gone.
     expect(audit.lines.some((l) => /stale/i.test(l.label))).toBe(false);
-    expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 1800, visitsPerYear: 6 });
+    // Program family decides the COGS key — never the marketing label.
+    expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ serviceKey: 'lawn_care', cadence: 'recurring', price: 1800, visitsPerYear: 6 });
     // Quarterly building line annualizes by its FREQUENCY (200 × 4), not ×12.
     expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800 });
     expect(audit.lines.find((l) => /door sweep/i.test(l.label))).toMatchObject({ cadence: 'one_time', price: 450 });
@@ -298,11 +299,15 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       id: 'est-hy', status: 'sent', monthly_total: '30.00', annual_total: '360.00', onetime_total: '900.00',
       estimate_data: {
         engineResult: {
-          lineItems: [{ service: 'termite_bait', name: 'Termite Bait', monthly: 30, annual: 360, installation: { price: 900 } }],
+          lineItems: [{ service: 'termite_bait', name: 'Termite Bait', monthly: 30, annual: 360, installation: { price: 900, totalCost: 320 } }],
         },
       },
     });
-    expect(hybrid.lines.find((l) => l.serviceKey === 'termite_bait_installation')).toMatchObject({ cadence: 'one_time', price: 900 });
+    const install = hybrid.lines.find((l) => l.serviceKey === 'termite_bait_installation');
+    expect(install).toMatchObject({ cadence: 'one_time', price: 900 });
+    // Persisted installation cost is authoritative — no phantom 100% margin.
+    expect(install.cogs.estimatedCost).toBe(320);
+    expect(install.margin).toBeCloseTo((900 - 320) / 900, 2);
   });
 
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {

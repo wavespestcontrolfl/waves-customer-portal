@@ -636,6 +636,15 @@ function normalizeEngineLineItems(result) {
     // revenue (GH codex P1).
     const installPrice = num(item.installation?.price);
     if (Number.isFinite(installPrice) && installPrice > 0) {
+      // The engine persists the installation's OWN costs — use them
+      // instead of an unmapped zero-COGS result that overstates profit
+      // (GH codex; explicitCogsCost is honored by the audit loop).
+      const installCost = pickNum(
+        item.installation?.totalCost,
+        Number.isFinite(num(item.installation?.materialCost)) || Number.isFinite(num(item.installation?.laborCost))
+          ? (num(item.installation?.materialCost) || 0) + (num(item.installation?.laborCost) || 0)
+          : undefined,
+      );
       lines.push({
         serviceKey: `${item.service || serviceKey}_installation`,
         label: `${item.name || serviceKey} Installation`,
@@ -645,6 +654,7 @@ function normalizeEngineLineItems(result) {
         priceBeforeDiscount: money(installPrice),
         discount: 0,
         priceSource: 'saved_estimate.engineResult.lineItems.installation',
+        ...(Number.isFinite(installCost) ? { explicitCogsCost: money(installCost) } : { skipCogs: true }),
       });
     }
     // Synthetic adjustment rows (bundle discounts, credits) are not
@@ -689,7 +699,7 @@ function normalizeProposalLines(estimate) {
   const push = (name, cadence, amount, extra = {}) => {
     const amt = numOrNaN(amount);
     if (!Number.isFinite(amt)) return;
-    const serviceKey = keyFromName(name);
+    const serviceKey = extra.serviceKey || keyFromName(name);
     lines.push({
       serviceKey,
       label: name || serviceKey,
@@ -712,8 +722,20 @@ function normalizeProposalLines(estimate) {
       }
     }
   }
+  // Canonical program families → COGS keys: the operator-editable label is
+  // marketing text ("P", brand names) and must not decide the mapping
+  // (codex pre-push P1).
+  const PROGRAM_FAMILY_TO_KEY = {
+    pest: 'pest_control',
+    lawn: 'lawn_care',
+    tree_shrub: 'tree_shrub',
+    mosquito: 'mosquito',
+    termite: 'termite_bait',
+    rodent: 'rodent_bait',
+  };
   for (const program of proposal.programs || []) {
     push(program.label || program.service, 'recurring', program.annual, {
+      serviceKey: PROGRAM_FAMILY_TO_KEY[program.service] || keyFromName(program.label || program.service),
       quoted: {
         service: program.service,
         pricePerApplication: program.pricePerApplication,
@@ -763,7 +785,11 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     const protocol = raw.skipCogs ? null : protocolFor(raw);
     const cogs = raw.skipCogs
       ? { status: 'not_applicable', totalPerVisit: 0, lines: [], warnings: [] }
-      : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers);
+      : (Number.isFinite(raw.explicitCogsCost)
+        // The line carries its OWN persisted cost (engine installation
+        // breakdowns) — authoritative over inventory mapping.
+        ? { status: 'explicit', totalPerVisit: 0, lines: [], warnings: [], fixedCost: raw.explicitCogsCost }
+        : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers));
     const visits = visitsFor(raw, result);
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0));
     const grossProfit = money(raw.price - estimatedCost);

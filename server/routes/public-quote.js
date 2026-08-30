@@ -1732,6 +1732,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             floorMo: item.floorMo ?? null,
             marginFloorMonthly: item.marginFloorMonthly ?? null,
             waveGuardDiscountEligible: item.waveGuardDiscountEligible ?? null,
+            // Termite-bait hybrid lines carry their one-time installation
+            // (price + persisted costs) — the audit splits it into its own
+            // row (GH codex on #3628).
+            installation: item.installation ?? null,
             discountEligible: item.discountEligible ?? null,
             waveGuardTierEligible: item.waveGuardTierEligible ?? null,
             countsTowardWaveGuardTier: item.countsTowardWaveGuardTier ?? null,
