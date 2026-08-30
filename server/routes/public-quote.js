@@ -883,11 +883,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       })
       : (normalizedAddress.fullAddress || String(address || '').trim());
     let trustedTurf = {};
+    let trustedProfileFound = false;
     const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
     if (parcelLookupAddress) {
       try {
         const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
-        trustedTurf = serverLookup?.enriched || {};
+        if (serverLookup?.enriched) {
+          trustedTurf = serverLookup.enriched;
+          trustedProfileFound = true;
+        }
       } catch (turfErr) {
         logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
         trustedTurf = {};
@@ -902,7 +906,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // miss must fail to "unmeasured", not to the client's number (pre-push
     // codex P0). The customer-confirmed leg still wins — a hand-entered lot
     // is an explicit override. Canonical read: lookupDimensionIsTrustworthy.
-    const lotDimensionTrusted = lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    // A cache MISS is not trust: lookupDimensionIsTrustworthy({}) is
+    // vacuously true, and a caller who can produce a miss (or an expired
+    // row) must not get their posted lot priced (pre-push codex P0 r2) —
+    // no server profile means no trusted lot, full stop.
+    const lotDimensionTrusted = trustedProfileFound && lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
     const realLotSqFt = resolveRealLotSqFt({
       enrichedLotSqFt: lotDimensionTrusted && Number(trustedTurf.lotSqFt) > 0 ? trustedTurf.lotSqFt : null,
       lotSqFt,
