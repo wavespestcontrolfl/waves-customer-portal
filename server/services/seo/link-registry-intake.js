@@ -261,10 +261,13 @@ const BACKOFF_MS = Object.freeze([60 * 60e3, 6 * 60 * 60e3, 24 * 60 * 60e3, 72 *
 const MAX_ATTEMPTS = BACKOFF_MS.length + 1;
 // A claimed item is invisible to a parallel tick for this long (fleet overlap
 // during deploys); the final update always rewrites next_retry_at.
-// Lease > worst-case batch: 50 items × up to 3 hops × 8 s ≈ 20 min sequential.
+// Lease > one claim batch's worst case: CLAIM_BATCH_MAX items × (up to 3 hops
+// × 8 s + a 10 s X lookup) ≈ 28 min sequential. Larger sweeps take several
+// batches, each leased from its own claim time (resolveIntakeItems).
 // The hold timestamp doubles as the claim token — every final write is
 // conditional on it (finalize), so a run that outlives its lease can never
 // overwrite a reclaiming run's newer result.
+const CLAIM_BATCH_MAX = 50;
 const CLAIM_HOLD_MS = 30 * 60e3;
 const LOST_CLAIM = Symbol('lost_claim');
 
@@ -301,29 +304,24 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
   const fetcher = fetchPage || require('./contact-finder').fetchPage;
   const tweetUrls = fetchTweetUrls || defaultFetchTweetUrls;
   const out = { claimed: 0, resolved: 0, unresolved: 0, dropped: 0, parked: 0, errors: [] };
-  const due = (q) => q('seo_link_intake_items')
+  const cap = Math.max(1, Math.min(Number(limit) || 50, 500));
+  const due = (q, n) => q('seo_link_intake_items')
     .whereIn('state', ['pending', 'unresolved'])
     .andWhere((b) => b.whereNull('next_retry_at').orWhere('next_retry_at', '<=', now))
     .orderBy('first_seen_at', 'asc')
-    .limit(Math.max(1, Math.min(Number(limit) || 50, 500)));
+    .limit(n);
 
   if (dryRun) {
     // Report only: what the next sweep WOULD claim. No claim hold, no network,
     // no state change — the rows stay due for the real tick.
-    const rows = await due(db);
+    const rows = await due(db, cap);
     const wouldPark = rows.filter((r) => X_POST_RE.test(r.raw_url)).length;
     return { ...out, dryRun: true, due: rows.length, wouldPark, wouldFetch: rows.length - wouldPark };
   }
 
-  const hold = new Date(now.getTime() + CLAIM_HOLD_MS);
-  const claimed = await db.transaction(async (trx) => {
-    const rows = await due(trx).forUpdate().skipLocked();
-    if (!rows.length) return rows;
-    await trx('seo_link_intake_items').whereIn('id', rows.map((r) => r.id)).update({ next_retry_at: hold });
-    return rows;
-  });
-  out.claimed = claimed.length;
   out.lost = 0;
+  let hold = null; // the CURRENT batch's claim stamp (see finalize)
+  const startedMs = Date.now();
   // Final write for a claimed item: only while OUR claim stamp is still on the
   // row. 0 rows ⇒ another run reclaimed it after our lease lapsed — its
   // result stands, ours is discarded (thrown inside a trx ⇒ rolled back).
@@ -343,65 +341,85 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
     }
   };
 
-  for (const item of claimed) {
-    try {
-      const attempts = (item.attempts || 0) + 1;
-      let target = toUrl(item.raw_url);
-      if (X_POST_RE.test(item.raw_url)) {
-        const urls = await tweetUrls(target);
-        if (urls === null) { await backoffOrExhaust(item, attempts, 'x_api_unavailable'); continue; }
-        const links = urls.filter((u) => !isXHost(u));
-        if (!links.length) {
-          await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: 'x_post_no_links', next_retry_at: null });
+  // Claims are taken in lease-sized batches: CLAIM_HOLD_MS covers one batch's
+  // worst case, and each batch is stamped from the moment IT is claimed — a
+  // long run (the admin route allows up to 500) never lets its later claims
+  // expire under it. A short batch (fewer rows than asked) ends the run.
+  for (let remaining = cap, batchNo = 0; remaining > 0; batchNo++) {
+    const size = Math.min(CLAIM_BATCH_MAX, remaining);
+    const claimedAt = batchNo === 0 ? now : new Date(now.getTime() + (Date.now() - startedMs));
+    hold = new Date(claimedAt.getTime() + CLAIM_HOLD_MS);
+    const claimed = await db.transaction(async (trx) => {
+      const rows = await due(trx, size).forUpdate().skipLocked();
+      if (!rows.length) return rows;
+      await trx('seo_link_intake_items').whereIn('id', rows.map((r) => r.id)).update({ next_retry_at: hold });
+      return rows;
+    });
+    out.claimed += claimed.length;
+    if (!claimed.length) break;
+
+    for (const item of claimed) {
+      try {
+        const attempts = (item.attempts || 0) + 1;
+        let target = toUrl(item.raw_url);
+        if (X_POST_RE.test(item.raw_url)) {
+          const urls = await tweetUrls(target);
+          if (urls === null) { await backoffOrExhaust(item, attempts, 'x_api_unavailable'); continue; }
+          const links = urls.filter((u) => !isXHost(u));
+          if (!links.length) {
+            await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: 'x_post_no_links', next_retry_at: null });
+            out.dropped += 1;
+            continue;
+          }
+          // The first link is what this item resolves to; every further link in
+          // the post is its own durable reference (same provenance, post as hint).
+          target = toUrl(links[0]);
+          for (const extra of links.slice(1)) {
+            const it = await upsertItem(db, { source: item.source, sourceDetail: touchDetail(item.source_detail, toUrl(item.raw_url), null), sourceRef: item.source_ref, rawUrl: extra, state: 'pending' });
+            if (it.created) out.spawned = (out.spawned || 0) + 1;
+          }
+        }
+        const page = await fetcher(target, { resolveOnly: true });
+        const host = page && page.finalUrl ? canonicalProspectDomain(page.finalUrl) : null;
+
+        if (page && (page.error === 'invalid_url' || page.error === 'unsupported_protocol' || page.blocked)) {
+          await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: page.error || 'blocked_host', next_retry_at: null });
           out.dropped += 1;
           continue;
         }
-        // The first link is what this item resolves to; every further link in
-        // the post is its own durable reference (same provenance, post as hint).
-        target = toUrl(links[0]);
-        for (const extra of links.slice(1)) {
-          const it = await upsertItem(db, { source: item.source, sourceDetail: touchDetail(item.source_detail, toUrl(item.raw_url), null), sourceRef: item.source_ref, rawUrl: extra, state: 'pending' });
-          if (it.created) out.spawned = (out.spawned || 0) + 1;
+        if (host && isOwnHost(host)) {
+          await finalize(db, item, { state: 'dropped', drop_reason: 'own_domain', attempts, resolved_url: page.finalUrl, resolved_host: host, last_error: null, next_retry_at: null });
+          out.dropped += 1;
+          continue;
         }
-      }
-      const page = await fetcher(target, { resolveOnly: true });
-      const host = page && page.finalUrl ? canonicalProspectDomain(page.finalUrl) : null;
-
-      if (page && (page.error === 'invalid_url' || page.error === 'unsupported_protocol' || page.blocked)) {
-        await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: page.error || 'blocked_host', next_retry_at: null });
-        out.dropped += 1;
-        continue;
-      }
-      if (host && isOwnHost(host)) {
-        await finalize(db, item, { state: 'dropped', drop_reason: 'own_domain', attempts, resolved_url: page.finalUrl, resolved_host: host, last_error: null, next_retry_at: null });
-        out.dropped += 1;
-        continue;
-      }
-      if (host && !isNeverTargetHost(host)) {
-        await db.transaction(async (trx) => {
-          const d = await registry.ensureDomain(trx, {
-            domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
+        if (host && !isNeverTargetHost(host)) {
+          await db.transaction(async (trx) => {
+            const d = await registry.ensureDomain(trx, {
+              domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
+            });
+            await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, last_error: null, next_retry_at: null });
           });
-          await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, last_error: null, next_retry_at: null });
-        });
-        out.resolved += 1;
-        continue;
-      }
+          out.resolved += 1;
+          continue;
+        }
 
-      // No usable host yet (network / DNS failure, or the chain ended on a
-      // never-target host): back off on the schedule, then exhaust.
-      const err = page && page.error ? page.error : (host ? `resolved_to_never_target:${host}` : `status_${(page && page.status) || 0}`);
-      await backoffOrExhaust(item, attempts, err);
-    } catch (e) {
-      if (e === LOST_CLAIM) { out.lost += 1; continue; }
-      out.errors.push({ id: item.id, error: (e && e.message) || String(e) });
-      // Leave the claim hold in place; the next due tick retries it.
+        // No usable host yet (network / DNS failure, or the chain ended on a
+        // never-target host): back off on the schedule, then exhaust.
+        const err = page && page.error ? page.error : (host ? `resolved_to_never_target:${host}` : `status_${(page && page.status) || 0}`);
+        await backoffOrExhaust(item, attempts, err);
+      } catch (e) {
+        if (e === LOST_CLAIM) { out.lost += 1; continue; }
+        out.errors.push({ id: item.id, error: (e && e.message) || String(e) });
+        // Leave the claim hold in place; the next due tick retries it.
+      }
     }
+    remaining -= claimed.length;
+    if (claimed.length < size) break;
   }
   return out;
 }
 
 module.exports = {
   parseOpportunities, parseCsvOpportunities, intake, resolveIntakeItems,
-  _internals: { TOKEN_RE, X_POST_RE, SHORTENER_HOSTS, isShortenerHost, hasPath, touchDetail, URL_HINT_MAX, isReferenceToken, isOwnHost, BACKOFF_MS, MAX_ATTEMPTS, CLAIM_HOLD_MS, upsertItem, toUrl, defaultFetchTweetUrls, isXHost },
+  _internals: { TOKEN_RE, X_POST_RE, SHORTENER_HOSTS, isShortenerHost, hasPath, touchDetail, URL_HINT_MAX, isReferenceToken, isOwnHost, BACKOFF_MS, MAX_ATTEMPTS, CLAIM_HOLD_MS, CLAIM_BATCH_MAX, upsertItem, toUrl, defaultFetchTweetUrls, isXHost },
 };

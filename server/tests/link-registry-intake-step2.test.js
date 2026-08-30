@@ -206,8 +206,21 @@ describe('resolveIntakeItems — sweep', () => {
     expect(finalWhere.map((c) => c.args[1])).toEqual([new Date(now.getTime() + _internals.CLAIM_HOLD_MS)]);
   });
 
-  test('the lease outlives the worst-case sequential batch (50 items × 3 hops × 8 s)', () => {
-    expect(_internals.CLAIM_HOLD_MS).toBeGreaterThanOrEqual(50 * 3 * 8000);
+  test('claims come in lease-sized batches: the lease covers one batch\'s worst case (3 hops × 8 s + 10 s X lookup per item); a large limit runs several batches, each stamped from its own claim time; a short batch ends the run', async () => {
+    expect(_internals.CLAIM_HOLD_MS).toBeGreaterThanOrEqual(_internals.CLAIM_BATCH_MAX * (3 * 8000 + 10000));
+    let claims = 0;
+    const batch = (n, prefix) => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, raw_url: `bit.ly/${prefix}${i}`, source: 'list_import', attempts: 0 }));
+    const db = dbWith(null, { 'seo_link_intake_items.skipLocked': () => { claims += 1; return claims === 1 ? batch(50, 'a') : claims === 2 ? batch(50, 'b') : batch(7, 'c'); } });
+    const fetchPage = jest.fn(async (url) => ({ status: 200, finalUrl: url.replace('bit.ly/', 'https://h-') + '.example/', blocked: false, error: null }));
+    const r = await resolveIntakeItems(db, { now, fetchPage, limit: 500 });
+    expect(claims).toBe(3); // 50 + 50 + 7 (< 50 ⇒ stop), never one 500-row claim
+    expect(db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'limit').map((c) => c.args[0])).toEqual([50, 50, 50]);
+    expect(r).toEqual(expect.objectContaining({ claimed: 107, resolved: 107, lost: 0 }));
+    // limit caps the run too: 60 ⇒ 50 then 10
+    claims = 0;
+    const db2 = dbWith(null, { 'seo_link_intake_items.skipLocked': () => { claims += 1; return claims === 1 ? batch(50, 'a') : batch(10, 'b'); } });
+    await resolveIntakeItems(db2, { now, fetchPage, limit: 60 });
+    expect(db2.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'limit').map((c) => c.args[0])).toEqual([50, 10]);
   });
 
   test('CSV rows for the same domain keep every distinct note (nothing silently discarded by the dedupe)', () => {
