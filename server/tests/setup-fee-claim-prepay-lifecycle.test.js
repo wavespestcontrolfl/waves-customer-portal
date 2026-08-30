@@ -399,7 +399,7 @@ describe('source contracts — where the lifecycle is wired', () => {
     expect(converter).toMatch(/recordSetupFeeClaimForInvoice\(database, \{\s*invoiceId: draftInvoiceId,\s*anchorId: rodentRoot \? rodentRoot\.id : null,/);
     // …and the restore resolves an anchor-less record from the term's source estimate (codex #3591 r39 P1).
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
-    expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, conn, \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null, customerId: [a-z]+\.customer_id \|\| null, coverageServiceType: [a-z]+\.coverage_service_type \|\| null \}\)/g) || []).length).toBe(2);
+    expect((renewals.match(/restoreRetiredSetupFeeClaimForPrepay\([a-z]+\.prepay_invoice_id, (?:conn|t), \{ sourceEstimateId: [a-z]+\.source_estimate_id \|\| null, customerId: [a-z]+\.customer_id \|\| null, coverageServiceType: [a-z]+\.coverage_service_type \|\| null \}\)/g) || []).length).toBe(2);
     // …and the restore no longer refuses an estimate-origin parent.
     expect(invoice).not.toMatch(/if \(!parent \|\| parent\.source_estimate_id\) return null;/);
   });
@@ -423,12 +423,12 @@ describe('source contracts — where the lifecycle is wired', () => {
   test('BOTH term-cancel branches (true void/refund AND decided-lapse refund) restore the claim right after the superseded-invoice restore', () => {
     // Each branch hands the term's source estimate along so an anchor-less
     // record can resolve its rodent root at restore time (codex #3591 r39 P1).
-    const CALL_RE = /restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, conn, \{ sourceEstimateId: \1\.source_estimate_id \|\| null, customerId: \1\.customer_id \|\| null, coverageServiceType: \1\.coverage_service_type \|\| null \}\)/g;
+    const CALL_RE = /restoreRetiredSetupFeeClaimForPrepay\((updated|decided)\.prepay_invoice_id, (?:conn|t), \{ sourceEstimateId: \1\.source_estimate_id \|\| null, customerId: \1\.customer_id \|\| null, coverageServiceType: \1\.coverage_service_type \|\| null \}\)/g;
     const calls = [...renewals.matchAll(CALL_RE)].map((m) => m[1]);
     expect(calls.sort()).toEqual(['decided', 'updated']);
     for (const who of ['updated', 'decided']) {
-      const superseded = renewals.indexOf(`restoreSwitchSupersededInvoicesForPrepay(${who}.prepay_invoice_id, conn)`);
-      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, conn, { sourceEstimateId: ${who}.source_estimate_id || null, customerId: ${who}.customer_id || null, coverageServiceType: ${who}.coverage_service_type || null })`);
+      const superseded = renewals.indexOf(`restoreSwitchSupersededInvoicesForPrepay(${who}.prepay_invoice_id, ${who === 'updated' ? 't' : 'conn'})`);
+      const claim = renewals.indexOf(`restoreRetiredSetupFeeClaimForPrepay(${who}.prepay_invoice_id, ${who === 'updated' ? 't' : 'conn'}, { sourceEstimateId: ${who}.source_estimate_id || null, customerId: ${who}.customer_id || null, coverageServiceType: ${who}.coverage_service_type || null })`);
       expect(superseded).toBeGreaterThan(-1);
       expect(claim).toBeGreaterThan(superseded);
     }
@@ -611,7 +611,7 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     // Both revivals run inside a transaction closure now (r52): the flip
     // and the cleanup commit together, on the closure's handle.
     expect((renewals.match(/retireRodentSetupObligationForRevivedPrepay\(t, invoice\.id\)/g) || []).length).toBe(2);
-    expect((renewals.match(/typeof conn\.transaction === 'function' && !conn\.isTransaction/g) || []).length).toBe(2);
+    expect((renewals.match(/typeof conn\.transaction === 'function' && !conn\.isTransaction/g) || []).length).toBe(3); // revivals + cancel branch (r53)
   });
 });
 
@@ -794,7 +794,8 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     const c = revConn();
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, stdInvoice()))
       .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
-    expect(c.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['setup_fee_claims:delete', 'scheduled_services:update']);
+    // The record is consumed AFTER the successful re-stamp (r53: ambiguity keeps the evidence).
+    expect(c.writes.map((w) => `${w.table}:${w.op}`)).toEqual(['scheduled_services:update', 'setup_fee_claims:delete']);
     const prepay = revConn({ termBacked: { id: 'term-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, stdInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);

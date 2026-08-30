@@ -248,6 +248,20 @@ async function directRodentSetupForRow(database, row) {
   // settled).
   const frozen = frozenAnchorSetupStamp(anchor);
   if (frozen != null) return frozen;
+  // ALREADY COLLECTED / IN COLLECTION (codex #3591 r53 P1): the first
+  // completion (or a prepay) billed this series' setup — the claims ledger
+  // keeps the record while the stamp is cleared. A live (non-terminal)
+  // claim invoice means the fee exists exactly once already; never derive
+  // a second obligation for the same series.
+  if (anchor?.id) {
+    const anchorClaims = await database('setup_fee_claims')
+      .where({ scheduled_service_id: anchor.id })
+      .select('invoice_id');
+    for (const cl of anchorClaims || []) {
+      const claimInvoice = await database('invoices').where({ id: cl.invoice_id }).first('status');
+      if (claimInvoice && !['void', 'cancelled', 'canceled', 'refunded'].includes(String(claimInvoice.status).toLowerCase())) return 0;
+    }
+  }
   // Estimate provenance lives on the ROOT (codex #3591 r47 local P0): a
   // series child carries no source_estimate_id of its own, so the anchor's
   // decides too — an estimate-origin series made its setup decision at

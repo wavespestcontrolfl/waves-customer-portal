@@ -2671,12 +2671,16 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         : await reviveFromCancelled(conn);
       current = updated || term;
     } else if (nextStatus === 'cancelled') {
-      const [updated] = await conn('annual_prepay_terms')
+      // The cancel flip and EVERY restoration commit TOGETHER (codex #3591
+      // r53 local P0 — symmetric with the revival branches): on the global
+      // handle an autocommitted flip beside a failed restore stranded the
+      // claim forever (the next sync excludes cancelled terms).
+      const cancelWithRestorations = async (t) => {
+      const [updated] = await t('annual_prepay_terms')
         .where({ id: term.id })
         .whereNull('renewal_decision')
         .update({ status: 'cancelled', updated_at: new Date() })
         .returning('*');
-      current = updated || term;
       // A true void/refund (no renewal decision) cancels coverage — drop the
       // per-visit prepaid stamps so future covered visits bill normally. A
       // renewal-lapse (renewal_decision set) keeps its paid window, so the
@@ -2690,32 +2694,32 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // concurrent accept + refund for one customer can deadlock. On
         // autocommit (conn === db) every statement is its own transaction
         // and no multi-statement order exists to invert.
-        if (conn.isTransaction && updated.customer_id) {
-          await conn('customers').where({ id: updated.customer_id }).forUpdate().first('id');
+        if (t.isTransaction && updated.customer_id) {
+          await t('customers').where({ id: updated.customer_id }).forUpdate().first('id');
         }
-        await clearPrepaidStampsForTerm(term.id, conn);
+        await clearPrepaidStampsForTerm(term.id, t);
         // Also reopen any per-visit invoices this term settled as NON-CASH coverage
         // (status='prepaid' by this term, or a partial with a coverage line) — the
         // prepay was refunded, so the covered work is owed again. Mirrors the stamp
         // clear; best-effort (never blocks the refund sync), and never reopens a
         // cash-paid invoice.
         try {
-          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, conn);
+          await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(term.id, t);
         } catch (err) {
           logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${term.id}: ${err.message}`);
         }
         // And claw back the pending-window completion credits this term
         // issued — the full-annual refund would otherwise refund those
         // slices twice (once inside the refund, once as kept credit).
-        await reversePendingWindowCompletionCredits(updated, conn);
+        await reversePendingWindowCompletionCredits(updated, t);
         // Same double-pay shape for the WaveGuard tier-extension credit:
         // the refund returns the prepaid dollars the discounted allocation
         // was carved from, so the extension's prepaid-difference grant
         // reverses with it.
-        await reverseWaveguardExtensionCredits(updated, conn);
+        await reverseWaveguardExtensionCredits(updated, t);
         // Coverage is gone — return the customer to a billable mode (the
         // monthly cron skips 'annual_prepay' outright; see GUARD 3b).
-        await resetBillingModeAfterTermCancel(updated, conn);
+        await resetBillingModeAfterTermCancel(updated, t);
         // An ON-SITE SWITCH retired the accept-minted per-application
         // invoice when this prepay was created; with the prepay dead that
         // AR (setup fee included) must come back, or it is silently gone
@@ -2723,7 +2727,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // idempotent; best-effort (never blocks the void/refund sync).
         if (updated.prepay_invoice_id) {
           try {
-            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, conn);
+            await require('./invoice').restoreSwitchSupersededInvoicesForPrepay(updated.prepay_invoice_id, t);
           } catch (err) {
             // The markers are durable, so this is recoverable — but only by a
             // human who knows: the void succeeded and the superseded
@@ -2740,9 +2744,15 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // error left the cancelled term unselectable by any later sync,
           // the claim record unused, and the $99 cleared forever. A throw
           // rolls the whole void/refund sync back and the event retries.
-          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, conn, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
+          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, t, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
         }
       }
+      return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(cancelWithRestorations)
+        : await cancelWithRestorations(conn);
+      current = updated || term;
     }
 
     if (ACTIVE_STATUSES.includes(current.status)) {

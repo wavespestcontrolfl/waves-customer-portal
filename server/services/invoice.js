@@ -5026,6 +5026,7 @@ const InvoiceService = {
     const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
     const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
     if (!setupLine || !(amount > 0)) return null;
+    let completionClaimToConsume = null;
     const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
     if (claimRecord) {
       // Only TERM-BACKED prepay claims restore through the claims-ledger
@@ -5034,7 +5035,10 @@ const InvoiceService = {
       // reversal must put the stamp back HERE, consuming the record.
       const termBacked = await conn("annual_prepay_terms").where({ prepay_invoice_id: invoiceRow.id }).first("id");
       if (termBacked) return null; // prepay lane — restored via the claims ledger
-      await conn("setup_fee_claims").where({ id: claimRecord.id }).delete();
+      // Consumed only AFTER a successful re-stamp/re-bill (codex #3591 r53
+      // local P0): an ambiguous or failed restore keeps the durable
+      // evidence for retry / manual reconciliation.
+      completionClaimToConsume = claimRecord.id;
     }
     const { authoritativeServiceKey } = require("./secure-appointment-plans");
     let anchorId = null;
@@ -5092,6 +5096,7 @@ const InvoiceService = {
         notes: `Re-billed after invoice ${invoiceRow.id} was voided/refunded — the series has no future visit left to collect the setup on (visit ${anchorId}). ${rodentSetupRebillMarker(invoiceRow.id)}`,
         dueDate: etDateString(),
       });
+      if (completionClaimToConsume) await conn("setup_fee_claims").where({ id: completionClaimToConsume }).delete();
       logger.info(`[invoice] reversed invoice ${invoiceRow.id}: setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${anchorId}`);
       return { scheduledServiceId: anchorId, amount, reInvoiceId: reInvoice?.id || null };
     }
@@ -5103,6 +5108,7 @@ const InvoiceService = {
       logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
       return null;
     }
+    if (completionClaimToConsume) await conn("setup_fee_claims").where({ id: completionClaimToConsume }).delete();
     logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed`);
       return { scheduledServiceId: anchorId, amount };
   },

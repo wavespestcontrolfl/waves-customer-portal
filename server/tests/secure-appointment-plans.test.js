@@ -190,6 +190,18 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
     await expect(resolveDirectRodentSetupObligation(db, rodentVisit)).rejects.toThrow('db down');
   });
 
+  test('a LIVE claims-ledger record on the anchor means the setup is already collected — never a second obligation; a voided claim invoice re-derives (codex #3591 r53 P1)', async () => {
+    mockQualifyingKeys = async () => [];
+    setTables({ visit: { ...baseVisit, service_type: 'Rodent Bait Stations' } });
+    mockTableHandlers.setup_fee_claims = { select: () => [{ invoice_id: 'inv-setup' }] };
+    mockTableHandlers.invoices = { first: () => ({ status: 'paid' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(0);
+    // The claim's invoice was voided — the obligation is live again.
+    mockTableHandlers.invoices = { first: () => ({ status: 'void' }) };
+    await expect(resolveDirectRodentSetupObligation(db, { id: 'v1' })).resolves.toBe(Number(RODENT.baitSetupFee));
+    delete mockTableHandlers.setup_fee_claims;
+  });
+
   test('a POSITIVE frozen claim on the series anchor outranks the live constant; a negative (mid-mint) stamp does not (codex #3591 r40 P1)', async () => {
     mockQualifyingKeys = async () => [];
     // The customer accepted $79 through /secure; the config was raised since.
