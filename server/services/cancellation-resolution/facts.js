@@ -61,9 +61,25 @@ function num(row, key) {
   return Number((row && row[key]) || 0) || 0;
 }
 
+// Cancellation-specific row predicate. Deliberately NOT
+// serviceRowCountsTowardWaveGuard: that helper is for TIER COVERAGE and
+// rejects terminal statuses including 'rescheduled' and 'completed' — but
+// for cancel-scope evidence a date-exempt rescheduled row or a completed
+// row still carrying recurring_ongoing=true IS the plan being cancelled
+// (mirrors cancellation-eligibility's reach). Callbacks and one-time
+// bookings are still never plan evidence.
+function rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource }) {
+  if (isOneTimeBookingSource(row.source)) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  if (String(row.status || '').toLowerCase() === 'cancelled') return false;
+  const recurring = row.is_recurring === true || row.is_recurring === 1 || row.is_recurring === '1' || row.is_recurring === 'true'
+    || row.recurring_ongoing === true;
+  return recurring;
+}
+
 async function loadFamilies(customerId, today) {
   const {
-    detectWaveGuardPlanKeys, serviceRowCountsTowardWaveGuard, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
+    detectWaveGuardPlanKeys, isOneTimeBookingSource, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
   // Mirrors hasCancellableWork's reach (cancellation-eligibility): an
   // ongoing recurring series indicates its family regardless of the row's
@@ -87,7 +103,7 @@ async function loadFamilies(customerId, today) {
     .select('s.*', 'sv.service_key', 'sv.service_name');
   const keys = [];
   for (const row of rows) {
-    if (!serviceRowCountsTowardWaveGuard(row)) continue;
+    if (!rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource })) continue;
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!keys.includes(key)) keys.push(key);
   }
@@ -138,7 +154,10 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where('s.customer_id', customerId)
       .where('s.status', 'completed')
       .whereRaw('COALESCE(s.is_callback, false) = false')
-      .whereIn('i.status', ['paid', 'prepaid'])
+      .where(function paidSignal() {
+        // paid_at is the authoritative paid signal; status can lag it.
+        this.whereNotNull('i.paid_at').orWhereIn('i.status', ['paid', 'prepaid']);
+      })
       .countDistinct({ n: 's.id' }).first(), null),
     leg('visits12mo', () => db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -157,13 +176,16 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .count({ n: '*' }).first(), null),
     leg('savings12mo', () => db('invoices')
       .where({ customer_id: customerId })
-      .whereIn('status', ['paid', 'prepaid'])
+      .where(function paidSignal() {
+        this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
+      })
       .where('created_at', '>=', since12mo)
       .where('discount_label', 'ilike', '%WaveGuard%')
       .sum({ n: 'discount_amount' }).first(), null),
     leg('pastDue', () => db('invoices')
       .where({ customer_id: customerId })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+      .whereNull('paid_at') // an invoice paid_at-stamped is settled even if status lags
       .whereNotNull('due_date')
       .where('due_date', '<', today)
       .whereRaw('COALESCE(total, 0) - COALESCE(credit_applied, 0) > 0')
