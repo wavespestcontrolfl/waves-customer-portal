@@ -597,12 +597,16 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   if (churned && gateEnvValue('GATE_CANCEL_FLOW_V2')) {
     try {
       const cleared = await db.transaction(async (trx) => {
-        // Serialize against service INSERTS the same way migration 41 does:
-        // the correlated-subquery UPDATE alone snapshots at READ COMMITTED
-        // and a booking committing after that snapshot could strand a new
-        // visit priceless. SHARE ROW EXCLUSIVE conflicts with every
-        // writer's ROW EXCLUSIVE lock; held for one UPDATE (~ms) on a rare
-        // path (a handful of cancels a week). Lock/timeout errors land in
+        // LOCK ORDER matches every booking writer (customers row FIRST,
+        // then scheduled_services — migration 41 uses the same order): a
+        // booking holding the customer row while waiting on its visit
+        // insert would deadlock against the reverse order.
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+        // Then serialize against service INSERTS: the correlated-subquery
+        // UPDATE alone snapshots at READ COMMITTED and a booking committing
+        // after that snapshot could strand a new visit priceless. SHARE ROW
+        // EXCLUSIVE conflicts with every writer's ROW EXCLUSIVE lock; held
+        // for one UPDATE (~ms) on a rare path. Lock/timeout errors land in
         // the catch below → per_application_lane review flag, never a
         // stuck cancel.
         await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
