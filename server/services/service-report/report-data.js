@@ -5,7 +5,7 @@ const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
-const { cockroachSnapshotOf, resolveCockroachProgram } = require('./cockroach-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -4402,6 +4402,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let cockroachNextTreatmentVisit;
   let cockroachUpcomingRoachVisits;
   let cockroachProgramPosition;
+  let cockroachRenderedSignature;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4424,7 +4425,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
       .limit(200)
-      .catch(() => []);
+      .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
     // A rodent report's "next visit" spans the whole rodent program —
     // trapping, exclusion, sanitation, proofing — including service names
     // that carry no rodent token ("Exclusion Service" alone falls to the
@@ -4583,7 +4584,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the program's completion state, keyed into the PDF cache. A failed
     // resolution → position null → the dashboard makes no program claims.
     if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service)) {
-      const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : [] });
+      // A FAILED upcoming query (null) is not an empty calendar (codex P1
+      // #3613): the resolver re-queries itself, and if that fails too the
+      // program falls closed (no claims) instead of reading "complete".
+      const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : null });
       if (program && !program.failed) {
         cockroachProgramPosition = { treatmentNumber: program.treatmentNumber };
         cockroachUpcomingRoachVisits = program.upcoming;
@@ -4591,6 +4595,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       } else if (program && program.failed) {
         cockroachProgramPosition = null;
       }
+      // The signature of the program state THIS payload carries — the PDF
+      // store key reads it from the render, never from a second lookup.
+      cockroachRenderedSignature = cockroachProgramSignature(program);
     }
   } catch { /* best-effort */ }
 
@@ -5079,6 +5086,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ...(cockroachNextTreatmentVisit !== undefined ? { cockroachNextTreatmentVisit } : {}),
     ...(cockroachUpcomingRoachVisits !== undefined ? { cockroachUpcomingRoachVisits } : {}),
     ...(cockroachProgramPosition !== undefined ? { cockroachProgramPosition } : {}),
+    ...(cockroachRenderedSignature !== undefined ? { cockroachReportV2RenderedSignature: cockroachRenderedSignature } : {}),
     // Visit stage for a bait-station snapshot, from the completion profile
     // (termite_installation_setup also freezes termite_bait_station):
     // 'installation' keeps the typed record; 'monitoring' may render the

@@ -405,6 +405,31 @@ function buildCockroachReportV2({
   };
 }
 
+/**
+ * The typed Today's Result body (activity-indicators.js gauge lane) is
+ * composed as `<technician report | what-we-did> <disclosure> <nextStep>`
+ * and, when reviewed copy exists, its bodySource is 'technician_report'.
+ * The dashboard renders the narrative and the next step in their own
+ * slots, so the body is stripped of the trailing next-step sentence and the
+ * separate technician summary is dropped whenever the body already carries
+ * it (codex P1 #3613 — the hero repeated the narrative, the program card
+ * repeated the next step).
+ */
+function dedupedNarrative({ todaysResult = null, summary = null } = {}) {
+  const rawBody = String(todaysResult?.body || '').replace(/\s+/g, ' ').trim();
+  const nextStep = String(todaysResult?.nextStep || '').replace(/\s+/g, ' ').trim() || null;
+  let body = rawBody;
+  if (body && nextStep && body.endsWith(nextStep)) body = body.slice(0, -nextStep.length).trim();
+  const summaryText = String(summary || '').replace(/\s+/g, ' ').trim() || null;
+  const bodyCarriesSummary = Boolean(summaryText)
+    && (todaysResult?.bodySource === 'technician_report' || (body && body.includes(summaryText)));
+  return {
+    todaysResultBody: body || null,
+    technicianReport: bodyCarriesSummary ? null : summaryText,
+    nextStep,
+  };
+}
+
 function serviceDataOf(service = {}) {
   const raw = service.service_data;
   let data = raw;
@@ -471,12 +496,13 @@ function attachCockroachReportV2(data, service = {}) {
       visitSequence: report.visitSequence || snapshot.visitSequence || 1,
       treatmentNumber,
       activity: data.activity || null,
-      technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
-        && typeof data.summary === 'string'
-        ? data.summary
-        : null,
-      todaysResultBody: report.todaysResult && report.todaysResult.body ? report.todaysResult.body : null,
-      nextStep: report.todaysResult && report.todaysResult.nextStep ? report.todaysResult.nextStep : null,
+      ...dedupedNarrative({
+        todaysResult: report.todaysResult || null,
+        summary: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
+          && typeof data.summary === 'string'
+          ? data.summary
+          : null,
+      }),
       serviceKey: frozenCockroachServiceKey(service),
       nextVisit,
       scheduleResolved,
@@ -654,12 +680,34 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
  * either. Bump the letter whenever the cockroach-line report COMPOSITION
  * changes.
  */
+function cockroachProgramSignature(program) {
+  const state = program && !program.failed && program.treatmentNumber != null
+    ? `${program.treatmentNumber}u${program.upcoming}`
+    : 'x';
+  return `-roachv2a-p${state}`;
+}
+
 async function cockroachReportV2PdfSignature(service = {}, knex = null) {
   if (process.env.COCKROACH_REPORT_V2 !== 'true') return '';
   if (!cockroachSnapshotOf(service)) return '';
   const program = knex ? await resolveCockroachProgram(service, knex) : null;
-  const state = program && !program.failed ? `${program.treatmentNumber}u${program.upcoming}` : 'x';
-  return `-roachv2a-p${state}`;
+  return cockroachProgramSignature(program);
+}
+
+/**
+ * The signature of the program state a render ACTUALLY used, read from the
+ * payload report-data built (it stamps `cockroachReportV2RenderedSignature`
+ * at the moment it resolved the program) — never re-resolved from the DB,
+ * so a render that fell closed on a transient failure is stored under the
+ * unknown key, not under the correct-state key the lookup computed
+ * (codex P1 #3613; same contract as treatmentNarrativeRenderedSignature).
+ */
+function cockroachReportV2RenderedSignature(data, service = {}) {
+  if (process.env.COCKROACH_REPORT_V2 !== 'true') return '';
+  if (!cockroachSnapshotOf(service)) return '';
+  return typeof data?.cockroachReportV2RenderedSignature === 'string' && data.cockroachReportV2RenderedSignature
+    ? data.cockroachReportV2RenderedSignature
+    : cockroachProgramSignature(null);
 }
 
 /** Typed field keys the dashboard renders itself — the typed tiles drop them. */
@@ -680,6 +728,8 @@ module.exports = {
   buildCockroachReportV2,
   attachCockroachReportV2,
   cockroachReportV2PdfSignature,
+  cockroachReportV2RenderedSignature,
+  cockroachProgramSignature,
   resolveCockroachProgram,
   cockroachProgramLineage,
   cockroachSnapshotOf,
@@ -692,4 +742,5 @@ module.exports = {
   buildHelp,
   buildWork,
   recordedWork,
+  dedupedNarrative,
 };

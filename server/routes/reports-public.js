@@ -165,7 +165,7 @@ const {
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
-const { cockroachReportV2PdfSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
+const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -1884,6 +1884,7 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      let cockroachRenderedSignature = cockroachV2Signature;
       // The canonical snapshot the render is pinned to. Declared out here so
       // the storage block below keys the object by what was RENDERED, not by
       // the cache-lookup value; assigned inside the try so an unreadable
@@ -1907,6 +1908,7 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
           renderedData = data;
           const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
@@ -1985,7 +1987,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

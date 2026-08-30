@@ -19,6 +19,8 @@ const {
   buildWhatsNext,
   buildHelp,
   buildWork,
+  dedupedNarrative,
+  cockroachReportV2RenderedSignature,
   COCKROACH_V2_DASHBOARD_FIELD_KEYS,
 } = require('../services/service-report/cockroach-report-v2');
 
@@ -160,6 +162,54 @@ describe('resolveProgram — honest about what the catalog and calendar say', ()
     expect(resolveProgram({ serviceKey: 'german_roach', treatmentNumber: 2 })).toEqual({ treatmentNumber: 2, treatmentsTotal: null, complete: false });
     // a package never reads "3 of 2"
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: 3 })).toEqual({ treatmentNumber: 3, treatmentsTotal: 3, complete: true });
+  });
+});
+
+describe('dedupedNarrative — the reviewed copy and the next step render once each (codex P1 #3613)', () => {
+  it('strips the trailing next-step sentence from the typed body and drops the separate summary the body already carries', () => {
+    const todaysResult = { body: 'We found activity behind the fridge and baited it. Keep the bait undisturbed.', nextStep: 'Keep the bait undisturbed.', bodySource: 'technician_report' };
+    expect(dedupedNarrative({ todaysResult, summary: 'We found activity behind the fridge and baited it.' })).toEqual({
+      todaysResultBody: 'We found activity behind the fridge and baited it.',
+      technicianReport: null,
+      nextStep: 'Keep the bait undisturbed.',
+    });
+    // template body (no reviewed copy inside) → the technician summary still rides aiSummary
+    expect(dedupedNarrative({ todaysResult: { body: 'Placed bait. Keep the bait undisturbed.', nextStep: 'Keep the bait undisturbed.' }, summary: 'Reviewed narrative.' })).toEqual({
+      todaysResultBody: 'Placed bait.',
+      technicianReport: 'Reviewed narrative.',
+      nextStep: 'Keep the bait undisturbed.',
+    });
+    // …but never twice when the body contains it verbatim without the stamp
+    expect(dedupedNarrative({ todaysResult: { body: 'Reviewed narrative. Extra disclosure.', nextStep: null }, summary: 'Reviewed narrative.' }).technicianReport).toBeNull();
+    expect(dedupedNarrative({})).toEqual({ todaysResultBody: null, technicianReport: null, nextStep: null });
+  });
+
+  it('attach renders the narrative once: hero body without the next step, no duplicate aiSummary, next step on the program card', () => {
+    process.env.COCKROACH_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({ completedServiceKey: 'cockroach_control', typedReportSnapshot: { type: 'cockroach', serviceKey: 'cockroach_control', values: GERMAN_MODERATE } }) };
+    const data = attachCockroachReportV2({
+      typedReport: { type: 'cockroach', visitSequence: 1, todaysResult: { body: 'Reviewed copy. Keep bait undisturbed.', nextStep: 'Keep bait undisturbed.', bodySource: 'technician_report' } },
+      summarySource: 'technician_report',
+      summary: 'Reviewed copy.',
+    }, service);
+    expect(data.cockroachReportV2.statusSummary).toBe('Reviewed copy.');
+    expect(data.cockroachReportV2.aiSummary).toBeNull();
+    expect(data.cockroachReportV2.nextStep).toBe('Keep bait undisturbed.');
+    expect(data.cockroachReportV2.whatsNext.lines.find((l) => l.label === 'From your technician').text).toBe('Keep bait undisturbed.');
+    delete process.env.COCKROACH_REPORT_V2;
+  });
+});
+
+describe('cockroachReportV2RenderedSignature — the store key describes the render, not a second lookup', () => {
+  it('reads the stamped state from the payload; falls back to unknown; empty when the gate is off or no snapshot', () => {
+    process.env.COCKROACH_REPORT_V2 = 'true';
+    const service = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', values: {} } }) };
+    expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, service)).toBe('-roachv2a-p2u1');
+    expect(cockroachReportV2RenderedSignature({}, service)).toBe('-roachv2a-px');
+    expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, {})).toBe('');
+    process.env.COCKROACH_REPORT_V2 = 'false';
+    expect(cockroachReportV2RenderedSignature({ cockroachReportV2RenderedSignature: '-roachv2a-p2u1' }, service)).toBe('');
+    delete process.env.COCKROACH_REPORT_V2;
   });
 });
 

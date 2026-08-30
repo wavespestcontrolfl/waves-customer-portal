@@ -738,6 +738,8 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     // cockroach_control package sold on the same estimate
     expect(data.cockroachUpcomingRoachVisits).toBe(1);
     expect(data.cockroachNextTreatmentVisit).toEqual({ serviceType: 'German Roach Cleanout', scheduledDate: '2999-01-05', windowStart: '10:00:00' });
+    // the state the payload carries is stamped for the PDF store key
+    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-p2u1');
   });
 
   test('pdf/static builds carry the program position and the upcoming count, never the date', async () => {

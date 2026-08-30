@@ -18,7 +18,7 @@ const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
-const { cockroachReportV2PdfSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
+const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -178,10 +178,15 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
   // lookup sentinel for reports that render no narrative.
   let tnRenderedSignature = '-tn0';
+  // Same contract for the cockroach program state: the store key carries the
+  // state the render actually used (stamped on the payload), so a render
+  // that fell closed is never stored under the lookup's correct-state key.
+  let cockroachRenderedSignature = cockroachV2Signature;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
@@ -331,7 +336,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
