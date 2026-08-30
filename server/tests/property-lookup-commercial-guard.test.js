@@ -493,6 +493,32 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('county-attested ≤4-unit parcel (duplex ruling) keeps its lot un-flagged', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '7 Example Duplex Ln, Testville, FL 00000',
+      propertyType: 'Multifamily',
+      squareFootage: 2400,
+      lotSize: 9000,
+      unitCount: 2,
+      _source: 'county',
+      _parcel: { residentialUnits: 2 },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('a lot the merge already field-flagged gets ONE flag (the generic evidence loop), not two', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '8 Example Condo Way, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      _source: 'county',
+      _fieldEvidence: { lotSize: { value: 93940, sourceType: 'county', fieldVerify: true } },
+    }, null, null);
+    expect(flags.filter((f) => f.field === 'lotSize')).toHaveLength(1);
+    expect(flags.find((f) => f.field === 'lotSize').reason).not.toMatch(/parcel, not one unit/i);
+  });
+
   test('aggregated multifamily association record → no unit-lot flag (whole-property workflow)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '5 Example Complex Dr, Testville, FL 00000',

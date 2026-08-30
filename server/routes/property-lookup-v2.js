@@ -3215,10 +3215,19 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // type string is read off commercialSignalRecord — an unverified AI
   // web-search "Multifamily" is stripped there and cannot fire this — and a
   // technician-VERIFIED lot is the unit's own treatable area, not a parcel.
+  // County-attested ≤4-unit parcels (duplex/triplex — the ≥5-unit ruling)
+  // are EXEMPT: their lot genuinely describes the small property, and the
+  // customer-pricing path treats a lotSize flag as an unconditional
+  // dimension rejection, which would fail-closed legitimate small-parcel
+  // quotes (GH codex P1). A lot the merge already field-flagged is left to
+  // the generic evidence loop below — two lotSize flags double-count in the
+  // win/loss slices (GH codex P2).
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
+    && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
+    && !countyAttestedSmallResidential(rc)
     && !/hoa\s*common/i.test(String(unitLotSignalRc?.propertyType || ''))
     && /condo|apartment|multifamily/i.test(String(unitLotSignalRc?.propertyType || ''))) {
     flags.push({
