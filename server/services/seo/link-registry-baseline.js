@@ -33,7 +33,7 @@
  */
 
 const { ensureDomain, isNeverTargetHost, pathKey, pathLinkTypeFor, touchKey } = require('./link-registry');
-const { canonicalProspectDomain, findPlacementRow, targetPageOf, locationKeyOf } = require('./prospect-domain-lock');
+const { canonicalProspectDomain, findPlacementRow, lockProspectDomain, targetPageOf, locationKeyOf } = require('./prospect-domain-lock');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 const SOURCE = 'existing_backlink';
@@ -242,6 +242,11 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
       }
 
       // ---- placements + mappings -----------------------------------------
+      // Board admission goes through the shared per-domain advisory lock like
+      // every other seo_link_prospects writer: no concurrent writer can admit a
+      // differently spelled, canonically equal (host, page) between the lookup
+      // and the insert. Transaction-scoped, so it needs the real transaction.
+      if (!dryRun) await lockProspectDomain(q, d.host);
       for (const g of d.groups.values()) {
         const rep = g.rows[0];
         let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true });

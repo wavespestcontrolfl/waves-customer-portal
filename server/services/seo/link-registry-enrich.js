@@ -19,6 +19,14 @@ const { canonicalProspectDomain } = require('./prospect-domain-lock');
 
 const BULK_MAX = 1000;
 const ENRICH_LOCK_KEY = 'seo_link_enrich'; // pg_advisory_xact_lock(hashtext(key)) around every paid batch
+// §4 enrich = rank, spam, referring domains, traffic — one bulk call each per
+// batch (≤1000 targets). enrichment JSON caches every raw item under its key.
+const BULK_CALLS = Object.freeze([
+  ['bulk_ranks', 'bulkRanks'],
+  ['bulk_spam_score', 'bulkSpamScore'],
+  ['bulk_referring_domains', 'bulkReferringDomains'],
+  ['bulk_traffic', 'bulkTrafficEstimation'],
+]);
 
 const items = (resp) => {
   const r = resp && resp.tasks && resp.tasks[0] && resp.tasks[0].result;
@@ -82,7 +90,8 @@ async function competitorsLinked(db, hosts) {
  *
  * - gated: no API call; competitors_linked still written (not dryRun).
  * - dryRun: selection + counts only; zero writes, zero API calls.
- * - Per batch of ≤1000: one bulkRanks + one bulkSpamScore. A thrown DataForSEO
+ * - Per batch of ≤1000: one call per BULK_CALLS entry (rank, spam, referring
+ *   domains, traffic). A thrown DataForSEO
  *   error propagates before any write for that batch. A null response (the
  *   client swallows transport/auth failures into null) is a batch failure:
  *   every domain in it lands in `failed` and keeps enriched_at NULL so the
@@ -98,7 +107,7 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
   const hosts = rows.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean);
   const linked = await competitorsLinked(db, [...new Set(hosts)]);
   if (dryRun) {
-    out.wouldCall = gated ? 0 : chunk(rows, BULK_MAX).length * 2;
+    out.wouldCall = gated ? 0 : chunk(rows, BULK_MAX).length * BULK_CALLS.length;
     return out;
   }
 
@@ -128,46 +137,46 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
         if (!batch.length) return;
         const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
 
-        // Both calls complete (or throw) BEFORE any write for this batch.
-        const ranksResp = await dataforseo.bulkRanks(targets);
-        out.calls += 1;
-        const spamResp = await dataforseo.bulkSpamScore(targets);
-        out.calls += 1;
-        const ranks = items(ranksResp);
-        const spam = items(spamResp);
-        if (!ranks || !spam) {
-          for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: !ranks ? 'bulk_ranks_no_response' : 'bulk_spam_score_no_response' });
+        // All four bulk calls complete (or throw) BEFORE any write for this
+        // batch — §4 enrich = rank, spam, referring domains, traffic. A null
+        // response from ANY of them fails the whole batch: enriched_at stays
+        // NULL so the next run retries, and nothing partial is ever marked done.
+        const responses = {};
+        for (const [key, method] of BULK_CALLS) {
+          responses[key] = items(await dataforseo[method](targets));
+          out.calls += 1;
+        }
+        const missingCall = BULK_CALLS.find(([key]) => !responses[key]);
+        if (missingCall) {
+          for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: `${missingCall[0]}_no_response` });
           // still write the free signal
           for (const r of batch) patches.push({ id: r.id, patch: { competitors_linked: linked.get(canonicalProspectDomain(r.domain)) || 0, updated_at: now } });
         } else {
-          const byHostRank = new Map();
-          for (const it of ranks) { const h = canonicalProspectDomain(it && it.target); if (h) byHostRank.set(h, it); }
-          const byHostSpam = new Map();
-          for (const it of spam) { const h = canonicalProspectDomain(it && it.target); if (h) byHostSpam.set(h, it); }
+          const byHost = {};
+          for (const [key] of BULK_CALLS) {
+            byHost[key] = new Map();
+            for (const it of responses[key]) { const h = canonicalProspectDomain(it && it.target); if (h) byHost[key].set(h, it); }
+          }
 
           for (const r of batch) {
             try {
               const host = canonicalProspectDomain(r.domain);
-              const rk = byHostRank.get(host) || null;
-              const sp = byHostSpam.get(host) || null;
+              const hit = Object.fromEntries(BULK_CALLS.map(([key]) => [key, byHost[key].get(host) || null]));
               const patch = { competitors_linked: linked.get(host) || 0, enriched_at: now, updated_at: now };
-              if (!rk && !sp) {
+              if (BULK_CALLS.every(([key]) => !hit[key])) {
                 patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
               } else {
                 const enrichment = { fetched_at: nowIso };
-                if (rk) {
-                  enrichment.bulk_ranks = rk;
-                  // bulk_ranks items are { target, rank } on the one_hundred scale
-                  // (dataforseo.bulkRanks); referring_domains / organic_traffic
-                  // have no source in this pass and stay untouched.
-                  const dr = intOrNull(rk.rank);
-                  if (dr != null) patch.domain_rating = dr;
-                } else enrichment.bulk_ranks = { missing: true };
-                if (sp) {
-                  enrichment.bulk_spam_score = sp;
-                  const ss = intOrNull(sp.spam_score);
-                  if (ss != null) patch.spam_score = ss;
-                } else enrichment.bulk_spam_score = { missing: true };
+                for (const [key] of BULK_CALLS) enrichment[key] = hit[key] || { missing: true };
+                const dr = hit.bulk_ranks ? intOrNull(hit.bulk_ranks.rank) : null; // one_hundred scale (dataforseo.bulkRanks)
+                if (dr != null) patch.domain_rating = dr;
+                const ss = hit.bulk_spam_score ? intOrNull(hit.bulk_spam_score.spam_score) : null;
+                if (ss != null) patch.spam_score = ss;
+                const rd = hit.bulk_referring_domains ? intOrNull(hit.bulk_referring_domains.referring_domains) : null;
+                if (rd != null) patch.referring_domains = rd;
+                const organic = hit.bulk_traffic && hit.bulk_traffic.metrics && hit.bulk_traffic.metrics.organic;
+                const traffic = organic ? intOrNull(organic.etv) : null;
+                if (traffic != null) patch.organic_traffic = traffic;
                 patch.enrichment = JSON.stringify(enrichment);
               }
               patches.push({ id: r.id, patch });
@@ -185,4 +194,4 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
   return out;
 }
 
-module.exports = { enrichDomains, competitorsLinked, BULK_MAX, ENRICH_LOCK_KEY, _test: { items, selectDomains } };
+module.exports = { enrichDomains, competitorsLinked, BULK_MAX, BULK_CALLS, ENRICH_LOCK_KEY, _test: { items, selectDomains } };

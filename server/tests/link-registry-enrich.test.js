@@ -55,14 +55,18 @@ function fakeDb({ domains = [], competitorBacklinks = [] } = {}) {
 }
 
 const dfsResp = (rows) => ({ tasks: [{ result: [{ items: rows }] }] });
-function fakeDfs({ ranks = [], spam = [], throwOn = null } = {}) {
+function fakeDfs({ ranks = [], spam = [], referring = [], traffic = [], throwOn = null } = {}) {
   const calls = [];
+  const answer = (name, fixture, targets) => { calls.push([name, targets]); if (throwOn === name) throw new Error('DFS down'); return typeof fixture === 'function' ? fixture(targets) : dfsResp(fixture); };
   return {
     calls,
-    async bulkRanks(targets) { calls.push(['bulkRanks', targets]); if (throwOn === 'ranks') throw new Error('DFS down'); return typeof ranks === 'function' ? ranks(targets) : dfsResp(ranks); },
-    async bulkSpamScore(targets) { calls.push(['bulkSpamScore', targets]); if (throwOn === 'spam') throw new Error('DFS down'); return typeof spam === 'function' ? spam(targets) : dfsResp(spam); },
+    async bulkRanks(targets) { return answer('bulkRanks', ranks, targets); },
+    async bulkSpamScore(targets) { return answer('bulkSpamScore', spam, targets); },
+    async bulkReferringDomains(targets) { return answer('bulkReferringDomains', referring, targets); },
+    async bulkTrafficEstimation(targets) { return answer('bulkTrafficEstimation', traffic, targets); },
   };
 }
+const ALL4 = (targets) => [['bulkRanks', targets], ['bulkSpamScore', targets], ['bulkReferringDomains', targets], ['bulkTrafficEstimation', targets]];
 
 const NOW = new Date('2026-08-29T12:00:00Z');
 const D = (id, domain, extra = {}) => ({ id, domain, discovery_priority: 'normal', enriched_at: null, created_at: NOW, ...extra });
@@ -70,7 +74,7 @@ const D = (id, domain, extra = {}) => ({ id, domain, discovery_priority: 'normal
 beforeEach(() => { isEnabled.mockReset(); isEnabled.mockReturnValue(true); });
 
 describe('enrichDomains', () => {
-  test('enriches a batch with ONE bulkRanks + ONE bulkSpamScore; maps rank (one_hundred scale) + spam; never invents referring_domains; caches raw payloads; enriched_at set', async () => {
+  test('enriches a batch with ONE call per §4 metric (rank, spam, referring domains, traffic); maps all four; caches raw payloads; enriched_at set only after the full set', async () => {
     const db = fakeDb({
       domains: [D('d1', 'alpha.example'), D('d2', 'beta.example')],
       competitorBacklinks: [
@@ -80,21 +84,27 @@ describe('enrichDomains', () => {
       ],
     });
     const dfs = fakeDfs({
-      ranks: [{ target: 'alpha.example', rank: 41, referring_domains: 120 }, { target: 'www.beta.example', rank: 7 }],
+      ranks: [{ target: 'alpha.example', rank: 41 }, { target: 'www.beta.example', rank: 7 }],
       spam: [{ target: 'alpha.example', spam_score: 5 }, { target: 'beta.example', spam_score: 60 }],
+      referring: [{ target: 'alpha.example', referring_domains: 120 }],
+      traffic: [{ target: 'alpha.example', metrics: { organic: { etv: 812.4, count: 300 } } }],
     });
     const r = await enrichDomains(db, { dataforseo: dfs, now: NOW });
-    expect(r).toMatchObject({ dryRun: false, gated: false, selected: 2, enriched: 2, failed: [], calls: 2 });
-    expect(dfs.calls).toEqual([['bulkRanks', ['alpha.example', 'beta.example']], ['bulkSpamScore', ['alpha.example', 'beta.example']]]);
+    expect(r).toMatchObject({ dryRun: false, gated: false, selected: 2, enriched: 2, failed: [], calls: 4 });
+    expect(dfs.calls).toEqual(ALL4(['alpha.example', 'beta.example']));
     expect(db.transaction).toHaveBeenCalledTimes(1);
     const byId = Object.fromEntries(db._store.updates.map((u) => [u.where.id, u.patch]));
-    expect(byId.d1).toMatchObject({ domain_rating: 41, spam_score: 5, competitors_linked: 2, enriched_at: NOW });
-    expect(byId.d1.referring_domains).toBeUndefined(); // bulk_ranks carries no referring_domains — a stray field is cached raw, never mapped
-    expect(byId.d1.organic_traffic).toBeUndefined();
-    expect(JSON.parse(byId.d1.enrichment)).toEqual({ fetched_at: NOW.toISOString(), bulk_ranks: { target: 'alpha.example', rank: 41, referring_domains: 120 }, bulk_spam_score: { target: 'alpha.example', spam_score: 5 } });
-    // www. spelling in the response still maps onto the canonical host
+    expect(byId.d1).toMatchObject({ domain_rating: 41, spam_score: 5, referring_domains: 120, organic_traffic: 812, competitors_linked: 2, enriched_at: NOW });
+    expect(JSON.parse(byId.d1.enrichment)).toEqual({
+      fetched_at: NOW.toISOString(),
+      bulk_ranks: { target: 'alpha.example', rank: 41 }, bulk_spam_score: { target: 'alpha.example', spam_score: 5 },
+      bulk_referring_domains: { target: 'alpha.example', referring_domains: 120 }, bulk_traffic: { target: 'alpha.example', metrics: { organic: { etv: 812.4, count: 300 } } },
+    });
+    // www. spelling in the response still maps onto the canonical host; metrics absent for a host are flagged in the cache, never invented
     expect(byId.d2).toMatchObject({ domain_rating: 7, spam_score: 60, competitors_linked: 0, enriched_at: NOW });
     expect(byId.d2.referring_domains).toBeUndefined();
+    expect(byId.d2.organic_traffic).toBeUndefined();
+    expect(JSON.parse(byId.d2.enrichment)).toMatchObject({ bulk_referring_domains: { missing: true }, bulk_traffic: { missing: true } });
   });
 
   test('gated: zero API calls, enriched 0, but competitors_linked is still written (free signal)', async () => {
@@ -121,8 +131,8 @@ describe('enrichDomains', () => {
       spam: (targets) => dfsResp(targets.map((t) => ({ target: t, spam_score: 0 }))),
     });
     const r = await enrichDomains(db, { dataforseo: dfs, limit: 2000, now: NOW });
-    expect(r).toMatchObject({ selected: 1500, enriched: 1500, calls: 4, failed: [] });
-    expect(dfs.calls.map(([n, t]) => [n, t.length])).toEqual([['bulkRanks', 1000], ['bulkSpamScore', 1000], ['bulkRanks', 500], ['bulkSpamScore', 500]]);
+    expect(r).toMatchObject({ selected: 1500, enriched: 1500, calls: 8, failed: [] });
+    expect(dfs.calls.map(([n, t]) => [n, t.length])).toEqual([...ALL4(1000), ...ALL4(500)].map(([n, t]) => [n, t]));
     for (const [, t] of dfs.calls) expect(t.length).toBeLessThanOrEqual(BULK_MAX);
     expect(db.transaction).toHaveBeenCalledTimes(2);
     expect(db._store.updates).toHaveLength(1500);
@@ -132,7 +142,7 @@ describe('enrichDomains', () => {
     const db = fakeDb({ domains: [D('d1', 'present.example'), D('d2', 'absent.example')] });
     const dfs = fakeDfs({ ranks: [{ target: 'present.example', rank: 10 }], spam: [{ target: 'present.example', spam_score: 1 }] });
     const r = await enrichDomains(db, { dataforseo: dfs, now: NOW });
-    expect(r).toMatchObject({ enriched: 2, failed: [], calls: 2 });
+    expect(r).toMatchObject({ enriched: 2, failed: [], calls: 4 });
     const absent = db._store.updates.find((u) => u.where.id === 'd2').patch;
     expect(absent.enriched_at).toEqual(NOW);
     expect(JSON.parse(absent.enrichment)).toEqual({ missing: true, fetched_at: NOW.toISOString() });
@@ -150,7 +160,7 @@ describe('enrichDomains', () => {
     const db = fakeDb({ domains: [D('d1', 'a.example'), D('d2', 'b.example'), D('d3', 'c.example', { enriched_at: NOW })] });
     const dfs = fakeDfs({ ranks: [{ target: 'a.example', rank: 1 }] });
     const r = await enrichDomains(db, { dataforseo: dfs, dryRun: true, now: NOW });
-    expect(r).toMatchObject({ dryRun: true, gated: false, selected: 2, enriched: 0, calls: 0, failed: [], wouldCall: 2 });
+    expect(r).toMatchObject({ dryRun: true, gated: false, selected: 2, enriched: 0, calls: 0, failed: [], wouldCall: 4 });
     expect(dfs.calls).toEqual([]);
     expect(db._store.updates).toEqual([]);
     expect(db._store.raws).toEqual([]); // no lock, no transaction: report only
@@ -171,7 +181,7 @@ describe('enrichDomains', () => {
       ['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']],
       ['bulkRanks', ['open.example']],
     ]);
-    expect(r).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1, calls: 2 });
+    expect(r).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1, calls: 4 });
     expect(db._store.updates.map((u) => u.where.id)).toEqual(['d1']);
     // force = deliberate re-spend: no re-check, both targets go out (still under the lock)
     const db2 = fakeDb({ domains });
@@ -207,16 +217,22 @@ describe('enrichDomains', () => {
 
   test('a thrown DataForSEO error aborts the batch with zero writes (propagates)', async () => {
     const db = fakeDb({ domains: [D('d1', 'a.example')] });
-    await expect(enrichDomains(db, { dataforseo: fakeDfs({ throwOn: 'spam' }), now: NOW })).rejects.toThrow('DFS down');
+    await expect(enrichDomains(db, { dataforseo: fakeDfs({ throwOn: 'bulkSpamScore' }), now: NOW })).rejects.toThrow('DFS down');
     expect(db._store.updates).toEqual([]);
     expect(db._store.raws).toEqual([['SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']]]); // the lock was held; the throw rolls the batch back
   });
 
   test('a null response (client swallowed a transport/auth failure) = batch failed, enriched_at left NULL for retry, competitors_linked still written', async () => {
     const db = fakeDb({ domains: [D('d1', 'a.example')], competitorBacklinks: [{ source_domain: 'a.example', competitor_domain: 'c.com' }] });
-    const dfs = { async bulkRanks() { return null; }, async bulkSpamScore() { return dfsResp([]); } };
+    const dfs = { async bulkRanks() { return null; }, async bulkSpamScore() { return dfsResp([]); }, async bulkReferringDomains() { return dfsResp([]); }, async bulkTrafficEstimation() { return dfsResp([]); } };
     const r = await enrichDomains(db, { dataforseo: dfs, now: NOW });
-    expect(r).toMatchObject({ enriched: 0, calls: 2, failed: [{ id: 'd1', domain: 'a.example', reason: 'bulk_ranks_no_response' }] });
+    expect(r).toMatchObject({ enriched: 0, calls: 4, failed: [{ id: 'd1', domain: 'a.example', reason: 'bulk_ranks_no_response' }] });
     expect(db._store.updates).toEqual([{ table: 'seo_link_domains', where: { id: 'd1' }, patch: { competitors_linked: 1, updated_at: NOW } }]);
+    // a later metric failing (traffic) is the same contract: nothing partial is marked enriched
+    const db2 = fakeDb({ domains: [D('d1', 'a.example')] });
+    const r2 = await enrichDomains(db2, { dataforseo: { ...dfs, async bulkRanks() { return dfsResp([{ target: 'a.example', rank: 9 }]); }, async bulkTrafficEstimation() { return null; } }, now: NOW });
+    expect(r2).toMatchObject({ enriched: 0, calls: 4, failed: [{ id: 'd1', domain: 'a.example', reason: 'bulk_traffic_no_response' }] });
+    expect(db2._store.updates[0].patch.enriched_at).toBeUndefined();
+    expect(db2._store.updates[0].patch.domain_rating).toBeUndefined();
   });
 });

@@ -7,6 +7,7 @@
 const { importExistingBacklinks, _internals } = require('../services/seo/link-registry-baseline');
 const R = require('../services/seo/link-registry');
 const { SPOKE_SITE_KEYS } = require('../services/content-astro/spoke-sites');
+const { LOCK_PREFIX } = require('../services/seo/prospect-domain-lock');
 
 const HOME = 'https://wavespestcontrol.com/';
 const TERMITE = 'https://www.wavespestcontrol.com/termite-control/';
@@ -98,7 +99,8 @@ function fakeDb(seed = {}) {
     return q;
   }
   const db = jest.fn((table) => builder(table));
-  db.raw = (s) => s;
+  store.raws = [];
+  db.raw = jest.fn(async (s, b) => { store.raws.push([s, b]); return s; });
   db.fn = { now: () => 'NOW()' };
   db.transaction = jest.fn(async (fn) => fn(db));
   db._store = store;
@@ -175,6 +177,8 @@ describe('importExistingBacklinks (live)', () => {
     const r = await importExistingBacklinks(db, { now: NOW });
     expect(r).toEqual({ dryRun: false, scanned: 5, domainsCreated: 1, domainsTouched: 1, placementsCreated: 2, placementsExisting: 0, mappingsCreated: 5, pathsCreated: 1, skipped: [] });
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    // board admission under the shared per-domain advisory lock, inside the transaction
+    expect(db._store.raws).toContainEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', [`${LOCK_PREFIX}dir.example`]]);
 
     const [dom] = db._store.seo_link_domains;
     expect(dom).toMatchObject({ domain: 'dir.example', source: 'existing_backlink', source_detail: 'baseline_import', agent_state: 'acquired', discovery_priority: 'normal' });
@@ -308,6 +312,7 @@ describe('importExistingBacklinks (dryRun)', () => {
     expect(dry).toEqual({ dryRun: true, scanned: 4, domainsCreated: 2, domainsTouched: 2, placementsCreated: 2, placementsExisting: 0, mappingsCreated: 3, pathsCreated: 2, skipped: [{ backlink_id: 'b04', reason: 'never_target' }] });
     expect(db._writes).toEqual([]);
     expect(db.transaction).not.toHaveBeenCalled();
+    expect(db._store.raws.filter(([s]) => /pg_advisory_xact_lock/.test(String(s)))).toEqual([]); // no lock outside a transaction
     for (const t of ['seo_link_domains', 'seo_link_domain_sources', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_backlinks']) expect(db._store[t]).toEqual([]);
 
     const live = await importExistingBacklinks(db, { now: NOW });

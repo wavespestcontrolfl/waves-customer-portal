@@ -182,6 +182,20 @@ class DataForSEO {
     return this.request('/backlinks/bulk_spam_score/live', [{ targets }]);
   }
 
+  // Bulk referring-domain counts for up to 1000 targets in ONE call
+  // (items: { target, referring_domains }).
+  async bulkReferringDomains(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/backlinks/bulk_referring_domains/live', [{ targets }]);
+  }
+
+  // Bulk organic traffic estimate for up to 1000 targets in ONE call
+  // (items: { target, metrics: { organic: { etv, count } } }); US / en.
+  async bulkTrafficEstimation(targets) {
+    if (!Array.isArray(targets) || targets.length === 0) return null;
+    return this.request('/dataforseo_labs/google/bulk_traffic_estimation/live', [{ targets, location_code: 2840, language_code: 'en' }]);
+  }
+
   // Keyword search volume
   async searchVolume(keywords) {
     return this.request('/keywords_data/google_ads/search_volume/live', [{
