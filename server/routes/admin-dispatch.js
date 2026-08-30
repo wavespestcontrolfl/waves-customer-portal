@@ -4535,10 +4535,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // columns leave svc.cust_billing_mode undefined = legacy behavior.
     let billingModeColumnsExist = false;
     let customerTierSourceColumnExists = false;
+    // Probe FAILURE is not column ABSENCE: absent means a pre-provenance
+    // schema (every tier genuinely 'manual'); a failed probe means we don't
+    // know, and the tier snapshot must freeze NOTHING rather than 'manual'
+    // — or an auto-derived label could be frozen as a paid membership and
+    // print "$0.00 billed" forever (codex r13 P1).
+    let customerColumnsProbeFailed = false;
     try {
       billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
       customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
-    } catch { /* keep false — legacy select shape */ }
+    } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -7128,6 +7134,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardTierSource: snapshotCustomer ? snapshotCustomer.waveguard_tier_source : svc.cust_waveguard_tier_source,
             monthlyRate: snapshotCustomer ? snapshotCustomer.monthly_rate : svc.cust_monthly_rate,
             billingMode: snapshotCustomer ? snapshotCustomer.billing_mode : svc.cust_billing_mode,
+            provenanceUnknown: customerColumnsProbeFailed,
             // The LOCKED completion row's flag — svc was read before the
             // FOR UPDATE and a concurrent update-details reclassify would
             // freeze a stale callback identity forever (codex GH-r3 P2;

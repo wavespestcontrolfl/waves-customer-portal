@@ -26,11 +26,17 @@ function completionTierSnapshotFields({
   monthlyRate = null,
   billingMode = null,
   isCallback = null,
+  // TRUE when the caller could not verify the provenance inputs (a failed
+  // column probe — distinct from a genuinely pre-provenance schema): the
+  // snapshot then freezes NO source, and the money claim stays refused on
+  // the unfrozen record rather than minting a false 'manual' membership
+  // (codex #3617 r13 P1).
+  provenanceUnknown = false,
 } = {}) {
   const fields = {};
   if (serviceRecordCols.service_tier) fields.service_tier = waveguardTier || null;
   if (serviceRecordCols.service_tier_source) {
-    if (!waveguardTier) {
+    if (!waveguardTier || provenanceUnknown) {
       fields.service_tier_source = null;
     } else {
       const isLabel = isAutoDerivedTierLabelRow({

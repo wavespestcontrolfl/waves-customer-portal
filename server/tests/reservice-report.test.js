@@ -218,6 +218,12 @@ describe('reservice-report (gate on)', () => {
     // protocol may itself be a JSON string inside service_data.
     const doubleEncoded = { ...member, service_data: JSON.stringify({ protocol: JSON.stringify({ visitOutcome: 'inspection_only' }) }) };
     expect(await reserviceReportPdfSignature(doubleEncoded, { knex })).toBe('-rs1mi');
+    // Durable record status: no outcome snapshot anywhere but the row says
+    // incomplete — never the treated copy (codex GH-r4 P1).
+    const statusOnly = { ...member, status: 'incomplete' };
+    const block = await buildReserviceReport(statusOnly, { serviceLine: 'pest', knex });
+    expect(block.outcome).toBe('incomplete');
+    expect(await reserviceReportPdfSignature(statusOnly, { knex })).toBe('-rs1mx');
   });
 
   test('ONLY the tier frozen on the record qualifies — the customer\'s current tier never rewrites an old callback as free', async () => {

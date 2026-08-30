@@ -515,13 +515,20 @@ export default function ServiceReportDocument({ data, token }) {
   // Primary-source only: a companion dashboard (combined visit) never
   // replaces the PRIMARY service's summary — it replaces the bait companion
   // block below instead.
-  const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
-  const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  // Callback block first: a NO-APPLICATION callback must suppress the
+  // treatment-PROGRAM dashboards below (cockroach/termite "Work completed",
+  // "Treatment N of M complete") — a permanent PDF cannot say no
+  // application was made and then claim a treatment completed
+  // (codex GH-r4 P1). 'incomplete' keeps them (partial work is real work).
+  const reserviceEarly = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  const suppressProgramDashboards = Boolean(reserviceEarly && ['inspection_only', 'customer_declined'].includes(reserviceEarly.outcome));
+  const termiteV2Primary = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
+  const termiteV2Companion = !suppressProgramDashboards && Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
   const termiteV2Summary = termiteV2Primary && data.termiteReportV2?.status?.label ? data.termiteReportV2 : null;
   // Cockroach treatment-program dashboard (cockroach-report-v2.js): the
   // headline + body + reviewed narrative are the document's summary, and
   // the program position prints as its own line.
-  const cockroachV2 = data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
+  const cockroachV2 = !suppressProgramDashboards && data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
   // Callback (re-service) block from reservice-report.js — the same copy the
   // web hero prints, so the archived document keeps the re-service framing
   // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
@@ -607,7 +614,7 @@ export default function ServiceReportDocument({ data, token }) {
   const mosquitoV2 = data.mosquitoReportV2 || null;
   // termite bait-station dashboard (termite-report-v2.js) — same status /
   // defense / primaryMove contract as pest and mosquito.
-  const termiteV2 = data.termiteReportV2 || null;
+  const termiteV2 = suppressProgramDashboards ? null : (data.termiteReportV2 || null);
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
 

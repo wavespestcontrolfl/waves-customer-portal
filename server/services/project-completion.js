@@ -761,13 +761,22 @@ async function completeProjectBackedService({
             ...(customerCols.billing_mode ? ['billing_mode'] : []),
           )
           : null;
+        // The LOCKED visit row's flag — scheduledService was read without
+        // FOR UPDATE, and an update-details reclassify racing this insert
+        // would freeze a stale callback identity (codex GH-r4 P2; same rule
+        // as the /complete and recap paths).
+        const lockedVisit = await trx('scheduled_services')
+          .where({ id: scheduledService.id })
+          .forUpdate()
+          .first('id', 'is_callback')
+          .catch(() => null);
         Object.assign(insert, completionTierSnapshotFields({
           serviceRecordCols,
           waveguardTier: snapCust?.waveguard_tier || null,
           waveguardTierSource: snapCust?.waveguard_tier_source || null,
           monthlyRate: snapCust?.monthly_rate ?? null,
           billingMode: snapCust?.billing_mode ?? null,
-          isCallback: scheduledService.is_callback === true,
+          isCallback: (lockedVisit || scheduledService).is_callback === true,
         }));
       } catch { /* legacy insert shape — never block a project completion */ }
       [serviceRecord] = await trx('service_records').insert(insert).returning('*');

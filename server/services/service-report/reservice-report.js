@@ -156,7 +156,11 @@ function outcomeOf(service, visitOutcome) {
     const serviceData = parseMaybeJson(service?.service_data) || {};
     const protocol = parseMaybeJson(serviceData.protocol) || {};
     const structured = parseMaybeJson(service?.structured_notes) || {};
-    outcome = protocol.visitOutcome || structured.visitOutcome || service?.visit_outcome || null;
+    outcome = protocol.visitOutcome || structured.visitOutcome || service?.visit_outcome
+      // Durable record status: a legacy/repaired callback whose row says
+      // 'incomplete' with no outcome snapshot must not read as treated
+      // (codex GH-r4 P1).
+      || (String(service?.status || '').toLowerCase() === 'incomplete' ? 'incomplete' : null);
   }
   const key = String(outcome || '').toLowerCase();
   return NON_PERFORMED_OUTCOMES.has(key) ? key : 'treated';

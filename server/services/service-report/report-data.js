@@ -4989,7 +4989,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Re-service hero/PDF copy (reservice-report.js) — null while
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
-    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || 'completed' }),
+    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || null }),
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.

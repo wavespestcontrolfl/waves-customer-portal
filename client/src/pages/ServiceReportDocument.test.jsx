@@ -1434,6 +1434,26 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(text).not.toContain('We completed today\u2019s treatment in your program.');
   });
 
+  it('no-application outcome: the cockroach program DASHBOARD sections are suppressed, not just the summary', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { key: 'watching', label: 'Treatment 2 of 3 complete — activity moderate.' },
+        work: ['Bait placement', 'Crack & crevice'],
+        whatsNext: { title: 'Treatment 2 of 3 complete', badge: 'IN_PROGRESS', lines: [{ label: 'next', text: 'Next visit booked.' }] },
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    expect(text).not.toContain('Your cockroach treatment program');
+    expect(text).not.toContain('Treatment 2 of 3 complete');
+  });
+
   it('incomplete outcome: the caveat LEADS but truthful partial-treatment content is kept', () => {
     const { container } = render(<ServiceReportDocument data={{
       ...BASE_DATA,
