@@ -66,6 +66,14 @@ exports.up = async function up(knex) {
             .whereRaw('payment_methods.customer_id = customers.id')
             .where('payment_methods.autopay_enabled', true);
         })
+        .orWhereExists(function staleSeriesFlag() {
+          // The header's stale-flag residue class: recurring_ongoing=true
+          // surviving on a CANCELLED row of an otherwise-clean account.
+          this.select(knex.raw('1')).from('scheduled_services')
+            .whereRaw('scheduled_services.customer_id = customers.id')
+            .where('scheduled_services.status', 'cancelled')
+            .where('scheduled_services.recurring_ongoing', true);
+        })
         .orWhereExists(function retryArmed() {
           this.select(knex.raw('1')).from('payments')
             .whereRaw('payments.customer_id = customers.id')

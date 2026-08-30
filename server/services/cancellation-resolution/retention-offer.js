@@ -105,7 +105,7 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
     // trusted with money (tenure, paid visits, balance, complaints,
     // callbacks, lane, family can all have changed).
     const { loadCancellationFacts } = require('./facts');
-    const facts = await loadCancellationFacts(customerId);
+    const facts = await loadCancellationFacts(customerId, { dbh: trx });
     const verdict = facts ? offerEligibility(facts, { reasonCode, families: [familyKey] }) : { eligible: false, blockers: ['no_facts'] };
     if (!verdict.eligible || verdict.familyKey !== familyKey) {
       const err = new Error('retention_offer_ineligible');

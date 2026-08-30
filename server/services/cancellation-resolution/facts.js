@@ -71,13 +71,17 @@ function num(row, key) {
 function rowIsCancellationFamilyEvidence(row, { isOneTimeBookingSource }) {
   if (isOneTimeBookingSource(row.source)) return false;
   if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
-  if (String(row.status || '').toLowerCase() === 'cancelled') return false;
+  // A CANCELLED row still carries family evidence when it is the parent of
+  // a live series (this_only cancellation keeps recurring_ongoing=true by
+  // design and hasCancellableWork treats it as an active plan); a cancelled
+  // one-off carries none.
+  if (String(row.status || '').toLowerCase() === 'cancelled' && row.recurring_ongoing !== true) return false;
   const recurring = row.is_recurring === true || row.is_recurring === 1 || row.is_recurring === '1' || row.is_recurring === 'true'
     || row.recurring_ongoing === true;
   return recurring;
 }
 
-async function loadFamilies(customerId, today) {
+async function loadFamilies(customerId, today, dbh = db) {
   const {
     detectWaveGuardPlanKeys, isOneTimeBookingSource, isCommercialServiceRow, isRodentLedServiceRow, uniqueServiceFamilies,
   } = require('../self-booking-plan-sync');
@@ -87,7 +91,7 @@ async function loadFamilies(customerId, today) {
   // account that CAN cancel must never resolve with families=[] (that would
   // suppress away/health/retention cards for exactly the plans being
   // cancelled).
-  const rows = await db('scheduled_services as s')
+  const rows = await dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .where(function familyEvidence() {
@@ -99,7 +103,6 @@ async function loadFamilies(customerId, today) {
             });
         });
     })
-    .whereNot('s.status', 'cancelled')
     .select('s.*', 'sv.service_key', 'sv.service_name');
   const keys = [];
   for (const row of rows) {
@@ -114,13 +117,13 @@ async function loadFamilies(customerId, today) {
   // the plan label text.
   try {
     const { coveredTermsAsOf } = require('../annual-prepay-renewals');
-    const terms = await coveredTermsAsOf(db, today)
+    const terms = await coveredTermsAsOf(dbh, today)
       .where('t.customer_id', customerId)
       .select('t.plan_label', 't.last_scheduled_service_id');
     for (const term of terms || []) {
       let anchorKeys = [];
       if (term.last_scheduled_service_id) {
-        const anchor = await db('scheduled_services as s')
+        const anchor = await dbh('scheduled_services as s')
           .leftJoin('services as sv', 's.service_id', 'sv.id')
           .where('s.id', term.last_scheduled_service_id)
           .first('s.*', 'sv.service_key', 'sv.service_name');
@@ -139,12 +142,12 @@ async function loadFamilies(customerId, today) {
   return uniqueServiceFamilies(keys);
 }
 
-async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
+async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } = {}) {
   if (!customerId) throw new Error('loadCancellationFacts requires customerId');
   const today = etDateString();
   const since12mo = daysAgo(365, now);
 
-  const customer = await db('customers')
+  const customer = await dbh('customers')
     .where({ id: customerId })
     .first('id', 'member_since', 'created_at', 'waveguard_tier', 'monthly_rate', 'billing_mode', 'termite_stations_rented', 'autopay_enabled');
   if (!customer) return null;
@@ -170,7 +173,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
     findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families,
   ] = await Promise.all([
-    leg('visitCounts', () => db('scheduled_services')
+    leg('visitCounts', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .whereRaw('COALESCE(is_callback, false) = false')
       .count({ n: '*' }).first(), null),
@@ -178,7 +181,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     // PAID/PREPAID invoice on the row. Monthly-membership customers pay dues,
     // not per-visit invoices — for that lane completed visits + the separate
     // account-current gate are the honest equivalent (see below).
-    leg('paidVisitCounts', () => db('scheduled_services as s')
+    leg('paidVisitCounts', () => dbh('scheduled_services as s')
       .join('invoices as i', 'i.scheduled_service_id', 's.id')
       .where('s.customer_id', customerId)
       .where('s.status', 'completed')
@@ -188,22 +191,22 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
         this.whereNotNull('i.paid_at').orWhereIn('i.status', ['paid', 'prepaid']);
       })
       .countDistinct({ n: 's.id' }).first(), null),
-    leg('visits12mo', () => db('scheduled_services')
+    leg('visits12mo', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .whereRaw('COALESCE(is_callback, false) = false')
       .where('scheduled_date', '>=', dateOnly(since12mo))
       .count({ n: '*' }).first(), null),
-    leg('callbacks12mo', () => db('scheduled_services')
+    leg('callbacks12mo', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed', is_callback: true })
       .where('scheduled_date', '>=', dateOnly(since12mo))
       .count({ n: '*' }).first(), null),
-    leg('reschedules12mo', () => db('job_status_history as h')
+    leg('reschedules12mo', () => dbh('job_status_history as h')
       .join('scheduled_services as s', 's.id', 'h.job_id')
       .where('s.customer_id', customerId)
       .where('h.to_status', 'rescheduled')
       .where('h.transitioned_at', '>=', since12mo)
       .count({ n: '*' }).first(), null),
-    leg('savings12mo', () => db('invoices')
+    leg('savings12mo', () => dbh('invoices')
       .where({ customer_id: customerId })
       .where(function paidSignal() {
         this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
@@ -211,7 +214,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where('created_at', '>=', since12mo)
       .where('discount_label', 'ilike', '%WaveGuard%')
       .sum({ n: 'discount_amount' }).first(), null),
-    leg('pastDue', () => db('invoices')
+    leg('pastDue', () => dbh('invoices')
       .where({ customer_id: customerId })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .whereNull('paid_at') // an invoice paid_at-stamped is settled even if status lags
@@ -219,7 +222,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where('due_date', '<', today)
       .whereRaw('COALESCE(total, 0) - COALESCE(credit_applied, 0) > 0')
       .first('id'), 'error'),
-    leg('failedPayment', () => db('payments')
+    leg('failedPayment', () => dbh('payments')
       .where({ customer_id: customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .first('id'), 'error'),
@@ -228,7 +231,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     // reports (typedReportDelivery != 'auto_send') — same egress rule as
     // service-report/report-copy-context.js. Fetch extra rows so filtering
     // still yields candidates.
-    leg('findings', () => db('service_findings as f')
+    leg('findings', () => dbh('service_findings as f')
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
       .where('r.status', 'completed')
@@ -237,20 +240,20 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .select('f.title', 'f.detail', 'f.category', 'f.severity', 'r.service_date', 'r.service_line', 'r.structured_notes'), []),
     // The OLDEST finding queried separately — the "your first visit found"
     // card must never quote a merely-less-recent finding as the first one.
-    leg('earliestFinding', () => db('service_findings as f')
+    leg('earliestFinding', () => dbh('service_findings as f')
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
       .where('r.status', 'completed')
       .orderBy([{ column: 'r.service_date', order: 'asc' }, { column: 'f.created_at', order: 'asc' }])
       .limit(5)
       .select('f.title', 'f.detail', 'r.service_date', 'r.service_line', 'r.structured_notes'), []),
-    leg('complaintRequest', () => db('service_requests')
+    leg('complaintRequest', () => dbh('service_requests')
       .where({ customer_id: customerId })
       .whereIn('category', COMPLAINT_CATEGORIES)
       .whereNotIn('status', TERMINAL_REQUEST_STATUSES)
       .where('created_at', '>=', daysAgo(60, now))
       .first('id'), 'error'),
-    leg('lastComplaint', () => db('messages as m')
+    leg('lastComplaint', () => dbh('messages as m')
       .join('conversations as c', 'c.id', 'm.conversation_id')
       .where('c.customer_id', customerId)
       .where('m.direction', 'inbound')
@@ -259,7 +262,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .orderBy('m.created_at', 'desc')
       .limit(20)
       .select('m.body', 'm.created_at'), []),
-    leg('priorOffer', () => db('retention_offers')
+    leg('priorOffer', () => dbh('retention_offers')
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
       .first('granted_at'), 'error'),
@@ -308,21 +311,21 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
         .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date > ?", [etMonthsAgoFloor(now, 12)])
         .select('resolution_template_id');
     }, []),
-    leg('termite', () => db('termite_stations')
+    leg('termite', () => dbh('termite_stations')
       .where({ customer_id: customerId, program: 'termite', owned_by: 'waves' })
       .whereRaw('COALESCE(is_active, true) = true')
       .first('id'), null),
-    leg('properties', () => db('customer_properties')
+    leg('properties', () => dbh('customer_properties')
       .where({ customer_id: customerId, active: true })
       .count({ n: '*' }).first(), null),
-    leg('prefs', () => db('property_preferences')
+    leg('prefs', () => dbh('property_preferences')
       .where({ customer_id: customerId })
       .first('preferred_day', 'preferred_time', 'property_gate_code', 'neighborhood_gate_code'), null),
     leg('callbackLanes', async () => {
       const { openReserviceCallbacks } = require('../reservice-scheduler');
       return Object.keys(await openReserviceCallbacks(customerId));
     }, 'error'),
-    leg('families', () => loadFamilies(customerId, today), []),
+    leg('families', () => loadFamilies(customerId, today, dbh), []),
   ]);
 
   // Customer-visibility filter (mirrors report-copy-context.js): a typed
