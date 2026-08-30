@@ -190,6 +190,13 @@ describe('enrichDomains', () => {
     expect(dfs2.calls[0]).toEqual(['bulkRanks', ['open.example', 'taken.example']]);
     expect(r2).toMatchObject({ enriched: 2, skippedClaimed: 0 });
     expect(db2._store.raws).toHaveLength(1);
+    // force still honors the in-lock freshness check: a row another run stamped between selection and the lock is skipped
+    const db3 = fakeDb({ domains: domains.map((d) => ({ ...d })) });
+    db3.raw.mockImplementation(async () => { const i = db3._store.domains.findIndex((d) => d.id === 'd2'); db3._store.domains[i] = { ...db3._store.domains[i], enriched_at: new Date(NOW.getTime() + 1000) }; return {}; }); // a concurrent run stamped d2 (new row object: selection's copy keeps the old stamp)
+    const dfs3 = fakeDfs({ ranks: (t) => dfsResp(t.map((x) => ({ target: x, rank: 1 }))), spam: (t) => dfsResp(t.map((x) => ({ target: x, spam_score: 0 }))) });
+    const r3 = await enrichDomains(db3, { dataforseo: dfs3, domainIds: ['d1', 'd2'], force: true, now: NOW });
+    expect(dfs3.calls[0]).toEqual(['bulkRanks', ['open.example']]);
+    expect(r3).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1 });
   });
 
   test('selection: un-enriched only unless force; explicit domainIds; owner_seed first; limit honored', async () => {

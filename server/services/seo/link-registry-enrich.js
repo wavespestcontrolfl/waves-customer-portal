@@ -128,12 +128,16 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
         // paid calls, and the batch is re-checked INSIDE it, so two overlapping
         // runs can never both see enriched_at IS NULL for the same domain.
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [ENRICH_LOCK_KEY]);
-        if (!force) {
-          const still = await trx('seo_link_domains').select('id').whereIn('id', batch.map((r) => r.id)).whereNull('enriched_at');
-          const open = new Set((still || []).map((r) => r.id));
-          out.skippedClaimed += batch.filter((r) => !open.has(r.id)).length;
-          batch = batch.filter((r) => open.has(r.id));
-        }
+        // In-lock freshness check for EVERY paid batch, force included: a row
+        // is spent on only if its enriched_at is still what selection saw —
+        // NULL for a normal run; the same (possibly non-NULL) stamp for a
+        // forced refresh. A row another run stamped in between is skipped.
+        const current = await trx('seo_link_domains').select('id', 'enriched_at').whereIn('id', batch.map((r) => r.id));
+        const stamp = (v) => (v == null ? null : new Date(v).getTime());
+        const seen = new Map((current || []).map((r) => [r.id, stamp(r.enriched_at)]));
+        const fresh = (r) => seen.has(r.id) && seen.get(r.id) === (force ? stamp(r.enriched_at) : null);
+        out.skippedClaimed += batch.filter((r) => !fresh(r)).length;
+        batch = batch.filter(fresh);
         if (!batch.length) return;
         const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
 
