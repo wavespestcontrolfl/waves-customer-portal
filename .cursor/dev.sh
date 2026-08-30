@@ -18,8 +18,9 @@ cd "${REPO_ROOT}"
 
 # Make sure PostgreSQL is up (start.sh may not have run in this shell).
 sudo pg_ctlcluster 16 main start 2>/dev/null || true
-for _ in $(seq 1 30); do sudo -u postgres pg_isready -q && break; sleep 1; done
-sudo -u postgres pg_isready
+PG_PORT="$(pg_local_port)"
+for _ in $(seq 1 30); do sudo -u postgres pg_isready -p "${PG_PORT}" -q && break; sleep 1; done
+sudo -u postgres pg_isready -p "${PG_PORT}"
 
 # Never serve against a remote/prod database.
 assert_local_effective_database_url

@@ -30,14 +30,19 @@ fi
 
 echo "[install] starting PostgreSQL cluster"
 sudo pg_ctlcluster 16 main start 2>/dev/null || true
-for _ in $(seq 1 30); do sudo -u postgres pg_isready -q && break; sleep 1; done
+# Resolve the 16/main port AFTER install/start — on a cached image with an older
+# cluster on 5432 the 16 cluster lands on a different port, and every client
+# below (and the generated URL) must target THAT port, not the default cluster.
+PG_PORT="$(pg_local_port)"
+echo "[install] PostgreSQL 16 cluster on port ${PG_PORT}"
+for _ in $(seq 1 30); do sudo -u postgres pg_isready -p "${PG_PORT}" -q && break; sleep 1; done
 
 echo "[install] ensuring dev role + database"
 # Create the role if missing, otherwise RECONCILE it — a cached/partial state
 # may hold waves_user with a stale password or without the privileges the
 # role-creating migrations need. Either way it ends with the exact password
-# baked into LOCAL_DATABASE_URL and the required attributes.
-sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+# baked into the local URL and the required attributes.
+sudo -u postgres psql -p "${PG_PORT}" -v ON_ERROR_STOP=1 <<'SQL'
 DO $$ BEGIN
   IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'waves_user') THEN
     ALTER ROLE waves_user WITH LOGIN PASSWORD 'waves_dev_password' SUPERUSER CREATEROLE CREATEDB;
@@ -46,8 +51,8 @@ DO $$ BEGIN
   END IF;
 END $$;
 SQL
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'waves_portal'" | grep -q 1; then
-  sudo -u postgres createdb -O waves_user waves_portal
+if ! sudo -u postgres psql -p "${PG_PORT}" -tAc "SELECT 1 FROM pg_database WHERE datname = 'waves_portal'" | grep -q 1; then
+  sudo -u postgres createdb -p "${PG_PORT}" -O waves_user waves_portal
 fi
 
 if [ ! -f .env ]; then
@@ -63,7 +68,7 @@ CLIENT_URL=http://localhost:5173
 WAVES_FDACS_LICENSE=JB351547
 VITE_WAVES_FDACS_LICENSE=JB351547
 
-DATABASE_URL=${LOCAL_DATABASE_URL}
+DATABASE_URL=$(local_database_url)
 DB_POOL_MIN=2
 DB_POOL_MAX=10
 

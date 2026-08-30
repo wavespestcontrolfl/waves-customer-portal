@@ -7,8 +7,25 @@
 CLOUD_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${CLOUD_ENV_DIR}/.." && pwd)"
 
-# The local dev database this environment provisions and owns.
-LOCAL_DATABASE_URL="postgresql://waves_user:waves_dev_password@127.0.0.1:5432/waves_portal"
+PG_MAJOR="16"
+
+# Port of the PostgreSQL $PG_MAJOR 'main' cluster. On a cached image that
+# already has an older cluster on 5432, `apt install postgresql-16` puts the 16
+# cluster on the next free port — so never assume 5432. Falls back to 5432 only
+# before the cluster exists (fresh image), where 16/main is created on 5432.
+pg_local_port() {
+  local p=""
+  if command -v pg_lsclusters >/dev/null 2>&1; then
+    p="$(pg_lsclusters -h 2>/dev/null | awk -v v="${PG_MAJOR}" '$1==v && $2=="main"{print $3; exit}')"
+  fi
+  printf '%s' "${p:-5432}"
+}
+
+# The local dev database this environment provisions and owns, on the resolved
+# PostgreSQL 16 port. A function (not a constant) so the port is always current.
+local_database_url() {
+  printf 'postgresql://waves_user:waves_dev_password@127.0.0.1:%s/waves_portal' "$(pg_local_port)"
+}
 
 # Lowercased hostname from a postgres URL. Handles URLs with OR without
 # credentials, an optional port, a path/query, and bracketed IPv6.
@@ -49,10 +66,13 @@ assert_local_database_url() {
 
 # Resolve the EFFECTIVE Knex database URL exactly as the app will (dotenv-loaded
 # .env plus knexfile's fallback vars: DATABASE_PRIVATE_URL / DATABASE_PUBLIC_URL
-# / POSTGRES_URL / POSTGRES_PRIVATE_URL / PG* ) and fail closed unless it is
-# local. This is the authoritative check — it catches a preexisting/cached .env
-# or a fallback var, not just an injected DATABASE_URL. Requires node deps
-# (dotenv), so call it AFTER `npm install`.
+# / POSTGRES_URL / POSTGRES_PRIVATE_URL / PG* ) and:
+#   - refuse (fail closed) if it resolves to a non-local host;
+#   - if it resolves EMPTY (e.g. a preserved .env with no DATABASE_URL and no
+#     fallback vars), export the provisioned local URL so `db:migrate`/the
+#     server never fall back to the OS-user database.
+# Requires node deps (dotenv), so call it AFTER `npm install`. The export
+# persists to the caller because this runs in the caller's shell.
 assert_local_effective_database_url() {
   local host
   host="$(cd "${REPO_ROOT}/server" 2>/dev/null && node -e '
@@ -62,7 +82,11 @@ assert_local_effective_database_url() {
     try { process.stdout.write(new URL(u).hostname); }
     catch { process.stdout.write("__unparseable__"); }
   ' 2>/dev/null || true)"
-  [ -z "$host" ] && return 0   # nothing resolved yet; the local .env will apply
+  if [ -z "$host" ]; then
+    export DATABASE_URL="$(local_database_url)"
+    echo "[cloud-env] no DATABASE_URL resolved — using the local database: 127.0.0.1:$(pg_local_port)/waves_portal"
+    return 0
+  fi
   host="${host#\[}"; host="${host%\]}"
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   if is_local_db_host "$host"; then
