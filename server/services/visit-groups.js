@@ -1649,6 +1649,55 @@ function visitSummariesForRows(rows, {
 }
 
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// THE shared last-moment send guard for appointment notices (codex r47 —
+// one implementation for the SMS canonical path and the appointment-email
+// path, never two drifting copies). True = do not send:
+//   1. a LIVE move_hold_until on the row's reminder record;
+//   2. renderedSlotMs (the epoch of the slot the body quotes) matching
+//      neither the row's own start nor the grouped stop's canonical start;
+//   3. the hold RE-READ after the slot/visit awaits — a mover can claim
+//      between the first hold read and those queries, with the row still
+//      showing the pre-move slot.
+// Fail closed on any read error.
+async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
+  if (!scheduledServiceId) return false;
+  const logger = require('./logger');
+  try {
+    const holdLive = async () => {
+      const row = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('move_hold_until');
+      return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+    };
+    if (await holdLive()) return true;
+    if (Number.isFinite(renderedSlotMs)) {
+      const live = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('scheduled_date', 'window_start', 'visit_id');
+      if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
+      const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
+      const day = etCalendarDayOf(live.scheduled_date);
+      const toMs = (hhmm) => {
+        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
+        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
+      };
+      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      if (live.visit_id) {
+        const stopStart = await liveStopStartHHMM(db, live.visit_id);
+        if (stopStart) candidates.push(toMs(stopStart));
+      }
+      if (!candidates.some((ms) => ms !== null && ms === renderedSlotMs)) return true;
+      // The slot/visit reads above are awaits a mover can slip behind while
+      // the row still shows the pre-move slot — the hold is checked LAST.
+      if (await holdLive()) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[visit-groups] appointment send-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
 // The staff repair message for an INCOMPLETE unit move (codex r44): a
 // straggler still at the old slot, a member that MOVED but could not be
 // reassigned (fixing its assignment, not re-moving it), and a failed
@@ -2760,6 +2809,7 @@ module.exports = {
   windowedMembersConnected,
   liveStopStartHHMM,
   incompleteMoveMessage,
+  appointmentSendHeld,
   createOrJoinVisit,
   maybeGroupRow,
   splitChild,

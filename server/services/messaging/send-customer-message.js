@@ -73,44 +73,11 @@ function appointmentMoveHoldApplies(input) {
   return !!input.appointmentId && (MOVE_HOLD_PURPOSES.includes(input.purpose) || input.enforceMoveHold === true);
 }
 async function appointmentMoveHeld(input) {
-  try {
-    const db = require('../../models/db');
-    const holdRow = await db('appointment_reminders')
-      .where({ scheduled_service_id: input.appointmentId })
-      .first('move_hold_until');
-    if (holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now()) return true;
-    // ABA guard (codex #3609 r39): a COMPLETE unit move can stamp and clear
-    // the hold entirely while this notice was rendering — no hold is left
-    // to see, but the body quotes the pre-move slot. Callers that rendered
-    // a schedule pass its epoch (renderedSlotMs, derived the same way the
-    // live one is below); a mismatch defers exactly like a hold so the
-    // retry re-renders the current slot.
-    if (Number.isFinite(input.renderedSlotMs)) {
-      const live = await db('scheduled_services')
-        .where({ id: input.appointmentId })
-        .first('scheduled_date', 'window_start', 'visit_id');
-      if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
-      const { parseETDateTime, etCalendarDayOf } = require('../../utils/datetime-et');
-      const day = etCalendarDayOf(live.scheduled_date);
-      const toMs = (hhmm) => {
-        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
-        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
-      };
-      // The rendered value is EITHER the row's own start (reminders) OR the
-      // grouped stop's canonical start (rain-out/appointment-page copy for
-      // a later chained member — codex r40); a stale body matches neither.
-      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
-      if (live.visit_id) {
-        const stopStart = await require('../visit-groups').liveStopStartHHMM(db, live.visit_id);
-        if (stopStart) candidates.push(toMs(stopStart));
-      }
-      if (!candidates.some((ms) => ms !== null && ms === input.renderedSlotMs)) return true;
-    }
-    return false;
-  } catch (err) {
-    logger.warn(`[send-customer-message] move-hold check failed for appointment ${input.appointmentId} — send held: ${err.message}`);
-    return true;
-  }
+  // Delegates to THE shared guard (visit-groups.appointmentSendHeld — one
+  // implementation with the appointment-email path, codex r47): live hold,
+  // rendered-slot ABA comparison, and a hold RE-READ after the slot/visit
+  // awaits. Fail closed inside the helper.
+  return require('../visit-groups').appointmentSendHeld(input.appointmentId, Number.isFinite(input.renderedSlotMs) ? input.renderedSlotMs : null);
 }
 
 function nextProviderRetryAt(providerOutcome, now = new Date()) {

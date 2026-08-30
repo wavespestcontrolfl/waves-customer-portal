@@ -12974,6 +12974,16 @@ const CallRecordingProcessor = {
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
+                        // Re-armed sweep owns the WHOLE phone fan-out
+                        // (codex r47): once the primary's MOVE_HOLD re-armed
+                        // confirmation_sent, the canonical sweep send fans
+                        // out to every appointment contact — a direct
+                        // secondary here (even after the hold cleared)
+                        // would be duplicated by that send.
+                        if (confirmationRearmed) {
+                          logger.info(`[call-proc] secondary confirmation to ${contact.role || 'contact'} skipped — re-armed sweep owns delivery to all contacts`);
+                          continue;
+                        }
                         // Same ladder as the primary send; the schedule row
                         // exists by this point, so the factory mints the
                         // same appointment-page link.

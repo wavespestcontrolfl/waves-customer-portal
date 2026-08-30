@@ -198,39 +198,9 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
 // the actual provider handoff, per recipient. Fail closed — a held notice
 // defers (the callers leave their rows unmarked and retry), never lost.
 async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
-  try {
-    const row = await db('appointment_reminders')
-      .where({ scheduled_service_id: scheduledServiceId })
-      .first('move_hold_until');
-    if (row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now()) return true;
-    // ABA guard (codex r39): a COMPLETE move can stamp and clear the hold
-    // while this email was being prepared — verify the rendered slot
-    // against the live row; a mismatch defers so the retry re-renders.
-    if (Number.isFinite(renderedSlotMs)) {
-      const live = await db('scheduled_services')
-        .where({ id: scheduledServiceId })
-        .first('scheduled_date', 'window_start', 'visit_id');
-      if (!live || !live.scheduled_date) return true;
-      const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
-      const day = etCalendarDayOf(live.scheduled_date);
-      const toMs = (hhmm) => {
-        const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
-        return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
-      };
-      // Row start OR the grouped stop's canonical start (codex r40) — a
-      // stale body matches neither.
-      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
-      if (live.visit_id) {
-        const stopStart = await require('./visit-groups').liveStopStartHHMM(db, live.visit_id);
-        if (stopStart) candidates.push(toMs(stopStart));
-      }
-      if (!candidates.some((ms) => ms !== null && ms === renderedSlotMs)) return true;
-    }
-    return false;
-  } catch (err) {
-    logger.warn(`[appointment-email] move-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
-    return true;
-  }
+  // Delegates to THE shared guard (visit-groups.appointmentSendHeld) —
+  // one implementation with the SMS canonical path (codex r47).
+  return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
 }
 
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null }) {
