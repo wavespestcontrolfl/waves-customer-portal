@@ -108,9 +108,11 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
   const [competitorPrice, setCompetitorPrice] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  // "Other" needs its note — the server 400s a blank one.
+  const incomplete = !reason || (reason === "declined_other" && !note.trim());
 
   const handleSave = async () => {
-    if (!reason) return;
+    if (incomplete) return;
     setSaving(true);
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
@@ -214,7 +216,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
         <Button
           variant="danger"
           onClick={handleSave}
-          disabled={saving || !reason}
+          disabled={saving || incomplete}
         >
           {saving ? "Saving…" : "Mark as Lost"}
         </Button>{" "}

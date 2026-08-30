@@ -134,6 +134,14 @@ describe('staffDispositionUpdates — PATCH payload', () => {
     expect(staffDispositionUpdates({}).error).toMatch(/required/);
   });
 
+  test("declined_other requires an explanation — blank note is a 400, mapped free text counts", () => {
+    expect(staffDispositionUpdates({ disposition: 'declined_other' }).error).toMatch(/note is required/);
+    expect(staffDispositionUpdates({ disposition: 'declined_other', dispositionNote: '  ' }).error).toMatch(/note is required/);
+    expect(staffDispositionUpdates({ disposition: 'declined_other', dispositionNote: 'hated the truck color' }).updates.disposition_note).toBe('hated the truck color');
+    // Unknown legacy free text maps to declined_other WITH the text as note.
+    expect(staffDispositionUpdates({ declineReason: 'Spouse said no' }).error).toBeUndefined();
+  });
+
   test('an explicit note wins over the legacy text and is bounded', () => {
     const { updates } = staffDispositionUpdates({
       disposition: 'declined_other', declineReason: 'Other', dispositionNote: ` ${'x'.repeat(3000)} `,

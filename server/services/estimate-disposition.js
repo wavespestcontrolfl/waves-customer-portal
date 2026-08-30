@@ -165,6 +165,12 @@ function staffDispositionUpdates(body = {}) {
 
   const note = typeof body.dispositionNote === 'string' ? body.dispositionNote.trim().slice(0, 2000) : '';
   const legacyText = typeof body.declineReason === 'string' ? body.declineReason.trim() : '';
+  // "Other" without any explanation is exactly the unexplained loss this
+  // taxonomy exists to end (GH codex P2). Free text that MAPPED to
+  // declined_other counts as the explanation.
+  if (code === 'declined_other' && !note && !legacyText) {
+    return { error: "A short note is required when the reason is 'Other'." };
+  }
   const updates = {
     disposition: code,
     disposition_source: 'staff',
