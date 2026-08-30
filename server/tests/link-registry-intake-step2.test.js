@@ -371,12 +371,13 @@ describe('resolveIntakeItems — sweep', () => {
     expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', attempts: 1, last_error: 'dns_error' }));
   });
 
-  test('a chain that ends on a never-target host is NOT turned into that domain — it stays unresolved', async () => {
+  test('a chain that RESOLVES onto a never-target host is dropped never_a_target immediately — never retried, never a domain', async () => {
     const db = dbWith([{ id: 'i1', raw_url: 'bit.ly/a', source: 'list_import', attempts: 0 }]);
     const fetchPage = jest.fn(async () => ({ status: 200, finalUrl: 'https://twitter.com/home', blocked: false, error: null }));
-    await resolveIntakeItems(db, { now, fetchPage });
+    const r = await resolveIntakeItems(db, { now, fetchPage });
     expect(registry.ensureDomain).not.toHaveBeenCalled();
-    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', last_error: 'resolved_to_never_target:twitter.com' }));
+    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'dropped', drop_reason: 'never_a_target', resolved_host: 'twitter.com', next_retry_at: null }));
+    expect(r.dropped).toBe(1);
   });
 
   test('X posts are parked for the X feeder without spending an attempt', async () => {

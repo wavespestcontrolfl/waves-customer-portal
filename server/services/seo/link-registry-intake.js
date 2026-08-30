@@ -462,9 +462,16 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
           continue;
         }
 
-        // No usable host yet (network / DNS failure, or the chain ended on a
-        // never-target host): back off on the schedule, then exhaust.
-        const err = page && page.error ? page.error : (host ? `resolved_to_never_target:${host}` : `status_${(page && page.status) || 0}`);
+        // A chain that RESOLVED onto a never-target host went somewhere we will
+        // never pursue: dropped now (plan §3.4d), the row kept as the audit.
+        if (host && isNeverTargetHost(host)) {
+          await finalize(db, item, { state: 'dropped', drop_reason: 'never_a_target', attempts, resolved_url: page.finalUrl, resolved_host: host, last_error: null, next_retry_at: null });
+          out.dropped += 1;
+          continue;
+        }
+
+        // No usable host yet (network / DNS failure): back off, then exhaust.
+        const err = page && page.error ? page.error : `status_${(page && page.status) || 0}`;
         await backoffOrExhaust(item, attempts, err);
       } catch (e) {
         if (e === LOST_CLAIM) { out.lost += 1; continue; }

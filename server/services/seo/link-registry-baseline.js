@@ -74,8 +74,15 @@ function expectedRelOfDofollow(v) {
   return v === true ? 'dofollow' : v === false ? 'nofollow' : 'unknown';
 }
 
+// The scan's own classifier fills a missing link_type (scan inserts leave it
+// NULL) — never a blanket 'citation'. Both the placement lane and the path's
+// acquisition_type derive from this ONE classification.
+function typeOf(bl) {
+  return bl.link_type || require('./backlink-monitor').classifyLinkType(bl);
+}
+
 function laneOf(bl) {
-  return bl.link_type ? pathLinkTypeFor(bl.link_type) : 'citation';
+  return pathLinkTypeFor(typeOf(bl));
 }
 
 function earliestFirstSeen(rows) {
@@ -94,7 +101,7 @@ function baselinePathRow(host, representative, backlinkCount) {
     // The lane the scan recorded (directory/citation/social → self_service_account,
     // editorial → editorial_outreach, resource → resource_outreach, none → unknown)
     // through the shared board-lane mapping — never a blanket 'unknown'.
-    acquisition_type: acquisitionTypeForLinkType(representative.link_type),
+    acquisition_type: acquisitionTypeForLinkType(typeOf(representative)),
     submission_url: representative.source_url || null,
     estimated_cost_cents: null,
     renewal_cost_cents: null,
@@ -116,7 +123,7 @@ function baselinePathRow(host, representative, backlinkCount) {
     confidence: 0.1,
     last_investigated_at: null,
     investigation: JSON.stringify({ baseline: true, backlink_count: backlinkCount }),
-    path_key: pathKey(acquisitionTypeForLinkType(representative.link_type), `baseline:${host}`),
+    path_key: pathKey(acquisitionTypeForLinkType(typeOf(representative)), `baseline:${host}`),
   };
 }
 
@@ -250,6 +257,11 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
         if (dom.touched) out.domainsTouched += 1;
         if (dom.created) {
           await q('seo_link_domains').where({ id: domainId }).update({ agent_state: 'acquired', updated_at: now });
+        } else {
+          // A pre-existing row another feeder minted but nothing has worked yet
+          // ('new') is promoted by the live evidence; a state some lane already
+          // moved (investigating, rejected, …) is that lane's to change.
+          await q('seo_link_domains').where({ id: domainId, agent_state: 'new' }).update({ agent_state: 'acquired', updated_at: now });
         }
       }
       if (domainCreated) out.domainsCreated += 1;

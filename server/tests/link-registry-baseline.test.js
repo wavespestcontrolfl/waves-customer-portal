@@ -230,8 +230,8 @@ describe('importExistingBacklinks (live)', () => {
     expect(dir).toMatchObject({ backlink_id: 'b02', live_url: 'https://dir.example/early', is_dofollow: false });
     expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'self_service_account:baseline:dir.example').expected_rel).toBe('nofollow');
     const nul = db._store.seo_link_prospects.find((p) => p.target_domain === 'nul.example');
-    expect(nul).toMatchObject({ backlink_id: 'b04', is_dofollow: null, link_type: 'citation' });
-    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'unknown:baseline:nul.example')).toMatchObject({ expected_rel: 'unknown', link_type: 'citation', acquisition_type: 'unknown' }); // no lane recorded → unknown
+    expect(nul).toMatchObject({ backlink_id: 'b04', is_dofollow: null, link_type: 'resource' }); // classifier found nothing → unknown → non-claimable lane
+    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'unknown:baseline:nul.example')).toMatchObject({ expected_rel: 'unknown', link_type: 'resource', acquisition_type: 'unknown' }); // classifier found nothing → unknown
   });
 
   test('idempotent: a second run creates nothing; a newly seen link is only mapped, the representative is never re-picked', async () => {
@@ -309,6 +309,19 @@ describe('importExistingBacklinks (live)', () => {
     const r2 = await importExistingBacklinks(db2, { now: NOW });
     expect(r2).toMatchObject({ placementsExisting: 1, placementsReconciled: 0 });
     expect(db2._store.seo_link_prospects[0]).toMatchObject({ status: 'prospect', outreach_status: 'sent', backlink_id: null });
+  });
+
+  test('a scan row with NULL link_type is classified through the scan\'s own classifier before lanes are derived (yelp → directory → self_service_account), and live evidence promotes a stale new domain to acquired', async () => {
+    const db = fakeDb({
+      seo_backlinks: [bl({ source_domain: 'yelp.com.example', link_type: null, source_url: 'https://yelp.com.example/business/waves' })],
+      seo_link_domains: [{ id: 'dom-n', domain: 'yelp.com.example', source: 'competitor_gap', discovery_priority: 'normal', agent_state: 'new', best_path_id: null }],
+    });
+    const r = await importExistingBacklinks(db, { now: NOW });
+    const path = db._store.seo_link_acquisition_paths[0];
+    expect(path).toMatchObject({ acquisition_type: 'self_service_account', link_type: 'directory', path_key: 'self_service_account:baseline:yelp.com.example' });
+    expect(db._store.seo_link_prospects[0].link_type).toBe('directory');
+    expect(db._store.seo_link_domains[0].agent_state).toBe('acquired'); // live evidence promotes 'new'
+    void r;
   });
 
   test('the baseline path is reused by its DOMAIN identity: a later scan with a different-lane representative never mints a sibling baseline path', async () => {
