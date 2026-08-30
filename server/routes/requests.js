@@ -665,19 +665,22 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
 });
 
 // =========================================================================
-// GET /api/requests/cancel-resolution — resolution preview (PR E, dark)
+// POST /api/requests/cancel-resolution — resolution preview (PR E, dark)
 // =========================================================================
-// Read-only: reason + context → the ONE retention card (or hard-stop /
-// nothing) the C1 flow will render. Writes nothing, sends nothing, and only
-// ever quotes facts already on the customer's own account. 404 while
-// GATE_CANCEL_FLOW_V2 is off so the surface simply does not exist dark.
+// Read-only despite the verb: reason + context → the ONE retention card (or
+// hard-stop / nothing) the C1 flow will render. Writes nothing, sends
+// nothing, and only ever quotes facts already on the customer's own
+// account. POST because new_address is a street address — in a GET query
+// string it would land verbatim in request logs and browser history
+// (AGENTS.md PII-in-logs rule). 404 while GATE_CANCEL_FLOW_V2 is off so the
+// surface simply does not exist dark.
 const cancelResolutionSchema = Joi.object({
   reason: Joi.string().valid(...REASON_CODE_VALUES).optional(),
-  families: Joi.string().trim().max(200).optional(), // csv of family keys
+  families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
   new_address: Joi.string().trim().max(400).optional(),
-  competitor_quote: Joi.string().valid('true', 'false').optional(),
-  adverse_event: Joi.string().valid('true', 'false').optional(),
-  safety_complaint: Joi.string().valid('true', 'false').optional(),
+  competitor_quote: Joi.boolean().optional(),
+  adverse_event: Joi.boolean().optional(),
+  safety_complaint: Joi.boolean().optional(),
 });
 
 // Per-customer limiter: the moving branch calls the paid Google Address
@@ -691,16 +694,13 @@ const cancelResolutionLimiter = rateLimit({
   message: { error: 'Too many requests. Please wait a moment and try again.' },
 });
 
-router.get('/cancel-resolution', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (req, res, next) => {
   try {
     if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
-    const { value, error } = cancelResolutionSchema.validate(req.query, { stripUnknown: true });
+    const { value, error } = cancelResolutionSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
 
-    const families = String(value.families || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const families = Array.isArray(value.families) ? value.families : [];
 
     // Moving: the transfer card only appears once the stated new address
     // verifies INSIDE the service area; a verified out-of-area address is a
@@ -718,9 +718,9 @@ router.get('/cancel-resolution', authenticate, cancelResolutionLimiter, async (r
       families,
       context: {
         newAddressInServiceArea,
-        hasCompetitorQuote: value.competitor_quote === 'true',
-        adverseEvent: value.adverse_event === 'true',
-        safetyComplaint: value.safety_complaint === 'true',
+        hasCompetitorQuote: value.competitor_quote === true,
+        adverseEvent: value.adverse_event === true,
+        safetyComplaint: value.safety_complaint === true,
       },
     });
     if (!preview) return res.status(404).json({ error: 'Not found' });

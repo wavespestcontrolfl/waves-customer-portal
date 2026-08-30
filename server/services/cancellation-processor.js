@@ -165,25 +165,40 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       // ledger failure must fail the churn write (→ 'churn' error → office
       // review alert), never be swallowed. Dark: gate off → byte-identical
       // to H0.
+      // Both saved payment METHODS (StripeService.charge() picks the default
+      // by payment_methods.autopay_enabled alone) and any armed
+      // failed-payment retry (the ladder does not check active/churn) are
+      // independent charge rails and belong to the same wind-down.
+      const disarmPaymentRails = async (dbh) => {
+        await dbh('payment_methods')
+          .where({ customer_id: customerId })
+          .update({ autopay_enabled: false });
+        await dbh('payments')
+          .where({ customer_id: customerId, status: 'failed' })
+          .whereNull('superseded_by_payment_id')
+          .whereNotNull('next_retry_at')
+          .update({ next_retry_at: null });
+      };
+
       if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+        // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
+        // authoritative ledger reset, payment-method disable, retry disarm —
+        // is ONE transaction. All-or-nothing is what makes the abort below
+        // sound: on a throw here, nothing persisted and the account is
+        // exactly as it was. The advisory ledger reset (gate off for
+        // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
+        // advisory hiccup must never take the committed wind-down back.
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
-        if (planRateLedgerEnabled()) {
-          // Ledger AUTHORITATIVE: scalar clear + component reset are one
-          // atomic write, fail-closed — a surviving positive component would
-          // resurrect the old rate on a win-back.
-          await db.transaction(async (trx) => {
-            await trx('customers').where({ id: customerId }).update(update);
-            await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
-          });
-        } else {
-          // Ledger ADVISORY (gate off): the billing wind-down must land even
-          // if the advisory store hiccups — otherwise a ledger error would
-          // roll back the churn while the visit sweep below still cancels
-          // service, leaving an active, chargeable customer with no visits.
-          await db('customers').where({ id: customerId }).update(update);
+        const ledgerAuthoritative = planRateLedgerEnabled();
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: customerId }).update(update);
+          if (ledgerAuthoritative) await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+          await disarmPaymentRails(trx);
+        });
+        if (!ledgerAuthoritative) {
           try {
             await resetLedgerToScalar(db, customerId, 0, { source: 'cancellation' });
           } catch (ledgerErr) {
@@ -191,38 +206,29 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
           }
         }
       } else {
+        // Legacy (H0) path, byte-identical: sequential writes, and on failure
+        // the catch below records 'churn' and CONTINUES like H0 did.
         await db('customers').where({ id: customerId }).update(update);
+        await disarmPaymentRails(db);
       }
-
-      // Also disable the saved payment METHODS, mirroring the customer
-      // autopay-off path: StripeService.charge() picks the default method by
-      // payment_methods.autopay_enabled alone (it never re-checks the
-      // customer flags), so a billing run that already preselected this
-      // customer would otherwise still charge the saved card.
-      await db('payment_methods')
-        .where({ customer_id: customerId })
-        .update({ autopay_enabled: false });
-
-      // Disarm any pending failed-payment retry so the retry ladder can't
-      // re-charge a cancelled customer (it does not check active/churn).
-      await db('payments')
-        .where({ customer_id: customerId, status: 'failed' })
-        .whereNull('superseded_by_payment_id')
-        .whereNotNull('next_retry_at')
-        .update({ next_retry_at: null });
 
       churned = true;
     }
   } catch (err) {
     errors.push('churn');
     logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
-    // ABORT: the churn/billing wind-down did not persist, so the account is
-    // still active and chargeable. Continuing into the recurrence stop and
-    // visit sweep would cancel SERVICE on a live billing account — the exact
-    // inversion this processor exists to prevent. Return partial (ok=false):
-    // the request row + admin review alert carry it, and both retry paths
-    // (60s dedupe, inactive-account) re-run this processor idempotently.
-    return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors };
+    if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+      // ABORT (gated path only): the wind-down is a single transaction, so a
+      // throw means NOTHING persisted and the account is still active and
+      // chargeable. Continuing into the recurrence stop and visit sweep
+      // would cancel SERVICE on a live billing account — the exact inversion
+      // this processor exists to prevent. Return partial (ok=false): the
+      // request row + admin review alert carry it, and both retry paths
+      // (60s dedupe, inactive-account) re-run this processor idempotently.
+      // The legacy path deliberately keeps H0's continue-and-flag behavior —
+      // its writes are sequential, so "nothing persisted" cannot be assumed.
+      return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors };
+    }
   }
 
   // 2. Stop any recurring series BEFORE reading the visit list, so a

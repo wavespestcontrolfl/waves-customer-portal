@@ -1,6 +1,7 @@
 'use strict';
 
-// GET /api/requests/cancel-resolution (PR E): dark = 404; gate on = the
+// POST /api/requests/cancel-resolution (PR E — POST so the moving address
+// stays out of URL logs): dark = 404; gate on = the
 // resolver's verdict serialized WITHOUT raw facts; moving address verdicts
 // map onto the resolver context. The engine itself is unit-tested in
 // cancellation-resolution-engine.test.js — here it is mocked.
@@ -53,8 +54,12 @@ beforeAll((done) => {
 });
 afterAll((done) => { server.close(done); });
 
-async function get(path) {
-  const res = await fetch(`${baseUrl}${path}`);
+async function post(body) {
+  const res = await fetch(`${baseUrl}/api/requests/cancel-resolution`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   let json = null;
   try { json = await res.json(); } catch { /* no body */ }
   return { status: res.status, body: json || {} };
@@ -67,7 +72,7 @@ afterEach(() => {
 });
 
 test('gate off → 404, resolver never consulted', async () => {
-  const res = await get('/api/requests/cancel-resolution?reason=price');
+  const res = await post({ reason: 'price' });
   expect(res.status).toBe(404);
   expect(mockPreview).not.toHaveBeenCalled();
 });
@@ -82,7 +87,7 @@ test('gate on → card verdict serialized without facts', async () => {
       card: { templateId: 'price_offer', headline: 'H', body: 'B', slots: { family: 'pest_control' }, action: { type: 'retention_offer' } },
     },
   });
-  const res = await get('/api/requests/cancel-resolution?reason=price&families=pest_control');
+  const res = await post({ reason: 'price', families: ['pest_control'] });
   expect(res.status).toBe(200);
   expect(res.body).toEqual({
     kind: 'card',
@@ -100,7 +105,7 @@ test('gate on → card verdict serialized without facts', async () => {
 test('hard stop serializes reviewType only', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockPreview.mockResolvedValue({ facts: {}, resolution: { kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing' } });
-  const res = await get('/api/requests/cancel-resolution?reason=billing_issue');
+  const res = await post({ reason: 'billing_issue' });
   expect(res.body).toEqual({ kind: 'hard_stop', reasonCode: 'billing_issue', reviewType: 'billing' });
 });
 
@@ -109,17 +114,17 @@ test('new_address verdicts map to the resolver context', async () => {
   mockPreview.mockResolvedValue({ facts: {}, resolution: { kind: 'none', reasonCode: 'moving_or_property_change' } });
 
   mockValidateAddress.mockResolvedValueOnce({ inServiceArea: true });
-  await get('/api/requests/cancel-resolution?reason=moving_or_property_change&new_address=123%20Main%20St%20Parrish%20FL');
+  await post({ reason: 'moving_or_property_change', new_address: '123 Main St Parrish FL' });
   expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: true }) }));
 
   mockValidateAddress.mockResolvedValueOnce({ inServiceArea: null, status: 'api_unavailable' });
-  await get('/api/requests/cancel-resolution?reason=moving_or_property_change&new_address=somewhere');
+  await post({ reason: 'moving_or_property_change', new_address: 'somewhere' });
   expect(mockPreview).toHaveBeenLastCalledWith(expect.objectContaining({ context: expect.objectContaining({ newAddressInServiceArea: null }) }));
 });
 
 test('invalid reason 400s before any work', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
-  const res = await get('/api/requests/cancel-resolution?reason=nope');
+  const res = await post({ reason: 'nope' });
   expect(res.status).toBe(400);
   expect(mockPreview).not.toHaveBeenCalled();
 });
