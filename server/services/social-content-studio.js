@@ -825,7 +825,9 @@ async function alertLegacyCardFallback(plan = {}, { link, creativeEnabled }) {
       suppressErrorLog: true,
     });
   } catch (err) {
-    logger.warn(`[social-studio] legacy-card fallback alert failed: ${err.message}`);
+    // err.message carries the raw SendGrid body, which can echo addresses —
+    // log only the status/code (non-card PII logging rule).
+    logger.warn(`[social-studio] legacy-card fallback alert failed: status=${err?.status || err?.code || 'unknown'}`);
   }
 }
 
@@ -1964,6 +1966,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       ? await heroImageForLink(finalPreview.suggestedLink)
       : null;
     let gbpImageBranded = true;
+    let usedLegacyCard = false;
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
       if (wantsGbp) {
@@ -2030,14 +2033,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         variant: 'campaign',
         templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
       });
-      // Draft runs park in the approval queue where the admin sees the card;
-      // only an unattended PUBLISH of the legacy card is worth an email.
-      if (!campaignHeroUrl && effectiveMode !== 'draft' && !SOCIAL_FLAGS.dryRun) {
-        await alertLegacyCardFallback(plan, {
-          link: finalPreview.suggestedLink,
-          creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
-        });
-      }
+      usedLegacyCard = true;
     }
 
     if (effectiveMode === 'draft') {
@@ -2149,6 +2145,16 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
     }
     const publishResult = publishOutcome.result;
+    // Only a CONFIRMED external publish of the legacy card is worth an email —
+    // a disabled channel, compliance rejection, or provider failure would
+    // otherwise report a card that never went out. Draft runs park in the
+    // approval queue where the admin sees the card; they never reach here.
+    if (usedLegacyCard && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      await alertLegacyCardFallback(plan, {
+        link: finalPreview.suggestedLink,
+        creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+      });
+    }
     // The claim is held through the durable published stamp below —
     // releasing it right after the publish would let a second draft run
     // referencing the same review acquire and double-publish in the
