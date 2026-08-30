@@ -176,15 +176,24 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
       : (monthlyTotal > 0 ? Math.round(monthlyTotal * 12 * 100) / 100 : 0));
   if (!(baseAnnual > 0)) return blocked('estimate has no recurring total');
 
-  // Cents anchoring (same rule the accept path applies): a candidate annual
-  // that is exactly round(monthly) × 12 is a recompute of the DISPLAY monthly,
-  // not the engine's true annual — quarterly $392/yr shows $32.67/mo, and
-  // 32.67 × 12 = 392.04. Re-anchor through the shared anchoredAnnualTotal so
-  // the prefill equals the amount an accept would invoice to the cent. An
+  // Cents anchoring (same rule AND same guards the accept path applies at
+  // estimate-public.js:9482-9487): a candidate annual that is exactly
+  // round(monthly) × 12 is a recompute of the DISPLAY monthly, not the
+  // engine's true annual — quarterly $392/yr shows $32.67/mo, and
+  // 32.67 × 12 = 392.04. Anchor ONLY when the option's monthly equals the
+  // engine's default monthly — a non-default cadence/tier's annual is its own
+  // quoted figure and must not inherit the default option's residue. An
   // annual that already differs from monthly × 12 is the engine figure —
   // leave it.
   const monthlyForAnchor = singleOptionMonthly || monthlyTotal;
+  const anchorRoot = estData?.result && typeof estData.result === 'object' ? estData.result : estData;
+  const engineDefaultMonthly = [
+    anchorRoot?.totals?.year2mo,
+    anchorRoot?.recurring?.grandTotal,
+    anchorRoot?.recurring?.monthlyTotal,
+  ].map(Number).find((n) => Number.isFinite(n) && n > 0) || null;
   if (monthlyForAnchor > 0
+    && engineDefaultMonthly === monthlyForAnchor
     && Math.round(monthlyForAnchor * 12 * 100) / 100 === Math.round(baseAnnual * 100) / 100) {
     const { anchoredAnnualTotal } = require('../routes/estimate-public');
     const anchored = anchoredAnnualTotal(estData, monthlyForAnchor);

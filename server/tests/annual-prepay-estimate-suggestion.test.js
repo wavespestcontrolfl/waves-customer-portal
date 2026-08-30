@@ -129,6 +129,23 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.baseAnnual).toBe(392);
   });
 
+  test('a non-default monthly never inherits the default option anchor', async () => {
+    // Mirror of the accept-path guard: anchoring applies only when the
+    // option's monthly equals the engine's default monthly.
+    const nonDefault = pestEstimate({
+      monthly_total: 30,
+      estimate_data: {
+        result: {
+          totals: { year2: 392, year2mo: 32.67 },
+          recurring: { services: [PEST_LINE] },
+        },
+      },
+    });
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([nonDefault], { resolveLineCadence: (line) => line?.frequency || null });
+    expect(suggestion.blocked).toBeUndefined();
+    expect(suggestion.baseAnnual).toBe(360);
+  });
+
   test('stored annual_total wins over monthly × 12', async () => {
     const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.baseAnnual).toBe(400);

@@ -4936,11 +4936,28 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const InvoiceService = require('../services/invoice');
     let result;
+    // Re-read inside the transaction below: the pre-transaction suggestion
+    // check can race a concurrent link of the same estimate.
+    let linkEstimateId = sourceEstimateId;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
+      // TOCTOU guard: this NEW-payment path must never update a term that
+      // already owns the source estimate (createTermForAnnualPrepay upserts
+      // by source_estimate_id and would rewrite last year's term's amount,
+      // dates, and coverage while keeping its old invoice). Re-check inside
+      // the transaction and drop the link if the estimate was claimed since
+      // the pre-transaction validation; a true concurrent double-claim after
+      // this read fails loudly on the UNIQUE constraint instead of
+      // corrupting a prior term.
+      if (linkEstimateId) {
+        const existingLink = await trx('annual_prepay_terms')
+          .where({ source_estimate_id: linkEstimateId })
+          .first('id');
+        if (existingLink) linkEstimateId = null;
+      }
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -4977,7 +4994,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
-        sourceEstimateId,
+        sourceEstimateId: linkEstimateId,
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
         monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
