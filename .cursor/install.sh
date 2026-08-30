@@ -19,13 +19,17 @@ cd "${REPO_ROOT}"
 # covers a cached .env / fallback vars runs right before migrations, below.)
 assert_local_database_url
 
-echo "[install] ensuring PostgreSQL 16 + pgvector are present"
-if ! command -v pg_ctlcluster >/dev/null 2>&1; then
+echo "[install] ensuring PostgreSQL 16 + contrib + pgvector are present"
+# Check each package independently so a partially prepared image (e.g. one that
+# already has pg_ctlcluster and pgvector but is missing postgresql-contrib) still
+# gets the pieces it lacks — migrations rely on contrib-family extensions.
+pg_pkgs=()
+command -v pg_ctlcluster >/dev/null 2>&1 || pg_pkgs+=(postgresql)
+dpkg -s postgresql-contrib >/dev/null 2>&1 || pg_pkgs+=(postgresql-contrib)
+dpkg -s postgresql-16-pgvector >/dev/null 2>&1 || pg_pkgs+=(postgresql-16-pgvector)
+if [ ${#pg_pkgs[@]} -gt 0 ]; then
   sudo apt-get update -qq
-  sudo apt-get install -y -qq postgresql postgresql-contrib postgresql-16-pgvector
-elif ! dpkg -s postgresql-16-pgvector >/dev/null 2>&1; then
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq postgresql-16-pgvector
+  sudo apt-get install -y -qq "${pg_pkgs[@]}"
 fi
 
 echo "[install] starting PostgreSQL cluster"

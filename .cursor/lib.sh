@@ -7,6 +7,13 @@
 CLOUD_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${CLOUD_ENV_DIR}/.." && pwd)"
 
+# This is a development environment. Force NODE_ENV=development for every script
+# that sources this file (install/start/dev), so a preserved .env or an injected
+# process NODE_ENV=test/production can't change knex config selection (migrations)
+# or the server's mode (feature gates, the catalog-name prime). dotenv uses
+# override:false, so exporting here wins over .env.
+export NODE_ENV=development
+
 PG_MAJOR="16"
 
 # Port of the PostgreSQL $PG_MAJOR 'main' cluster. On a cached image that
@@ -52,10 +59,16 @@ is_local_db_host() {
 }
 
 # Fail closed unless the given URL (default: $DATABASE_URL) targets a local host.
-# Never echoes credentials — only the parsed host.
+# Never echoes credentials — only the parsed host. This is the cheap pre-check;
+# the authoritative resolver (assert_local_effective_database_url) runs later.
 assert_local_database_url() {
   local url="${1-${DATABASE_URL:-}}"
-  [ -z "$url" ] && return 0
+  # Mirror knexfile's hasUsableDatabaseUrl (server/knexfile.js): trimmed-blank,
+  # 'undefined', and 'null' are treated as UNSET so fallback vars / the local DB
+  # apply — don't misread those sentinels as a non-local hostname and abort.
+  url="${url#"${url%%[![:space:]]*}"}"   # ltrim
+  url="${url%"${url##*[![:space:]]}"}"   # rtrim
+  case "$url" in ""|undefined|null) return 0 ;; esac
   local host
   host="$(db_url_host "$url")"
   if is_local_db_host "$host"; then
