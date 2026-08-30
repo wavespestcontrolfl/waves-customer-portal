@@ -5169,21 +5169,28 @@ const InvoiceService = {
     for (const sc of siblingClaims || []) {
       const sib = await conn("invoices")
         .where({ id: sc.invoice_id })
-        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+        .first("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
       const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
       const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+        || sib.payer_statement_id
         || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
       if (sib && sibTerminal) {
         await conn("setup_fee_claims").where({ id: sc.id }).delete();
       } else if (!moneyAttached) {
         // Unpaid — sent included (codex #3591 r49 local P0): a live pay
-        // link on the duplicate is a double charge waiting.
-        await conn("invoices")
+        // link on the duplicate is a double charge waiting. The claim is
+        // consumed ONLY when the guarded void wins (codex #3591 r50 P1) —
+        // a lost CAS means money arrived mid-flight and a human reconciles.
+        const sibVoided = await conn("invoices")
           .where({ id: sib.id, status: sib.status })
           .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
           .update({ status: "void", updated_at: new Date() });
-        await conn("setup_fee_claims").where({ id: sc.id }).delete();
-        logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
+        if (sibVoided === 1) {
+          await conn("setup_fee_claims").where({ id: sc.id }).delete();
+          logger.info(`[invoice] revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} voided (its claim consumed) — the prepay's own setup line is live again`);
+        } else {
+          logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: completion setup invoice ${sib.id} gained a payment anchor mid-void — refund/reconcile so the setup is not collected twice (claim kept)`);
+        }
       } else {
         logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: invoice ${sc.invoice_id} also carries this series' setup claim with money attached (${sib ? sib.status : "unreadable"}) — refund/reconcile so the setup is not collected twice`);
       }
@@ -5233,10 +5240,14 @@ const InvoiceService = {
     const rebills = await conn("invoices")
       .where("notes", "like", `%${rodentSetupRebillMarker(sourceInvoiceId)}%`)
       .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
-      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
     let voided = 0;
     for (const rb of rebills || []) {
+      // A payer-statement accrual counts as money attached (codex #3591 r50
+      // P1): a direct status flip would leave the statement charging the
+      // voided duplicate — that reconciliation is a human's.
       const moneyAttached = rb.paid_at || rb.payment_recorded_at || rb.stripe_payment_intent_id
+        || rb.payer_statement_id
         || ["paid", "prepaid", "processing"].includes(String(rb.status).toLowerCase());
       if (!moneyAttached) {
         voided += await conn("invoices")
@@ -5317,19 +5328,26 @@ const InvoiceService = {
         // only money attached needs a human refund/reconcile.
         const sib = await conn("invoices")
           .where({ id: siblingClaim.invoice_id })
-          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+          .first("id", "status", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
         const sibTerminal = sib && ["void", "cancelled", "canceled", "refunded"].includes(String(sib.status).toLowerCase());
         const moneyAttached = !sib || sib.paid_at || sib.payment_recorded_at || sib.stripe_payment_intent_id
+          || sib.payer_statement_id
           || ["paid", "prepaid", "processing"].includes(String(sib?.status).toLowerCase());
         if (sib && sibTerminal) {
           await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
         } else if (!moneyAttached) {
-          await conn("invoices")
+          const sibVoided = await conn("invoices")
             .where({ id: sib.id, status: sib.status })
             .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id")
             .update({ status: "void", updated_at: new Date() });
-          await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
-          logger.info(`[invoice] invoice ${invoiceRow.id} reinstated — sibling setup invoice ${sib.id} voided (claim consumed) so the fee is carried once`);
+          if (sibVoided === 1) {
+            await conn("setup_fee_claims").where({ id: siblingClaim.id }).delete();
+            logger.info(`[invoice] invoice ${invoiceRow.id} reinstated — sibling setup invoice ${sib.id} voided (claim consumed) so the fee is carried once`);
+          } else if (strict) {
+            throw new Error(`Cannot restore invoice ${invoiceRow.id} — sibling setup invoice ${sib.id} gained a payment anchor mid-void; reconcile which invoice carries the fee first`);
+          } else {
+            logger.error(`[invoice] FIX: invoice ${invoiceRow.id} left 'refunded' but sibling setup invoice ${sib.id} gained a payment anchor mid-void — refund/reconcile so the setup is not collected twice (claim kept)`);
+          }
         } else if (strict) {
           throw new Error(`Cannot restore invoice ${invoiceRow.id} — invoice ${siblingClaim.invoice_id} already collected this series' bait-station setup; reconcile which invoice carries the fee first`);
         } else {

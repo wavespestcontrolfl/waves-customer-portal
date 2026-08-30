@@ -3736,20 +3736,46 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     setSaving(true);
     setError("");
     try {
-      const result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
-        method: "POST",
-        body: JSON.stringify({
-          amount: Number(amount),
-          serviceType: serviceType.trim(),
-          visitCount: Number.parseInt(visitCount, 10),
-          coverageCadence,
-          method,
-          termStart,
-          termEnd,
-          reference: reference.trim() || undefined,
-          note: note.trim() || undefined,
-        }),
-      });
+      const recordedPayload = {
+        amount: Number(amount),
+        serviceType: serviceType.trim(),
+        visitCount: Number.parseInt(visitCount, 10),
+        coverageCadence,
+        method,
+        termStart,
+        termEnd,
+        reference: reference.trim() || undefined,
+        note: note.trim() || undefined,
+      };
+      let result;
+      try {
+        result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+          method: "POST",
+          body: JSON.stringify(recordedPayload),
+        });
+      } catch (err) {
+        // The route refuses (409, setupFeeRequired) when the coverage
+        // series owes the bait-station setup — confirm the collected total
+        // includes it and re-submit carrying the server-derived figure
+        // (codex #3591 r50 P1).
+        const refusal = err?.body;
+        if (err?.status === 409 && refusal?.setupFeeRequired && Number(refusal.setupFeeAmount) > 0) {
+          const ok = window.confirm(
+            `${refusal.error}\n\nRecord the $${Number(refusal.setupFeeAmount).toFixed(2)} Bait Station Setup as its own line on this prepay?`,
+          );
+          if (!ok) throw new Error("Annual prepay not recorded — the bait-station setup must ride the invoice.");
+          result = await adminFetch(`/admin/customers/${customer.id}/annual-prepay`, {
+            method: "POST",
+            body: JSON.stringify({
+              ...recordedPayload,
+              setupFeeAmount: Number(refusal.setupFeeAmount),
+              ...(refusal.scheduledServiceId ? { scheduledServiceId: String(refusal.scheduledServiceId) } : {}),
+            }),
+          });
+        } else {
+          throw err;
+        }
+      }
       await onSaved?.(result);
     } catch (err) {
       setError(err.message || "Annual prepay failed");

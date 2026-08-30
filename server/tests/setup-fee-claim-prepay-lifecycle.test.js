@@ -850,3 +850,32 @@ describe('r48 — completion claims restore, in-flight/sibling reconciliation, c
     expect(writes.some((w) => w.table === 'setup_fee_claims' && w.op === 'delete' && w.where.id === 'claim-comp')).toBe(true);
   });
 });
+
+describe('r50 — statement anchors, guarded-void claim preservation, collected-prepay enforcement (codex #3591 r50 P1)', () => {
+  test('a payer-statement-accrued duplicate is money-anchored (paged, never direct-voided); a lost guarded void keeps the claim', async () => {
+    const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+    // Every duplicate read selects payer_statement_id and every moneyAttached check consults it.
+    expect((invoiceSrc.match(/payer_statement_id/g) || []).length).toBeGreaterThanOrEqual(6);
+    // Claim deletes are gated on the guarded void's affected-row count.
+    expect((invoiceSrc.match(/sibVoided === 1/g) || []).length).toBe(2); // revival + reinstate
+    expect(invoiceSrc).toMatch(/const sibVoided = await conn\("invoices"\)/);
+    expect(invoiceSrc).toMatch(/gained a payment anchor mid-void/);
+  });
+
+  test('the recorded-collected prepay route derives, 409s, re-derives in-trx, ledgers, and carves the setup out of the coverage basis (source contract)', () => {
+    const customersSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    const routeAt = customersSrc.indexOf("router.post('/:id/annual-prepay', requireAdmin");
+    expect(routeAt).toBeGreaterThan(-1);
+    const deriveAt = customersSrc.indexOf('.findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType })', routeAt);
+    const trxAt = customersSrc.indexOf('await db.transaction(async (trx) => {', routeAt);
+    const guardAt = customersSrc.indexOf('.findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType })', trxAt);
+    const ledgerAt = customersSrc.indexOf('retireCoverageOnlySetupClaim(trx, {', trxAt);
+    const carveAt = customersSrc.indexOf('collectedSetupShare', trxAt);
+    expect(deriveAt).toBeGreaterThan(routeAt);
+    expect(deriveAt).toBeLessThan(trxAt);
+    expect(guardAt).toBeGreaterThan(trxAt);
+    expect(ledgerAt).toBeGreaterThan(trxAt);
+    expect(carveAt).toBeGreaterThan(trxAt);
+    expect(customersSrc.slice(routeAt, trxAt)).toMatch(/setupFeeRequired: true/);
+  });
+});

@@ -4980,6 +4980,39 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       });
     }
 
+    // The recorded-collected lane carries the SAME setup lifecycle as the
+    // draft mint (codex #3591 r50 P1): a direct non-member rodent series'
+    // prepaid term suppresses completion billing, so the $99 must ride this
+    // paid invoice as its own line and be ledgered/retired — or it is
+    // silently lost. Omission is not a waiver: derive, refuse 409 with the
+    // figure + anchor, dialog re-submits.
+    const collectedSetupRaw = req.body?.setupFeeAmount;
+    const collectedSetupInput = collectedSetupRaw === undefined || collectedSetupRaw === null ? 0 : Number(collectedSetupRaw);
+    if (!Number.isFinite(collectedSetupInput) || collectedSetupInput < 0
+      || Math.abs(collectedSetupInput * 100 - Math.round(collectedSetupInput * 100)) > 1e-6) {
+      return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
+    }
+    const collectedSetupFee = Math.round(collectedSetupInput * 100) / 100;
+    const collectedSetupAnchor = cleanOptionalText(req.body?.scheduledServiceId) || null;
+    if (!(collectedSetupFee > 0)) {
+      let owed;
+      try {
+        owed = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(db, { customerId: customer.id, coverageServiceType });
+      } catch (lookupErr) {
+        logger.warn(`[customers:annual-prepay] rodent setup obligation lookup failed for ${customer.id}: ${lookupErr.message}`);
+        return res.status(503).json({ error: 'Could not confirm whether this series owes a bait-station setup — retry in a moment.' });
+      }
+      if (owed) {
+        return res.status(409).json({
+          error: `This customer's ${coverageServiceType} series owes a $${owed.amount.toFixed(2)} bait-station setup (non-member) — the collected total must include it as its own line.`,
+          setupFeeRequired: true,
+          setupFeeAmount: owed.amount,
+          scheduledServiceId: owed.anchorId ? String(owed.anchorId) : null,
+        });
+      }
+    }
+
     const activeTerm = await db('annual_prepay_terms')
       .where({ customer_id: customer.id })
       .where(annualPrepayOverlapStatusClause())
@@ -5025,6 +5058,18 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an active annual prepay term through',
       );
+      // Fee-free TOCTOU guard under the trx (same posture as the draft
+      // mint, codex #3591 r48/r50): a claim restored or a waiving family
+      // lost in the gap must abort, not mint coverage-only.
+      if (!(collectedSetupFee > 0)) {
+        const owedNow = await require('../services/secure-appointment-plans')
+          .findDirectRodentSetupObligationForCoverage(trx, { customerId: customer.id, coverageServiceType });
+        if (owedNow) {
+          const driftErr = new Error(`This customer's ${coverageServiceType} series now owes a $${owedNow.amount.toFixed(2)} bait-station setup — refresh and retry so it rides the recorded prepay.`);
+          driftErr.switchConflict = true;
+          throw driftErr;
+        }
+      }
       const invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -5039,7 +5084,13 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           quantity: 1,
           unit_price: amount,
           category: 'Annual prepay',
-        }],
+        },
+        ...(collectedSetupFee > 0 ? [{
+          description: 'Bait Station Setup — one-time setup fee',
+          quantity: 1,
+          unit_price: collectedSetupFee,
+          category: 'Setup fee',
+        }] : [])],
         notes: invoiceNotes,
         dueDate: termStart,
       });
@@ -5058,6 +5109,32 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         .returning('*');
       if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
 
+      // Server-trusted setup on the recorded lane too (codex #3591 r50 P1):
+      // re-derive from the anchor (or the coverage family when none exists
+      // yet), ledger the claim against this paid prepay, retire any stamp.
+      if (collectedSetupFee > 0) {
+        const plans = require('../services/secure-appointment-plans');
+        if (collectedSetupAnchor) {
+          await plans.retirePrepayOnBookSetupClaim(trx, {
+            customerId: customer.id,
+            scheduledServiceId: collectedSetupAnchor,
+            invoiceId: updatedInvoice.id,
+            amount: collectedSetupFee,
+          });
+        } else {
+          await plans.retireCoverageOnlySetupClaim(trx, {
+            customerId: customer.id,
+            coverageServiceType,
+            invoiceId: updatedInvoice.id,
+            amount: collectedSetupFee,
+          });
+        }
+      }
+      // The setup line's tax-proportional share of the PAID total never
+      // enters the coverage basis the term slices across visits.
+      const collectedSetupShare = collectedSetupFee > 0 && (amount + collectedSetupFee) > 0
+        ? Math.round((Number(updatedInvoice.total) * (collectedSetupFee / (amount + collectedSetupFee))) * 100) / 100
+        : 0;
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
@@ -5066,8 +5143,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
         // Match the recorded payment (inserted below as updatedInvoice.total) and
         // the coverage ledger: commercial invoices add county tax, so the pretax
-        // request amount would under-credit the prepaid visits.
-        prepayAmount: Number(updatedInvoice.total),
+        // request amount would under-credit the prepaid visits. Coverage
+        // money only — the setup share is carved out.
+        prepayAmount: Math.round((Number(updatedInvoice.total) - collectedSetupShare) * 100) / 100,
         termStart,
         termEnd,
         coverageServiceType,
