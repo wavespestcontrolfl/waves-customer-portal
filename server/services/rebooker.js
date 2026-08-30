@@ -1841,6 +1841,11 @@ class SmartRebooker {
       const seriesFingerprint = (list) => list.map((s) => [
         String(s.id),
         dateOnly(s.scheduled_date),
+        // Property is part of the identity: the visit STOP LOCKS above are
+        // keyed on it (property, else customer), so a property re-link
+        // while this sweep waited means the locks guard the wrong stop —
+        // abort like any other concurrent series change (codex #3609 r33).
+        String(s.property_id || ''),
         s.date_exception === true ? 'x' : '-',
         s.date_exception_cadence_date ? dateOnly(s.date_exception_cadence_date) : '',
         (RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId))) ? 'm' : '-',
@@ -1900,6 +1905,28 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          // Visit stop locks for EVERY swept occurrence, right after
+          // rung 1 — the same occupancy-then-stop order the single-row
+          // writers take (codex #3609 r31 P1 + uncapped audit):
+          // createOrJoinVisit serializes on the stop lock, never on the
+          // occupancy/maintenance locks, so a grouping racing this sweep
+          // either committed (visible in the locked read below) or waits
+          // behind these locks. Keys from the PRE-lock read, deduped +
+          // SORTED (two overlapping sweeps acquire in one order); the
+          // fingerprint below carries the property leg, so a key that
+          // drifted while we waited aborts. Property-less rows are
+          // included — explicit office groups fall back to the
+          // customer-anchored stop key (stopBaseKey's own fallback).
+          if (options.visitPolicy !== 'single' && sweptIds.length) {
+            const vg = require('./visit-groups');
+            const sweptSet = new Set(sweptIds.map(String));
+            const keys = [...new Set(siblings
+              .filter((x) => sweptSet.has(String(x.id)))
+              .map((r) => vg.stopBaseKey({ propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date })))].sort();
+            for (const vgKey of keys) {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+            }
+          }
           // Rung 1 → the per-parent recurring-series maintenance lock, the
           // order update-details already takes (occupancy, then
           // maintenance, then comms). Byte-identical key to admin-schedule's
@@ -1947,56 +1974,32 @@ class SmartRebooker {
             // anchor (codex #3609 r31 P1): a later cadence occurrence in a
             // two-service visit would otherwise be moved directly by the
             // series loop, stranding its grouped sibling (or, frozen,
-            // leaving issued artifacts describing the old stop). The stop
-            // locks are taken for the COMPUTED keys regardless of observed
-            // visit_id (uncapped audit P1): createOrJoinVisit serializes on
-            // the stop lock, never on the occupancy/maintenance locks
-            // above, so only a membership re-read UNDER those locks is
-            // authoritative. Keys sorted (two overlapping series sweeps
-            // grab them in one order); property-less rows cannot be
-            // auto-grouped and have no key — skipped.
+            // leaving issued artifacts describing the old stop). The
+            // LOCKED sweep read above ran UNDER the stop locks (acquired
+            // right after rung 1, before the maintenance lock) and carries
+            // visit_id, so it IS the authoritative membership snapshot — a
+            // grouping racing this sweep either committed before the locks
+            // (visible here) or waits behind them, and the property-aware
+            // fingerprint aborted any stop-key drift.
             const vg = require('./visit-groups');
             const sweptSet = new Set(sweptIds.map(String));
-            const keyRows = siblings.filter((x) => sweptSet.has(String(x.id)) && x.property_id);
-            if (keyRows.length) {
-              const keys = [...new Set(keyRows.map((r) => vg.stopBaseKey({
-                propertyId: r.property_id, customerId: service.customer_id, scheduledDate: r.scheduled_date,
-              })))].sort();
-              for (const vgKey of keys) {
-                await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+            const visitIds = [...new Set(siblings
+              .filter((x) => sweptSet.has(String(x.id)) && x.visit_id)
+              .map((x) => String(x.visit_id)))];
+            for (const vid of visitIds) {
+              const liveRes = await trx.raw(
+                "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
+                [vid],
+              );
+              if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
+                throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
               }
-              // Re-read under the locks; a property/date drift since the
-              // locked sweep means the locked keys are stale — abort like
-              // any other concurrent series change.
-              const freshRows = await trx('scheduled_services')
-                .whereIn('id', keyRows.map((r) => r.id))
-                .select('id', 'visit_id', 'property_id', 'scheduled_date');
-              const before = new Map(keyRows.map((r) => [String(r.id), r]));
-              for (const f of freshRows) {
-                const b = before.get(String(f.id));
-                if (!b || String(f.property_id) !== String(b.property_id)
-                  || dateOnly(f.scheduled_date) !== dateOnly(b.scheduled_date)) {
-                  throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
-                    statusCode: 409, isOperational: true, code: 'SERIES_CHANGED',
-                  });
-                }
-              }
-              const visitIds = [...new Set(freshRows.filter((f) => f.visit_id).map((f) => String(f.visit_id)))];
-              for (const vid of visitIds) {
-                const liveRes = await trx.raw(
-                  "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
-                  [vid],
-                );
-                if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
-                  throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
-                }
-                // A frozen lone-member visit is just as unmovable by the
-                // sweep: its seam preserves membership and the issued
-                // artifacts would keep describing the old stop.
-                const verdict = await vg.frozenVisitVerdict(trx, vid);
-                if (verdict.frozen) {
-                  throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
-                }
+              // A frozen lone-member visit is just as unmovable by the
+              // sweep: its seam preserves membership and the issued
+              // artifacts would keep describing the old stop.
+              const verdict = await vg.frozenVisitVerdict(trx, vid);
+              if (verdict.frozen) {
+                throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
               }
             }
           }
