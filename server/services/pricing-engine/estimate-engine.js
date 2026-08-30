@@ -1788,7 +1788,13 @@ function generateEstimate(input) {
     const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
     const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices, ...setupWaiverPriorQualifyingServices])]
       .filter((key) => key !== 'rodent_bait');
-    const isWaveGuardMember = determineWaveGuardTier(otherQualifiers).qualifyingCount > 0;
+    // COMMERCIAL bait is ALWAYS setup-bearing (codex #3591 r56 local P0):
+    // commercial coverage is never a WaveGuard member, so an account's
+    // residential families must not waive the commercial program's setup —
+    // the shared resolver and the coverage helpers already refuse this
+    // waiver, and the estimate must price the same money.
+    const isWaveGuardMember = !propertyIsCommercial
+      && determineWaveGuardTier(otherQualifiers).qualifyingCount > 0;
     if (rodentPriced && !isWaveGuardMember) {
       const setup = priceBaitSetup({ waived: false });
       if (setup.price > 0) lineItems.push(setup);

@@ -22,6 +22,8 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
   baitBracketExtension: constants.RODENT.baitBracketExtension,
   baitVisitsPerYear: constants.RODENT.baitVisitsPerYear,
   baitSetupFee: constants.RODENT.baitSetupFee,
+  tierQualifier: constants.RODENT.tierQualifier,
+  excludeFromPctDiscount: constants.RODENT.excludeFromPctDiscount,
 }));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
@@ -1457,6 +1459,23 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
     }
 
+    // Rebase the qualification/exclusion policy to code defaults BEFORE the
+    // optional row applies (codex #3591 r56 P1) — a removed rodent_waveguard
+    // row must return this pod to the same posture a fresh pod boots with,
+    // in BOTH the RODENT flags and the WAVEGUARD maps.
+    constants.RODENT.tierQualifier = RODENT_BRACKET_DEFAULTS.tierQualifier;
+    constants.RODENT.excludeFromPctDiscount = RODENT_BRACKET_DEFAULTS.excludeFromPctDiscount;
+    {
+      const defaultQualifies = RODENT_BRACKET_DEFAULTS.tierQualifier;
+      const qi = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+      if (defaultQualifies && qi === -1) constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+      if (!defaultQualifies && qi !== -1) constants.WAVEGUARD.qualifyingServices.splice(qi, 1);
+      if (RODENT_BRACKET_DEFAULTS.excludeFromPctDiscount) {
+        constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+      } else {
+        delete constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+      }
+    }
     if (config.rodent_waveguard || config.rodent_rules) {
       const rw = config.rodent_waveguard || config.rodent_rules;
       // The RODENT flags and the WAVEGUARD maps must move TOGETHER — the

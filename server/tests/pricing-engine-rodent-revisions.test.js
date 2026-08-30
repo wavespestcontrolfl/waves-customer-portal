@@ -759,3 +759,20 @@ describe('saved-replay rodent % treatment freeze (codex #3591 r44 P1)', () => {
     }
   });
 });
+
+describe('commercial bait setup is never membership-waived (codex #3591 r56 local P0)', () => {
+  test('an existing residential member quoting COMMERCIAL bait still owes the setup; residential bait keeps the waiver', () => {
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSqFt: 4000,
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+    }));
+    expect(commercial.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeDefined();
+    const residential = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      setupWaiverPriorQualifyingServices: ['pest_control'],
+    }));
+    expect(residential.lineItems.find((i) => i.service === 'rodent_bait_setup')).toBeUndefined();
+  });
+});

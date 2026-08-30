@@ -5543,10 +5543,13 @@ const EstimateConverter = {
           // property_type='commercial' is visible — then blend by the taxable
           // pest share. Never hardcode 7%.
           const prepayRodentSetupForTax = frozenRodentBaitSetupAmount(estimateData);
+          const prepayCommercialBaseRate = hasCommercialRecurring
+            ? await resolveCommercialPrepayBaseRate(customerId, { database })
+            : 0;
           const prepayTaxRate = hasCommercialRecurring
             ? resolveCommercialPrepayTaxRate(recurringServicesForConversion, {
               prepayDiscountApplied,
-              baseRate: await resolveCommercialPrepayBaseRate(customerId, { database }),
+              baseRate: prepayCommercialBaseRate,
               // The taxable bait-station setup rides this same invoice —
               // it must sit in the blend or it is under-taxed (r55 P1).
               taxableOneTimeAmount: prepayRodentSetupForTax,
@@ -5819,9 +5822,15 @@ const EstimateConverter = {
               // blended prepayTaxRate is exactly the rate create() applies
               // to the whole subtotal. Residential passes no rate (gross ==
               // face), keeping the r5 behavior byte-identical there.
+              // The setup's gross share leaves at its FULL effective rate
+              // (codex #3591 r56 P1): the blend collects each taxable line
+              // at the base county rate, so the fully-taxable setup carries
+              // setup × baseRate of the invoice's tax — a blended-rate
+              // subtraction left part of that tax inside the coverage
+              // basis. Residential (no rate) stays byte-identical.
               prepayAmount: draftInvoiceAmount != null
                 ? Math.max(0, Math.round((draftInvoiceAmount + appliedPrepayDepositCredit
-                  - prepayRodentSetupAmount * (1 + (Number(prepayTaxRate) || 0))) * 100) / 100)
+                  - prepayRodentSetupAmount * (1 + (hasCommercialRecurring ? (Number(prepayCommercialBaseRate) || 0) : 0))) * 100) / 100)
                 : draftInvoiceAmount,
               termStart: termStartDate || null,
               // Coverage config for the single recurring service → visits get
