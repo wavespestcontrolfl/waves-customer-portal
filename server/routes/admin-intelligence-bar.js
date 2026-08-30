@@ -185,6 +185,7 @@ const PII_TOOL_NAMES = new Set([
   'create_customer',
   'update_property_access',
   'get_stop_details',
+  'get_recent_completions',
   'get_unanswered_threads',
   'get_conversation_thread',
   'search_messages',

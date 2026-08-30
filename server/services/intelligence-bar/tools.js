@@ -1638,17 +1638,21 @@ function parseTimeWindowStart(timeWindow) {
 // elapsed guard.
 
 // Recency resolver for "the customer we just finished": completed visits,
-// newest first. The close-out moment is the completed TRANSITION in
-// job_status_history (transitionJobStatus inserts it in the completion
-// trx) — not ss.completed_at (the tracker can backdate it to an older
-// service DAY, see admin-dispatch BACKFILL_RECORD_END_FIELDS) and not
-// ss.updated_at (touched by unrelated edits, which would let an old visit
-// outrank the actual latest completion). Rows predating the history table
-// fall back to COALESCE(completed_at, updated_at).
+// newest first. The close-out moment is completion EVIDENCE only, in
+// preference order: the completed transition in job_status_history
+// (transitionJobStatus inserts it in the completion trx) → the legacy
+// service_status_log completed row → ss.completed_at. Never ss.updated_at
+// (touched by unrelated edits — an old visit would outrank the actual
+// latest completion) and never completed_at first (the tracker can
+// backdate it to an older service DAY, see admin-dispatch
+// BACKFILL_RECORD_END_FIELDS). A completed row with NO completion evidence
+// at all is omitted rather than mis-ranked.
 const CLOSED_OUT_AT_SQL = `COALESCE(
   (SELECT MAX(jsh.transitioned_at) FROM job_status_history jsh
     WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
-  ss.completed_at, ss.updated_at)`;
+  (SELECT MAX(ssl.created_at) FROM service_status_log ssl
+    WHERE ssl.scheduled_service_id = ss.id AND ssl.status = 'completed'),
+  ss.completed_at)`;
 
 async function getRecentCompletions(input = {}) {
   const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 20);
@@ -1657,6 +1661,7 @@ async function getRecentCompletions(input = {}) {
     .join('customers as c', 'c.id', 'ss.customer_id')
     .leftJoin('technicians as t', 't.id', 'ss.technician_id')
     .where('ss.status', 'completed')
+    .whereRaw(`${CLOSED_OUT_AT_SQL} IS NOT NULL`)
     .whereRaw(`${CLOSED_OUT_AT_SQL} >= NOW() - (? || ' days')::interval`, [days])
     .orderByRaw(`${CLOSED_OUT_AT_SQL} DESC`)
     .limit(limit)
