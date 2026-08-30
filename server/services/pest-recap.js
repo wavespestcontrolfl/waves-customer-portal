@@ -556,13 +556,29 @@ async function submitRecap({
       // the tier snapshot stays unfrozen, and the money claim stays refused.
       const snapshotBackfill = {};
       if (Object.prototype.hasOwnProperty.call(tierSnapshot, 'is_callback')) {
-        // NULL-only: an explicit false is left to migration 20260830000051,
-        // which promotes on FROZEN completedServiceKey evidence. Promoting
-        // here from the scheduled row's CURRENT flag would let a post-
-        // completion update-details reclassify rewrite a historical
-        // non-callback report on a mere recap retry (codex r10 P1); records
-        // created by this code already stamp the flag at insert.
-        if (existing.is_callback == null) snapshotBackfill.is_callback = tierSnapshot.is_callback;
+        // NULL fills from the completion snapshot. An explicit false is
+        // promoted ONLY on the record's OWN frozen completedServiceKey —
+        // the same creation-time evidence migration 20260830000051 uses —
+        // never from the scheduled row's mutable flag (codex r10 P1): a
+        // post-completion update-details reclassify must not rewrite a
+        // historical non-callback report on a recap retry. The frozen-key
+        // path exists for the rolling-deploy window where an old pod mints
+        // a default-false record AFTER the one-shot migration already ran
+        // (codex r12 P1). Never demotes.
+        if (existing.is_callback == null) {
+          snapshotBackfill.is_callback = tierSnapshot.is_callback;
+        } else if (existing.is_callback === false) {
+          let frozenKey = null;
+          try {
+            const existingServiceData = typeof existing.service_data === 'string'
+              ? JSON.parse(existing.service_data)
+              : (existing.service_data || {});
+            frozenKey = existingServiceData?.completedServiceKey || null;
+          } catch { frozenKey = null; }
+          if (frozenKey === 'pest_re_service' || frozenKey === 'lawn_re_service') {
+            snapshotBackfill.is_callback = true;
+          }
+        }
       }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,
