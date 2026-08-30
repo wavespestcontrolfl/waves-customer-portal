@@ -5,6 +5,7 @@ const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -1553,6 +1554,7 @@ function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
   delete data.termiteNextMonitoringVisit;
+  delete data.cockroachNextTreatmentVisit;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
   return data;
 }
@@ -4392,6 +4394,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let sameLineNextAppointment = null;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
+  // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
+  // the first upcoming ROACH-FAMILY appointment (the next treatment of the
+  // program) and how many roach-family visits are still ahead — the program
+  // position ("treatment 1 of 2") reads from these when the catalog does
+  // not fix the package size. Both consumed by attachCockroachReportV2.
+  let cockroachNextTreatmentVisit;
+  let cockroachUpcomingRoachVisits;
+  let cockroachProgramPosition;
+  let cockroachRenderedSignature;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4414,7 +4425,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .orderBy('scheduled_date', 'asc')
       .orderBy('window_start', 'asc')
       .limit(200)
-      .catch(() => []);
+      .catch(() => null); // null = the query FAILED (not "no visits") — consumers that need the distinction check Array.isArray
     // A rodent report's "next visit" spans the whole rodent program —
     // trapping, exclusion, sanitation, proofing — including service names
     // that carry no rodent token ("Exclusion Service" alone falls to the
@@ -4556,6 +4567,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         if (isBait) { baitRow = row; break; }
       }
       termiteNextMonitoringVisit = toNextAppointment(baitRow);
+    }
+
+    // Cockroach treatment program (owner 2026-08-29: the first treatment
+    // ALWAYS references the next treatment date). Same identity discipline
+    // as the termite pick: the canonical completion-profile resolver decides
+    // roach-family rows (typed `cockroach` pointer, or a roach service key),
+    // name tokens judge only rows with no resolvable profile; a failed
+    // resolution skips the row. Runs only where the value can render
+    // (live view, gate on, cockroach typed primary).
+    // Cockroach treatment program (cockroach-report-v2.js resolveCockroachProgram
+    // — the ONE resolver shared with the PDF cache-key component): package
+    // position, same-program visits still ahead, and the next one. The
+    // DATE is live-only (stripped for pdf/static); the position and the
+    // upcoming COUNT ride every mode because the permanent record carries
+    // the program's completion state, keyed into the PDF cache. A failed
+    // resolution → position null → the dashboard makes no program claims.
+    if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service)) {
+      // A FAILED upcoming query (null) is not an empty calendar (codex P1
+      // #3613): the resolver re-queries itself, and if that fails too the
+      // program falls closed (no claims) instead of reading "complete".
+      const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : null });
+      if (program && !program.failed) {
+        cockroachProgramPosition = program.treatmentNumber != null
+          ? { treatmentNumber: program.treatmentNumber, laterCompleted: program.laterCompleted || 0 }
+          : { treatmentNumber: null, reason: program.positionReason || 'no_lineage' };
+        cockroachUpcomingRoachVisits = program.upcoming;
+        if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);
+      } else if (program && program.failed) {
+        cockroachProgramPosition = null;
+      }
+      // The signature of the program state THIS payload carries — the PDF
+      // store key reads it from the render, never from a second lookup.
+      cockroachRenderedSignature = cockroachProgramSignature(program);
     }
   } catch { /* best-effort */ }
 
@@ -5037,6 +5081,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
     termiteNextMonitoringVisit,
+    // Present (possibly null) ONLY when the live cockroach pick ran — the
+    // attach composer reads presence as "schedule resolved" (pdf/static
+    // never carry the keys, so the permanent record neither promises nor
+    // disclaims a date).
+    ...(cockroachNextTreatmentVisit !== undefined ? { cockroachNextTreatmentVisit } : {}),
+    ...(cockroachUpcomingRoachVisits !== undefined ? { cockroachUpcomingRoachVisits } : {}),
+    ...(cockroachProgramPosition !== undefined ? { cockroachProgramPosition } : {}),
+    ...(cockroachRenderedSignature !== undefined ? { cockroachReportV2RenderedSignature: cockroachRenderedSignature } : {}),
     // Visit stage for a bait-station snapshot, from the completion profile
     // (termite_installation_setup also freezes termite_bait_station):
     // 'installation' keeps the typed record; 'monitoring' may render the

@@ -145,12 +145,10 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'plugging',
   'top_dressing',
   'bora_care',
-  // Reactivation batch (owner "turn them back on" 2026-08-09, migration
-  // 20260809000000): the German roach programs complete through the same
-  // generic form as the rest of the pest family (the typed pest form was
-  // retired 2026-07-30).
-  'german_roach',
-  'german_roach_initial',
+  // german_roach / german_roach_initial LEFT this list 2026-08-29 (owner
+  // ruling, cockroach report V2): migration 20260830000030 points both at
+  // the typed `cockroach` form so every one-time roach job feeds the
+  // treatment-program report. They now classify as unlisted typed.
 ];
 
 // Registered typed findings schemas — a typed pointer that isn't a real

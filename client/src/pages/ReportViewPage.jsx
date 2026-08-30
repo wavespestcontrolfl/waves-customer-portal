@@ -12,6 +12,8 @@ import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
+import CockroachReportV2Section from '../components/report/cockroachV2/CockroachReportV2Section';
+import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication } from '../lib/product-application';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -866,6 +868,19 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   // heading size (owner eyeball 2026-08-29).
   // Primary-source only: on a combined visit the bait dashboard is a
   // companion and the header keeps the PRIMARY service's status.
+  // Cockroach V2: same header rule — short headline only, body in the hero.
+  if (data.cockroachReportV2?.status?.label) {
+    return {
+      heading: 'your service is complete!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: data.cockroachReportV2.status.label,
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
+      detail: data.techVisitCard
+        ? ''
+        : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+    };
+  }
   if (data.termiteReportV2?.source !== 'companion' && (data.termiteReportV2?.status?.label || data.termiteReportV2?.statusSummary)) {
     return {
       heading: 'your service is complete!',
@@ -5521,6 +5536,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     && !data.pestReportV2
     && !data.mosquitoReportV2
     && !(data.termiteReportV2 && data.termiteReportV2.source !== 'companion')
+    && !data.cockroachReportV2
     && !!data.pestPressure
     && data.pestPressure.enabled !== false
     && data.pestPressure.showOnCustomerReport !== false;
@@ -5559,7 +5575,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // high; mosquito follows the pest layout (owner 2026-08-27: "evenly
   // spaced — see the recurring pest control report"). The two review
   // mounts are mutually exclusive on this flag.
-  const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
+  const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || Boolean(data.cockroachReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
   // Termite V2 replaces ONE typed section: the primary cards (source
   // 'primary') or the bait-station companion block (source 'companion' —
   // combined pest + termite visits). Every suppression below keys on the
@@ -5567,6 +5583,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // companion dashboard (codex P1 #3600 r13).
   const termiteV2Primary = Boolean(data.termiteReportV2) && data.termiteReportV2.source !== 'companion';
   const termiteV2Companion = Boolean(data.termiteReportV2) && data.termiteReportV2.source === 'companion';
+  // Cockroach V2 (one-time treatment program dashboard, primary only): the
+  // hero replaces Today's Result + Visit Summary; the typed tiles drop the
+  // fields the dashboard renders; the activity gauge stays (owner 07-14 /
+  // 08-29). Mutually exclusive with pest V2 by the cockroach classifier.
+  const cockroachV2Primary = Boolean(data.cockroachReportV2) && data.cockroachReportV2.source !== 'companion';
   const reconcileTermiteTimeline = (timeline) => (data.termiteReportV2?.status?.label && Array.isArray(timeline?.visits)
     ? {
       ...timeline,
@@ -8824,7 +8845,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Termite V2 owns the visit story (hero + station network) — the
             typed Today's Result card would restate it (same rationale as the
             pest V2 tile suppression, owner 2026-07-21). */}
-        {!termiteV2Primary && (
+        {!termiteV2Primary && !cockroachV2Primary && (
           <TodaysResultCard
             typedReport={data.typedReport}
             bodyOverride={data.summarySource === 'typed_narrative'
@@ -8963,6 +8984,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
+        {/* Cockroach Report V2 — one-time treatment-program dashboard
+            (flag-gated server-side; mounts purely on payload presence). */}
+        {data.cockroachReportV2 && (
+          <div id="visit-summary">
+            <CockroachReportV2Section
+              data={data.cockroachReportV2}
+              print={mode === 'pdf' || mode === 'static'}
+              token={token}
+              mode={mode}
+              /* Same-line next visit only — the builder scopes it to the
+                 next ROACH-FAMILY appointment (live view only). */
+              nextVisitLabel={formatNextAppointmentLabel(data.cockroachReportV2.nextVisit)}
+              narrative={data.cockroachReportV2.aiSummary?.body ? cleanVisitSummary(data.cockroachReportV2.aiSummary.body) : null}
+              /* the gauge trend describes the frozen select; when the status
+                 was reconciled away from it the trend is stale (codex P2 #3613 r1) */
+              activityTrend={data.cockroachReportV2.statusReconciled ? null : (data.activity || null)}
+            />
+          </div>
+        )}
+
         {/* V2: Visit Timeline renders directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
@@ -8993,7 +9034,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Ask-Waves section that used to render into pdf/static documents was
             removed 2026-08-02 (dead chrome in a printed PDF — owner); live
             mode's ask surface is FloatingAskWaves. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !typedNarrativeOwnsSummary && (
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
@@ -9107,10 +9148,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hero-owned counts/status tiles drop (codex P1 #3600 r1). */}
         {!data.pestReportV2 && (
           <TypedFindingsCard
-            typedReport={termiteV2Primary && data.typedReport
+            typedReport={(termiteV2Primary || cockroachV2Primary) && data.typedReport
               ? {
                 ...data.typedReport,
-                findings: (data.typedReport.findings || []).filter((f) => !TERMITE_V2_DASHBOARD_FIELD_KEYS.has(f?.fieldKey)),
+                findings: (data.typedReport.findings || []).filter((f) => !(termiteV2Primary ? TERMITE_V2_DASHBOARD_FIELD_KEYS : COCKROACH_V2_DASHBOARD_FIELD_KEYS).has(f?.fieldKey)),
               }
               : data.typedReport}
           />
@@ -9151,7 +9192,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Termite V2 renders the current reading in its hero/metrics AND
             carries the cross-visit trend line itself (activityTrend), so the
             standalone gauge would print the reading twice (codex P2 #3600 r5). */}
-        {!termiteV2Primary && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
+        {/* A reconciled cockroach reading (live evidence beside a "None
+            observed" select) must not sit above a gauge that still shows the
+            stale zero — the dashboard is the reading (local codex P1). */}
+        {!termiteV2Primary && !(cockroachV2Primary && data.cockroachReportV2?.statusReconciled) && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : (
             <PestPressureCard
