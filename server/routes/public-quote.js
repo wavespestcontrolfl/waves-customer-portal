@@ -1712,6 +1712,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
             total: item.totalAfterDiscount ?? item.total ?? null,
+            // PRE-discount values + tier/floor provenance for the send-time
+            // pricing audit (GH codex on #3628): the after-discount
+            // projection above erased the discount entirely, so audited
+            // wizard quotes looked undiscounted and their tier/floor basis
+            // was unrecoverable.
+            annualBeforeDiscount: item.annual ?? null,
+            monthlyBeforeDiscount: item.monthly ?? null,
+            priceBeforeDiscount: item.price ?? null,
+            totalBeforeDiscount: item.total ?? null,
+            tier: item.tier ?? null,
+            program: item.program ?? null,
+            floorPa: item.floorPa ?? null,
+            floorAnn: item.floorAnn ?? null,
+            floorMo: item.floorMo ?? null,
+            marginFloorMonthly: item.marginFloorMonthly ?? null,
+            waveGuardDiscountEligible: item.waveGuardDiscountEligible ?? null,
             perApp: item.perApp ?? null,
             // Mosquito lines carry perVisit/visits instead of
             // perApp/visitsPerYear (codex 2642 r4) — preserve both shapes so

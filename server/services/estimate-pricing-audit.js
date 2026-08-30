@@ -558,6 +558,17 @@ function normalizeEngineLineItems(result) {
     const price = isRecurring
       ? money(Number.isFinite(annual) ? annual : monthly * 12)
       : money(Number.isFinite(num(item.price)) ? num(item.price) : (Number.isFinite(num(item.total)) ? num(item.total) : 0));
+    // The projection persists AFTER-discount values in annual/monthly/price
+    // and the pre-discount originals alongside — recover the real
+    // before-discount price instead of claiming the line was undiscounted
+    // (GH codex on #3628).
+    const before = isRecurring
+      ? num(item.annualBeforeDiscount)
+      : (Number.isFinite(num(item.priceBeforeDiscount)) ? num(item.priceBeforeDiscount) : num(item.totalBeforeDiscount));
+    const priceBeforeDiscount = Number.isFinite(before) && before > 0 ? money(before) : price;
+    const discount = priceBeforeDiscount > 0 && priceBeforeDiscount > price
+      ? Math.round((1 - price / priceBeforeDiscount) * 1000) / 1000
+      : 0;
     // Cadence persists under several names: palm as appsPerYear, and the
     // public-quote projection's `frequency` can itself be numeric.
     const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.frequency]
@@ -570,8 +581,8 @@ function normalizeEngineLineItems(result) {
       cadence: isRecurring ? 'recurring' : 'one_time',
       price,
       monthly: isRecurring ? money(monthly) : null,
-      priceBeforeDiscount: price,
-      discount: 0,
+      priceBeforeDiscount,
+      discount,
       priceSource: 'saved_estimate.engineResult.lineItems',
       ...(visitsPerYear !== undefined ? { visitsPerYear } : {}),
     });
