@@ -189,6 +189,15 @@ describe('address normalizer', () => {
     });
   });
 
+  test('trailing punctuation after the ZIP still parses (codex P1)', () => {
+    expect(parseRawAddress('123 Main Street Bradenton FL 34209.')).toMatchObject({
+      line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34209',
+    });
+  });
+
   test('raw parser leaves state empty unless an explicit Florida token is present', () => {
     expect(parseRawAddress('123 Main St Parrish')).toMatchObject({
       line1: '123 Main St',

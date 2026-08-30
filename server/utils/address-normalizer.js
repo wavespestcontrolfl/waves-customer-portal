@@ -537,7 +537,7 @@ function parseRawAddress(raw) {
     // Drive Bradenton"; SWFL house numbers share the 5-digit range with 34xxx
     // ZIPs). Strip the matched trailing occurrence specifically so a house
     // number that equals the ZIP is never removed from the street line.
-    const trailingZip = remainder.match(/(^|[\s,])(\d{5}(?:-\d{4})?)$/);
+    const trailingZip = remainder.match(/(^|[\s,])(\d{5}(?:-\d{4})?)[.,;\s]*$/);
     if (trailingZip) {
       zip = trailingZip[2];
       remainder = cleanString(remainder.slice(0, trailingZip.index));
