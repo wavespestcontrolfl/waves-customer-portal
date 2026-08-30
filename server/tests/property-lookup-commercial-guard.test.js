@@ -519,6 +519,18 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
   });
 
+  test('an "Office Condominium" land use behind a normalized Commercial type still flags (codex P1 r4)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '11 Example Office Park Unit B, Testville, FL 00000',
+      propertyType: 'Commercial',
+      squareFootage: 1800,
+      lotSize: 120000,
+      _source: 'county',
+      _parcel: { landUseDescription: 'Office Condominium' },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
   test('apartment/multifamily whole-building records never fire the condo unit-lot flag', () => {
     for (const propertyType of ['Multifamily', 'Apartment Building', 'Condo Association']) {
       const flags = buildFieldVerifyFlags({

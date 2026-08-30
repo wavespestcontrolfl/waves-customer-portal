@@ -36,6 +36,10 @@ const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
 } = require('../services/estimator-engine/unit-scope-model');
+// The estimator's own condo-record predicate (propertyType OR county
+// land-use text) — shared so the unit-lot verify flag and the unit-scope
+// model can never disagree on what counts as a condo record.
+const { _private: { isCondoRecord: shadowIsCondoRecord } } = require('../services/estimator-engine/property-facts-shadow');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -3233,13 +3237,24 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   const smallSharedParcel = Number.isFinite(unitLotParcelUnits)
     && unitLotParcelUnits >= 2 && unitLotParcelUnits <= 4;
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
+  // Condo identity via the estimator's OWN predicate (isCondoRecord —
+  // propertyType OR county land-use text, aggregated excluded), so an
+  // "Office Condominium" land use behind a normalized 'Commercial' type is
+  // caught the same way the unit-scope model catches it (codex P1 r4).
+  // Land-use text is county metadata riding on the trusted-record read.
+  const unitLotIsCondo = !!unitLotSignalRc
+    && shadowIsCondoRecord({
+      aggregated: rc?._parcel?.aggregated === true,
+      propertyType: unitLotSignalRc.propertyType,
+      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+    });
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
     && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
     && !smallSharedParcel
     && !/hoa\s*common|association/i.test(String(unitLotSignalRc?.propertyType || ''))
-    && /condo/i.test(String(unitLotSignalRc?.propertyType || ''))) {
+    && unitLotIsCondo) {
     flags.push({
       field: 'lotSize',
       reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
