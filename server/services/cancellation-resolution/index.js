@@ -55,7 +55,13 @@ async function openCancellationCase({
       // safety complaint, reconstructed from reason+context) that the
       // original write lost — record it so the case reaches the incident
       // lane; never downgrade an existing verdict.
-      if (!existing.hard_stop && resolution && resolution.kind === 'hard_stop') {
+      if (
+        !existing.hard_stop && resolution && resolution.kind === 'hard_stop'
+        && (!existing.reason_code || !resolution.reasonCode || existing.reason_code === resolution.reasonCode)
+      ) {
+        // Never attach a verdict from a DIFFERENT reason to a recorded case
+        // (a later retry claiming health_or_chemicals must not flip an
+        // existing price case into the incident lane).
         repair.hard_stop = true;
         if (!existing.review_type) repair.review_type = resolution.reviewType || null;
       }

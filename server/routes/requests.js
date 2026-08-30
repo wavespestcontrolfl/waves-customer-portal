@@ -360,20 +360,41 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
     }
 
-    // Cancellation case snapshot + SERVER-side resolution recompute — with
-    // ALL external I/O (the paid, up-to-30s Google address validation)
-    // resolved BEFORE the acceptance persists below: once the
-    // service_requests row exists the account must reach the billing
-    // wind-down without awaiting anything external, or a billing cron can
-    // charge inside the gap (and a crash would leave a durable acceptance
-    // with billing still armed). The audit record is the SERVER's
-    // resolution under the SAME scope/context the preview took — never the
-    // caller's claim; the claimed template id only decides whether the
-    // claimed outcome refers to the card the server would have shown.
+    // Cancellation case snapshot + PRE-CHURN facts — LOCAL reads only.
+    // Ordering invariant (codex rounds 27+30): nothing EXTERNAL may run
+    // between the acceptance persisting and the billing wind-down (a
+    // billing cron could charge inside that window), and nothing slow may
+    // run before the acceptance persists (a crash would lose the submitted
+    // cancellation). So: local facts here → insert → pure resolve → case
+    // write → processor; the paid Google address validation, when needed,
+    // runs AFTER the wind-down and only refines the case verdict.
     const isCancellation = category === 'cancellation';
     let caseSnapshot = null;
+    let preChurnFacts = null;
     let serverResolution = null;
     if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
+      // Pure, I/O-free resolve from the preloaded pre-churn facts. The
+      // moving address verdict is deliberately absent here (it needs the
+      // paid external call, which must wait until after the billing
+      // wind-down) — an out-of-area hard stop is added post-processor.
+      if (preChurnFacts && value.reasonCode) {
+        try {
+          const { resolveCancellation } = require('../services/cancellation-resolution/resolve');
+          serverResolution = resolveCancellation({
+            facts: preChurnFacts,
+            reasonCode: value.reasonCode,
+            families: Array.isArray(value.families) ? value.families : [],
+            context: {
+              newAddressInServiceArea: null,
+              hasCompetitorQuote: value.competitorQuote === true,
+              adverseEvent: value.adverseEvent === true,
+              safetyComplaint: value.safetyComplaint === true,
+            },
+          });
+        } catch (resErr) {
+          logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
+        }
+      }
       try {
         caseSnapshot = await db('customers')
           .where({ id: req.customer.id })
@@ -383,28 +404,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
       if (value.reasonCode) {
         try {
-          let newAddressInServiceArea = null;
-          // Paid Google call: only the moving branch consumes the verdict —
-          // never burn quota validating an address on a non-moving reason.
-          if (value.newAddress && value.reasonCode === 'moving_or_property_change') {
-            const { validateAddress, STATUSES } = require('../services/address-validation');
-            const verdict = await validateAddress({ addressLines: [value.newAddress] });
-            newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
-          }
-          const preview = await CancellationResolution.previewCancellationResolution({
-            customerId: req.customer.id,
-            reasonCode: value.reasonCode,
-            families: Array.isArray(value.families) ? value.families : [],
-            context: {
-              newAddressInServiceArea,
-              hasCompetitorQuote: value.competitorQuote === true,
-              adverseEvent: value.adverseEvent === true,
-              safetyComplaint: value.safetyComplaint === true,
-            },
-          });
-          serverResolution = preview ? preview.resolution : null;
-        } catch (resErr) {
-          logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
+          const { loadCancellationFacts } = require('../services/cancellation-resolution/facts');
+          preChurnFacts = await loadCancellationFacts(req.customer.id);
+        } catch (factsErr) {
+          logger.warn(`Cancellation facts preload failed for ${req.customer.id}: ${factsErr.message}`);
         }
       }
     }
@@ -478,6 +481,23 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
       cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
+
+      // Moving branch: the paid Google validation runs ONLY NOW — after
+      // the billing wind-down — and only refines the audit verdict (an
+      // accepted out-of-area address becomes the clean-cancel hard stop on
+      // the case; nothing customer-facing depends on it at commit time).
+      if (CancellationResolution.cancelFlowV2Enabled()
+        && value.reasonCode === 'moving_or_property_change' && value.newAddress) {
+        try {
+          const { validateAddress, STATUSES } = require('../services/address-validation');
+          const verdict = await validateAddress({ addressLines: [value.newAddress] });
+          if (cancelMoveAddressVerdict(verdict, STATUSES) === false) {
+            serverResolution = { kind: 'hard_stop', reasonCode: value.reasonCode, scope: serverResolution ? serverResolution.scope : [], reviewType: 'none' };
+          }
+        } catch (addrErr) {
+          logger.warn(`Cancellation address validation failed for request ${request.id}: ${addrErr.message}`);
+        }
+      }
 
       // Finalize the case opened pre-churn: an idempotent second call that
       // only promotes open→committed (and re-supplies the resolution in case

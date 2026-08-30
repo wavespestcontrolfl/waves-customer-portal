@@ -281,11 +281,11 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       // is the best remaining evidence (mutable, so absence proves nothing;
       // presence still blocks).
       const [auditRow, ledgerRow] = await Promise.all([
-        db('audit_log')
+        dbh('audit_log')
           .where({ action: MANUAL_RATE_AUDIT_ACTION, resource_type: 'customer', resource_id: customerId })
           .orderBy('created_at', 'desc')
           .first('created_at'),
-        db('customer_plan_rates')
+        dbh('customer_plan_rates')
           .where({ customer_id: customerId })
           .whereIn('source', Array.from(MANUAL_RATE_SOURCES))
           .orderBy('updated_at', 'desc')
@@ -304,7 +304,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // 12 ET CALENDAR months (leap-year/DST safe), like the money cooldown.
     leg('shownCases', () => {
       const { etMonthsAgoFloor } = require('./retention-offer');
-      return db('cancellation_cases')
+      return dbh('cancellation_cases')
         .where({ customer_id: customerId })
         .whereNotNull('resolution_template_id')
         .whereIn('resolution_outcome', ['shown', 'accepted', 'declined'])
@@ -323,7 +323,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .first('preferred_day', 'preferred_time', 'property_gate_code', 'neighborhood_gate_code'), null),
     leg('callbackLanes', async () => {
       const { openReserviceCallbacks } = require('../reservice-scheduler');
-      return Object.keys(await openReserviceCallbacks(customerId));
+      return Object.keys(await openReserviceCallbacks(customerId, dbh));
     }, 'error'),
     leg('families', () => loadFamilies(customerId, today, dbh), []),
   ]);
