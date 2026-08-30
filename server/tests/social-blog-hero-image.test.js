@@ -43,6 +43,7 @@ function mockFetch(routes) {
       ok: route.ok !== false && !route.redirectTo,
       status: route.redirectTo ? 301 : route.ok !== false ? 200 : 404,
       headers: { get: (h) => (h.toLowerCase() === 'location' ? route.redirectTo || null : null) },
+      body: route.redirectTo ? { cancel: (route.cancel = jest.fn(async () => {})) } : null,
       text: async () => route.text || '',
       arrayBuffer: async () => (route.bytes || Buffer.alloc(0)).buffer.slice(0),
     };
@@ -106,14 +107,18 @@ describe('blogHeroSocialImageUrl', () => {
 
   test('one same-host canonical hop (normalized link → trailing slash) is followed; off-host or chained hops are not', async () => {
     const STRIPPED = PAGE.replace(/\/$/, '');
-    mockFetch({ [STRIPPED]: { redirectTo: PAGE }, [PAGE]: { text: HTML }, [HERO]: { bytes: Buffer.from('img') } });
+    let routes = { [STRIPPED]: { redirectTo: PAGE }, [PAGE]: { text: HTML }, [HERO]: { bytes: Buffer.from('img') } };
+    mockFetch(routes);
     await expect(social.blogHeroSocialImageUrl(STRIPPED)).resolves.toMatch(/blog-hero-dangerous-ants-in-florida-/);
     expect(global.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
     expect(global.fetch.mock.calls[1][1]).toMatchObject({ redirect: 'error' });
+    expect(routes[STRIPPED].cancel).toHaveBeenCalledTimes(1); // redirect body released before the hop
 
-    mockFetch({ [STRIPPED]: { redirectTo: 'https://evil.example.com/' } });
+    routes = { [STRIPPED]: { redirectTo: 'https://evil.example.com/' } };
+    mockFetch(routes);
     await expect(social.blogHeroSocialImageUrl(STRIPPED)).resolves.toBeNull();
     expect(global.fetch.mock.calls.map(([u]) => String(u))).toEqual([STRIPPED]);
+    expect(routes[STRIPPED].cancel).toHaveBeenCalledTimes(1); // released on the off-host miss too
 
     // A second redirect is refused by redirect:'error' on the hop fetch (mock throws like undici).
     global.fetch = jest.fn(async (url, opts) => {

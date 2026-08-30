@@ -1339,6 +1339,9 @@ async function blogHeroSocialImageUrl(link) {
     // fetched; a second hop or an off-host Location is a miss (no hero).
     let pageRes = await fetch(pageUrl.href, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
     if ([301, 302, 307, 308].includes(pageRes.status)) {
+      // Release the redirect body before anything else — an unconsumed manual
+      // redirect pins its undici connection (same discipline as linkIsLive).
+      if (pageRes.body && typeof pageRes.body.cancel === 'function') await pageRes.body.cancel().catch(() => {});
       const location = pageRes.headers?.get?.('location');
       const hop = location ? new URL(location, pageUrl) : null;
       if (!hop || !isTrustedImageHost(hop.href)) return null;

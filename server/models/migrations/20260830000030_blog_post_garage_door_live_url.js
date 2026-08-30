@@ -20,16 +20,19 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('blog_posts'))) return;
   if (!(await knex.schema.hasColumn('blog_posts', 'astro_live_url'))) return;
   // Exact observed state only (status=published, astro_status=draft, no
-  // live URL). If the row was republished (pr_open), failed, or unpublished
-  // before this deploys, that newer lifecycle state wins and nothing is
-  // touched — pages-poll owns those transitions.
+  // live URL, no published_at). If the row was republished (pr_open), failed,
+  // unpublished, or stamped by pages-poll before this deploys, that newer
+  // lifecycle state wins and nothing is touched — pages-poll owns those
+  // transitions. Writing PUBLISHED_AT directly (not COALESCE) keeps `down`'s
+  // predicate an exact fingerprint of what `up` wrote.
   await knex('blog_posts')
     .where({ slug: SLUG, status: 'published', astro_status: 'draft' })
     .whereNull('astro_live_url')
+    .whereNull('astro_published_at')
     .update({
       astro_live_url: LIVE_URL,
       astro_status: 'live',
-      astro_published_at: knex.raw('COALESCE(astro_published_at, ?::timestamptz)', [PUBLISHED_AT]),
+      astro_published_at: knex.raw('?::timestamptz', [PUBLISHED_AT]),
       updated_at: knex.fn.now(),
     });
 };
