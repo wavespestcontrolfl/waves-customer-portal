@@ -33,7 +33,11 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('blog_posts'))) return;
   if (!(await knex.schema.hasColumn('blog_posts', 'astro_live_url'))) return;
+  // Revert ONLY the exact values `up` wrote. If the pages-poll worker has
+  // since stamped its own published_at (or moved the status), that is live
+  // metadata this migration did not create — leave the row alone.
   await knex('blog_posts')
-    .where({ slug: SLUG, astro_live_url: LIVE_URL })
+    .where({ slug: SLUG, astro_live_url: LIVE_URL, astro_status: 'live' })
+    .whereRaw('astro_published_at = ?::timestamptz', [PUBLISHED_AT])
     .update({ astro_live_url: null, astro_status: 'draft', astro_published_at: null, updated_at: knex.fn.now() });
 };
