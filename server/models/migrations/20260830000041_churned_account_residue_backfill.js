@@ -32,16 +32,45 @@ exports.up = async function up(knex) {
   // remaining series continues to extend; admin-dispatch.js leaves it
   // intact by design.)
   const hasPerAppFee = await knex.schema.hasColumn('customers', 'per_application_fee');
+  const hasLedgerForPredicate = await knex.schema.hasTable('customer_plan_rates');
+  // Same churned-or-inactive scope as the audit script, and EVERY billing
+  // rail counts as residue — not just tier/rate: an armed retry or a still-
+  // enabled payment method can charge an account with no tier at all, and
+  // surviving plan-rate components can resurrect an old rate on win-back.
   const candidates = await knex('customers')
-    .where({ pipeline_stage: 'churned' })
+    .where(function churnedOrInactive() {
+      this.where({ pipeline_stage: 'churned' }).orWhere('active', false);
+    })
     .where(function orResidue() {
-      this.where('active', true)
+      this.where(function activeChurned() {
+        this.where('active', true).where('pipeline_stage', 'churned');
+      })
         .orWhereNotNull('waveguard_tier')
         .orWhereRaw('COALESCE(monthly_rate, 0) > 0')
         // Per-application residue: the lane stamp + fee remain the live
         // price for a straggler completion (customer-offboarding.js) even
         // when tier/rate are already clear.
-        .orWhere('billing_mode', 'per_application');
+        .orWhere('billing_mode', 'per_application')
+        .orWhere('autopay_enabled', true)
+        .orWhereNotNull('next_charge_date')
+        .orWhereExists(function methodArmed() {
+          this.select(knex.raw('1')).from('payment_methods')
+            .whereRaw('payment_methods.customer_id = customers.id')
+            .where('payment_methods.autopay_enabled', true);
+        })
+        .orWhereExists(function retryArmed() {
+          this.select(knex.raw('1')).from('payments')
+            .whereRaw('payments.customer_id = customers.id')
+            .where('payments.status', 'failed')
+            .whereNull('payments.superseded_by_payment_id')
+            .whereNotNull('payments.next_retry_at');
+        });
+      if (hasLedgerForPredicate) {
+        this.orWhereExists(function ledgerResidue() {
+          this.select(knex.raw('1')).from('customer_plan_rates')
+            .whereRaw('customer_plan_rates.customer_id = customers.id');
+        });
+      }
     })
     .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
 
