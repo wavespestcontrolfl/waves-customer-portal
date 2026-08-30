@@ -1996,6 +1996,10 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
+          // Same fence as pdf-queue: a callback inserted/reclassified
+          // mid-render must not store the old chart under the new key.
+          logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
         } else if (unreachablePhotos > 0) {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {

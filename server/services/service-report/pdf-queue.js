@@ -199,6 +199,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same contract for the re-service block (reservice-report.js): the store
   // key carries the billing outcome the render actually printed.
   let reserviceRenderedSignature = '';
+  // Trend-exclusion key component captured BEFORE the render: a callback
+  // inserted or reclassified mid-render would otherwise store the OLD chart
+  // under the NEW signature and serve it as current (codex #3623 r5 P1).
+  // Re-read after the render; on mismatch the object is served unstored,
+  // matching the lawn-assessment stability fence below.
+  const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
@@ -353,8 +359,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: 'photos_unreachable',
       };
     }
+    const reserviceTrendsAfter = await reserviceTrendsPdfSignature(service, knex);
+    if (reserviceTrendsAfter !== reserviceTrendsBefore) {
+      logger.warn(`[service-report-pdf] callback set changed during PDF render for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'callback_set_changed',
+      };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + await reserviceTrendsPdfSignature(service, knex) + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -458,7 +472,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     // (20260830000050), so during the Railway rollout overlap the column
     // may not exist yet — probe once and select it conditionally instead
     // of failing every PDF lookup (codex r8 P1).
-    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_date', ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
