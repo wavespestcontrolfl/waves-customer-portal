@@ -13,6 +13,7 @@ const { processCancellationRequest } = require('../services/cancellation-process
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
+const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
 const { etDateString } = require('../utils/datetime-et');
 
 function etDisplayDate(value) {
@@ -218,6 +219,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           value,
           families: [], // scope unverifiable post-churn — never retry input
           reasonText: dupe.description || null,
+          // Situational hard stops (adverse event / safety complaint) are
+          // derivable from reason+context alone — reconstruct them so a
+          // repaired-from-nothing case still reaches the incident lane.
+          resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
           snapshot: { written_on_retry: true, degraded: true },
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
         });
@@ -282,6 +287,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         value,
         families: [], // scope unverifiable post-churn — never retry input
         reasonText: priorCancellation.description || null,
+        resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
         snapshot: { written_on_retry: true, degraded: true },
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
       });
@@ -404,7 +410,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       if (value.reasonCode) {
         try {
           let newAddressInServiceArea = null;
-          if (value.newAddress) {
+          // Paid Google call: only the moving branch consumes the verdict —
+          // never burn quota validating an address on a non-moving reason.
+          if (value.newAddress && value.reasonCode === 'moving_or_property_change') {
             const { validateAddress, STATUSES } = require('../services/address-validation');
             const verdict = await validateAddress({ addressLines: [value.newAddress] });
             newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
@@ -722,7 +730,8 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
     // verifies INSIDE the service area; a verified out-of-area address is a
     // clean-cancel hard stop; anything unverifiable resolves to no card.
     let newAddressInServiceArea = null;
-    if (value.new_address) {
+    // Paid Google call — moving previews only (see the commit path).
+    if (value.new_address && value.reason === 'moving_or_property_change') {
       const { validateAddress, STATUSES } = require('../services/address-validation');
       const verdict = await validateAddress({ addressLines: [value.new_address] });
       newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);

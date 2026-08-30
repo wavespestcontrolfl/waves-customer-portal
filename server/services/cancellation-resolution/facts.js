@@ -107,6 +107,35 @@ async function loadFamilies(customerId, today) {
     if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) if (!keys.includes(key)) keys.push(key);
   }
+  // A LIVE annual-prepay term is a plan to cancel even with zero schedule
+  // rows (coverage visits carry recurring_ongoing=false and the last visit
+  // can precede term_end by months — the same reach hasCancellableWork
+  // has). Derive its family from the term's anchor visit, falling back to
+  // the plan label text.
+  try {
+    const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+    const terms = await coveredTermsAsOf(db, today)
+      .where('t.customer_id', customerId)
+      .select('t.plan_label', 't.last_scheduled_service_id');
+    for (const term of terms || []) {
+      let anchorKeys = [];
+      if (term.last_scheduled_service_id) {
+        const anchor = await db('scheduled_services as s')
+          .leftJoin('services as sv', 's.service_id', 'sv.id')
+          .where('s.id', term.last_scheduled_service_id)
+          .first('s.*', 'sv.service_key', 'sv.service_name');
+        if (anchor && !isCommercialServiceRow(anchor) && !isRodentLedServiceRow(anchor)) {
+          anchorKeys = detectWaveGuardPlanKeys(anchor);
+        }
+      }
+      if (!anchorKeys.length && term.plan_label) {
+        anchorKeys = detectWaveGuardPlanKeys({ service_type: term.plan_label });
+      }
+      for (const key of anchorKeys) if (!keys.includes(key)) keys.push(key);
+    }
+  } catch (err) {
+    logger.warn(`[cancellation-resolution] prepay family evidence failed for ${customerId}: ${err.message}`);
+  }
   return uniqueServiceFamilies(keys);
 }
 
@@ -268,13 +297,17 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     }, 'error'),
     // Only cases whose card was actually SHOWN (or acted on) suppress a
     // repeat — a server-resolved-but-never-displayed card (outcome 'none')
-    // must not burn the customer's once-per-12-months slot.
-    leg('shownCases', () => db('cancellation_cases')
-      .where({ customer_id: customerId })
-      .whereNotNull('resolution_template_id')
-      .whereIn('resolution_outcome', ['shown', 'accepted', 'declined'])
-      .where('created_at', '>=', since12mo)
-      .select('resolution_template_id'), []),
+    // must not burn the customer's once-per-12-months slot. The window is
+    // 12 ET CALENDAR months (leap-year/DST safe), like the money cooldown.
+    leg('shownCases', () => {
+      const { etMonthsAgoFloor } = require('./retention-offer');
+      return db('cancellation_cases')
+        .where({ customer_id: customerId })
+        .whereNotNull('resolution_template_id')
+        .whereIn('resolution_outcome', ['shown', 'accepted', 'declined'])
+        .whereRaw("(created_at AT TIME ZONE 'America/New_York')::date > ?", [etMonthsAgoFloor(now, 12)])
+        .select('resolution_template_id');
+    }, []),
     leg('termite', () => db('termite_stations')
       .where({ customer_id: customerId, program: 'termite', owned_by: 'waves' })
       .whereRaw('COALESCE(is_active, true) = true')

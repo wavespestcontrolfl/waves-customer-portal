@@ -87,14 +87,13 @@ exports.up = async function up(knex) {
     // leave a newly re-won customer wound down.
      
     await knex.transaction(async (trx) => {
-      // One-off migration: block concurrent scheduled_services writers for
-      // the (tiny) duration of this per-customer transaction. SHARE ROW
-      // EXCLUSIVE conflicts with every writer's ROW EXCLUSIVE lock, so a
-      // booking insert cannot cross the wind-down commit — readers are
-      // unaffected. This, not the read-checks, is what actually closes the
-      // race; the pre/post guards remain as cheap belt-and-suspenders.
-      await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
-      await windDownIfStillResidue(trx, customer.id);
+      // LOCK ORDER matches the booking writers (customers row FIRST, then
+      // scheduled_services): a booking transaction updates the customers
+      // row before inserting the visit, so taking the table lock first
+      // while a booking holds the row lock would deadlock. The customer
+      // FOR UPDATE happens inside windDownIfStillResidue before this table
+      // lock is requested — see acquireTableLock there.
+      await windDownIfStillResidue(trx, customer.id, customer);
     }).catch((err) => {
       // A concurrent booking raced this account mid-wind-down: everything
       // rolled back; the audit script keeps reporting it. Anything else is
@@ -149,7 +148,7 @@ exports.up = async function up(knex) {
     return !!(liveSeries || upcoming || inProgress || coveredTerm);
   }
 
-  async function windDownIfStillResidue(trx, customerId) {
+  async function windDownIfStillResidue(trx, customerId, candidate) {
     // Lock and RE-FETCH — the candidate snapshot is stale by now; an admin
     // reactivation or reprice committed before this lock must win.
     const customer = await trx('customers')
@@ -158,6 +157,21 @@ exports.up = async function up(knex) {
       .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (!customer) return;
     if (!(customer.pipeline_stage === 'churned' || customer.active === false)) return; // re-won — leave alone
+    // A reprice committed between candidate selection and this lock wins:
+    // any change to tier/rate/lane since the snapshot means an operator
+    // touched the account — leave it to the audit script.
+    if (
+      String(customer.waveguard_tier || '') !== String(candidate.waveguard_tier || '')
+      || Math.round((Number(customer.monthly_rate) || 0) * 100) !== Math.round((Number(candidate.monthly_rate) || 0) * 100)
+      || String(customer.billing_mode || '') !== String(candidate.billing_mode || '')
+    ) return;
+    // Table lock AFTER the customer row lock (booking writers take the
+    // customers row first, then insert the visit — same order avoids
+    // deadlock). SHARE ROW EXCLUSIVE blocks every scheduled_services
+    // writer for the tiny duration of this transaction, which is what
+    // actually closes the concurrent-booking race; the pre/post read
+    // guards remain as cheap belt-and-suspenders.
+    await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
     if (await hasLiveState(trx, customer.id)) return; // possibly a mistaken stage-flip — leave for the audit script
     const update = {
       active: false,
@@ -217,7 +231,7 @@ exports.up = async function up(knex) {
       interaction_type: 'note',
       subject: 'Churn residue backfill (2026-08-30)',
       body:
-        'One-off cleanup with the cancellation engine ship: account was pipeline_stage=churned but still carried ' +
+        `One-off cleanup with the cancellation engine ship: account was ${customer.pipeline_stage === 'churned' ? 'pipeline_stage=churned' : `inactive (stage ${customer.pipeline_stage || 'unset'})`} but still carried ` +
         `${customer.active ? 'active=true' : ''}${customer.active && (customer.waveguard_tier || Number(customer.monthly_rate) > 0) ? ' and ' : ''}` +
         `${customer.waveguard_tier ? `tier ${customer.waveguard_tier}` : ''}${customer.waveguard_tier && Number(customer.monthly_rate) > 0 ? ' / ' : ''}` +
         `${Number(customer.monthly_rate) > 0 ? `rate $${Number(customer.monthly_rate).toFixed(2)}` : ''}` +

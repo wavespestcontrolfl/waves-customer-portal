@@ -31,14 +31,18 @@ const OFFER_TTL_DAYS = 365;
 // boundary by a day around the ET evening rollover — the calendar
 // components come from etDateString instead (AGENTS.md America/New_York
 // rule). Comparisons happen on ET dates, never on raw instants.
-function cooldownFloor(now = new Date()) {
+function etMonthsAgoFloor(now = new Date(), months = COOLDOWN_MONTHS) {
   const [y, m, d] = etDateString(now).split('-').map(Number);
   let ty = y;
-  let tm = m - COOLDOWN_MONTHS;
+  let tm = m - months;
   while (tm < 1) { tm += 12; ty -= 1; }
   const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate(); // day 0 of next month
   const td = Math.min(d, lastDay);
   return `${ty}-${String(tm).padStart(2, '0')}-${String(td).padStart(2, '0')}`;
+}
+
+function cooldownFloor(now = new Date()) {
+  return etMonthsAgoFloor(now, COOLDOWN_MONTHS);
 }
 
 /**
@@ -220,6 +224,7 @@ module.exports = {
   MIN_PAID_VISITS,
   COOLDOWN_MONTHS,
   cooldownFloor,
+  etMonthsAgoFloor,
   offerEligibility,
   grantRetentionOffer,
   retentionDiscountForInvoice,

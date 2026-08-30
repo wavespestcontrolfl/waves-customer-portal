@@ -76,8 +76,13 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
   const ctx = { ...context, reasonCode: reason };
   const hasPest = scope.includes('pest_control');
   const holdable = scope.some((f) => f === 'lawn_care' || f === 'mosquito' || f === 'tree_shrub');
-  const pestLane = facts.openCallbackLanes && facts.openCallbackLanes.includes('pest');
-  const lawnLane = facts.openCallbackLanes && facts.openCallbackLanes.includes('lawn');
+  // A callback-lookup FAILURE ('unknown' sentinel) blocks BOTH lanes: the
+  // engine cannot promise a free re-service without proving one is not
+  // already on the calendar (fail closed, like the money facts).
+  const lanes = facts.openCallbackLanes || [];
+  const lanesUnknown = lanes.includes('unknown');
+  const pestLane = lanesUnknown || lanes.includes('pest');
+  const lawnLane = lanesUnknown || lanes.includes('lawn');
   const opts = { shown12mo: facts.cardsShown12mo || [] };
   const offer = offerEligibility(facts, { reasonCode: reason, families: scope, now });
   const offerAction = offer.eligible ? { familyKey: offer.familyKey } : null;
@@ -208,4 +213,16 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
   return { kind: 'card', reasonCode: reason, scope, card, offerBlockers: offer.blockers };
 }
 
-module.exports = { resolveCancellation, ownerTextAudience };
+/**
+ * Situational hard-stop verdict derivable from reason + context ALONE (no
+ * facts) — used by retry repair to reconstruct incident/out-of-area
+ * verdicts when the original case writes were lost post-churn.
+ */
+function situationalHardStop(reasonCode, context = {}) {
+  if (reasonCode === 'health_or_chemicals' && context.adverseEvent) return { kind: 'hard_stop', reasonCode, reviewType: 'incident' };
+  if (reasonCode === 'service_experience' && context.safetyComplaint) return { kind: 'hard_stop', reasonCode, reviewType: 'incident' };
+  if (reasonCode === 'moving_or_property_change' && context.newAddressInServiceArea === false) return { kind: 'hard_stop', reasonCode, reviewType: 'none' };
+  return null;
+}
+
+module.exports = { resolveCancellation, ownerTextAudience, situationalHardStop };
