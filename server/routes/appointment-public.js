@@ -472,15 +472,21 @@ async function confirmGroupedOrSolo(trx, svc, shown) {
   return { outcome: 'fanned', row: cur, confirmed: await visitAllConfirmed(trx, svc.visit_id) };
 }
 
-// Lost-race grouped confirm: prove the page's member set is still the live
-// one and report the visit's aggregate state, both under the stop lock.
+// Lost-race grouped confirm (local codex audit r25): the CAS missed because
+// another confirmation path won the anchor between this request's read and
+// its write — a winner that is NOT this route (the logged-in portal, self-
+// booking) never fanned out to the siblings, so reporting the aggregate
+// alone acknowledges a grouped confirm that left eligible pending siblings
+// unconfirmed (and the page clears its Confirm CTA). Same contract as the
+// already-confirmed grouped path, under the stop lock: the anchor re-read
+// FOR UPDATE must still be a confirmed member at the shown slot, the shown
+// member set must still be the live one, then the pending siblings are
+// confirmed and the visit's aggregate reported. A lone member is 'solo':
+// the caller applies the single-row race verdict to the locked row.
 async function groupedAggregateUnderLock(svc, shown) {
-  let confirmed = null;
-  const ok = await underStopLock(svc, async (trx) => {
-    await membersMatchShown(trx, svc, shown);
-    confirmed = await visitAllConfirmed(trx, svc.visit_id);
-  });
-  return { ok, confirmed };
+  let locked = null;
+  const ok = await underStopLock(svc, async (trx) => { locked = await confirmGroupedOrSolo(trx, svc, shown); });
+  return { ok, confirmed: ok ? locked.confirmed : null, outcome: ok ? locked.outcome : null, row: ok ? locked.row : null };
 }
 
 // The visit's aggregate state after a fan-out (codex r17 P2): a
@@ -1015,7 +1021,12 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
           // Same contract as the other grouped paths, under the stop lock.
           const grouped = await groupedAggregateUnderLock(svc, req.body);
           if (!grouped.ok) return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
-          return res.json({ success: true, confirmed: grouped.confirmed });
+          // ONE live member is not grouped: the single-row race verdict
+          // applies, on the LOCKED row (same as the already-confirmed path).
+          if (grouped.outcome === 'solo' && confirmRaceVerdict(grouped.row) !== 'idempotent_success') {
+            return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+          }
+          return res.json({ success: true, confirmed: grouped.confirmed !== false });
         }
         return res.json({ success: true, confirmed: true });
       }

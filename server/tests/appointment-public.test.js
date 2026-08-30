@@ -653,30 +653,46 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     expect(await visitServicesFor({ id: 'a', visit_id: 'v1' })).toEqual({ visitUnknown: true });
   });
 
-  test('a lost-race grouped confirm re-proves the membership key and reports the aggregate under the stop lock (local audit)', async () => {
+  test('a lost-race grouped confirm re-proves the anchor + membership under the stop lock and FANS OUT to the pending siblings (local audit r25) — a winner that was another surface never confirmed them', async () => {
     const { groupedAggregateUnderLock, membershipKeyFor } = appointmentRouter._test;
     // far-future stop: the locked proof also checks the STOP's window against real now
     const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: bStatus, scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }];
-    const wire = (live) => {
+    const anchorRow = { visit_id: 'v1', status: 'confirmed', customer_confirmed: true, scheduled_date: '2026-08-05', window_start: '09:00:00' };
+    const wire = (live, anchor = anchorRow) => {
+      const updates = [];
       const api = {
-        where: () => api, whereNotIn: () => api, forUpdate: () => api,
-        first: async () => ({ property_id: 'p1', customer_id: 'c1', scheduled_date: '2026-08-05' }), // lockStopForRow peek + verify
-        select: async () => live,
+        where(w) { api._w = w; return api; }, whereNot(col, v) { api._not = v; return api; }, whereNotIn: () => api, forUpdate: () => api,
+        // the anchor FOR UPDATE read (status in the projection) vs lockStopForRow's peek + verify
+        first: async (...cols) => (cols.includes('status') ? anchor : { property_id: 'p1', customer_id: 'c1', scheduled_date: '2026-08-05' }),
+        select: async () => { const not = api._not; api._not = null; return live.filter((m) => m.id !== not); }, // the sibling read excludes the anchor
+        update: async (v) => { updates.push({ where: api._w, v }); return 1; },
+        insert: async () => [1],
       };
       const trx = jest.fn(() => api);
       trx.raw = jest.fn(async () => ({ rows: [] }));
+      trx.fn = { now: () => 'now()' };
       mockDb.transaction = jest.fn(async (fn) => fn(trx));
-      return trx;
+      return { trx, updates };
     };
     const key = membershipKeyFor(members('pending'));
-    let trx = wire(members('pending'));
-    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: true, confirmed: false });
-    expect(trx.raw).toHaveBeenCalled(); // the stop advisory lock was taken
-    trx = wire(members('confirmed'));
-    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: membershipKeyFor(members('confirmed')) })).toEqual({ ok: true, confirmed: true });
+    let w = wire(members('pending'));
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toMatchObject({ ok: true, confirmed: false, outcome: 'fanned' });
+    expect(w.trx.raw).toHaveBeenCalled(); // the stop advisory lock was taken
+    // the pending sibling was confirmed by THIS request (the CAS winner was another surface)
+    expect(w.updates).toEqual([{ where: { id: 'b', status: 'pending' }, v: expect.objectContaining({ status: 'confirmed', customer_confirmed: true }) }]);
+    w = wire(members('confirmed'));
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: membershipKeyFor(members('confirmed')) })).toMatchObject({ ok: true, confirmed: true });
     // membership changed (that is what made the CAS miss) ⇒ not ok ⇒ CHANGED
-    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'c', status: 'pending', scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }]);
-    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: false, confirmed: null });
+    w = wire([{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'c', status: 'pending', scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }]);
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: false, confirmed: null, outcome: null, row: null });
+    expect(w.updates).toEqual([]);
+    // the anchor no longer confirmed at the shown slot under the lock (a staff cancel / move won) ⇒ CHANGED, no fan-out
+    w = wire(members('pending'), { ...anchorRow, status: 'cancelled' });
+    expect((await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).ok).toBe(false);
+    expect(w.updates).toEqual([]);
+    // a lone live member is 'solo' with the locked row for the caller's race verdict
+    w = wire([{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }]);
+    expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: null })).toMatchObject({ ok: true, outcome: 'solo', row: anchorRow });
   });
 
   test('the anchor must still be at the shown slot either way', async () => {
