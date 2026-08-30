@@ -13,6 +13,7 @@ jest.mock('../models/db', () => {
       where: jest.fn(() => q), whereILike: jest.fn(() => q), orWhereILike: jest.fn(() => q),
       clone: () => q, orderBy: () => q, limit: () => q, offset: () => Promise.resolve(rows),
       select: () => q, count: () => q, groupBy: () => Promise.resolve(counts),
+      first: jest.fn(async () => undefined), insert: jest.fn(async () => [{ id: 'q1' }]),
     };
     return q;
   };
@@ -29,7 +30,7 @@ jest.mock('../services/seo/link-registry-enrich', () => ({ enrichDomains: jest.f
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (name, fn) => fn()) }));
 
 const router = require('../routes/admin-backlink-agent-v2');
-const { resolveIntakeItems } = require('../services/seo/link-registry-intake');
+const { intake, resolveIntakeItems } = require('../services/seo/link-registry-intake');
 const { importExistingBacklinks } = require('../services/seo/link-registry-baseline');
 const { ingestCompetitorGap } = require('../services/seo/link-registry-gap-ingest');
 const { enrichDomains } = require('../services/seo/link-registry-enrich');
@@ -65,6 +66,14 @@ describe('POST /registry/jobs/:job', () => {
     expect(r.status).toBe(404);
     expect(r.body.error).toMatch(/resolve, baseline, gap, enrich/);
   });
+  test('the legacy Add-URLs queue route ALSO feeds the registry intake (one pipeline, never two)', async () => {
+    intake.mockResolvedValueOnce({ inserted: 2, existing: 1, items: { pending: 1 } });
+    const post = handler('post', '/queue');
+    const r = await call(post, { body: { urls: ['https://dir.example/add', 'bit.ly/x'] } });
+    expect(intake).toHaveBeenCalledWith(expect.anything(), { text: 'https://dir.example/add\nbit.ly/x', source: 'list_import', sourceDetail: expect.stringMatching(/^legacy_queue_add:\d{4}-\d{2}-\d{2}$/) });
+    expect(r.body.registry).toEqual({ inserted: 2, existing: 1, pending: 1 });
+  });
+
   test('each job runs its service once, bounded, with dryRun passed through', async () => {
     const post = handler('post', '/registry/jobs/:job');
     expect((await call(post, { params: { job: 'resolve' }, body: { limit: '5000' } })).body).toEqual({ job: 'resolve', claimed: 1, resolved: 1 });

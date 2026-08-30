@@ -72,7 +72,12 @@ router.post('/queue', async (req, res, next) => {
       added++;
     }
 
-    res.json({ added, skipped, duplicates });
+    // Every opportunity that enters the legacy signup queue ALSO enters the
+    // registry (plan v2 §4 step 2: one intake, never two pipelines) — same
+    // dedupe/never-target rules, references parked for the resolver sweep.
+    const registryIntake = await linkIntake.intake(db, { text: urls.join('\n'), source: 'list_import', sourceDetail: `legacy_queue_add:${etDateString()}` });
+
+    res.json({ added, skipped, duplicates, registry: { inserted: registryIntake.inserted, existing: registryIntake.existing, pending: registryIntake.items.pending } });
   } catch (err) { next(err); }
 });
 
