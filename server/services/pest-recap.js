@@ -540,12 +540,16 @@ async function submitRecap({
           mergedServiceData = JSON.stringify({ ...existingData, ...missing });
         }
       } catch { /* leave service_data untouched */ }
-      // Backfill ONLY what the existing row never froze (a row an older
-      // recap created without the snapshot) — never overwrite an existing
-      // freeze, matching this file's frozen-identity pattern above.
+      // Backfill ONLY the callback identity, and only when the existing row
+      // never carried it: is_callback comes from the SCHEDULED row and is
+      // immutable evidence of what the visit was. Tier/provenance are NEVER
+      // backfilled on a retry — the customer's row is mutable, so a later
+      // membership could stamp an old visit as a member visit and make its
+      // permanent report claim $0 (codex r5 P1). A record created without
+      // the tier snapshot stays unfrozen, and the money claim stays refused.
       const snapshotBackfill = {};
-      for (const [key, value] of Object.entries(tierSnapshot)) {
-        if (existing[key] == null) snapshotBackfill[key] = value;
+      if (Object.prototype.hasOwnProperty.call(tierSnapshot, 'is_callback') && existing.is_callback == null) {
+        snapshotBackfill.is_callback = tierSnapshot.is_callback;
       }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,

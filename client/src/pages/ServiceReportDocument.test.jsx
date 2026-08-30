@@ -1396,6 +1396,25 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(lawnText.indexOf('Lawn re-service completed')).toBeGreaterThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
   });
 
+  it('non-performed outcome: legacy treatment-claiming summary copy is suppressed', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      summary: 'We treated the kitchen and perimeter today.',
+      reserviceReport: {
+        ...reservice,
+        outcome: 'inspection_only',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('No application was made on this visit');
+    // BASE_DATA's typed headline and the legacy summary both claim a
+    // performed visit — neither may print on a non-performed callback.
+    expect(text).not.toContain('We treated the kitchen and perimeter today.');
+    expect(text).not.toContain('Cockroach activity was moderate today.');
+  });
+
   it('no block (gate dark): the document is unchanged', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();

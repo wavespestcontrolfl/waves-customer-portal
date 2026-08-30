@@ -526,6 +526,11 @@ export default function ServiceReportDocument({ data, token }) {
   // web hero prints, so the archived document keeps the re-service framing
   // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
   const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  // A non-performed callback (inspection_only / customer_declined /
+  // incomplete) applied nothing — legacy/typed summary copy written for a
+  // performed visit can claim treatment, so it is suppressed below and the
+  // outcome-honest re-service copy is the document's summary (codex r5 P1).
+  const reserviceNotPerformed = Boolean(reservice && reservice.outcome && reservice.outcome !== 'treated');
   const summaryParagraphs = [];
   if (cockroachV2) {
     summaryParagraphs.push(String(cockroachV2.status.label).replace(/\.$/, '') + '.');
@@ -537,7 +542,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
     const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
     if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
-  } else if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
+  } else if (result?.headline && !reserviceNotPerformed) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
@@ -546,7 +551,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = (termiteV2Summary || cockroachV2) ? '' : (reconciledResult
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNotPerformed) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   if (reservice) {
