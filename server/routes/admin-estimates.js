@@ -1470,8 +1470,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // intentionally left untouched here.
   const freshForSnapshot = await db('estimates').where({ id: estimate.id }).first() || estimate;
   const proposalEnabledForDelivery = normalizeProposal(freshForSnapshot).enabled;
+  // Hoisted so the superseded-send branch can graft the rendered bundle
+  // into ITS audit snapshot too (GH codex P2 on #3628).
+  let builtSendSnapshot = null;
   try {
     const snapshot = await buildEstimateSendSnapshot({ ...freshForSnapshot, expires_at: nextExpiresAt }, now);
+    builtSendSnapshot = snapshot.sendSnapshot || null;
     // Merge only the keys we own (sendSnapshot, and proposalDelivery for an
     // authored proposal) so a proposal save committing mid-send isn't clobbered
     // by a full estimate_data write. proposalDelivery is a sibling of proposal,
@@ -1554,6 +1558,26 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       } catch (e) {
         logger.warn(`[admin-estimates] superseded-send first-response stamp failed: ${e.message}`);
       }
+    }
+    // The customer SAW this quote (channels delivered) even though the row
+    // moved on — the accepted/declined anchor still gets its send-time
+    // pricing snapshot, with the rendered bundle grafted in for the audit
+    // only when the terminal row lacks one (GH codex P2; same rule as the
+    // accepted-mid-publication sibling). Fail-soft.
+    try {
+      const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+      const terminalAnchor = await db('estimates').where({ id: estimate.id }).first();
+      if (terminalAnchor) {
+        let terminalData = terminalAnchor.estimate_data;
+        if (typeof terminalData === 'string') { try { terminalData = JSON.parse(terminalData); } catch { terminalData = {}; } }
+        terminalData = terminalData || {};
+        const auditRow = terminalData.sendSnapshot || !builtSendSnapshot
+          ? terminalAnchor
+          : { ...terminalAnchor, estimate_data: { ...terminalData, sendSnapshot: builtSendSnapshot } };
+        await saveEstimatePricingAuditSnapshot(auditRow, { trigger: 'send', sendMethod });
+      }
+    } catch (auditErr) {
+      logger.warn(`[admin-estimates] superseded-send pricing audit snapshot failed (state stands): ${auditErr.message}`);
     }
     // Superseded anchor: a concurrent accept/decline won the anchor row while
     // channels were in flight. Hand claimed siblings back rather than publish

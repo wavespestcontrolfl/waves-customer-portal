@@ -181,6 +181,27 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.request.priorQualifyingServices).toEqual([{ service: 'pest_control', mode: 'recurring' }]);
   });
 
+  test('wizard rows with ONLY engineResult.lineItems still produce audit lines', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-li', status: 'sent', source: 'quote_wizard',
+      monthly_total: '110.00', annual_total: '1320.00', onetime_total: '150.00',
+      estimate_data: {
+        engineResult: {
+          lineItems: [
+            { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, pricingVersion: 'v2' },
+            { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660 },
+            { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
+          ],
+        },
+      },
+    });
+    expect(audit.lines).toHaveLength(3);
+    const pest = audit.lines.find((l) => l.serviceKey === 'pest_control');
+    expect(pest).toMatchObject({ cadence: 'recurring', monthly: 55, price: 660, priceSource: 'saved_estimate.engineResult.lineItems' });
+    expect(pest.quoted).toMatchObject({ pricingVersion: 'v2' });
+    expect(audit.lines.find((l) => l.serviceKey === 'flea_treatment')).toMatchObject({ cadence: 'one_time', price: 150 });
+  });
+
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-zero', status: 'sent', monthly_total: '60.00', annual_total: '720.00', onetime_total: null,

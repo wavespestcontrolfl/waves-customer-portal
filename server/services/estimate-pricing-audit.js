@@ -211,7 +211,7 @@ function mosquitoCogs(program, addOns = {}) {
 // from today's constants after a price change silently rewrites history,
 // which is exactly what this snapshot exists to prevent.
 const QUOTED_LINE_KEYS = [
-  'service', 'tier', 'program', 'cadence', 'frequency', 'frequencyKey',
+  'service', 'tier', 'program', 'pricingVersion', 'cadence', 'frequency', 'frequencyKey',
   'visitsPerYear', 'visits', 'perTreatment',
   'annualAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime',
   'priceAfterDiscount', 'recurringCustomerDiscountRate', 'setupCharge',
@@ -540,15 +540,49 @@ function protocolFor(line) {
   }
 }
 
+// The persisted raw-engine lineItems shape (public-quote projection:
+// service/name/annual/monthly/price/total/perApp/...). monthly-bearing
+// rows are recurring; the rest are one-time.
+function normalizeEngineLineItems(result) {
+  const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
+  const lines = [];
+  for (const item of items) {
+    const serviceKey = item.service || keyFromName(item.name);
+    const quoted = quotedFieldsFrom(item);
+    const monthly = Number(item.monthly);
+    const isRecurring = Number.isFinite(monthly) && monthly !== 0;
+    const price = isRecurring
+      ? money(Number.isFinite(Number(item.annual)) ? Number(item.annual) : monthly * 12)
+      : money(item.price ?? item.total ?? 0);
+    lines.push({
+      ...(quoted ? { quoted } : {}),
+      serviceKey,
+      label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
+      cadence: isRecurring ? 'recurring' : 'one_time',
+      price,
+      monthly: isRecurring ? money(monthly) : null,
+      priceBeforeDiscount: price,
+      discount: 0,
+      priceSource: 'saved_estimate.engineResult.lineItems',
+    });
+  }
+  return lines;
+}
+
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
   const result = data.result || data.engineResult || {};
   const dimensions = dimensionsFrom(data);
   const inventory = context.inventory || await loadInventoryCostRows();
-  const rawLines = [
+  let rawLines = [
     ...normalizeRecurringLines(result),
     ...normalizeOneTimeLines(result),
   ];
+  // Quote-wizard rows persist their priced services ONLY at
+  // engineResult.lineItems (no recurring/oneTime blocks) — without this
+  // fallback such snapshots had empty lines, zero cost, and a falsely
+  // perfect margin (GH codex P1).
+  if (!rawLines.length) rawLines = normalizeEngineLineItems(result);
   const lines = [];
 
   for (const raw of rawLines) {
