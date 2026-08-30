@@ -41,6 +41,7 @@ function mockFetch(routes) {
     if (!route) throw new Error(`unexpected fetch: ${url}`);
     return {
       ok: route.ok !== false,
+      status: route.ok !== false ? 200 : 404,
       text: async () => route.text || '',
       arrayBuffer: async () => (route.bytes || Buffer.alloc(0)).buffer.slice(0),
     };
@@ -90,6 +91,16 @@ describe('blogHeroSocialImageUrl', () => {
     await expect(social.blogHeroSocialImageUrl('https://evil.example.com/')).resolves.toBeNull();
     await expect(social.blogHeroSocialImageUrl(null)).resolves.toBeNull();
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('an off-host og:image is never fetched (SSRF guard) and redirects are refused', async () => {
+    const OFF_HOST = 'https://169.254.169.254/latest/meta-data/';
+    mockFetch({ [PAGE]: { text: `<meta property="og:image" content="${OFF_HOST}">` } });
+    await expect(social.blogHeroSocialImageUrl(PAGE)).resolves.toBeNull();
+    const fetched = global.fetch.mock.calls.map(([u]) => String(u));
+    expect(fetched).toEqual([PAGE]); // the metadata URL was never requested
+    expect(global.fetch.mock.calls[0][1]).toMatchObject({ redirect: 'error' });
+    expect(mockS3Send).not.toHaveBeenCalled();
   });
 
   test('page without og:image, non-200 page, and empty image body all return null (card fallback)', async () => {

@@ -2014,9 +2014,17 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // engine, and the whole post when the engine is off/failed) — the legacy
     // fixed SVG card is the last resort, and every publish that lands on it
     // is emailed as a FIX:.
-    const campaignHeroUrl = (!isReviewRun && !isVersusRun && !isMilestoneRun)
-      ? await heroImageForLink(finalPreview.suggestedLink)
-      : null;
+    // Resolved lazily — the fetch + CDN upload only happens on a branch that
+    // will actually consume it (creative Meta image + no GBP would otherwise
+    // orphan an S3 object every run).
+    const campaignHeroEligible = !isReviewRun && !isVersusRun && !isMilestoneRun;
+    let campaignHeroUrl = null;
+    const resolveCampaignHero = async () => {
+      if (campaignHeroEligible && campaignHeroUrl === null) {
+        campaignHeroUrl = (await heroImageForLink(finalPreview.suggestedLink)) || '';
+      }
+      return campaignHeroUrl || null;
+    };
     let gbpImageBranded = true;
     const legacyCardUrls = new Set();
     if (creativeVariants.length) {
@@ -2025,9 +2033,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         if (isReviewRun) {
           gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
         } else {
-          gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
-          gbpImageBranded = !campaignHeroUrl;
-          if (!campaignHeroUrl && gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
+          const hero = await resolveCampaignHero();
+          gbpImageUrl = hero || await renderCampaignImageUrl(plan, preview, 'gbp');
+          gbpImageBranded = !hero;
+          if (!hero && gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
         }
       }
       finalPreview = previewWithVisual(preview, {
@@ -2076,17 +2085,18 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         templateKey: 'waves_versus_square',
       });
     } else {
-      imageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview);
-      if (wantsGbp) gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
-      gbpImageBranded = !campaignHeroUrl;
+      const hero = await resolveCampaignHero();
+      imageUrl = hero || await renderCampaignImageUrl(plan, preview);
+      if (wantsGbp) gbpImageUrl = hero || await renderCampaignImageUrl(plan, preview, 'gbp');
+      gbpImageBranded = !hero;
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
         gbpImageBranded,
         variant: 'campaign',
-        templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
+        templateKey: hero ? 'waves_blog_hero' : 'waves_campaign_square',
       });
-      if (!campaignHeroUrl) {
+      if (!hero) {
         if (imageUrl) legacyCardUrls.add(imageUrl);
         if (gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
       }
