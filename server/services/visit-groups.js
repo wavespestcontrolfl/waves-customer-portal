@@ -1936,18 +1936,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   let reminderHoldIds = [];
   try {
     await db.transaction(async (t) => {
+      // EVERY represented member's row is held — including members already
+      // at the target (codex r30 P1): they stay part of the whole-visit
+      // quiet invariant while another member is mid-move or stranded.
+      // FOR UPDATE + an active-hold refusal make this a LEASE (codex r30
+      // P1): a concurrent mover's live stamp is never overwritten (its
+      // partial outcome would otherwise lose its hold when our fenced
+      // release ran), it is refused — that visit is mid-move elsewhere.
       const holdRows = await t('appointment_reminders')
-        .whereIn('scheduled_service_id', pending.map((x) => x.id))
+        .whereIn('scheduled_service_id', plan.memberIds)
         .where({ cancelled: false })
-        .select('id');
+        .forUpdate()
+        .select('id', 'move_hold_until');
       if (!holdRows.length) return;
+      const foreign = holdRows.find((r) => r.move_hold_until && new Date(r.move_hold_until).getTime() > Date.now());
+      if (foreign) {
+        throw Object.assign(new Error('another move of this stop is still in progress (or awaiting repair) — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
+      }
       await t('appointment_reminders').whereIn('id', holdRows.map((r) => r.id))
         .update({ move_hold_until: reminderHoldUntil });
       reminderHoldIds = holdRows.map((r) => r.id);
     });
   } catch (err) {
     reminderHoldIds = [];
-    throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true });
+    throw Object.assign(new Error(`Cannot move this stop right now — its reminder hold could not be secured (${err.message}); try again`), { statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', isOperational: true, ...(err.code === 'VISIT_MOVE_HOLD_ACTIVE' ? { reason: 'hold_active' } : {}) });
   }
   // Release the hold (fenced on our own stamp so a newer mover's hold is
   // never cleared). Runs on full success AND on an abort where nothing

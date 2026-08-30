@@ -812,6 +812,17 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
     expect(rem.length).toBe(2);
     expect(rem[1].values).toEqual({ move_hold_until: null });
+    // an ACTIVE foreign hold (another mover mid-move / awaiting repair) is never overwritten — the move refuses (lease, codex r30)
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 3600000) }] } };
+    await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
+      .rejects.toMatchObject({ statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', reason: 'hold_active' });
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update').length).toBe(0);
+    // an EXPIRED foreign hold (abandoned partial) is claimable
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() - 60000) }] : []) } };
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(1);
     // an unclaimable hold ABORTS before anything moves
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => { throw new Error('ledger down'); } } };
@@ -822,7 +833,10 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(db.__calls.some((c) => c.op === 'update' && c.table === 'scheduled_services')).toBe(false);
     // the SENDERS honor the hold (source contract): deferred recheck + the 72h/24h sweep
     const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
-    expect(src.match(/move_hold_until/g).length).toBeGreaterThanOrEqual(4);
+    expect(src.match(/move_hold_until/g).length).toBeGreaterThanOrEqual(5);
+    // the shared chokepoint every leg passes (inline confirmations included) re-checks the hold at the last moment
+    const choke = src.slice(src.indexOf('async function deliverAppointmentNotice'), src.indexOf('const ch = apptChannel(channel);'));
+    expect(choke).toMatch(/move_hold_until/);
     expect(src).toMatch(/whereNull\('move_hold_until'\)\.orWhere\('move_hold_until', '<', new Date\(\)\)/);
   });
 

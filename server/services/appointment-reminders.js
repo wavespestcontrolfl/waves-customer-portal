@@ -357,6 +357,27 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 // (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
 // applies the same-day skip ruling).
 async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null }) {
+  // LAST-moment unit-move hold check, at the one chokepoint every
+  // confirmation/72h/24h leg passes — inline creation confirmations
+  // included (codex #3609 r30 P1): a grouped move stamped after a caller's
+  // earlier recheck must still win. Read fresh, fail open on a read error
+  // (the hold is an availability guard, not a correctness gate — the
+  // sweep-side checks stay authoritative). Returning false leaves the
+  // caller's sent flags unmarked, so the send retries once the hold
+  // clears or expires.
+  if (scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
+    try {
+      const holdRow = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('move_hold_until');
+      if (holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now()) {
+        logger.info(`[appt-remind] ${kind} for ${scheduledServiceId} held — grouped move in progress (move_hold_until)`);
+        return false;
+      }
+    } catch (err) {
+      logger.warn(`[appt-remind] ${kind} hold check failed for ${scheduledServiceId}: ${err.message}`);
+    }
+  }
   const ch = apptChannel(channel);
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
   const smsHeld = () => !!smsOutcome && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD';

@@ -248,6 +248,7 @@ describe('appointment_time-guarded flag updates', () => {
       appointment_reminders: [
         chain(), // stranded sweep
         chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
+        chain(), // deliverAppointmentNotice unit-move hold check → no hold
         flagUpdate,
       ],
       scheduled_services: [
