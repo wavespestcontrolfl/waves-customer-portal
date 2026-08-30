@@ -157,8 +157,11 @@ function dimensionsFrom(data) {
   const property = result.property || {};
   const homeSqFt = Number(inputs.homeSqFt || property.homeSqFt || property.squareFootage || 0);
   const lotSqFt = Number(inputs.lotSqFt || property.lotSqFt || 0);
-  const lawnSqFt = Number(inputs.lawnSqFt || property.estimatedTurfSf || property.estimatedTurfSqFt || inputs.estimatedTurfSf || 0);
-  const bedArea = Number(inputs.bedArea || property.estimatedBedAreaSf || property.estimatedBedSqFt || 0);
+  // measuredTurfSf is the wizard's AUTHORITATIVE turf (trusted-measurement
+  // substitution); property.lawnSqFt/bedArea are the engine-result twins —
+  // omitting them zeroed lawn/tree COGS on wizard rows (codex pre-push P1).
+  const lawnSqFt = Number(inputs.measuredTurfSf || inputs.lawnSqFt || property.lawnSqFt || property.estimatedTurfSf || property.estimatedTurfSqFt || inputs.estimatedTurfSf || 0);
+  const bedArea = Number(inputs.bedArea || inputs.estimatedBedAreaSf || property.bedArea || property.estimatedBedAreaSf || property.estimatedBedSqFt || 0);
   return { homeSqFt, lotSqFt, lawnSqFt, bedArea };
 }
 
