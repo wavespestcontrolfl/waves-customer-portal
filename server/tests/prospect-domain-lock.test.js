@@ -79,6 +79,11 @@ describe('prospect-domain-lock helper', () => {
     expect(captured.loc).toEqual(['location_key', 'sarasota']);
     await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'default' });
     expect(captured.loc).toBeUndefined();
+    // exactLocation: the unscoped identity itself — never a GBP-scoped row
+    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: '-', exactLocation: true });
+    expect(captured.loc).toEqual(['location_key', '-']);
+    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'Venice', exactLocation: true });
+    expect(captured.loc).toEqual(['location_key', 'venice']);
   });
 
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {

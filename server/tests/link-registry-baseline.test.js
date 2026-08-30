@@ -253,6 +253,21 @@ describe('importExistingBacklinks (live)', () => {
     expect(db._writes.slice(before).filter((w) => w.op === 'update')).toEqual([]);
   });
 
+  test('a GBP-scoped placement for the same (host, page) is NOT reused: the baseline owns the distinct unscoped row', async () => {
+    const db = fakeDb({
+      seo_backlinks: [bl()],
+      seo_link_prospects: [{ id: 'pr-scoped', target_domain: 'dir.example', target_page: 'https://www.wavespestcontrol.com/', location_key: 'sarasota', status: 'live', backlink_id: null }],
+    });
+    const r = await importExistingBacklinks(db, { now: NOW });
+    expect(r).toMatchObject({ placementsCreated: 1, placementsExisting: 0, mappingsCreated: 1 });
+    const rows = db._store.seo_link_prospects.filter((p) => canon(p.target_domain) === 'dir.example');
+    expect(rows.map((p) => p.location_key).sort()).toEqual(['-', 'sarasota']);
+    const unscoped = rows.find((p) => p.location_key === '-');
+    expect(unscoped.id).not.toBe('pr-scoped');
+    expect(db._store.seo_link_placement_backlinks.find((m) => m.backlink_id === 'b01').prospect_id).toBe(unscoped.id);
+    expect(db._store.seo_link_prospects.find((p) => p.id === 'pr-scoped')).toMatchObject({ status: 'live', backlink_id: null });
+  });
+
   test('a known domain keeps its agent_state, first-touch source and best_path_id; an existing board row (any spelling) is reused', async () => {
     const db = fakeDb({
       seo_backlinks: [bl(), bl({ source_domain: 'fresh.example', source_url: 'https://fresh.example/a' })],

@@ -346,6 +346,12 @@ describe('§3.4d intake item identity (step 2)', () => {
     expect(R.normalizeRawUrl('http://t.co/AbC')).toBe('http://t.co/AbC'); // http stays http; path case kept
     expect(R.normalizeRawUrl('https://a.example:8080/p?q=1&r=2')).toBe('https://a.example:8080/p?q=1&r=2');
     expect(R.normalizeRawUrl('https://x.com/user/status/123#m')).toBe('https://x.com/user/status/123');
+    // trailing slashes come off the PATH only — a slash inside the query is part of the reference
+    expect(R.normalizeRawUrl('https://example.com/x?next=/')).toBe('https://example.com/x?next=/');
+    expect(R.normalizeRawUrl('https://example.com/x?next=')).toBe('https://example.com/x?next=');
+    expect(R.normalizeRawUrl('https://example.com/x/?next=/')).toBe('https://example.com/x?next=/');
+    expect(R.normalizeRawUrl('https://example.com/?a=b/')).toBe('https://example.com?a=b/');
+    expect(R.intakeItemKey('list_import', 'https://example.com/x?next=/')).not.toBe(R.intakeItemKey('list_import', 'https://example.com/x?next='));
     expect(R.normalizeRawUrl('')).toBe('');
     expect(R.normalizeRawUrl(null)).toBe('');
   });

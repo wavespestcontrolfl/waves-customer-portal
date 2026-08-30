@@ -175,12 +175,13 @@ function normalizeRawUrl(url) {
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
   try {
     const u = new URL(withScheme);
-    u.hash = '';
-    u.protocol = u.protocol.toLowerCase();
-    u.hostname = u.hostname.toLowerCase();
-    return u.toString().replace(/#$/, '').replace(/\/+$/, '');
+    // Trailing slashes come off the PATH only; the query stays verbatim
+    // (`?next=/` and `?next=` are different references).
+    const path = u.pathname.replace(/\/+$/, '');
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${path}${u.search}`;
   } catch {
-    return withScheme.replace(/#.*$/, '').replace(/\/+$/, '');
+    const s = withScheme.replace(/#.*$/, '');
+    return s.includes('?') ? s : s.replace(/\/+$/, '');
   }
 }
 

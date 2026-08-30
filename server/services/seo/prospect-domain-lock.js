@@ -104,12 +104,16 @@ function targetPageVariants(url) {
  * non-www page coexist with a canonical-equivalent row; every writer's
  * "does this placement already exist" check goes through here.
  */
-async function findPlacementRow(q, domain, targetPage, { excludeId = null, location = '-', columns = ['id', 'status', 'target_page'] } = {}) {
+async function findPlacementRow(q, domain, targetPage, { excludeId = null, location = '-', exactLocation = false, columns = ['id', 'status', 'target_page'] } = {}) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
   let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
   const loc = locationKeyOf(location);
-  if (loc !== '-') qb = qb.where('location_key', loc);
+  // Default: '-' is location-AGNOSTIC (the page-move probe). exactLocation
+  // matches the (domain, page, location_key) identity itself — '-' included —
+  // for writers that own the unscoped row (baseline import) and must never
+  // reuse a GBP-scoped placement for it.
+  if (exactLocation || loc !== '-') qb = qb.where('location_key', loc);
   if (excludeId) qb = qb.whereNot('id', excludeId);
   return (await qb.first(...columns)) || null;
 }

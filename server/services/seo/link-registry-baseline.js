@@ -244,7 +244,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
       // ---- placements + mappings -----------------------------------------
       for (const g of d.groups.values()) {
         const rep = g.rows[0];
-        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey });
+        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true });
         if (placement) out.placementsExisting += 1;
         else if (dryRun) out.placementsCreated += 1;
         else {
@@ -255,7 +255,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
             .onConflict().ignore()
             .returning(['id']);
           if (ins && ins.length) { placement = ins[0]; out.placementsCreated += 1; } else {
-            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey });
+            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true });
             if (!placement) throw new Error(`link-registry-baseline: lost race creating placement ${d.host} → ${g.targetPage}`);
             out.placementsExisting += 1;
           }
