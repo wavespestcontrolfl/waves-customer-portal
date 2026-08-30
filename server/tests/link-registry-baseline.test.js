@@ -186,7 +186,7 @@ describe('importExistingBacklinks (live)', () => {
 
     const [path] = db._store.seo_link_acquisition_paths;
     expect(path).toMatchObject({
-      domain_id: dom.id, acquisition_type: 'unknown', baseline: true, path_key: 'unknown:baseline:dir.example',
+      domain_id: dom.id, acquisition_type: 'self_service_account', baseline: true, path_key: 'self_service_account:baseline:dir.example', // directory lane → the shared mapping
       account_required: false, email_verification: false, payment_required: false, legal_attestation: false, agent_completable: false,
       terms_accepted_by_send: false, execution_after_send: true,
       expected_rel: 'dofollow', expected_indexability: 'unknown', expected_persistence: 'unknown', link_type: 'directory',
@@ -228,10 +228,10 @@ describe('importExistingBacklinks (live)', () => {
     await importExistingBacklinks(db, { now: NOW });
     const dir = db._store.seo_link_prospects.find((p) => p.target_domain === 'dir.example');
     expect(dir).toMatchObject({ backlink_id: 'b02', live_url: 'https://dir.example/early', is_dofollow: false });
-    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'unknown:baseline:dir.example').expected_rel).toBe('nofollow');
+    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'self_service_account:baseline:dir.example').expected_rel).toBe('nofollow');
     const nul = db._store.seo_link_prospects.find((p) => p.target_domain === 'nul.example');
     expect(nul).toMatchObject({ backlink_id: 'b04', is_dofollow: null, link_type: 'citation' });
-    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'unknown:baseline:nul.example')).toMatchObject({ expected_rel: 'unknown', link_type: 'citation' });
+    expect(db._store.seo_link_acquisition_paths.find((p) => p.path_key === 'unknown:baseline:nul.example')).toMatchObject({ expected_rel: 'unknown', link_type: 'citation', acquisition_type: 'unknown' }); // no lane recorded → unknown
   });
 
   test('idempotent: a second run creates nothing; a newly seen link is only mapped, the representative is never re-picked', async () => {
@@ -296,6 +296,12 @@ describe('importExistingBacklinks (live)', () => {
     expect(byId['pr-placed']).toMatchObject({ status: 'live', live_url: 'https://placed.example/a', backlink_id: 'b02', is_dofollow: true, first_live_at: '2026-03-01' });
     expect(byId['pr-mid']).toMatchObject({ status: 'contacted', backlink_id: null });
     expect(byId['pr-done']).toMatchObject({ status: 'live', live_url: 'https://done.example/old', backlink_id: 'b-old' });
+    // a live row that never had a representative gets one (backlink_id) without changing status or live_url
+    const b = bl();
+    const db3 = fakeDb({ seo_backlinks: [b], seo_link_prospects: [seed('pr-live-norep', 'dir.example', { status: 'live', live_url: 'https://dir.example/kept', backlink_id: null })] });
+    const r3 = await importExistingBacklinks(db3, { now: NOW });
+    expect(r3).toMatchObject({ placementsExisting: 1, placementsReconciled: 1 });
+    expect(db3._store.seo_link_prospects[0]).toMatchObject({ status: 'live', live_url: 'https://dir.example/kept', backlink_id: b.id });
     // every backlink is still mapped to its (reused) placement
     expect(db._store.seo_link_placement_backlinks.map((m) => m.prospect_id).sort()).toEqual(['pr-done', 'pr-mid', 'pr-placed', 'pr-prospect']);
     // a prospect whose outreach already went out is NOT promoted (the send finalizer owns it)
@@ -316,7 +322,7 @@ describe('importExistingBacklinks (live)', () => {
     expect(r).toMatchObject({ domainsCreated: 1, domainsTouched: 2, pathsCreated: 2, placementsCreated: 1, placementsExisting: 1, mappingsCreated: 2 });
     const known = db._store.seo_link_domains.find((d) => d.id === 'd-known');
     expect(known).toMatchObject({ source: 'competitor_gap', agent_state: 'investigating', best_path_id: 'p-real' });
-    expect(db._store.seo_link_acquisition_paths.filter((p) => p.domain_id === 'd-known').map((p) => p.path_key).sort()).toEqual(['self_service_account:https://dir.example/add', 'unknown:baseline:dir.example']);
+    expect(db._store.seo_link_acquisition_paths.filter((p) => p.domain_id === 'd-known').map((p) => p.path_key).sort()).toEqual(['self_service_account:baseline:dir.example', 'self_service_account:https://dir.example/add']);
     // the existing board row was reused: no second dir.example placement, mapping points at it; an indexed row
     // keeps its status and only gains the live evidence it lacked (live_url / backlink_id)
     expect(db._store.seo_link_prospects.filter((p) => canon(p.target_domain) === 'dir.example')).toEqual([expect.objectContaining({ id: 'pr-known', status: 'indexed', backlink_id: 'b01', live_url: 'https://dir.example/listing-1' })]);

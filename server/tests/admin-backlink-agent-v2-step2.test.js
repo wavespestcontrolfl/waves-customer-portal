@@ -26,12 +26,14 @@ jest.mock('../services/seo/link-registry-intake', () => ({ intake: jest.fn(), re
 jest.mock('../services/seo/link-registry-baseline', () => ({ importExistingBacklinks: jest.fn(async () => ({ scanned: 3 })) }));
 jest.mock('../services/seo/link-registry-gap-ingest', () => ({ ingestCompetitorGap: jest.fn(async () => ({ scanned: 9 })) }));
 jest.mock('../services/seo/link-registry-enrich', () => ({ enrichDomains: jest.fn(async () => ({ gated: true, selected: 4 })) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (name, fn) => fn()) }));
 
 const router = require('../routes/admin-backlink-agent-v2');
 const { resolveIntakeItems } = require('../services/seo/link-registry-intake');
 const { importExistingBacklinks } = require('../services/seo/link-registry-baseline');
 const { ingestCompetitorGap } = require('../services/seo/link-registry-gap-ingest');
 const { enrichDomains } = require('../services/seo/link-registry-enrich');
+const { runExclusive } = require('../utils/cron-lock');
 
 function handler(method, routePath) {
   const layer = router.stack.find((l) => l.route && l.route.path === routePath && l.route.methods[method]);
@@ -72,6 +74,12 @@ describe('POST /registry/jobs/:job', () => {
 
     expect((await call(post, { params: { job: 'baseline' }, body: { dryRun: 'true' } })).body).toEqual({ job: 'baseline', scanned: 3 });
     expect(importExistingBacklinks).toHaveBeenCalledWith(expect.anything(), { dryRun: true, limit: null });
+    expect(runExclusive).not.toHaveBeenCalled(); // dryRun reads only
+    // a live baseline import runs under the backlink scan's own lease; a held lease is reported, never queued
+    expect((await call(post, { params: { job: 'baseline' }, body: {} })).body).toEqual({ job: 'baseline', scanned: 3 });
+    expect(runExclusive).toHaveBeenCalledWith('backlink-scan', expect.any(Function), { recordHealth: false });
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    expect((await call(post, { params: { job: 'baseline' }, body: {} })).body).toEqual({ job: 'baseline', skipped: 'lease_held' });
 
     expect((await call(post, { params: { job: 'gap' }, body: { limit: 20 } })).body).toEqual({ job: 'gap', scanned: 9 });
     expect(ingestCompetitorGap).toHaveBeenCalledWith(expect.anything(), { dryRun: false, limit: 20 });

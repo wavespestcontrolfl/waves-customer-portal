@@ -32,13 +32,12 @@
  * writes and no transaction. Nothing here fetches, sends, or spends.
  */
 
-const { ensureDomain, isNeverTargetHost, pathKey, pathLinkTypeFor, touchKey } = require('./link-registry');
+const { ensureDomain, isNeverTargetHost, pathKey, pathLinkTypeFor, acquisitionTypeForLinkType, touchKey } = require('./link-registry');
 const { canonicalProspectDomain, findPlacementRow, lockProspectDomain, targetPageOf, locationKeyOf } = require('./prospect-domain-lock');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 const SOURCE = 'existing_backlink';
 const SOURCE_DETAIL = 'baseline_import';
-const BASELINE_ACQUISITION_TYPE = 'unknown';
 const OWN_HOSTS = Object.freeze(['wavespestcontrol.com', ...SPOKE_SITE_KEYS]);
 
 // Same predicate as link-prospect-verifier.js `scanTrackedOnly` (not exported
@@ -92,7 +91,10 @@ function earliestFirstSeen(rows) {
 /** The §3.2 row for a domain's baseline path (domain_id filled by the caller). */
 function baselinePathRow(host, representative, backlinkCount) {
   return {
-    acquisition_type: BASELINE_ACQUISITION_TYPE,
+    // The lane the scan recorded (directory/citation/social → self_service_account,
+    // editorial → editorial_outreach, resource → resource_outreach, none → unknown)
+    // through the shared board-lane mapping — never a blanket 'unknown'.
+    acquisition_type: acquisitionTypeForLinkType(representative.link_type),
     submission_url: representative.source_url || null,
     estimated_cost_cents: null,
     renewal_cost_cents: null,
@@ -114,7 +116,7 @@ function baselinePathRow(host, representative, backlinkCount) {
     confidence: 0.1,
     last_investigated_at: null,
     investigation: JSON.stringify({ baseline: true, backlink_count: backlinkCount }),
-    path_key: pathKey(BASELINE_ACQUISITION_TYPE, `baseline:${host}`),
+    path_key: pathKey(acquisitionTypeForLinkType(representative.link_type), `baseline:${host}`),
   };
 }
 
@@ -149,8 +151,9 @@ function placementRow(host, targetPage, locationKey, representative) {
 const PLACEMENT_COLUMNS = ['id', 'status', 'target_page', 'live_url', 'first_live_at', 'backlink_id'];
 async function reconcilePlacement(q, placement, rep, now) {
   const isLive = ['live', 'indexed'].includes(placement.status);
-  if (isLive && placement.live_url) return 0;
-  const patch = { live_url: rep.source_url || placement.live_url || null, backlink_id: placement.backlink_id || rep.id, updated_at: now };
+  if (isLive && placement.live_url && placement.backlink_id) return 0; // representative already identified
+  // A row that is already live keeps the live_url it verified; a promoted row takes the scan's.
+  const patch = { live_url: (isLive ? placement.live_url || rep.source_url : rep.source_url || placement.live_url) || null, backlink_id: placement.backlink_id || rep.id, updated_at: now };
   let u = q('seo_link_prospects').where({ id: placement.id, status: placement.status });
   if (!isLive) {
     if (placement.status === 'prospect') {
@@ -315,5 +318,5 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
 
 module.exports = {
   importExistingBacklinks,
-  _internals: { groupProfile, representativeOrder, baselinePathRow, placementRow, hostOf, isOwnHost, scanTrackedOnly, SOURCE, SOURCE_DETAIL, BASELINE_ACQUISITION_TYPE },
+  _internals: { groupProfile, representativeOrder, baselinePathRow, placementRow, hostOf, isOwnHost, scanTrackedOnly, SOURCE, SOURCE_DETAIL },
 };
