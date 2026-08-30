@@ -854,6 +854,14 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     const choke = src.slice(src.indexOf('async function deliverAppointmentNotice'), src.indexOf('const ch = apptChannel(channel);'));
     expect(choke).toMatch(/move_hold_until/);
     expect(src).toMatch(/whereNull\('move_hold_until'\)\.orWhere\('move_hold_until', '<', new Date\(\)\)/);
+    // repair-clear (uncapped audit P1): a successful reschedule of an UNGROUPED
+    // row clears a retained hold in the same guarded sync — a detached
+    // partial-move straggler must not stay silent for the full 24h TTL after
+    // staff repair it. SQL-guarded on visit_id IS NULL so a still-grouped
+    // row keeps its mover's lease.
+    const resched = src.slice(src.indexOf('async handleReschedule'), src.indexOf('const syncedRows'));
+    expect(resched).toMatch(/if \(record\.move_hold_until\)/);
+    expect(resched).toMatch(/visit_id IS NULL\) THEN NULL ELSE move_hold_until END/);
   });
 
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {

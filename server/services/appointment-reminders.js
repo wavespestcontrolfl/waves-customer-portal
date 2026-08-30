@@ -3123,6 +3123,20 @@ const AppointmentReminders = {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
+      // Repair-clear for a retained unit-move hold (codex #3609 uncapped
+      // audit P1): a member DETACHED by a partial move keeps its
+      // move_hold_until, and neither a later unit move (releases current
+      // members only) nor this path cleared it — the repaired row's
+      // reminders stayed silent for the full 24h TTL. A successful
+      // reschedule of an UNGROUPED row IS the repair completing, so the
+      // hold clears with the sync. Guarded in SQL, not from a pre-read: a
+      // row still (or newly) grouped keeps its hold — the visit's own
+      // mover owns that lease and releases/re-stamps it itself.
+      if (record.move_hold_until) {
+        rescheduleUpdate.move_hold_until = db.raw(
+          'CASE WHEN EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.visit_id IS NULL) THEN NULL ELSE move_hold_until END',
+        );
+      }
       const syncedRows = await expectGuard(
         db('appointment_reminders').where({ id: record.id }),
       ).update(rescheduleUpdate);
