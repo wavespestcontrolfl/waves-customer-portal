@@ -1330,13 +1330,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // and satellite turf — the engine prices them directly and exempts them
     // from turf review (GH codex P2: a valid plugging patch measurement
     // keeps its exact quote; same contract for top dressing / dethatching).
-    // Split by flag scope (GH codex P2): ANY lot flag parks the LOT-priced
+    // Split by flag scope (GH codex P2 r7): a lot flag parks the LOT-priced
     // services (the number itself is impugned); only the CONDO-SCOPE flag
     // parks the turf family — on a generic flag the independent vision turf
     // still forwards above and lawn prices instantly, and where no vision
     // turf exists the engine's own LOW-turf gate (#3622) parks it anyway.
+    // Channel rules (GH codex P0 r8): the GENERIC-flag leg is wizard-only —
+    // a legacy direct-API request must price identically whether or not an
+    // unrelated prior lookup cached a lot-evidence flag (same contract rule
+    // as the fallback-lot fix above). The deliberate CONDO-SCOPE protection
+    // applies on every channel. Commercial rodent bait is exempt: it prices
+    // from the building footprint and never reads the lot (GH codex P2 r8).
+    const lotPricedRequested = !!(services.mosquito
+      || (services.rodentBait && !commercialDetected)
+      || services.treeShrub);
     const lotFlagForcesSiteQuote = !lotSizeMeasured && (
-      (lotVerifyFlagged && !!(services.mosquito || services.rodentBait || services.treeShrub))
+      ((condoScopeLotFlag || (wizardShaped && lotVerifyFlagged)) && lotPricedRequested)
       || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl
         || (services.topDressing && !(Number(services.topDressing?.lawnSqFt) > 0))
         || (services.dethatching && !(Number(services.dethatching?.lawnSqFt) > 0))
