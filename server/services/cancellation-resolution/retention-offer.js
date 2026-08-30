@@ -89,6 +89,14 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
  */
 async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, reasonCode }, dbh = db) {
   if (!customerId || !familyKey) throw new Error('grantRetentionOffer requires customerId and familyKey');
+  // The DURABLE case is the grant's authorization — mandatory. There is no
+  // caseless grant path: caller-supplied reason/family values alone can
+  // never mint money.
+  if (!cancellationCaseId) {
+    const err = new Error('retention_offer_case_required');
+    err.code = 'retention_offer_case_required';
+    throw err;
+  }
   if (!OFFER_FAMILIES.includes(familyKey)) {
     const err = new Error('retention_offer_family_excluded');
     err.code = 'retention_offer_family_excluded';
@@ -99,7 +107,7 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
     // customer serialize here, so the once-per-18-months rule holds even
     // when both passed the facts-level cooldown check.
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(customerId)]);
-    if (cancellationCaseId) {
+    {
       // Scoped to the customer: a mismatched case id must never surface
       // another customer's financial record as a "successful" grant.
       const existing = await trx('retention_offers')
