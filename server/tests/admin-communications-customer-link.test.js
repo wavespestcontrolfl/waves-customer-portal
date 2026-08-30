@@ -79,7 +79,7 @@ jest.mock('../services/composer-customer-links', () => ({
   buildReferralLink: jest.fn(),
 }));
 jest.mock('../services/review-request', () => ({
-  markInlineDeliveryFailed: jest.fn(async () => {}),
+  cancelInlineIfPending: jest.fn(async () => true),
 }));
 
 const express = require('express');
@@ -271,32 +271,24 @@ describe('POST /admin/communications/customer-link/cancel', () => {
     db.mockReset();
   });
 
-  test('suppresses a pending inline row and is idempotent for everything else', async () => {
-    const pendingRow = { id: 'rr-1', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline' };
-    wireDb({ customers: soloCustomer(), reviewRequests: makeReviewRequestsBuilder(pendingRow) });
+  test('delegates to the conditional suppress and stays ok either way', async () => {
+    // The pending/sent/other-flow guards live INSIDE cancelInlineIfPending's
+    // single conditional UPDATE (no read-then-act race at the route) — the
+    // route just delegates and answers ok whether or not a row matched.
+    wireDb({ customers: soloCustomer() });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-1' });
       expect(res.status).toBe(200);
-      expect(ReviewService.markInlineDeliveryFailed).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.cancelInlineIfPending).toHaveBeenCalledWith('rr-1');
     });
 
-    // Already sent → left alone, still ok:true.
-    const sentRow = { id: 'rr-2', status: 'sent', sms_sent_at: new Date(), triggered_by: 'auto_inline' };
-    wireDb({ customers: soloCustomer(), reviewRequests: makeReviewRequestsBuilder(sentRow) });
+    // Nothing matched (already sent, or a row from a different flow) → still ok:true.
+    ReviewService.cancelInlineIfPending.mockResolvedValueOnce(false);
+    wireDb({ customers: soloCustomer() });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-2' });
       expect(res.status).toBe(200);
-      expect(ReviewService.markInlineDeliveryFailed).toHaveBeenCalledTimes(1);
-    });
-
-    // A row minted by a DIFFERENT flow (a real queued ask) must never be
-    // suppressed through this endpoint.
-    const cronRow = { id: 'rr-3', status: 'pending', sms_sent_at: null, triggered_by: 'auto' };
-    wireDb({ customers: soloCustomer(), reviewRequests: makeReviewRequestsBuilder(cronRow) });
-    await withServer(async (baseUrl) => {
-      const res = await post(baseUrl, 'customer-link/cancel', { requestId: 'rr-3' });
-      expect(res.status).toBe(200);
-      expect(ReviewService.markInlineDeliveryFailed).toHaveBeenCalledTimes(1);
+      expect((await res.json()).ok).toBe(true);
     });
   });
 

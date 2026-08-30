@@ -1582,13 +1582,10 @@ router.post('/customer-link/cancel', requireAdmin, async (req, res) => {
     if (!requestId || requestId.length > 64) {
       return res.status(400).json({ error: 'requestId required' });
     }
-    const row = await db('review_requests')
-      .where({ id: requestId })
-      .first('id', 'status', 'sms_sent_at', 'triggered_by');
-    if (row && row.triggered_by === 'auto_inline' && row.status === 'pending' && !row.sms_sent_at) {
-      const ReviewService = require('../services/review-request');
-      await ReviewService.markInlineDeliveryFailed(row.id);
-    }
+    // One conditional UPDATE (no read-then-act): a scheduled sender that
+    // marks the row sent in between must keep its delivered state.
+    const ReviewService = require('../services/review-request');
+    await ReviewService.cancelInlineIfPending(requestId);
     res.json({ ok: true });
   } catch (err) {
     logger.error(`customer-link cancel failed: ${err.message}`);

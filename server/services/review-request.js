@@ -1747,6 +1747,22 @@ const ReviewService = {
       });
   },
 
+  /**
+   * Withdraw a composer-minted inline row's safety-net send — one
+   * CONDITIONAL update, so a scheduled sender that marks the row sent
+   * between the caller's read and this write can't have its delivered
+   * state overwritten to suppressed (the read-then-act race). Returns
+   * whether a pending row was actually suppressed.
+   */
+  async cancelInlineIfPending(requestId) {
+    if (!requestId) return false;
+    const updated = await db("review_requests")
+      .where({ id: requestId, triggered_by: "auto_inline", status: "pending" })
+      .whereNull("sms_sent_at")
+      .update({ status: "suppressed", scheduled_for: null });
+    return updated > 0;
+  },
+
   async markInlineDeliveryFailed(requestId) {
     if (!requestId) return;
     await db("review_requests").where({ id: requestId }).update({

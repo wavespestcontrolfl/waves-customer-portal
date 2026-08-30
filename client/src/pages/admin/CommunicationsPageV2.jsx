@@ -1666,6 +1666,30 @@ function SmsTab() {
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
   };
 
+  // Withdraw a minted review row's +120min safety-net send. A silently
+  // dropped failure would leave the net armed for an ask the operator
+  // abandoned, so retry transient failures and surface the final one —
+  // the operator can then check the customer's review requests. Never
+  // rejects (callers fire-and-forget it behind state updates).
+  const cancelReviewRequestRow = useCallback(async (requestId) => {
+    if (!requestId) return;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await adminFetch("/admin/communications/customer-link/cancel", {
+          method: "POST",
+          body: JSON.stringify({ requestId }),
+        });
+        return;
+      } catch {
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 1500 * attempt));
+      }
+    }
+    setSendResult({
+      ok: false,
+      text: "Couldn't withdraw the review link's automatic follow-up — it may still send. Check the customer's review requests.",
+    });
+  }, []);
+
   const handleInsertCustomerLink = async (kind) => {
     const requestRecipient = toNumber.trim();
     if (!requestRecipient || insertingCustomerLink) return;
@@ -1701,10 +1725,7 @@ function SmsTab() {
         // The mint landed after the operator moved on. A review row minted
         // for the abandoned recipient must not keep its safety-net send.
         if (kind === "review_request" && d.requestId) {
-          adminFetch("/admin/communications/customer-link/cancel", {
-            method: "POST",
-            body: JSON.stringify({ requestId: d.requestId }),
-          }).catch(() => {});
+          void cancelReviewRequestRow(d.requestId);
         }
         return;
       }
@@ -1721,10 +1742,7 @@ function SmsTab() {
         prevEntry?.requestId &&
         prevEntry.requestId !== (d.requestId || null)
       ) {
-        adminFetch("/admin/communications/customer-link/cancel", {
-          method: "POST",
-          body: JSON.stringify({ requestId: prevEntry.requestId }),
-        }).catch(() => {});
+        void cancelReviewRequestRow(prevEntry.requestId);
       }
       setMsgBody((b) => {
         const base = prevUrl
@@ -1766,12 +1784,7 @@ function SmsTab() {
     const entries = Object.entries(insertedCustomerLinks);
     if (!entries.length) return;
     const cancelReviewRow = (entry) => {
-      if (entry.requestId) {
-        adminFetch("/admin/communications/customer-link/cancel", {
-          method: "POST",
-          body: JSON.stringify({ requestId: entry.requestId }),
-        }).catch(() => {});
-      }
+      if (entry.requestId) void cancelReviewRequestRow(entry.requestId);
     };
     const currentRecipient = toNumber.trim();
     const currentRecipientKey = currentRecipient ? smsThreadKey(currentRecipient) : "";
@@ -1808,7 +1821,7 @@ function SmsTab() {
         setSendResult({ ok: true, text: "Customer link removed — the recipient changed." });
       }
     }
-  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId]);
+  }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId, cancelReviewRequestRow]);
 
   // The sheet's full list: the customer group first, then the library rows.
   // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,
