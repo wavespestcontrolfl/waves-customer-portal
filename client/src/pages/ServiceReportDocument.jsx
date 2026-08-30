@@ -530,7 +530,9 @@ export default function ServiceReportDocument({ data, token }) {
   // incomplete) applied nothing — legacy/typed summary copy written for a
   // performed visit can claim treatment, so it is suppressed below and the
   // outcome-honest re-service copy is the document's summary (codex r5 P1).
-  const reserviceNotPerformed = Boolean(reservice && reservice.outcome && reservice.outcome !== 'treated');
+  const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
+  const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
+  const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
   const summaryParagraphs = [];
   if (cockroachV2) {
     summaryParagraphs.push(String(cockroachV2.status.label).replace(/\.$/, '') + '.');
@@ -542,7 +544,7 @@ export default function ServiceReportDocument({ data, token }) {
     if (termiteV2Summary.statusSummary) summaryParagraphs.push(termiteV2Summary.statusSummary);
     const narrative = cleanVisitSummary(termiteV2Summary.aiSummary?.body || '');
     if (narrative && !summaryParagraphs.includes(narrative)) summaryParagraphs.push(narrative);
-  } else if (result?.headline && !reserviceNotPerformed) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
+  } else if (result?.headline && !reserviceNoApplication) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
   // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
   // replace legacy summary copy that contradicts the watch items — without it
   // the PDF can claim nothing notable was found directly above those findings.
@@ -551,7 +553,7 @@ export default function ServiceReportDocument({ data, token }) {
   // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
   // an over-strong "should see activity ease" promise) that cleanVisitSummary
   // exists to strip — printing data.summary raw reintroduced both.
-  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNotPerformed) ? '' : (reconciledResult
+  const summaryBody = (termiteV2Summary || cockroachV2 || reserviceNoApplication) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   if (reservice) {
@@ -566,7 +568,7 @@ export default function ServiceReportDocument({ data, token }) {
     const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(snapshot?.status || ''));
     const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
     const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
-    if (reserviceNotPerformed) {
+    if (reserviceNoApplication) {
       // No application happened: every other summary source — the cockroach/
       // termite program copy pushed above, typed headlines, legacy bodies,
       // dashboard leads — was written for a performed visit and can claim
@@ -574,6 +576,12 @@ export default function ServiceReportDocument({ data, token }) {
       // summary; findings and dashboards keep their own sections below.
       summaryParagraphs.length = 0;
       summaryParagraphs.push(...lines);
+    } else if (reserviceIncomplete) {
+      // Partial application possible: LEAD with the could-not-complete
+      // caveat but keep truthful partial-treatment content below it
+      // (codex r11 P1 — discarding it hid real work; claiming nothing
+      // about applications is the module's incomplete contract).
+      summaryParagraphs.unshift(...fresh);
     } else if (cockroachV2 || termiteV2Summary) {
       summaryParagraphs.push(...fresh);
     } else if (pestAttention || snapshotAttention) {

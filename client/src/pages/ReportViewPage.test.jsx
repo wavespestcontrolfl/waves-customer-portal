@@ -1159,6 +1159,18 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.detail).toContain('No application was made on this visit');
   });
 
+  it('an incomplete callback KEEPS the re-entry drying warning (partial application may be drying)', () => {
+    const status = smartStatusSummary({
+      reserviceReport: { ...reservicePest, outcome: 'incomplete', completedFallback: 'The visit was not completed.' },
+      dynamicContext: {
+        reentry: { displayTimezone: 'America/New_York', targets: [{ label: 'Interior', readyAt: '2026-05-21T20:00:00.000Z' }] },
+      },
+      applications: [],
+    }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
+    expect(status.result).toContain('still drying');
+    expect(status.detail).toContain('Keep pets and people away from treated zones');
+  });
+
   it('an incomplete callback with a high-priority finding claims neither treatment nor "no application"', () => {
     const status = smartStatusSummary({
       reserviceReport: { ...reservicePest, outcome: 'incomplete', completedFallback: 'The visit was not completed.' },

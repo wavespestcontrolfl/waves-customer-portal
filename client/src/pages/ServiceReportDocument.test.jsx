@@ -1434,6 +1434,24 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(text).not.toContain('We completed today\u2019s treatment in your program.');
   });
 
+  it('incomplete outcome: the caveat LEADS but truthful partial-treatment content is kept', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: {
+        ...reservice,
+        outcome: 'incomplete',
+        result: 'We returned for your re-service, but the visit could not be completed.',
+        expectation: 'We will follow up to finish the visit — contact us if you are still seeing activity in the meantime.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    const caveatAt = text.indexOf('could not be completed');
+    expect(caveatAt).toBeGreaterThan(-1);
+    // The typed partial-visit content survives, below the caveat.
+    expect(text).toContain('Cockroach activity was moderate today.');
+    expect(caveatAt).toBeLessThan(text.indexOf('Cockroach activity was moderate today.'));
+  });
+
   it('no block (gate dark): the document is unchanged', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();

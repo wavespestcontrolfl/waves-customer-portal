@@ -800,7 +800,13 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // outcome: an inspection_only / customer_declined callback performed no
   // application, so no branch may claim "we treated" (codex r2 P1).
   const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
-  const reserviceNotPerformed = Boolean(reservice && reservice.outcome && reservice.outcome !== 'treated');
+  // Two distinct non-treated classes (codex r11): the no-application
+  // outcomes may claim "no application"; 'incomplete' can include a PARTIAL
+  // application, so it claims nothing either way and KEEPS the re-entry
+  // drying/keep-off warnings (safety info for whatever was applied).
+  const reserviceNoApplication = Boolean(reservice && ['inspection_only', 'customer_declined'].includes(reservice.outcome));
+  const reserviceIncomplete = Boolean(reservice && reservice.outcome === 'incomplete');
+  const reserviceNotPerformed = reserviceNoApplication || reserviceIncomplete;
   const reserviceStatus = () => ({
     heading: reservice.heading || 'we came back and took care of it!',
     status: allReady ? 'Ready now' : 'Service complete',
@@ -817,10 +823,12 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   });
 
   if (primaryFinding) {
-    // A non-performed callback applied nothing, so the pending re-entry
+    // A NO-APPLICATION callback applied nothing, so the pending re-entry
     // arm ("still drying", "keep off treated zones") can never be true for
-    // it — force the non-pending, outcome-honest arm (codex GH-r3 P1).
-    const pendingText = reserviceNotPerformed ? null : pendingReadyText;
+    // it — force the non-pending, outcome-honest arm (codex GH-r3 P1). An
+    // INCOMPLETE callback may have a partial application drying: keep the
+    // safety warning (codex r11 P1).
+    const pendingText = reserviceNoApplication ? null : pendingReadyText;
     return {
       heading: 'we found activity that needs attention!',
       status: pendingText || 'Follow-up recommended',
@@ -849,7 +857,22 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // (codex r7 P1), so the outcome-honest callback summary returns here.
   // High-priority findings above still outrank it (their copy is already
   // outcome-honest); the dashboards keep rendering as cards below.
-  if (reserviceNotPerformed) {
+  if (reserviceNoApplication) {
+    return reserviceStatus();
+  }
+  if (reserviceIncomplete) {
+    // Partial application possible: the standalone re-entry warning stays
+    // (safety), everything else yields to the claim-nothing callback copy.
+    if (pendingTarget && !allReady) {
+      return {
+        heading: reservice.heading || 'about your visit',
+        status: pendingReadyText,
+        statusTone: 'pending',
+        result: `${pendingTarget.label || 'Treated'} areas are still drying.`,
+        completedLine: reservice.completedFallback || 'The visit was not completed.',
+        detail: ['Keep pets and people away from treated zones until they are ready.', reservice.expectation || null, reservice.billingLine || null].filter(Boolean).join(' '),
+      };
+    }
     return reserviceStatus();
   }
 
