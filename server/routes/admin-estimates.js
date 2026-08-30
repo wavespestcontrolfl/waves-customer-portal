@@ -2805,10 +2805,21 @@ router.post('/:id/archive', async (req, res, next) => {
         disposition_at: db.fn.now(),
       });
     }
+    // Predicate on the OBSERVED state, not just id (codex pre-push P1
+    // TOCTOU): a public decline / accept / conversion sweep committing
+    // after the pre-read must not be overwritten by this stale archive
+    // classification — the racing writer owns the row's story.
     const [updated] = await db('estimates')
-      .where({ id: req.params.id })
+      .where({ id: req.params.id, status: estimate.status })
+      .whereNull('archived_at')
+      .modify((q) => (estimate.disposition
+        ? q.where({ disposition: estimate.disposition })
+        : q.whereNull('disposition')))
       .update(archiveUpdates)
       .returning('*');
+    if (!updated) {
+      return res.status(409).json({ error: 'Estimate changed while you were archiving it. Refresh and retry.' });
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });
@@ -3221,6 +3232,14 @@ router.patch('/:id', async (req, res, next) => {
     // The human label is preserved in decline_reason for existing badges.
     const wantsDisposition = req.body.disposition !== undefined || req.body.declineReason !== undefined;
     if (wantsDisposition) {
+      // Loss fields land ONLY on a decline transition in this same request
+      // or a reason edit on an already-declined row (codex pre-push P1): a
+      // live estimate stamped here would carry the stale staff loss through
+      // expiry/conversion via their COALESCEs. Archive reasons belong to
+      // the archive endpoint.
+      if (req.body.status !== 'declined' && estimate.status !== 'declined') {
+        return res.status(400).json({ error: 'A decline reason can only be set while declining the estimate (or editing an already-declined one).' });
+      }
       const { staffDispositionUpdates } = require('../services/estimate-disposition');
       const verdict = staffDispositionUpdates(req.body);
       if (verdict.error) return res.status(400).json({ error: verdict.error });

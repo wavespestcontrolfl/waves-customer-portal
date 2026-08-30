@@ -211,6 +211,15 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
     expect(readBuilder.update).not.toHaveBeenCalled();
   });
 
+  test('400s when disposition fields arrive without a decline transition on a live row', async () => {
+    const readBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
+    db.mockImplementation(() => readBuilder);
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { declineReason: 'Too expensive' } }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(readBuilder.update).not.toHaveBeenCalled();
+  });
+
   test('re-declining an already-declined estimate updates the reason without re-stamping declined_at', async () => {
     const readBuilder = makeBuilder({ first: { id: 'e1', status: 'declined' } });
     const writeBuilder = makeBuilder({ updateCount: 1 });
@@ -338,6 +347,23 @@ describe('POST /api/admin/estimates/:id/archive disposition', () => {
       .mockImplementationOnce(() => writeBuilder);
     return { writeBuilder };
   }
+
+  test('archive predicates on the observed status/disposition and 409s when the row moved (TOCTOU)', async () => {
+    const estimate = { id: 'e1', status: 'sent', archived_at: null, disposition: null };
+    const readBuilder = makeBuilder({ first: estimate });
+    const depositBuilder = makeBuilder({ first: null });
+    const writeBuilder = makeBuilder({});
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => []) })); // concurrent writer won
+    db.mockImplementationOnce(() => readBuilder)
+      .mockImplementationOnce(() => depositBuilder)
+      .mockImplementationOnce(() => writeBuilder);
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(writeBuilder.where).toHaveBeenCalledWith({ id: 'e1', status: 'sent' });
+    expect(writeBuilder.whereNull).toHaveBeenCalledWith('archived_at');
+    expect(writeBuilder.whereNull).toHaveBeenCalledWith('disposition');
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
 
   beforeEach(() => { db.mockReset(); });
 
