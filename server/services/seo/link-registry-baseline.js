@@ -167,8 +167,12 @@ async function reconcilePlacement(q, placement, rep, now) {
   return (await u.update(patch)) ? 1 : 0;
 }
 
-async function findActivePath(q, domainId, key) {
-  return q('seo_link_acquisition_paths').where({ domain_id: domainId, path_key: key }).whereNull('superseded_by').first('id');
+// The baseline path's identity is DOMAIN-LEVEL (baseline = true), not its
+// path_key: the key carries the lane the FIRST import saw, and a later scan
+// promoting a different-lane representative must reuse the same path — never
+// mint a sibling baseline path (the investigator supersedes it deliberately).
+async function findActiveBaselinePath(q, domainId) {
+  return q('seo_link_acquisition_paths').where({ domain_id: domainId, baseline: true }).whereNull('superseded_by').first('id');
 }
 
 /**
@@ -252,7 +256,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
 
       // ---- baseline path (one per domain) ---------------------------------
       let pathId = null;
-      const existingPath = domainId ? await findActivePath(q, domainId, path.path_key) : null;
+      const existingPath = domainId ? await findActiveBaselinePath(q, domainId) : null;
       if (existingPath) pathId = existingPath.id;
       else if (dryRun) out.pathsCreated += 1;
       else {
@@ -260,7 +264,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
           .onConflict(q.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore()
           .returning(['id']);
         if (ins && ins.length) { pathId = ins[0].id; out.pathsCreated += 1; } else {
-          const again = await findActivePath(q, domainId, path.path_key);
+          const again = await findActiveBaselinePath(q, domainId);
           if (!again) throw new Error(`link-registry-baseline: lost race creating path ${path.path_key} for ${d.host}`);
           pathId = again.id;
         }

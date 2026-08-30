@@ -311,6 +311,14 @@ describe('importExistingBacklinks (live)', () => {
     expect(db2._store.seo_link_prospects[0]).toMatchObject({ status: 'prospect', outreach_status: 'sent', backlink_id: null });
   });
 
+  test('the baseline path is reused by its DOMAIN identity: a later scan with a different-lane representative never mints a sibling baseline path', async () => {
+    const db = fakeDb({ seo_backlinks: [bl({ link_type: 'editorial', source_url: 'https://dir.example/story' })], seo_link_acquisition_paths: [{ id: 'p-base', domain_id: 'dom-1', path_key: 'self_service_account:baseline:dir.example', baseline: true, superseded_by: null }], seo_link_domains: [{ id: 'dom-1', domain: 'dir.example', source: 'existing_backlink', discovery_priority: 'normal', agent_state: 'acquired', best_path_id: 'p-base' }] });
+    const r = await importExistingBacklinks(db, { now: NOW });
+    expect(r.pathsCreated).toBe(0);
+    expect(db._store.seo_link_acquisition_paths).toHaveLength(1); // reused, no editorial sibling
+    expect(db._store.seo_link_prospects[0].path_id).toBe('p-base');
+  });
+
   test('a known domain keeps its agent_state, first-touch source and best_path_id; an existing board row (any spelling) is reused', async () => {
     const db = fakeDb({
       seo_backlinks: [bl(), bl({ source_domain: 'fresh.example', source_url: 'https://fresh.example/a' })],
