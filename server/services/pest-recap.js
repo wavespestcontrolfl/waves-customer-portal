@@ -356,7 +356,7 @@ async function submitRecap({
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
       .forUpdate()
-      .first('id', 'status', 'scheduled_date', 'service_id', 'service_type', 'visit_id');
+      .first('id', 'status', 'scheduled_date', 'service_id', 'service_type', 'visit_id', 'is_callback');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -429,13 +429,20 @@ async function submitRecap({
         ? await trx('customers').where({ id: svc.customer_id }).first(
           'waveguard_tier',
           ...(customerCols.waveguard_tier_source ? ['waveguard_tier_source'] : []),
+          ...(customerCols.monthly_rate ? ['monthly_rate'] : []),
+          ...(customerCols.billing_mode ? ['billing_mode'] : []),
         )
         : null;
       tierSnapshot = completionTierSnapshotFields({
         serviceRecordCols,
         waveguardTier: custRow?.waveguard_tier || null,
         waveguardTierSource: custRow?.waveguard_tier_source || null,
-        isCallback: !!svc.is_callback,
+        monthlyRate: custRow?.monthly_rate ?? null,
+        billingMode: custRow?.billing_mode ?? null,
+        // The LOCKED row's flag: svc was read before the row lock, and an
+        // admin reclassify between the read and the lock would freeze a
+        // stale callback identity forever (codex #3617 GH-r2 P2).
+        isCallback: locked ? locked.is_callback === true : !!svc.is_callback,
       });
     } catch { tierSnapshot = {}; /* legacy insert shape — never block the recap */ }
 

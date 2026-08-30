@@ -898,7 +898,12 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // NOT a callback — an editable display name containing "Re-Service" must
   // not override it (codex r2 P1). Only a payload without the field at all
   // (gate-dark/legacy cache) still trusts the name.
-  if (!reservice && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // When the gated composer RAN (reserviceGateOn) and still sent no block,
+  // the server deliberately withheld the copy (unsupported service line —
+  // e.g. a mosquito/termite callback whose name contains "Re-Service");
+  // the legacy pest wording would be false there (codex GH-r2 P1). The
+  // regex remains only for payloads from before the gate / while dark.
+  if (!reservice && !data.reserviceGateOn && data.isCallback !== false && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',

@@ -1207,6 +1207,24 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(treated.heading).toBe('pest pressure is trending down!');
   });
 
+  it('gate on + unsupported-line callback (block deliberately withheld): no legacy pest copy', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Mosquito Re-Service',
+      isCallback: true,
+      reserviceGateOn: true,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).not.toMatch(/re-treated/);
+    // Gate dark (no marker): the legacy name regex still names the visit.
+    const dark = smartStatusSummary({
+      serviceType: 'Pest Control Re-Service',
+      isCallback: true,
+      applications: [],
+    }, 'static');
+    expect(dark.heading).toBe('we came back and took care of it!');
+  });
+
   it('isCallback: false on the payload suppresses the legacy name regex', () => {
     const status = smartStatusSummary({
       serviceType: 'Pest Control Re-Service',

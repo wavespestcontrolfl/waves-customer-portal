@@ -274,8 +274,17 @@ function reserviceReportRenderedSignature(data, service = {}) {
   return signatureFor(block);
 }
 
+// Payload marker: TRUE means the server ran the gated composer, so a null
+// `reserviceReport` on a callback is a DELIBERATE withholding (unsupported
+// service line) — the client must not fall back to the legacy name-regex
+// pest copy for it (codex #3617 GH-r2 P1).
+function reserviceReportCopyGateOn() {
+  return gateOn();
+}
+
 module.exports = {
   buildReserviceReport,
+  reserviceReportCopyGateOn,
   resolveCallbackBilling,
   reserviceReportPdfSignature,
   reserviceReportRenderedSignature,

@@ -7113,6 +7113,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceRecordCols,
             waveguardTier: svc.cust_waveguard_tier,
             waveguardTierSource: svc.cust_waveguard_tier_source,
+            monthlyRate: svc.cust_monthly_rate,
+            billingMode: svc.cust_billing_mode,
             isCallback: !!svc.is_callback,
           }));
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;

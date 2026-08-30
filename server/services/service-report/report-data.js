@@ -49,7 +49,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { buildReserviceReport } = require('./reservice-report');
+const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
 const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
@@ -4990,6 +4990,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
     reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || 'completed' }),
+    // True when the gated composer ran: a null reserviceReport on a callback
+    // is then a deliberate withholding (unsupported line), and the client
+    // must not fall back to the legacy name-regex copy.
+    reserviceGateOn: reserviceReportCopyGateOn(),
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
