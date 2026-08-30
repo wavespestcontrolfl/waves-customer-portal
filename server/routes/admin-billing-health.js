@@ -127,13 +127,17 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
     let payment;
     try {
       if (isMonthlyCollection) {
+        // Machine provenance (Codex #3598 r5 P1): an admin clicking Charge
+        // Now is not the customer's own action — the PI's ACH lifecycle
+        // notices stay behind the 8AM-8PM send window.
         payment = await service.charge(customerId, chargeAmount, desc, {
           type: 'manual_charge',
           tier: customer.waveguard_tier || '',
           billed_month: etDateString().slice(0, 7),
+          initiated_by: 'machine',
         });
       } else {
-        payment = await service.chargeOneTime(customerId, chargeAmount, desc);
+        payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' });
       }
     } catch (err) {
       // Stripe ACCEPTED the charge but the ledger write failed — the

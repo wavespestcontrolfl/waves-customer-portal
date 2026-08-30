@@ -257,44 +257,12 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
         promoter_id: promoter.id,
       },
     });
-    // Send-window hold: the CUSTOMER clicked "text a friend" now, but the
-    // recipient is a cold third party — exactly who quiet hours protect —
-    // so the invite queues on the scheduled-SMS rail for 8:00 AM instead
-    // of texting a stranger at night or bouncing the customer's click
-    // with a 422. Reported to the customer as scheduled.
-    let inviteScheduled = false;
-    if (!smsResult.sent
-      && smsResult.code === 'QUIET_HOURS_HOLD'
-      && smsResult.deferred
-      && smsResult.nextAllowedAt) {
-      try {
-        const TWILIO_NUMBERS = require('../config/twilio-numbers');
-        await db('sms_log').insert({
-          customer_id: null,
-          direction: 'outbound',
-          from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-          to_phone: cleanPhone,
-          message_body: body,
-          status: 'scheduled',
-          scheduled_for: new Date(smsResult.nextAllowedAt),
-          message_type: 'referral_invite',
-          metadata: JSON.stringify({
-            entry_point: 'referrals_v2_invite_deferred',
-            promoter_id: promoter.id,
-            // onTerminal releases the cooldown reservation written below.
-            invite_phone: cleanPhone,
-            original_block_code: smsResult.code,
-            replay_purpose: 'referral',
-            consent_basis: { status: 'transactional_allowed', source: 'referral_invite_form' },
-          }),
-        });
-        inviteScheduled = true;
-        logger.info(`[referrals-v2] Invite for promoter ${promoter.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-      } catch (queueErr) {
-        logger.error(`[referrals-v2] Held invite requeue failed for promoter ${promoter.id}: ${queueErr.message}`);
-      }
-    }
-    if (!smsResult.sent && !inviteScheduled) {
+    // No quiet-hours requeue: referrals_v2_invite is a customer-action
+    // entry point (owner ruling 2026-08-29, referral invites confirmed
+    // explicitly) — the customer clicked "text a friend" now, so the
+    // invite sends immediately, at any hour, and QUIET_HOURS_HOLD cannot
+    // surface here.
+    if (!smsResult.sent) {
       logger.warn(`[referrals-v2] Invite SMS blocked/failed for promoter ${promoter.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       return res.status(422).json({ error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' });
     }
@@ -312,7 +280,7 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
       updated_at: new Date(),
     });
 
-    res.json({ success: true, ...(inviteScheduled ? { scheduled: true, note: 'Your invite will be texted in the morning (8:00 AM ET).' } : {}) });
+    res.json({ success: true });
   } catch (err) {
     logger.error(`[Referrals] Invite SMS failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to send invite' });

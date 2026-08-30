@@ -3433,6 +3433,12 @@ function initScheduledJobs() {
             // window must not reclassify it. Persisted at enqueue by the
             // inbound webhook's retry insert; automated rows never carry it.
             ...(claimMeta.conversational_context === true ? { conversationalContext: true } : {}),
+            // Customer-action provenance survives the retry rail the same
+            // way (Codex #3598 r5): a deposit receipt that hit a transient
+            // provider failure is still the answer to the customer's own
+            // payment. Persisted at enqueue by the customer-action
+            // requeue; automated rows never carry it.
+            ...(claimMeta.customer_initiated === true ? { customerInitiated: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as

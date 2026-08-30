@@ -392,33 +392,11 @@ router.post('/:id/interest', async (req, res, next) => {
           new_tier: newTier,
         },
       });
-      if (!smsResult.sent && smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
-        // Send-window hold: a portal/web action is not an SMS reply, so the
-        // text defers — queued on the scheduled-SMS rail for 8:00 AM.
-        try {
-          const TWILIO_NUMBERS = require('../config/twilio-numbers');
-          await db('sms_log').insert({
-            customer_id: customer.id,
-            direction: 'outbound',
-            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-            to_phone: customer.phone,
-            message_body: body,
-            status: 'scheduled',
-            scheduled_for: new Date(smsResult.nextAllowedAt),
-            message_type: 'upsell_interest_confirmation',
-            metadata: JSON.stringify({
-              entry_point: 'promotions_upsell_interest_deferred',
-              original_block_code: smsResult.code,
-              replay_purpose: 'support_resolution',
-              refresh_customer_phone: true,
-              resolve_from_by_customer: true,
-            }),
-          });
-          logger.info(`[promotions] upsell ack SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-        } catch (queueErr) {
-          logger.error(`[promotions] upsell ack held-SMS requeue failed: ${queueErr.message}`);
-        }
-      } else if (!smsResult.sent) {
+      // No quiet-hours requeue: promotions_upsell_interest is a
+      // customer-action entry point (owner ruling 2026-08-29) — the ack
+      // answers the customer's own portal tap immediately, at any hour, so
+      // QUIET_HOURS_HOLD cannot surface here.
+      if (!smsResult.sent) {
         logger.warn(`Customer promotion confirmation blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
     } catch (smsErr) {

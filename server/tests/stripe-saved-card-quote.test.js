@@ -535,4 +535,30 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(capIdx).toBeLessThan(creditIdx);
     expect(capIdx).toBeLessThan(coveredIdx);
   });
+
+  test('saved-method mint stamps initiated_by from customerInitiated and threads it to the receipt job (Codex #3598 r3 P1 — source contract)', () => {
+    // The 'admin_card_on_file' source alone reads as machine in the webhook
+    // classifier; a customer's accept-time charge must carry explicit
+    // customer provenance on BOTH the PI and its pre-webhook receipt job,
+    // and the option must default to machine (fail closed).
+    const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async chargeInvoiceWithSavedCard('));
+    expect(fn.startsWith('async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false,')).toBe(true);
+    const sourceIdx = fn.indexOf("source: 'admin_card_on_file',");
+    expect(sourceIdx).toBeGreaterThan(-1);
+    expect(fn.slice(sourceIdx, sourceIdx + 400)).toContain("initiated_by: customerInitiated ? 'customer' : 'machine',");
+    const enqueueIdx = fn.indexOf("source: 'card_on_file',");
+    expect(enqueueIdx).toBeGreaterThan(-1);
+    expect(fn.slice(enqueueIdx, enqueueIdx + 400)).toContain('customerInitiated,');
+  });
+
+  test('chargeOneTime forwards caller metadata onto the one_time PI', async () => {
+    const StripeService = require('../services/stripe');
+    const chargeSpy = jest.spyOn(StripeService, 'charge').mockResolvedValue({ id: 'pay-1' });
+    await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on', 'key-1', { initiated_by: 'machine' });
+    expect(chargeSpy).toHaveBeenCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time', initiated_by: 'machine' }, 'key-1');
+    await StripeService.chargeOneTime('cust-1', 25, 'Flea add-on');
+    expect(chargeSpy).toHaveBeenLastCalledWith('cust-1', 25, 'Flea add-on', { type: 'one_time' }, null);
+    chargeSpy.mockRestore();
+  });
 });
