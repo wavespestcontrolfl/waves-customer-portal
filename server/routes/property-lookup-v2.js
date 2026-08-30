@@ -3274,6 +3274,13 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     && unitLotIsCondo) {
     flags.push({
       field: 'lotSize',
+      // Machine-readable scope marker: consumers that must distinguish
+      // "this lot describes the WRONG SCOPE (shared development)" from a
+      // generic lot-evidence disagreement key on it — a generic flag says
+      // verify the number, this one says the number measures the wrong
+      // thing, so scope-derived estimates (satellite turf, bed area) are
+      // wrong-scope too (GH codex P2 on #3626).
+      scope: 'unit_parcel',
       reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
       priority: 'HIGH',
     });

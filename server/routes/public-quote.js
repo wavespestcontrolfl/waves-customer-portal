@@ -914,6 +914,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
     //     caller cannot select rodent-bait brackets by attesting a lot.
     const lotVerifyFlagged = trustedProfileFound && !lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    // The condo-scope flag says the lot measures the WRONG THING (shared
+    // development), so scope-derived estimates (satellite turf, bed area)
+    // are wrong-scope too. A GENERIC lot flag (two sources disagree) only
+    // impugns the number — an independent vision turf measurement stays
+    // valid there (GH codex P2), so only the scoped flag suppresses it.
+    const condoScopeLotFlag = lotVerifyFlagged
+      && Array.isArray(trustedTurf.fieldVerifyFlags)
+      && trustedTurf.fieldVerifyFlags.some((f) => f && f.field === 'lotSize' && f.scope === 'unit_parcel');
     // The channel distinction is the REQUEST CONTRACT, never cache state
     // (pre-push P0 r5 + GH P0 r6: the cache is global with a 180-day TTL,
     // so keying on trustedProfileFound made an unchanged direct-API request
@@ -1068,7 +1076,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // → the #3622 review gate, until an explicit turf area is supplied.
     // measuredTurfSf above is a real measurement of the serviced area and
     // forwards regardless.
-    if (!parcelCapStale && !lotVerifyFlagged) {
+    if (!parcelCapStale && !condoScopeLotFlag) {
       engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
       if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
       if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
@@ -1094,7 +1102,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // absolute bed estimate over deriving from a corrected lot, so an
       // office-condo unit could still price the development's beds after a
       // lotSizeConfirmed correction (GH codex P1 r6).
-      if (!lotVerifyFlagged) {
+      if (!condoScopeLotFlag) {
         engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
         engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
         engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
@@ -1322,12 +1330,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // and satellite turf — the engine prices them directly and exempts them
     // from turf review (GH codex P2: a valid plugging patch measurement
     // keeps its exact quote; same contract for top dressing / dethatching).
-    const lotFlagForcesSiteQuote = lotVerifyFlagged && !lotSizeMeasured
-      && !!(services.mosquito || services.rodentBait || services.treeShrub
-        || services.lawn || services.oneTimeLawn || services.lawnPestControl
+    // Split by flag scope (GH codex P2): ANY lot flag parks the LOT-priced
+    // services (the number itself is impugned); only the CONDO-SCOPE flag
+    // parks the turf family — on a generic flag the independent vision turf
+    // still forwards above and lawn prices instantly, and where no vision
+    // turf exists the engine's own LOW-turf gate (#3622) parks it anyway.
+    const lotFlagForcesSiteQuote = !lotSizeMeasured && (
+      (lotVerifyFlagged && !!(services.mosquito || services.rodentBait || services.treeShrub))
+      || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl
         || (services.topDressing && !(Number(services.topDressing?.lawnSqFt) > 0))
         || (services.dethatching && !(Number(services.dethatching?.lawnSqFt) > 0))
-        || (services.plugging && !(Number(services.plugging?.area) > 0)));
+        || (services.plugging && !(Number(services.plugging?.area) > 0))))
+    );
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
