@@ -1038,7 +1038,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const parcelCapStale = trustedTurf.turfCappedToParcel === true
       && Number(trustedTurf.lotSqFt) > 0
       && Math.abs(Number(lot) - Number(trustedTurf.lotSqFt)) > 1;
-    if (!parcelCapStale) {
+    // A flagged condo profile's vision turf measures the SHARED
+    // development's grounds — condo records deliberately skip the parcel
+    // turf cap — so it must not forward even after the customer confirms a
+    // corrected lot (the confirmation fixes the LOT, not the turf scope;
+    // the engine would still prefer the shared-grounds turf — GH codex P1
+    // on 91b9c656a). Lawn then falls to the corrected lot's fallback → LOW
+    // → the #3622 review gate, until an explicit turf area is supplied.
+    // measuredTurfSf above is a real measurement of the serviced area and
+    // forwards regardless.
+    if (!parcelCapStale && !lotVerifyFlagged) {
       engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
       if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
       if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
@@ -1208,7 +1217,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.dethatching) {
-      engineInput.services.dethatching = {};
+      // Forward a positive explicit area — the lot-flag review exemption
+      // above assumes the engine actually prices from it, and dropping it
+      // here priced the (possibly development-wide) property turf instead
+      // (GH codex P1 on 91b9c656a).
+      const dethatchArea = Number(services.dethatching?.lawnSqFt);
+      engineInput.services.dethatching = {
+        ...(Number.isFinite(dethatchArea) && dethatchArea > 0 ? { lawnSqFt: dethatchArea } : {}),
+      };
     }
     if (services.plugging) {
       // Forward a positive patch area so the engine prices the patch; when
@@ -1221,8 +1237,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       };
     }
     if (services.topDressing) {
+      // Same explicit-area forwarding contract as dethatching above.
+      const topDressAreaSqFt = Number(services.topDressing?.lawnSqFt);
       engineInput.services.topDressing = {
         depth: services.topDressing.depth || 'eighth',
+        ...(Number.isFinite(topDressAreaSqFt) && topDressAreaSqFt > 0 ? { lawnSqFt: topDressAreaSqFt } : {}),
       };
     }
     if (services.lawnPestControl) {
