@@ -906,24 +906,23 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // miss must fail to "unmeasured", not to the client's number (pre-push
     // codex P0). The customer-confirmed leg still wins — a hand-entered lot
     // is an explicit override. Canonical read: lookupDimensionIsTrustworthy.
-    // A cache MISS is not trust: lookupDimensionIsTrustworthy({}) is
-    // vacuously true, and a caller who can produce a miss (or an expired
-    // row) must not get their posted lot priced (pre-push codex P0 r2) —
-    // no server profile means no trusted lot, full stop.
-    const lotDimensionTrusted = trustedProfileFound && lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    // Two DISTINCT verdicts (pre-push codex P0 r2/r3 + P1):
+    //   lotVerifyFlagged — a returned profile whose lot the lookup flagged
+    //     verify-first. Only this parks lot-priced services below; an
+    //     ordinary cache miss keeps today's synthetic-lot pricing.
+    //   The measured VALUE is server-or-confirmed ONLY — the posted
+    //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
+    //     caller cannot select rodent-bait brackets by attesting a lot.
+    const lotVerifyFlagged = trustedProfileFound && !lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
     const realLotSqFt = resolveRealLotSqFt({
-      enrichedLotSqFt: lotDimensionTrusted && Number(trustedTurf.lotSqFt) > 0 ? trustedTurf.lotSqFt : null,
+      enrichedLotSqFt: trustedProfileFound && !lotVerifyFlagged && Number(trustedTurf.lotSqFt) > 0
+        ? trustedTurf.lotSqFt
+        : null,
       lotSqFt,
       lotSizeConfirmed,
     });
     const lotSizeMeasured = realLotSqFt != null;
-    // A flagged lot also rejects the unconfirmed POSTED lotSqFt from the
-    // synthetic fallback (pre-push codex P0: rodent bait prices off `lot`
-    // via its 12k/20k brackets, so the posted association-scale number
-    // could still price a bookable quote) — the fallback is the sqft×4
-    // synthetic only.
-    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt
-      ?? ((lotDimensionTrusted ? Number(lotSqFt) : 0) || sqft * 4)));
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? sqft * 4));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water) flow into the
@@ -1251,7 +1250,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // because the parcel-scale figure (and any silent substitute) is not a
     // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
     // flag keep today's synthetic-lot pricing.
-    const lotFlagForcesSiteQuote = !lotDimensionTrusted && !lotSizeMeasured
+    const lotFlagForcesSiteQuote = lotVerifyFlagged && !lotSizeMeasured
       && !!(services.mosquito || services.rodentBait);
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
