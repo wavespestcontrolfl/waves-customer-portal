@@ -22,7 +22,6 @@ jest.mock('../services/review-request', () => ({
 // The builder runs gate+mint under the review advisory lock — run the body
 // inline; the skipped path is exercised explicitly.
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
-jest.mock('../services/customer-contact', () => ({ getServiceContactSmsRecipient: jest.fn(() => ({ phone: null })) }));
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
@@ -178,30 +177,13 @@ describe('buildReviewRequestLink', () => {
     expect(ReviewService.createInline).not.toHaveBeenCalled();
   });
 
-  test('disarms the safety net when the recipient policy resolves to a different number', async () => {
-    const customers = chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false, phone: '9415551234' } });
-    const reviewRequests = chainBuilder({});
-    mockBuilders = { customers, review_requests: reviewRequests };
+  test('mints WITHOUT arming the safety net — the composer send is the only delivery', async () => {
+    mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
     ReviewService.createInline.mockResolvedValue({ url: 'https://x/l/rv1', requestId: 'rr-1', token: 't' });
-    const { getServiceContactSmsRecipient } = require('../services/customer-contact');
-    getServiceContactSmsRecipient.mockReturnValueOnce({ phone: '+19415559999' });
 
-    const r = await buildReviewRequestLink('c1', { selectedLast10: '9415551234' });
+    const r = await buildReviewRequestLink('c1');
     expect(r.requestId).toBe('rr-1');
-    expect(reviewRequests.update).toHaveBeenCalledWith({ scheduled_for: null });
-  });
-
-  test('keeps the safety net armed when the policy targets the composed number', async () => {
-    const customers = chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false, phone: '9415551234' } });
-    const reviewRequests = chainBuilder({});
-    mockBuilders = { customers, review_requests: reviewRequests };
-    ReviewService.createInline.mockResolvedValue({ url: 'https://x/l/rv1', requestId: 'rr-1', token: 't' });
-    const { getServiceContactSmsRecipient } = require('../services/customer-contact');
-    getServiceContactSmsRecipient.mockReturnValueOnce({ phone: '+19415551234' });
-
-    const r = await buildReviewRequestLink('c1', { selectedLast10: '9415551234' });
-    expect(r.requestId).toBe('rr-1');
-    expect(reviewRequests.update).not.toHaveBeenCalled();
+    expect(ReviewService.createInline).toHaveBeenCalledWith({ customerId: 'c1', armSafetyNet: false });
   });
 });
 

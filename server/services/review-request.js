@@ -1625,7 +1625,15 @@ const ReviewService = {
    * @returns {{ url: string, requestId: string, token: string }|null}
    * shortened review URL metadata, or null when the caller should skip the suffix.
    */
-  async createInline({ customerId, serviceRecordId }) {
+  /**
+   * armSafetyNet: the dispatch completion-SMS caller keeps the +120min
+   * safety-net send (the completion SMS is already committed, so the ask
+   * must not be lost to a delivery hiccup). Composer mints pass false —
+   * the row is created UNSCHEDULED and only ever becomes "sent" when the
+   * operator's own send carries it (markInlineDelivered), so an abandoned
+   * draft can never auto-text the customer two hours later.
+   */
+  async createInline({ customerId, serviceRecordId, armSafetyNet = true }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) return null;
     // CSR flagged this customer as already-reviewed — caller treats null
@@ -1719,7 +1727,7 @@ const ReviewService = {
         service_type: serviceType,
         service_date: serviceDate,
         triggered_by: "auto_inline",
-        scheduled_for: new Date(Date.now() + 120 * 60000),
+        scheduled_for: armSafetyNet ? new Date(Date.now() + 120 * 60000) : null,
         sms_sent_at: null,
         status: "pending",
       })
@@ -1748,11 +1756,12 @@ const ReviewService = {
   },
 
   /**
-   * Withdraw a composer-minted inline row's safety-net send — one
-   * CONDITIONAL update, so a scheduled sender that marks the row sent
-   * between the caller's read and this write can't have its delivered
-   * state overwritten to suppressed (the read-then-act race). Returns
-   * whether a pending row was actually suppressed.
+   * Retire a composer-minted inline row (operator withdrew the link) — one
+   * CONDITIONAL update, so a send that marks the row delivered between the
+   * caller's read and this write can't have its delivered state overwritten
+   * to suppressed (the read-then-act race). Composer rows are unscheduled,
+   * so there is no scheduled send to race — this guards the operator's own
+   * /sms delivery marking. Returns whether a pending row was suppressed.
    */
   async cancelInlineIfPending(requestId) {
     if (!requestId) return false;

@@ -1113,9 +1113,9 @@ function SmsTab() {
       return;
     }
     // A composer-inserted review link is marked delivered by the immediate
-    // /sms send (clearing its safety-net auto-ask). The scheduled and
-    // draft-approval paths can't do that yet, so a review link riding them
-    // would double-text the customer — block instead.
+    // /sms send. The scheduled and draft-approval paths can't do that yet,
+    // so a review ask riding them would go out untracked — invisible to the
+    // 3-in-180d cap and cooldown — and could double-ask later. Block instead.
     if (insertedCustomerLinks.review_request && (scheduledFor || loadedMessageDraft?.id)) {
       setSendResult({
         ok: false,
@@ -1666,11 +1666,11 @@ function SmsTab() {
     referral: (d) => `Referral link added${d.firstName ? ` — ${d.firstName}'s personal link` : ""}.`,
   };
 
-  // Withdraw a minted review row's +120min safety-net send. A silently
-  // dropped failure would leave the net armed for an ask the operator
-  // abandoned, so retry transient failures and surface the final one —
-  // the operator can then check the customer's review requests. Never
-  // rejects (callers fire-and-forget it behind state updates).
+  // Retire a withdrawn review row (minted unscheduled — nothing auto-sends
+  // either way, but a silently dropped failure would leave an abandoned ask
+  // lingering pending in the customer's review history). Retry transient
+  // failures and surface the final one. Never rejects (callers
+  // fire-and-forget it behind state updates).
   const cancelReviewRequestRow = useCallback(async (requestId) => {
     if (!requestId) return;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -1686,7 +1686,7 @@ function SmsTab() {
     }
     setSendResult({
       ok: false,
-      text: "Couldn't withdraw the review link's automatic follow-up — it may still send. Check the customer's review requests.",
+      text: "Couldn't retire the withdrawn review link — it may linger as pending on the customer's review requests.",
     });
   }, []);
 
@@ -1722,8 +1722,8 @@ function SmsTab() {
         }),
       });
       if (contextChanged()) {
-        // The mint landed after the operator moved on. A review row minted
-        // for the abandoned recipient must not keep its safety-net send.
+        // The mint landed after the operator moved on — retire the row
+        // minted for the abandoned recipient.
         if (kind === "review_request" && d.requestId) {
           void cancelReviewRequestRow(d.requestId);
         }
@@ -1734,9 +1734,8 @@ function SmsTab() {
       // Replace-don't-stack per kind (same rule as the reschedule insert).
       const prevEntry = insertedCustomerLinks[kind] || null;
       const prevUrl = prevEntry?.url || null;
-      // A replaced review link's OLD row would otherwise stay pending and
-      // its +120min safety net would text a second ask — withdraw it before
-      // the tracked entry is overwritten.
+      // A replaced review link's OLD row would otherwise stay pending —
+      // retire it before the tracked entry is overwritten.
       if (
         kind === "review_request" &&
         prevEntry?.requestId &&
@@ -1779,7 +1778,7 @@ function SmsTab() {
   // Same bearer-credential rule as the reschedule/re-service links: a minted
   // customer link must not survive a recipient change, and the tracked entry
   // is forgotten once the operator deletes it from the body. A withdrawn
-  // review-request link additionally cancels its row's safety-net send.
+  // review-request link additionally retires its pending row.
   useEffect(() => {
     const entries = Object.entries(insertedCustomerLinks);
     if (!entries.length) return;

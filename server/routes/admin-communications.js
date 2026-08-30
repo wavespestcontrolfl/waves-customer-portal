@@ -454,8 +454,8 @@ router.post('/sms', async (req, res, next) => {
     }
 
     // A composer-inserted review link rode this body — the send that just
-    // left IS the ask, so stamp the inline row delivered (clears its +120min
-    // safety-net send; see /customer-link). Guarded on a REAL provider send
+    // left IS the ask, so stamp the inline row delivered (the row is minted
+    // unscheduled; see /customer-link). Guarded on a REAL provider send
     // (same sentinel rule as the SLA stamp below — a suppressed send reports
     // sent:true with nothing actually delivered, and marking then would
     // silently drop the ask), the row still being a pending inline ask, the
@@ -1478,18 +1478,17 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // cross-checked then expanded to the account, cross-account 409). Builders
 // live in services/composer-customer-links.js; a kind with nothing to insert
 // answers 404 with the builder's plain reason.
-// review_request mints a real review_requests row via createInline (the
-// dispatch completion-SMS pattern): its +120min safety-net send stays armed
-// until POST /sms marks it delivered or /customer-link/cancel suppresses it,
-// so the returned requestId must ride the eventual send.
+// review_request mints a real review_requests row via createInline with
+// armSafetyNet:false — the row is UNSCHEDULED, so the operator's own POST
+// /sms send (carrying the returned requestId) is the ONLY thing that can
+// deliver it; an abandoned draft never auto-texts. /customer-link/cancel
+// retires a withdrawn row so it doesn't linger pending.
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
     const kind = String(req.body?.kind || '');
     const builders = require('../services/composer-customer-links');
     const builderByKind = {
-      // selectedLast10 (bound below, after phone validation) lets the builder
-      // disarm the safety net when its fallback would text a different number.
-      review_request: (ids, primaryId, selectedLast10) => builders.buildReviewRequestLink(primaryId, { selectedLast10 }),
+      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
       pay_balance: (ids) => builders.buildPayBalanceLink(ids),
       estimate: (ids) => builders.buildLatestEstimateLink(ids),
       referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
@@ -1552,7 +1551,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 
-    const result = await builderByKind[kind](customerIds, primaryId, last10);
+    const result = await builderByKind[kind](customerIds, primaryId);
     if (!result?.url) {
       return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
     }
@@ -1573,8 +1572,9 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
 
 // POST /api/admin/communications/customer-link/cancel  { requestId }
 // The operator withdrew a composer-inserted review link (recipient changed,
-// line deleted) — suppress the inline review_requests row so its +120min
-// safety-net send can't text a customer whose ask was withdrawn. Idempotent:
+// line deleted) — retire the inline review_requests row. Composer mints are
+// unscheduled (nothing auto-sends either way); suppressing keeps a withdrawn
+// ask from lingering pending in the customer's review history. Idempotent:
 // a row already sent/suppressed/missing is left alone and still answers ok.
 router.post('/customer-link/cancel', requireAdmin, async (req, res) => {
   try {
@@ -1582,8 +1582,8 @@ router.post('/customer-link/cancel', requireAdmin, async (req, res) => {
     if (!requestId || requestId.length > 64) {
       return res.status(400).json({ error: 'requestId required' });
     }
-    // One conditional UPDATE (no read-then-act): a scheduled sender that
-    // marks the row sent in between must keep its delivered state.
+    // One conditional UPDATE (no read-then-act): a send that marks the row
+    // delivered in between must keep its delivered state.
     const ReviewService = require('../services/review-request');
     await ReviewService.cancelInlineIfPending(requestId);
     res.json({ ok: true });

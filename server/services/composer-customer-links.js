@@ -10,10 +10,11 @@
  *
  * These reuse the owning systems rather than minting parallel credentials:
  *   review   — ReviewService.createInline (the dispatch completion-SMS
- *              pattern): mints a real review_requests row WITHOUT sending.
- *              The row's built-in +120min safety-net send stays armed until
- *              the composer send marks it delivered (POST /sms) or the
- *              operator's removal cancels it (customer-link/cancel).
+ *              pattern) with armSafetyNet:false: mints a real
+ *              review_requests row WITHOUT sending and WITHOUT a scheduled
+ *              fallback — the operator's composer send is the only delivery
+ *              (POST /sms marks it delivered); a withdrawn link's row is
+ *              retired via customer-link/cancel.
  *   pay      — open-balance.js selection (self-pay only, live payer
  *              re-resolution) + the oldest open invoice's /pay/:token link,
  *              short-wrapped with the repo-wide invoice idiom. Totals a
@@ -46,10 +47,10 @@ const REVIEW_GATE_REASONS = {
   already_queued: 'A review request to this customer is already queued and will send automatically.',
 };
 
-async function buildReviewRequestLink(customerId, { selectedLast10 = null } = {}) {
+async function buildReviewRequestLink(customerId) {
   const ReviewService = require('./review-request');
   const { runExclusive } = require('../utils/cron-lock');
-  const customer = await db('customers').where({ id: customerId }).first();
+  const customer = await db('customers').where({ id: customerId }).first('id', 'has_left_google_review');
   if (customer?.has_left_google_review) {
     return { url: null, line: '', reason: 'This customer is already marked as having left a review' };
   }
@@ -59,12 +60,18 @@ async function buildReviewRequestLink(customerId, { selectedLast10 = null } = {}
   // or the sheet becomes a path around the caps. Gate-check + mint run under
   // the per-customer advisory lock create() uses so a concurrent trigger
   // can't slip a second ask past the gates between check and insert.
+  //
+  // armSafetyNet:false — the row is UNSCHEDULED: the only delivery is the
+  // operator's own composer send (which marks it delivered). No scheduler
+  // ever picks the row up, so an abandoned draft can't auto-text the
+  // customer later, the fallback can't target a different recipient than
+  // the operator composed to, and cancellation has no send to race.
   const minted = await runExclusive(
     `review-send:${customerId}`,
     async () => {
       const gate = await ReviewService.checkUnscheduledAskGates(customerId);
       if (!gate.allowed) return { gate };
-      return { inline: await ReviewService.createInline({ customerId }) };
+      return { inline: await ReviewService.createInline({ customerId, armSafetyNet: false }) };
     },
     { recordHealth: false },
   );
@@ -77,21 +84,6 @@ async function buildReviewRequestLink(customerId, { selectedLast10 = null } = {}
   const inline = minted?.inline;
   if (!inline?.url) {
     return { url: null, line: '', reason: 'No review link for this customer — review texts may be turned off in their notification preferences' };
-  }
-
-  // The +120min safety net delivers through ReviewService.sendSMS, which
-  // routes to the service contact (customer-contact.js). When that policy
-  // resolves to a DIFFERENT number than the one the operator is composing
-  // to, disarm the net (clear scheduled_for): the operator's own send is
-  // then the only delivery, so the fallback can never text a second person
-  // an ask the operator addressed to the first.
-  if (selectedLast10 && inline.requestId) {
-    const { getServiceContactSmsRecipient } = require('./customer-contact');
-    const contact = getServiceContactSmsRecipient(customer);
-    const contactLast10 = String(contact?.phone || '').replace(/\D/g, '').slice(-10);
-    if (contactLast10 && contactLast10 !== String(selectedLast10)) {
-      await db('review_requests').where({ id: inline.requestId }).update({ scheduled_for: null });
-    }
   }
 
   return {
