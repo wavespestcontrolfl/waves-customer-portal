@@ -24,6 +24,7 @@ const mockRecordResult = jest.fn();
 const mockDbInsert = jest.fn(async () => undefined);
 const mockResolveCommsCustomer = jest.fn();
 const mockResolveTechnician = jest.fn();
+const mockResolveTechnicianById = jest.fn();
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -48,6 +49,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   TOOLS: [],
   executeTool: (...args) => mockExecuteTool(...args),
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
+  resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -708,6 +710,41 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       // The card names the tech; the opaque uuid stays off the display.
       expect(body.pendingActions[0].params.technician).toBe('Testd Tech');
       expect(body.pendingActions[0].params.technician_id).toBeUndefined();
+    });
+  });
+
+  test('create_appointment by model-supplied technician_id: resolved + canonicalized — the card names the tech, never an opaque uuid', async () => {
+    mockResolveTechnicianById.mockResolvedValue({ id: 'tech-uuid-9', name: 'Testd Tech' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_id: 'tech-uuid-9' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockResolveTechnicianById).toHaveBeenCalledWith('tech-uuid-9');
+
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params.technician_id).toBe('tech-uuid-9');
+      expect(stored.params.technician_name).toBe('Testd Tech');
+
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.technician).toBe('Testd Tech');
+      expect(body.pendingActions[0].params.technician_id).toBeUndefined();
+    });
+  });
+
+  test('create_appointment with an unknown/inactive technician_id: proposal fails, nothing stored', async () => {
+    mockResolveTechnicianById.mockResolvedValue(undefined);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', technician_id: 'tech-uuid-gone' } }],
+      [{ type: 'text', text: 'No match.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
     });
   });
 

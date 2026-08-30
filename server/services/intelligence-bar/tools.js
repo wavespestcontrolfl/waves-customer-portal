@@ -1638,12 +1638,18 @@ function parseTimeWindowStart(timeWindow) {
 // elapsed guard.
 
 // Recency resolver for "the customer we just finished": completed visits,
-// newest first. Recency is GREATEST(completed_at, updated_at): the
-// tracker's completed_at can carry a backdated service DAY (see
-// admin-dispatch BACKFILL_RECORD_END_FIELDS notes) — a visit closed out NOW
-// for an older service day must still surface as "just finished", which
-// updated_at (touched by the close-out write) guarantees; rows predating
-// the completed_at column fall back to updated_at the same way.
+// newest first. The close-out moment is the completed TRANSITION in
+// job_status_history (transitionJobStatus inserts it in the completion
+// trx) — not ss.completed_at (the tracker can backdate it to an older
+// service DAY, see admin-dispatch BACKFILL_RECORD_END_FIELDS) and not
+// ss.updated_at (touched by unrelated edits, which would let an old visit
+// outrank the actual latest completion). Rows predating the history table
+// fall back to COALESCE(completed_at, updated_at).
+const CLOSED_OUT_AT_SQL = `COALESCE(
+  (SELECT MAX(jsh.transitioned_at) FROM job_status_history jsh
+    WHERE jsh.job_id = ss.id AND jsh.to_status = 'completed'),
+  ss.completed_at, ss.updated_at)`;
+
 async function getRecentCompletions(input = {}) {
   const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 20);
   const days = Math.min(Math.max(Number(input.days) || 2, 1), 30);
@@ -1651,12 +1657,13 @@ async function getRecentCompletions(input = {}) {
     .join('customers as c', 'c.id', 'ss.customer_id')
     .leftJoin('technicians as t', 't.id', 'ss.technician_id')
     .where('ss.status', 'completed')
-    .whereRaw("GREATEST(COALESCE(ss.completed_at, ss.updated_at), ss.updated_at) >= NOW() - (? || ' days')::interval", [days])
-    .orderByRaw('GREATEST(COALESCE(ss.completed_at, ss.updated_at), ss.updated_at) DESC')
+    .whereRaw(`${CLOSED_OUT_AT_SQL} >= NOW() - (? || ' days')::interval`, [days])
+    .orderByRaw(`${CLOSED_OUT_AT_SQL} DESC`)
     .limit(limit)
     .select(
       'ss.id', 'ss.customer_id', 'c.first_name', 'c.last_name',
-      'ss.service_type', 'ss.scheduled_date', 'ss.completed_at', 'ss.updated_at',
+      'ss.service_type', 'ss.scheduled_date',
+      db.raw(`${CLOSED_OUT_AT_SQL} as closed_out_at`),
       't.name as technician_name',
     );
   return {
@@ -1666,7 +1673,7 @@ async function getRecentCompletions(input = {}) {
       customer: `${r.first_name} ${r.last_name || ''}`.trim(),
       service_type: r.service_type,
       scheduled_date: r.scheduled_date,
-      completed_at: r.completed_at || r.updated_at,
+      completed_at: r.closed_out_at,
       technician: r.technician_name || null,
     })),
     total: rows.length,
@@ -2485,4 +2492,11 @@ async function searchFieldIntelligence(input) {
   };
 }
 
-module.exports = { TOOLS, executeTool, resolveTechnicianByName };
+// Id-supplied path shares the same active bar as name resolution; used by
+// proposal-time pinning so a model-provided uuid still yields a NAMED tech
+// on the confirmation card.
+async function resolveActiveTechnicianById(id) {
+  return db('technicians').where('id', id).where('active', true).first();
+}
+
+module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById };

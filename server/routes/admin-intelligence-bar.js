@@ -16,7 +16,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { TOOLS, executeTool, resolveTechnicianByName } = require('../services/intelligence-bar/tools');
+const { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById } = require('../services/intelligence-bar/tools');
 const { SCHEDULE_TOOLS, executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 const { DASHBOARD_TOOLS, executeDashboardTool } = require('../services/intelligence-bar/dashboard-tools');
 const { SEO_TOOLS, executeSeoTool } = require('../services/intelligence-bar/seo-tools');
@@ -614,14 +614,18 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         },
       };
     }
-    if (toolUse.name === 'create_appointment' && params.technician_name && !params.technician_id) {
-      // Pin the technician like send_sms pins the recipient: name→id
-      // resolution happens NOW, so the card names the exact tech the visit
-      // binds to and /confirm-action can never re-resolve "Adam" to a
-      // different row than the operator approved. Ambiguity (or no match)
-      // fails the proposal instead of silently mis-assigning.
-      const tech = await resolveTechnicianByName(params.technician_name);
-      if (!tech) return { failed: true, modelResult: { error: 'No technician matches that name — nothing was proposed. Retry with a corrected name or omit the technician.' } };
+    if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
+      // Pin the technician like send_sms pins the recipient: resolution
+      // happens NOW, so the card names the exact tech the visit binds to
+      // and /confirm-action can never re-resolve "Adam" to a different row
+      // than the operator approved. A model-supplied technician_id gets the
+      // SAME treatment — resolved to an active tech and canonicalized to a
+      // name, never approved as an opaque uuid. Ambiguity (or no active
+      // match) fails the proposal instead of silently mis-assigning.
+      const tech = params.technician_id
+        ? await resolveActiveTechnicianById(params.technician_id)
+        : await resolveTechnicianByName(params.technician_name);
+      if (!tech) return { failed: true, modelResult: { error: 'No active technician matches — nothing was proposed. Retry with a corrected name, a technician_id from an ambiguity result, or omit the technician.' } };
       if (tech.error) return { failed: true, modelResult: tech };
       params.technician_id = tech.id;
       params.technician_name = tech.name;
