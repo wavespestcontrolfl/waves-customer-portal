@@ -147,22 +147,33 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     if ((bundle?.serviceCadenceCombos || []).length > 0) {
       return blocked('estimate offers multiple pricing combinations');
     }
-    const pricedRows = [
+    // Ambiguity is counted in selectable ROWS, not distinct prices: two
+    // cadence/tier rows with the same annual are still two different
+    // schedules. Exactly one selectable option or no amount.
+    const selectableRows = [
       ...(Array.isArray(bundle?.frequencies) ? bundle.frequencies : []),
       ...(Array.isArray(bundle?.hiddenLawnFrequencies) ? bundle.hiddenLawnFrequencies : []),
-    ].filter((row) => (Number(row?.annual) || (Number(row?.monthly) || 0) * 12) > 0);
-    optionAnnuals = [...new Set(pricedRows
-      .map((row) => Math.round((Number(row?.annual) || (Number(row?.monthly) || 0) * 12) * 100)))];
-    if (optionAnnuals.length > 1) return blocked('estimate offers multiple pricing options');
-    // Per-frequency eligibility (e.g. the mosquito ladder's seasonal tier):
-    // the single sellable option must itself allow prepay.
-    if (pricedRows.length === 1 && pricedRows[0]?.annualPrepayEligible === false) {
+    ];
+    if (selectableRows.length !== 1) {
+      return blocked(selectableRows.length === 0
+        ? 'estimate has no selectable pricing option'
+        : 'estimate offers multiple pricing options');
+    }
+    const [optionRow] = selectableRows;
+    // Per-option eligibility (e.g. the mosquito ladder's seasonal tier): the
+    // single option must itself allow prepay.
+    if (optionRow?.annualPrepayEligible === false) {
       return blocked('estimate is not annual-prepay eligible');
     }
-    if (pricedRows.length === 1) {
-      singleOptionKey = pricedRows[0]?.key || null;
-      singleOptionMonthly = Number(pricedRows[0]?.monthly) || null;
-    }
+    singleOptionKey = optionRow?.key || null;
+    singleOptionMonthly = Number(optionRow?.monthly) || null;
+    // A priced row's annual is the authoritative figure the accept path
+    // would invoice for it; an UNPRICED row (legacy/engine-draft shapes)
+    // still identifies the schedule, and the estimate's stored totals — the
+    // numbers the customer was quoted — price it below.
+    const optionAnnualCents = Math.round((Number(optionRow?.annual)
+      || (Number(optionRow?.monthly) || 0) * 12) * 100);
+    optionAnnuals = optionAnnualCents > 0 ? [optionAnnualCents] : [];
   } catch {
     return blocked('estimate pricing options could not be verified');
   }

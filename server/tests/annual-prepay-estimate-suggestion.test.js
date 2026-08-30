@@ -97,19 +97,23 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     expect(suggestion.coverageVisitCount).toBe(4);
   });
 
-  test('unsupported cadence never auto-prices (fail closed)', async () => {
+  test('seasonal mosquito (prepay-unsupported schedule) never auto-prices', async () => {
     const seasonal = pestEstimate({
+      monthly_total: 55,
       estimate_data: {
-        result: { recurring: { services: [{ service: 'pest', name: 'Pest Control Service', frequency: 'seasonal_feb_oct' }] } },
+        result: { recurring: { services: [{ service: 'mosquito', name: 'Mosquito Service', frequency: 'seasonal_feb_oct', visitsPerYear: 9 }] } },
       },
     });
     const suggestion = await buildAnnualPrepayEstimateSuggestion([seasonal], { resolveLineCadence: (line) => line?.frequency || null });
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
-    // No cadence reader at all → same fail-closed result.
-    const noReader = await buildAnnualPrepayEstimateSuggestion([pestEstimate()]);
-    expect(noReader.blocked).toBe(true);
-    expect(noReader.amount).toBeUndefined();
+  });
+
+  test("the bundle's single option key is the schedule authority when no line reader is given", async () => {
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate()]);
+    expect(suggestion.blocked).toBeUndefined();
+    expect(suggestion.coverageCadence).toBe('quarterly');
+    expect(suggestion.coverageVisitCount).toBe(4);
   });
 
   test('rounding residue: display-monthly × 12 re-anchors to the engine annual', async () => {
