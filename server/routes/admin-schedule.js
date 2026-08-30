@@ -6664,11 +6664,26 @@ async function planCollectiveEditDateMove(req) {
   // before the body is touched and before any write (same message as the
   // handler's guard).
   if (row.visit_id) {
-    const members = await require('../services/visit-groups').openMembers(db, row.visit_id);
+    const vg = require('../services/visit-groups');
+    const members = await vg.openMembers(db, row.visit_id);
     if (members.length >= 2) {
       throw Object.assign(
         httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
         { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+    // FROZEN visit (codex r30 P2): a lone-live-member anchor of a
+    // frozen/claimed/finalizing visit passes the count above, but the
+    // rebooker's frozenVisitVerdict deterministically refuses its date
+    // move AFTER this planner has stripped the slot keys and the handler
+    // has committed the other field edits — exactly the partial save this
+    // preflight exists to prevent. Refuse here, before anything is
+    // written (fail closed: an unreadable verdict is frozen).
+    const verdict = await vg.frozenVisitVerdict(db, row.visit_id);
+    if (verdict.frozen) {
+      throw Object.assign(
+        httpError(409, 'This visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it. Nothing was changed.'),
+        { code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
       );
     }
   }

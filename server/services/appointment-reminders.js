@@ -283,10 +283,35 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
   return !isWithinSendWindowET();
 }
 
+// The notice kinds a grouped unit move's durable send hold governs — the
+// same set deliverAppointmentNotice's entry check covers.
+const MOVE_HOLD_KINDS = new Set(['confirmation', '72h', '24h']);
+const MOVE_HOLD_PURPOSES = new Set(['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h']);
+
+// Is the visit's reminder row under a grouped unit-move hold RIGHT NOW?
+// Read fresh at every provider handoff (codex #3609 r30 P1: the entry-point
+// check alone races the template/link/contact awaits — a mover stamping
+// mid-flight still let the in-flight send deliver the old time). FAIL
+// CLOSED: an unverifiable hold must not send; the unmarked notice retries.
+async function moveHoldActive(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
+  try {
+    const row = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('move_hold_until');
+    return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+  } catch (err) {
+    logger.warn(`[appt-remind] move-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
 // Send the email version of an appointment notice. Returns the raw send result
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
 // the same occurrence will not double-deliver. Best-effort — never throws.
+// A held: true result means a grouped unit move holds the visit — a
+// deferral, not a delivery failure: no fallback, no no-channel alert.
 async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
@@ -298,6 +323,14 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
     let resolvedRescheduleUrl = rescheduleUrl;
     if (!resolvedRescheduleUrl && scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
       resolvedRescheduleUrl = (await buildRescheduleLink(scheduledServiceId, { customerId })).url;
+    }
+    // Move-hold recheck at the EMAIL handoff (codex #3609 r30 P1): every
+    // email leg passes here — deliverAppointmentNotice's branches, the
+    // quiet-hours direct sends, the undelivered-SMS fallback — and the
+    // link mint above is exactly the await a mid-flight hold stamp races.
+    if (MOVE_HOLD_KINDS.has(kind) && scheduledServiceId && await moveHoldActive(scheduledServiceId)) {
+      logger.info(`[appt-remind] ${kind} email for ${scheduledServiceId} held at the provider handoff — grouped move in progress`);
+      return { ok: false, held: true, reason: 'move_hold' };
     }
     if (kind === 'confirmation') {
       return await AppointmentEmail.sendAppointmentConfirmationEmail({ customerId, scheduledServiceId, appointmentTime: apptTime, serviceLabel, rescheduleUrl: resolvedRescheduleUrl });
@@ -322,6 +355,9 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
   }
+  // Grouped-move hold at the handoff: a deferral, not an unreachable
+  // customer — no alert; the caller's unmarked row retries after release.
+  if (res?.held) return false;
   if ((res?.skipped && res.reason === 'missing_email') || res?.blocked) {
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
@@ -365,32 +401,25 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // sweep-side checks stay authoritative). Returning false leaves the
   // caller's sent flags unmarked, so the send retries once the hold
   // clears or expires.
-  if (scheduledServiceId && (kind === 'confirmation' || kind === '72h' || kind === '24h')) {
-    try {
-      const holdRow = await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId })
-        .first('move_hold_until');
-      if (holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now()) {
-        logger.info(`[appt-remind] ${kind} for ${scheduledServiceId} held — grouped move in progress (move_hold_until)`);
-        // Distinct hold code (codex r30 P1): a bare false reads as a
-        // completed-but-undelivered send to the callers, which mark their
-        // sent flags and suppress the message forever. MOVE_HOLD, like
-        // QUIET_HOURS_HOLD, means "leave the flags, retry later".
-        if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
-        return false;
-      }
-    } catch (err) {
-      // FAIL CLOSED (codex r28 P1): this is the last-moment guard for
-      // inline sends and holds stamped after batch selection — an
-      // unverifiable hold must not send. The unmarked notice retries.
-      logger.warn(`[appt-remind] ${kind} hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
-      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
-      return false;
-    }
+  // (The handoff-level rechecks — safeSend's pre-dispatch hold and
+  // sendAppointmentNoticeEmail's pre-send hold — are the authority for
+  // holds stamped DURING the awaits below; this entry check is the cheap
+  // early exit. moveHoldActive fails closed — codex r28 P1.)
+  if (scheduledServiceId && MOVE_HOLD_KINDS.has(kind) && await moveHoldActive(scheduledServiceId)) {
+    logger.info(`[appt-remind] ${kind} for ${scheduledServiceId} held — grouped move in progress (move_hold_until)`);
+    // Distinct hold code (codex r30 P1): a bare false reads as a
+    // completed-but-undelivered send to the callers, which mark their
+    // sent flags and suppress the message forever. MOVE_HOLD, like
+    // QUIET_HOURS_HOLD, means "leave the flags, retry later".
+    if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+    return false;
   }
   const ch = apptChannel(channel);
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
-  const smsHeld = () => !!smsOutcome && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD';
+  // Both hold codes are deferrals with the same contract: no fallback
+  // that would deliver the notice anyway, no alert, row left unmarked.
+  const smsHeld = () => !!smsOutcome
+    && (smsOutcome.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome.blockedCode === 'MOVE_HOLD');
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -412,6 +441,12 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
+    // Held at the handoff by a grouped move — defer the whole notice: no
+    // SMS fallback (it would carry the same stale time), no alert.
+    if (res?.held) {
+      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+      return false;
+    }
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
@@ -443,6 +478,12 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     }
     const emailRes = await sendAppointmentNoticeEmail(emailArgs);
     const emailOk = !!emailRes?.ok;
+    // Email leg held by a grouped move mid-flight and no SMS went out —
+    // a whole-notice deferral, not an unreachable customer.
+    if (!smsOk && emailRes?.held) {
+      if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
+      return false;
+    }
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
     if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
@@ -1119,6 +1160,22 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
+  // Grouped-move hold at the SMS handoff (codex #3609 r30 P1): composed
+  // into the canonical path's pre-dispatch recheck — the last
+  // caller-visible abort before the provider — so a hold stamped during
+  // the template/link/contact awaits still blocks the send. The blocked
+  // result's MOVE_HOLD code reaches the callers via sendOutcome.blockedCode,
+  // which they already treat as "leave the flags, retry later".
+  let dispatchCheck = preDispatchCheck;
+  if (metaExtra.scheduled_service_id && MOVE_HOLD_PURPOSES.has(purpose)) {
+    dispatchCheck = async () => {
+      if (await moveHoldActive(metaExtra.scheduled_service_id)) {
+        return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress' };
+      }
+      return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
+    };
+  }
+
   let result;
   try {
     result = await sendCustomerMessage({
@@ -1144,8 +1201,9 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
-    // the appointment moved or went terminal while validators ran.
-    ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
+    // the appointment moved or went terminal while validators ran. The
+    // move-hold recheck above composes onto it for hold-governed notices.
+    ...(typeof dispatchCheck === 'function' ? { preDispatchCheck: dispatchCheck } : {}),
   });
   } catch (sendErr) {
     // Only a throw AFTER the provider handoff began is dispatch-uncertain
@@ -1181,12 +1239,12 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
       // notice permanently on a blip.
       || result.code === 'PRE_DISPATCH_CHECK_FAILED'
       || result.code === 'CONSENT_LOOKUP_FAILED';
-    // QUIET_HOURS_HOLD is STICKY across the contact fanout (like
-    // retryable/providerAccepted): a later opted-out contact's block must
-    // not erase the evidence that an eligible contact was held at the
+    // QUIET_HOURS_HOLD and MOVE_HOLD are STICKY across the contact fanout
+    // (like retryable/providerAccepted): a later opted-out contact's block
+    // must not erase the evidence that an eligible contact was held at the
     // boundary — the callers' defer-don't-close decision reads this code.
-    sendOutcome.blockedCode = sendOutcome.blockedCode === 'QUIET_HOURS_HOLD'
-      ? 'QUIET_HOURS_HOLD'
+    sendOutcome.blockedCode = (sendOutcome.blockedCode === 'QUIET_HOURS_HOLD' || sendOutcome.blockedCode === 'MOVE_HOLD')
+      ? sendOutcome.blockedCode
       : (result.code || null);
     // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
     // the sticky blockedCode above cannot say WHICH contact was held once
@@ -1264,6 +1322,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
     }
     sentAny = sentAny || sent;
+    // A move-hold block covers the whole VISIT, not one recipient — stop
+    // the fan-out (each remaining contact would just re-read the same
+    // hold and write another blocked audit row). Sticky blockedCode above
+    // carries the deferral out to the caller.
+    if (!sent && sharedOutcome.lastCode === 'MOVE_HOLD') break;
   }
   // Partial fan-out across the 20:00 boundary (codex r20): one accepted
   // contact makes callers finalize 'sent', so a later held contact would

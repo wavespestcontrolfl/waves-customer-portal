@@ -1944,17 +1944,41 @@ class SmartRebooker {
           // (visitPolicy 'single') keep their own contract.
           if (options.visitPolicy !== 'single') {
             const lockedAnchorRow = siblings.find((x) => String(x.id) === String(serviceId));
-            if (lockedAnchorRow && lockedAnchorRow.visit_id) {
-              const vgKey = require('./visit-groups').stopBaseKey({
+            // The stop lock is taken REGARDLESS of the anchor's observed
+            // visit_id (uncapped codex audit P1): createOrJoinVisit can
+            // group an UNGROUPED anchor between the locked sibling read
+            // and this point — it serializes on the stop lock, never on
+            // the occupancy/maintenance locks above, so only a membership
+            // re-read UNDER the anchor's stop lock is authoritative. A
+            // property-less anchor cannot be auto-grouped (grouping
+            // requires property_id) and has no stop key to lock — skip.
+            if (lockedAnchorRow && lockedAnchorRow.property_id) {
+              const vg = require('./visit-groups');
+              const vgKey = vg.stopBaseKey({
                 propertyId: lockedAnchorRow.property_id, customerId: service.customer_id, scheduledDate: lockedAnchorRow.scheduled_date,
               });
               await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
-              const liveRes = await trx.raw(
-                "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
-                [lockedAnchorRow.visit_id],
-              );
-              if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
-                throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+              // Membership re-read under the lock; verify the locked key is
+              // still the row's stop (a moved/relinked row needs different
+              // keys — the fingerprint/anchor fences catch date moves, this
+              // catches the property leg).
+              const freshAnchor = await trx('scheduled_services').where({ id: serviceId })
+                .first('visit_id', 'property_id', 'scheduled_date');
+              if (!freshAnchor
+                || String(freshAnchor.property_id) !== String(lockedAnchorRow.property_id)
+                || dateOnly(freshAnchor.scheduled_date) !== dateOnly(lockedAnchorRow.scheduled_date)) {
+                throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
+                  statusCode: 409, isOperational: true, code: 'SERIES_CHANGED',
+                });
+              }
+              if (freshAnchor.visit_id) {
+                const liveRes = await trx.raw(
+                  "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
+                  [freshAnchor.visit_id],
+                );
+                if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
+                  throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+                }
               }
             }
           }

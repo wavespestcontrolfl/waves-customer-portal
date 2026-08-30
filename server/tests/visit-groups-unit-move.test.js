@@ -821,12 +821,19 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     const retargetOut = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(retargetOut.visitMove.parentRetargetFailed).toBe(true);
     expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until === null).length).toBe(0); // hold KEPT
-    // an ACTIVE foreign hold (another mover mid-move / awaiting repair) is never overwritten — the move refuses (lease, codex r30)
+    // a LIVE foreign hold (another mover mid-move, stamped inside the takeover grace) is never overwritten — the move refuses (lease, codex r30)
     db.__calls.length = 0; jest.clearAllMocks();
-    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 3600000) }] } };
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: () => [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 24 * 3600000) }] } };
     await expect(moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }))
       .rejects.toMatchObject({ statusCode: 503, code: 'VISIT_MOVE_HOLD_FAILED', reason: 'hold_active' });
     expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update').length).toBe(0);
+    // a RETAINED foreign hold (active but stamped beyond the takeover grace — a partial move awaiting repair)
+    // is taken over by the repair move instead of 503ing until the 24h expiry (codex r30 P1)
+    db.__calls.length = 0; jest.clearAllMocks();
+    db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 24 * 3600000 - 10 * 60000) }] : []) } };
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(3); // takeover claim + 2 per-member re-stamps
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until === null).length).toBe(1); // full success releases the taken-over lease
     // an EXPIRED foreign hold (abandoned partial) is claimable
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() - 60000) }] : []) } };

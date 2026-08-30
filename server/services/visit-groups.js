@@ -1609,6 +1609,16 @@ function visitSummariesForRows(rows, {
 }
 
 // ---- R3: moving one grouped row moves the group (doc §2, ruled rev 5) ------
+// Durable reminder send hold for grouped unit moves. TTL is the
+// self-expiry (a forgotten repair can never silence a customer forever);
+// the takeover grace is the lease window inside which an ACTIVE stamp is
+// presumed to belong to a live concurrent mover (a move completes in
+// seconds) — older active stamps are retained partial-move holds a repair
+// move may take over (codex r30 P1). Stamp time is until − TTL, so the
+// TTL must never change without considering in-flight stamps.
+const MOVE_HOLD_TTL_MS = 24 * 60 * 60 * 1000;
+const MOVE_HOLD_TAKEOVER_AFTER_MS = 5 * 60 * 1000;
+
 const UNIT_MOVE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 const UNIT_MOVE_LIVE_STATUSES = new Set(['en_route', 'on_site']);
 
@@ -1958,7 +1968,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // staff repair the stop — and it expires on its own in 24h so a
   // forgotten repair can never silence a customer forever. The stamp
   // itself failing ABORTS the move before anything is written.
-  const reminderHoldUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const reminderHoldUntil = new Date(Date.now() + MOVE_HOLD_TTL_MS);
   let reminderHoldIds = [];
   try {
     await db.transaction(async (t) => {
@@ -1975,9 +1985,26 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         .whereIn('scheduled_service_id', plan.memberIds)
         .forUpdate()
         .select('id', 'scheduled_service_id', 'move_hold_until');
-      const foreign = holdRows.find((r) => r.move_hold_until && new Date(r.move_hold_until).getTime() > Date.now());
+      // Foreign-hold refusal is a LEASE with a takeover grace (codex r30
+      // P1): a stamp inside the grace belongs to a LIVE concurrent mover
+      // (a move completes in seconds) and is refused. An OLDER active
+      // stamp is a RETAINED hold — a partial move / failed retarget kept
+      // it so nobody texts until staff repair the stop — and the repair
+      // move the needsAttention alert asks for IS such a new mover: it
+      // takes the lease over (FOR UPDATE above serializes rival repairs;
+      // the re-stamp below replaces the old stamp, so the finished
+      // repair's fenced release clears it). Without the takeover every
+      // repair 503'd until the 24h expiry. Stamp time is derivable:
+      // every stamp is written as now + MOVE_HOLD_TTL_MS.
+      const foreign = holdRows.find((r) => {
+        if (!r.move_hold_until) return false;
+        const until = new Date(r.move_hold_until).getTime();
+        if (until <= Date.now()) return false; // expired
+        const stampedAt = until - MOVE_HOLD_TTL_MS;
+        return Date.now() - stampedAt < MOVE_HOLD_TAKEOVER_AFTER_MS; // live mover
+      });
       if (foreign) {
-        throw Object.assign(new Error('another move of this stop is still in progress (or awaiting repair) — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
+        throw Object.assign(new Error('another move of this stop is still in progress — try again shortly'), { code: 'VISIT_MOVE_HOLD_ACTIVE' });
       }
       // A member with NO reminder row gets a HELD pre-closed placeholder
       // (codex r29 P1): the lease must exist durably for every member —
@@ -1992,15 +2019,36 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const stubIds = [];
       for (const memberId of plan.memberIds.map(String).filter((id) => !coveredMemberIds.has(id))) {
         const row = await t('scheduled_services').where({ id: memberId })
-          .first('customer_id', 'scheduled_date', 'service_type', 'created_at');
+          .first('customer_id', 'scheduled_date', 'window_start', 'service_type', 'created_at');
         if (!row || !row.customer_id || !row.scheduled_date) continue;
-        const { parseETDateTime } = require('../utils/datetime-et');
-        const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
-        if (!stubTime || Number.isNaN(stubTime.getTime())) continue;
-        const rec = await require('./appointment-reminders').insertPreClosedPlaceholderRowInTx(t, {
-          scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
-          serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
-        });
+        const AppointmentReminders = require('./appointment-reminders');
+        let rec = null;
+        if (row.window_start) {
+          // A member with a REAL window gets an ARMED registration, not the
+          // pre-closed 08:00 stub (codex r30 P2): a tech-only / same-slot
+          // move never fires the trigger's time_changed promotion and the
+          // reminder sync excludes windows_preclosed rows, so a stub here
+          // would stay permanently silent after the hold clears. The
+          // registration path arms 72h/24h for the row's actual slot (and
+          // handles same-slot sibling dedupe); the hold stamp below keeps
+          // it quiet until release/expiry.
+          rec = await AppointmentReminders.registerVisitReminderInTx(t, {
+            scheduledServiceId: memberId,
+            customerId: row.customer_id,
+            appointmentTime: `${dateOnly(row.scheduled_date)}T${String(row.window_start).slice(0, 5)}`,
+            serviceType: row.service_type || 'service',
+            source: 'unit_move_hold',
+            createdAt: row.created_at,
+          });
+        } else {
+          const { parseETDateTime } = require('../utils/datetime-et');
+          const stubTime = parseETDateTime(`${dateOnly(row.scheduled_date)}T08:00`);
+          if (!stubTime || Number.isNaN(stubTime.getTime())) continue;
+          rec = await AppointmentReminders.insertPreClosedPlaceholderRowInTx(t, {
+            scheduledServiceId: memberId, customerId: row.customer_id, apptTime: stubTime,
+            serviceLabel: row.service_type || 'service', source: 'unit_move_hold', createdAt: row.created_at,
+          });
+        }
         if (rec && rec.id) stubIds.push(rec.id);
       }
       const allIds = [...holdRows.map((r) => r.id), ...stubIds];

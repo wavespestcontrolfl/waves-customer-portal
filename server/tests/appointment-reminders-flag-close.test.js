@@ -249,6 +249,7 @@ describe('appointment_time-guarded flag updates', () => {
         chain(), // stranded sweep
         chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
         chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // deliverAppointmentNotice unit-move hold check
+        chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // email-handoff hold recheck (sendAppointmentNoticeEmail)
         flagUpdate,
       ],
       scheduled_services: [
