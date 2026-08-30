@@ -1421,6 +1421,15 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // hold while this body renders or awaits Twilio.
     appointmentId: String(serviceId),
     enforceMoveHold: true,
+    // ABA guard (codex r39): the body quotes chosen.date/window — a
+    // complete later move that stamped AND cleared its hold mid-render is
+    // caught by the live-slot comparison at the canonical checkpoints.
+    ...(chosen?.date ? (() => {
+      const { parseETDateTime } = require('../utils/datetime-et');
+      const start = chosen.window?.start ? String(chosen.window.start).slice(0, 5) : '08:00';
+      const at = parseETDateTime(`${String(chosen.date)}T${start}`);
+      return at && !Number.isNaN(at.getTime()) ? { renderedSlotMs: at.getTime() } : {};
+    })() : {}),
     identityTrustLevel: 'phone_matches_customer',
     // Send-window operator marker (validators/send-window.js): a quick-move
     // notice is the direct consequence of an operator's commit click with an

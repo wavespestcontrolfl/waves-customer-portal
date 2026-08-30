@@ -2029,26 +2029,38 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // stop locks and the retained cohort hold on these members released;
     // a healthy parent keeps the plain no-op. Best-effort — a failed
     // repair leaves the hold to its TTL, the safe direction.
+    // Explicit outcome (codex r39): a silent early-return or swallowed error
+    // would report a plain success and staff would lose the
+    // VISIT_MOVE_INCOMPLETE signal while the parent stays stale.
+    // 'not_needed' (parent healthy) · 'repaired' · 'failed' (parent
+    // missing/non-open, members drifted, or the update threw).
+    let repairOutcome = 'not_needed';
     try {
       await db.transaction(async (t) => {
         const repairKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
         for (const key of [...new Set([plan.oldKey, repairKey])].sort()) await lockStop(t, key);
         const visit = await t('service_visits').where({ id: plan.visitId }).first();
-        if (!visit || String(visit.status) !== 'open') return;
+        if (!visit || String(visit.status) !== 'open') { repairOutcome = 'failed'; return; }
         const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
           .whereNotIn('status', TERMINAL_ROW_STATUSES).orderBy('id').forUpdate()
           .select('id', 'scheduled_date', 'window_start', 'window_end');
-        if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) return;
+        if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) { repairOutcome = 'failed'; return; }
         const starts = rows.map((r) => r.window_start).filter(Boolean).sort();
         const ends = rows.map((r) => r.window_end).filter(Boolean).sort();
         const hhmm5 = (v) => (v ? String(v).slice(0, 5) : null);
         const stale = dateOnly(visit.scheduled_date) !== newDateStr
           || hhmm5(visit.window_start) !== hhmm5(starts[0] || null)
           || hhmm5(visit.window_end) !== hhmm5(ends.length ? ends[ends.length - 1] : null)
-          || visit.stop_base_key !== repairKey;
+          || visit.stop_base_key !== repairKey
+          // Tech-only moves (codex r39): a re-save after a failed retarget
+          // of a reassignment finds date/window/key healthy — the parent's
+          // technician is part of the tuple, mirroring the normal
+          // retarget's options.technicianId patch.
+          || (options.technicianId !== undefined && String(visit.technician_id || '') !== String(options.technicianId || ''));
         if (!stale) return;
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
+        if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
         await t('service_visits').where({ id: plan.visitId }).update(patch);
         // The stop is whole again — release the RETAINED cohort hold on
         // these members. Same lease semantics as the claim (codex r38): a
@@ -2071,12 +2083,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           await t('appointment_reminders').whereIn('id', releasable.map((r) => r.id))
             .update({ move_hold_until: null, move_hold_token: null });
         }
+        repairOutcome = 'repaired';
         logger.info(`[visit-groups] no-op unit move repaired the stale parent of visit ${plan.visitId} and released its retained hold`);
       });
     } catch (repairErr) {
+      repairOutcome = 'failed';
       logger.warn(`[visit-groups] no-op parent repair for visit ${plan.visitId} failed: ${repairErr.message} — a retained hold (if any) expires on its own`);
     }
-    return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
+    return {
+      success: true,
+      newDate,
+      visitMove: {
+        visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String),
+        // A stale-but-unrepaired parent keeps the incomplete-move signal
+        // (codex r39): callers preserve needsAttention, suppress the
+        // customer text and pass preserveMoveHold on their reminder sync.
+        ...(repairOutcome === 'failed' ? { parentRetargetFailed: true } : {}),
+      },
+    };
   }
 
   // ---- 2. move members: primary first, then siblings ----

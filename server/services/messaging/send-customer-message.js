@@ -78,7 +78,23 @@ async function appointmentMoveHeld(input) {
     const holdRow = await db('appointment_reminders')
       .where({ scheduled_service_id: input.appointmentId })
       .first('move_hold_until');
-    return !!(holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now());
+    if (holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now()) return true;
+    // ABA guard (codex #3609 r39): a COMPLETE unit move can stamp and clear
+    // the hold entirely while this notice was rendering — no hold is left
+    // to see, but the body quotes the pre-move slot. Callers that rendered
+    // a schedule pass its epoch (renderedSlotMs, derived the same way the
+    // live one is below); a mismatch defers exactly like a hold so the
+    // retry re-renders the current slot.
+    if (Number.isFinite(input.renderedSlotMs)) {
+      const live = await db('scheduled_services')
+        .where({ id: input.appointmentId })
+        .first('scheduled_date', 'window_start');
+      if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
+      const { parseETDateTime, etCalendarDayOf } = require('../../utils/datetime-et');
+      const liveStart = parseETDateTime(`${etCalendarDayOf(live.scheduled_date)}T${live.window_start ? String(live.window_start).slice(0, 5) : '08:00'}`);
+      if (!liveStart || Number.isNaN(liveStart.getTime()) || liveStart.getTime() !== input.renderedSlotMs) return true;
+    }
+    return false;
   } catch (err) {
     logger.warn(`[send-customer-message] move-hold check failed for appointment ${input.appointmentId} — send held: ${err.message}`);
     return true;

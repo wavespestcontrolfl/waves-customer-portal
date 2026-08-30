@@ -197,19 +197,32 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
 // (customer/recipients/property/template), so the hold is re-read here at
 // the actual provider handoff, per recipient. Fail closed — a held notice
 // defers (the callers leave their rows unmarked and retry), never lost.
-async function moveHoldLive(scheduledServiceId) {
+async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
   try {
     const row = await db('appointment_reminders')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('move_hold_until');
-    return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+    if (row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now()) return true;
+    // ABA guard (codex r39): a COMPLETE move can stamp and clear the hold
+    // while this email was being prepared — verify the rendered slot
+    // against the live row; a mismatch defers so the retry re-renders.
+    if (Number.isFinite(renderedSlotMs)) {
+      const live = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('scheduled_date', 'window_start');
+      if (!live || !live.scheduled_date) return true;
+      const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
+      const liveStart = parseETDateTime(`${etCalendarDayOf(live.scheduled_date)}T${live.window_start ? String(live.window_start).slice(0, 5) : '08:00'}`);
+      if (!liveStart || Number.isNaN(liveStart.getTime()) || liveStart.getTime() !== renderedSlotMs) return true;
+    }
+    return false;
   } catch (err) {
     logger.warn(`[appointment-email] move-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
     return true;
   }
 }
 
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
@@ -255,7 +268,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     // the payload above was rendered from a slot a unit move may have just
     // vacated. Held ⇒ stop the whole fan-out (the hold covers the visit,
     // not one recipient) and defer.
-    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId)) {
+    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) {
       logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the provider handoff — grouped move in progress`);
       await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
       return { ok: false, held: true, reason: 'move_hold' };
@@ -343,6 +356,7 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
     moveHoldServiceId: scheduledServiceId || null,
+    renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
 }
 
@@ -420,6 +434,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     triggerEventId: `${templateKey}:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
     moveHoldServiceId: scheduledServiceId || null,
+    renderedSlotMs: apptTime ? apptTime.getTime() : null,
   });
 }
 
