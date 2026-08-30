@@ -156,6 +156,7 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
       for (const [key, method] of BULK_CALLS) {
         responses[key] = items(await dataforseo[method](targets));
         out.calls += 1;
+        if (!responses[key]) break; // the batch already failed — never pay for calls whose results would be discarded
       }
       const patches = [];
       const missingCall = BULK_CALLS.find(([key]) => !responses[key]);

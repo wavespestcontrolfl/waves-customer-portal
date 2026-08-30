@@ -165,13 +165,37 @@ describe('intake — persists every reference as an intake item', () => {
     await intake(db2, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
     await intake(db2, { text: 'bit.ly/abc', source: 'list_import', sourceDetail: 'paste:first' });
     expect(updates).toEqual([{ last_seen_at: 'NOW()' }, { last_seen_at: 'NOW()' }]);
-    // resolver: primary touch + one touch per pending feed, each with its own detail and the final URL
-    const dbr = makeDb({ 'seo_link_intake_items.skipLocked': [{ id: 'i1', raw_url: 'bit.ly/abc', source: 'list_import', source_detail: 'paste:first', source_ref: null, attempts: 0, pending_touches: [{ source_detail: 'sheet:aug note:Claim it', source_ref: 'ref-2' }] }], 'seo_link_intake_items.update': () => 1 });
+    // resolver: primary touch + one touch per pending feed — read FRESH under the row lock inside
+    // the resolve trx (a feed appended after the claim snapshot is applied too, never stranded),
+    // and cleared atomically with the resolution
+    const dbr = makeDb({
+      'seo_link_intake_items.skipLocked': [{ id: 'i1', raw_url: 'bit.ly/abc', source: 'list_import', source_detail: 'paste:first', source_ref: null, attempts: 0, pending_touches: [] }], // snapshot at claim: EMPTY
+      'seo_link_intake_items.first': { pending_touches: [{ source_detail: 'sheet:aug note:Claim it', source_ref: 'ref-2' }] }, // appended while resolving; seen by the in-trx re-read
+      'seo_link_intake_items.update': () => 1,
+    });
     await resolveIntakeItems(dbr, { now: new Date('2026-08-30T01:00:00Z'), fetchPage: async () => ({ status: 200, finalUrl: 'https://listing.example/c', blocked: false, error: null }) });
     expect(registry.ensureDomain.mock.calls.map((c) => c[1])).toEqual([
       expect.objectContaining({ domain: 'listing.example', source: 'list_import', sourceDetail: 'paste:first https://listing.example/c', sourceRef: null }),
       expect.objectContaining({ domain: 'listing.example', source: 'list_import', sourceDetail: 'sheet:aug note:Claim it https://listing.example/c', sourceRef: 'ref-2' }),
     ]);
+    expect(dbr.calls.some((c) => c.table === 'seo_link_intake_items' && c.op === 'forUpdate')).toBe(true); // the re-read locks the row
+    const final = dbr.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'update').map((c) => c.args[0]).find((u) => u.state === 'resolved');
+    expect(final.pending_touches).toBe('[]'); // applied touches cleared atomically with the resolution
+  });
+
+  test('appending a pending touch is conditional on the row STILL waiting: a row resolved mid-flight is re-read so the caller retouches directly', async () => {
+    let reads = 0;
+    const db = makeDb({
+      'seo_link_intake_items.returning': [],
+      'seo_link_intake_items.first': () => (reads += 1) === 1
+        ? { id: 'item-p', state: 'pending', source_detail: 'paste:first', source_ref: null, pending_touches: [] }
+        : { state: 'resolved', resolved_host: 'listing.example', domain_id: 'id-listing.example' },
+      'seo_link_intake_items.update': (chain, args) => (args[0].pending_touches ? 0 : 1), // the conditional append misses — resolver got there first
+    });
+    registry.ensureDomain.mockResolvedValue({ id: 'id-listing.example', created: false, touched: true, touchId: 't9' });
+    const r = await intake(db, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'list_import', sourceDetail: 'sheet:aug' });
+    expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), { domain: 'listing.example', source: 'list_import', sourceDetail: 'sheet:aug note:Claim it', sourceRef: null });
+    expect(r.items).toEqual({ created: 0, seen: 1, pending: 0, retouched: 1 });
   });
 
   test('a whole CSV cell that is a root URL with a query names the HOST, never `host?query`', () => {
@@ -203,6 +227,7 @@ describe('resolveIntakeItems — sweep', () => {
   function dbWith(items, extra = {}) {
     const updates = [];
     const db = makeDb({
+      'seo_link_intake_items.first': { pending_touches: [] }, // the resolve trx's locked re-read; override to simulate a mid-flight append
       'seo_link_intake_items.skipLocked': items,
       'seo_link_intake_items.update': (chain, args) => { updates.push({ where: chain.ops.find((o) => o[0] === 'where' || o[0] === 'whereIn'), set: args[0] }); return 1; },
       ...extra,
@@ -234,7 +259,8 @@ describe('resolveIntakeItems — sweep', () => {
     expect(r).toEqual(expect.objectContaining({ claimed: 1, resolved: 0, lost: 1, errors: [] }));
     // the finalize predicate carries the claim stamp
     const finalWhere = db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'where' && c.args[0] === 'next_retry_at');
-    expect(finalWhere.map((c) => c.args[1])).toEqual([new Date(now.getTime() + _internals.CLAIM_HOLD_MS)]);
+    const stamp = new Date(now.getTime() + _internals.CLAIM_HOLD_MS);
+    expect(finalWhere.map((c) => c.args[1])).toEqual([stamp, stamp]); // the locked re-read AND the final write both carry the claim stamp
   });
 
   test('claims come in lease-sized batches: the lease covers one batch\'s worst case (3 hops × 8 s + 10 s X lookup per item); a large limit runs several batches, each stamped from its own claim time; a short batch ends the run', async () => {

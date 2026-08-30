@@ -196,6 +196,18 @@ async function upsertItem(q, item) {
       patch.pending_touches = JSON.stringify([...touches, { source_detail: row.source_detail, source_ref: row.source_ref, seen_at: new Date().toISOString() }]);
     }
   }
+  if (patch.pending_touches) {
+    // The append lands only while the row is STILL waiting: if the resolver
+    // committed a resolution meanwhile, re-read and let the caller's
+    // resolved-state handling apply this feed's touch directly instead.
+    const n = await q('seo_link_intake_items').where({ id: existing.id }).whereIn('state', ['pending', 'unresolved']).update(patch);
+    if (!n) {
+      const after = await q('seo_link_intake_items').where({ id: existing.id }).first('state', 'resolved_host', 'domain_id');
+      await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
+      return { id: existing.id, created: false, state: (after && after.state) || null, resolvedHost: (after && after.resolved_host) || null, domainId: (after && after.domain_id) || null };
+    }
+    return { id: existing.id, created: false, state: existing.state, resolvedHost: null, domainId: null };
+  }
   await q('seo_link_intake_items').where({ id: existing.id }).update(patch);
   return { id: existing.id, created: false, state: existing.state || null, resolvedHost: existing.resolved_host || null, domainId: existing.domain_id || null };
 }
@@ -430,14 +442,21 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
         }
         if (host && !isNeverTargetHost(host)) {
           await db.transaction(async (trx) => {
+            // Row-lock the item and read pending_touches FRESH inside the
+            // resolve transaction: a feed appended after the claim snapshot
+            // must not be stranded on a row the sweep never revisits. The
+            // claim-stamp predicate keeps a reclaimed row LOST as usual, and
+            // the finalize below clears the applied touches atomically.
+            const fresh = await trx('seo_link_intake_items').where({ id: item.id }).where('next_retry_at', hold).forUpdate().first('pending_touches');
+            if (!fresh) throw LOST_CLAIM;
             const d = await registry.ensureDomain(trx, {
               domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
             });
             // every later feed of this reference lands as its own touch
-            for (const t of parseTouches(item.pending_touches)) {
+            for (const t of parseTouches(fresh.pending_touches)) {
               await registry.ensureDomain(trx, { domain: host, source: item.source, sourceDetail: touchDetail(t.source_detail, page.finalUrl, null), sourceRef: t.source_ref || null });
             }
-            await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, source_row_id: d.touchId || null, last_error: null, next_retry_at: null });
+            await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, source_row_id: d.touchId || null, pending_touches: '[]', last_error: null, next_retry_at: null });
           });
           out.resolved += 1;
           continue;

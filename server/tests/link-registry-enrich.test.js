@@ -260,7 +260,7 @@ describe('enrichDomains', () => {
     const db = fakeDb({ domains: [D('d1', 'a.example')], competitorBacklinks: [{ source_domain: 'a.example', competitor_domain: 'c.com' }] });
     const dfs = { async bulkRanks() { return null; }, async bulkSpamScore() { return dfsResp([]); }, async bulkReferringDomains() { return dfsResp([]); }, async bulkTrafficEstimation() { return dfsResp([]); } };
     const r = await enrichDomains(db, { dataforseo: dfs, now: NOW });
-    expect(r).toMatchObject({ enriched: 0, calls: 4, failed: [{ id: 'd1', domain: 'a.example', reason: 'bulk_ranks_no_response' }] });
+    expect(r).toMatchObject({ enriched: 0, calls: 1, failed: [{ id: 'd1', domain: 'a.example', reason: 'bulk_ranks_no_response' }] }); // stops at the first null — no spend on results that would be discarded
     expect(db._store.updates).toEqual([{ table: 'seo_link_domains', where: { id: 'd1' }, patch: { competitors_linked: 1, updated_at: NOW } }]);
     // a later metric failing (traffic) is the same contract: nothing partial is marked enriched
     const db2 = fakeDb({ domains: [D('d1', 'a.example')] });
