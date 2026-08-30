@@ -12893,7 +12893,10 @@ const CallRecordingProcessor = {
                     // 15-minute stranded-confirmation sweep delivers the
                     // standard confirmation at the 8:00 AM window open —
                     // same handoff as the estimate-accept flow.
-                    if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
+                    // MOVE_HOLD (grouped unit move in flight, codex #3609
+                    // r31 P1) defers the same way: re-arm so the sweep
+                    // delivers once the move completes and the hold clears.
+                    if (((sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred) || sendResult.code === 'MOVE_HOLD') && scheduledServiceId) {
                       try {
                         const rearmed = await db('appointment_reminders')
                           .where({ scheduled_service_id: scheduledServiceId })

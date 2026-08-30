@@ -43,7 +43,7 @@ const {
   formatSmsTimeRange,
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
-const { calendarIcsAvailable } = require('../services/appointment-ics-eligibility');
+const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -294,6 +294,9 @@ async function visitServicesFor(svc) {
         // chained sibling is still ahead.
         ...groupedState(members),
       },
+      // INTERNAL — for the ICS route's shared verdict; stripped from the
+      // page payload before the spread (never raw ids on a public page).
+      members,
     };
   } catch (err) {
     // Unknown membership is NOT "ungrouped" (local codex audit): rendering
@@ -331,16 +334,11 @@ function groupedState(members, now = new Date()) {
   const date = apptDateStr(rows[0]?.scheduled_date);
   if (date) {
     // The stop stays live through the LATER of the quoted arrival promise
-    // (the visit's start + ARRIVAL_PROMISE_MINUTES — the page's own copy,
-    // like pageState) and the latest chained member's end (local codex
-    // audit r21): two overlapping 09–10 services promise arrival through
-    // 11:00 and must not go past at 10:00.
-    const ends = rows.map((m) => hhmm(m.window_end)).filter(Boolean).sort();
-    const starts = rows.map((m) => hhmm(m.window_start)).filter(Boolean).sort();
-    const bounds = [];
-    if (starts.length) bounds.push(parseETDateTime(`${date}T${starts[0]}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000);
-    if (ends.length) bounds.push(parseETDateTime(`${date}T${ends[ends.length - 1]}`).getTime());
-    const endsAt = bounds.length ? new Date(Math.max(...bounds)) : parseETDateTime(`${date}T23:59`);
+    // and the latest chained member's end (local codex audit r21) — the
+    // shared groupedStopEndsAt math (appointment-ics-eligibility), so the
+    // page's past-verdict and the calendar servability never drift. An
+    // all-windowless stop keeps the page's own end-of-day fallback.
+    const endsAt = groupedStopEndsAt(rows) || parseETDateTime(`${date}T23:59`);
     if (endsAt && endsAt < now) return { state: 'past', phase: null };
   }
   return { state: 'upcoming', phase: null };
@@ -429,12 +427,14 @@ async function confirmGroupedSiblings(trx, svc) {
 // ended while the stop is still upcoming); ungrouped ⇒ the row's quoted
 // window (calendarIcsAvailable).
 function calendarEligible(svc, visitInfo, now = new Date()) {
-  // Grouped: the STOP's state AND a real aggregate start (codex r28 P2) —
-  // an all-windowless stop has no DTSTART to file; the ungrouped rule
-  // (calendarIcsAvailable) already requires the row's own start.
-  return visitInfo?.visit
-    ? (pageStateForGroup(svc, visitInfo, now).state === 'upcoming' && !!(visitInfo.visit.windowStart || hhmm(svc?.window_start)))
-    : calendarIcsAvailable(svc, now);
+  // Grouped: the SHARED verdict (appointment-ics-eligibility.
+  // groupedIcsVerdict — the same one routes/schedule.js advertises links
+  // from, so link and file can never drift; codex #3609 uncapped audit
+  // P1). The token row's own terminal/unknown states still outrank the
+  // stop, exactly as pageStateForGroup ranked them.
+  if (!visitInfo?.visit) return calendarIcsAvailable(svc, now);
+  if (!UPCOMING_STATUSES.has(String(svc?.status || '').toLowerCase())) return false;
+  return !groupedIcsVerdict(visitInfo.members, now).blocked;
 }
 
 // The calendar file's DTSTART: the visit's shared start when grouped (the
@@ -637,7 +637,9 @@ router.get('/:token', async (req, res, next) => {
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online
     // until the lookup works (never a solo page over a possibly grouped stop).
-    const { visitUnknown, ...visitInfo } = visitInfoRaw;
+    // `members` is internal (ICS verdict input) — stripped with visitUnknown
+    // so the payload spread below never carries raw member rows.
+    const { visitUnknown, members: _visitMembers, ...visitInfo } = visitInfoRaw;
     // Grouped: the state is the STOP's (all members + the stop's window),
     // whichever member's link this is; ungrouped: the row's own.
     const { state, phase: livePhase } = visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, visitInfo);

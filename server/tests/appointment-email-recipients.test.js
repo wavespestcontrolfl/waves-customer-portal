@@ -19,6 +19,10 @@ function mockDb({ customer = null, prefs = null }) {
     if (table === 'customer_interactions') {
       return { insert: async () => [1] };
     }
+    if (table === 'appointment_reminders') {
+      // pre-provider move-hold recheck — no hold
+      return { where: () => ({ first: async () => null }) };
+    }
     throw new Error(`unexpected db table ${table}`);
   });
 }

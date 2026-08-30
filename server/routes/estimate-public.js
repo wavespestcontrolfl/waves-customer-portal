@@ -12853,7 +12853,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 // row in the 15-minute sweep, whose deliverConfirmation
                 // pre-check defers to the 8:00 AM window open and then
                 // sends the standard confirmation for this visit.
-                if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && confirmedAppointmentRow?.id) {
+                // MOVE_HOLD (grouped unit move in flight, codex #3609 r31
+                // P1) is the same shape of deferral: this flow owns the
+                // confirmation, so without the re-arm nothing would retry
+                // after the move completes and the hold clears.
+                if (((sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred) || sendResult.code === 'MOVE_HOLD') && confirmedAppointmentRow?.id) {
                   try {
                     await db('appointment_reminders')
                       .where({ scheduled_service_id: confirmedAppointmentRow.id })

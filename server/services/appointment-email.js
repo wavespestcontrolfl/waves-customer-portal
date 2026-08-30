@@ -190,7 +190,26 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
  *   { ok: false, blocked: true, reason }           — all recipients suppressed
  *   { ok: false, error }                           — threw
  */
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null }) {
+// Grouped unit-move hold (codex #3609 uncapped audit P1): a visit mid-move
+// stamps move_hold_until on its members' reminder rows, and an email
+// rendered for the OLD slot must not dispatch. The caller-level checks
+// (sendAppointmentNoticeEmail) run BEFORE this module's own awaits
+// (customer/recipients/property/template), so the hold is re-read here at
+// the actual provider handoff, per recipient. Fail closed — a held notice
+// defers (the callers leave their rows unmarked and retry), never lost.
+async function moveHoldLive(scheduledServiceId) {
+  try {
+    const row = await db('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('move_hold_until');
+    return !!(row && row.move_hold_until && new Date(row.move_hold_until).getTime() > Date.now());
+  } catch (err) {
+    logger.warn(`[appointment-email] move-hold check failed for ${scheduledServiceId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
@@ -232,6 +251,15 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     // exceed email_messages.idempotency_key (varchar 260) for long addresses.
     const recipientToken = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 16);
     const recipientKey = idempotencyKey ? `${idempotencyKey}:${recipientToken}` : undefined;
+    // Move-hold boundary re-check immediately before the provider call —
+    // the payload above was rendered from a slot a unit move may have just
+    // vacated. Held ⇒ stop the whole fan-out (the hold covers the visit,
+    // not one recipient) and defer.
+    if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId)) {
+      logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the provider handoff — grouped move in progress`);
+      await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
+      return { ok: false, held: true, reason: 'move_hold' };
+    }
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey,
@@ -314,6 +342,7 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
     categories: ['appointment_confirmation'],
     triggerEventId: `appointment.confirmation:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
+    moveHoldServiceId: scheduledServiceId || null,
   });
 }
 
@@ -390,6 +419,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     categories: [is72 ? 'appointment_reminder_72h' : 'appointment_reminder_24h'],
     triggerEventId: `${templateKey}:${scheduledServiceId || customerId}`,
     metadata: { scheduled_service_id: scheduledServiceId || null },
+    moveHoldServiceId: scheduledServiceId || null,
   });
 }
 

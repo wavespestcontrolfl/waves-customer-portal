@@ -383,7 +383,15 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     // each member carries its OWN pristine label (codex r15 P2) — the
     // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a', window_start: '09:00:00' }, { id: 'b', window_start: '10:00:00' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, state: 'upcoming', phase: null } });
+      .toEqual({
+        visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a', window_start: '09:00:00' }, { id: 'b', window_start: '10:00:00' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, state: 'upcoming', phase: null },
+        // internal member snapshot for the shared ICS verdict — stripped
+        // from the page payload before the spread
+        members: [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, window_start: '09:00:00', window_end: '10:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, window_start: '10:00:00', window_end: '11:00:00' },
+        ],
+      });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
@@ -420,14 +428,17 @@ describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
     expect(tokenExpr).toMatch(/!visitInfo\.visitUnknown/);
   });
 
-  test('calendar eligibility is the page verdict: a chained stop stays eligible after an earlier member\'s own window ended; ungrouped keeps the row rule (codex r24 P2)', () => {
+  test('calendar eligibility is the SHARED grouped verdict (appointment-ics-eligibility.groupedIcsVerdict — the same one schedule.js advertises links from): a chained stop stays eligible after an earlier member\'s own window ended; ungrouped keeps the row rule; the token row\'s terminal state outranks (codex r24 P2 + uncapped audit)', () => {
     const { calendarEligible } = appointmentRouter._test;
-    const first = { status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00:00' };
+    const first = { status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00:00', window_end: '10:00:00', technician_id: 't1' };
+    const chained = { status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:30:00', window_end: '14:00:00', technician_id: 't1' };
     const at1130 = new Date('2026-08-05T15:30:00.000Z'); // 11:30 ET — the first member's 09–11 promise has ended
-    expect(calendarEligible(first, {}, at1130)).toBe(false);
-    expect(calendarEligible(first, { visit: { state: 'upcoming', phase: null } }, at1130)).toBe(true);
-    expect(calendarEligible(first, { visit: { state: 'in_progress', phase: 'en_route' } }, at1130)).toBe(false);
-    expect(calendarEligible({ ...first, status: 'cancelled' }, { visit: { state: 'upcoming', phase: null } }, at1130)).toBe(false);
+    expect(calendarEligible(first, {}, at1130)).toBe(false); // ungrouped: the row rule
+    const grouped = (members) => ({ visit: { windowStart: '09:00' }, members });
+    expect(calendarEligible(first, grouped([first, chained]), at1130)).toBe(true); // the stop runs to 14:00
+    expect(calendarEligible(first, grouped([first, { ...chained, status: 'en_route' }]), at1130)).toBe(false); // underway member blocks
+    expect(calendarEligible({ ...first, status: 'cancelled' }, grouped([first, chained]), at1130)).toBe(false); // row-terminal outranks the stop
+    expect(calendarEligible(first, grouped(undefined), at1130)).toBe(false); // no members snapshot ⇒ fail closed
   });
 
   test('the calendar file starts at the VISIT start when grouped, the row start otherwise', () => {

@@ -7,8 +7,7 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { calendarIcsAvailable, arrivalWindowEndsAt, hhmm: icsHHMM, UPCOMING_STATUSES } = require('../services/appointment-ics-eligibility');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
 // NOT re-derived here — services/appointment-ics-eligibility.js owns it and
@@ -31,39 +30,15 @@ function calendarUrlFor(row, now = new Date()) {
   return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
 }
 
-// Grouped stop states the public ICS route refuses (a member awaiting rebook,
-// a member underway) — read from the visit's open members; an unreadable
-// membership blocks (fail closed, the route's own posture).
-// The grouped calendar verdict, mirroring the public ICS route (codex #3609
-// r27 P1 + local r35): blocked unless the members still form ONE quiet stop
-// (one date, one technician, connected windows, nobody underway/awaiting
-// rebook), and — when servable — the STOP's expiry: the later of the
-// earliest member's arrival promise and the latest member end, exactly the
-// grouped state the appointment page renders. An early chained member's own
-// two-hour window elapsing must not hide a link the ICS route still serves.
+// The grouped calendar verdict is NOT derived here (codex #3609 uncapped
+// audit P1): services/appointment-ics-eligibility.groupedIcsVerdict is the
+// one definition shared with the public ICS route, so the portal never
+// advertises a link that route rejects. This wrapper only loads the live
+// members and fails closed on an unreadable membership.
 async function groupedCalendarVerdict(visitId) {
   try {
-    const vg = require('../services/visit-groups');
-    const members = await vg.openMembers(db, visitId);
-    const blocked = { blocked: true, endsAt: null };
-    if (members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) return blocked;
-    const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : '');
-    if (new Set(members.map((m) => day(m.scheduled_date))).size > 1) return blocked;
-    if (new Set(members.map((m) => String(m.technician_id || ''))).size > 1) return blocked;
-    if (!vg.windowedMembersConnected(members)) return blocked;
-    const date = day(members[0]?.scheduled_date);
-    const starts = members.map((m) => icsHHMM(m.window_start)).filter(Boolean).sort();
-    const ends = members.map((m) => icsHHMM(m.window_end)).filter(Boolean).sort();
-    const bounds = [];
-    if (date && starts.length) {
-      const promise = arrivalWindowEndsAt({ scheduled_date: date, window_start: starts[0] });
-      if (promise) bounds.push(promise.getTime());
-    }
-    if (date && ends.length) {
-      const latest = parseETDateTime(`${date}T${ends[ends.length - 1]}`);
-      if (latest && !Number.isNaN(latest.getTime())) bounds.push(latest.getTime());
-    }
-    return { blocked: false, endsAt: bounds.length ? new Date(Math.max(...bounds)) : null };
+    const members = await require('../services/visit-groups').openMembers(db, visitId);
+    return groupedIcsVerdict(members);
   } catch {
     return { blocked: true, endsAt: null };
   }

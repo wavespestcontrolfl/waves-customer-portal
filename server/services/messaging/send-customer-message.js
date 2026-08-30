@@ -54,6 +54,33 @@ const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+// Grouped unit-move hold for appointment notices (codex #3609 r30/r31).
+// A visit mid-move (or stranded partial) stamps move_hold_until on its
+// members' reminder rows; a notice rendered for the OLD slot must not
+// reach the customer. Checked twice: at step 6.4 (early, audited block)
+// and again inside the provider preSendCheck at the actual Twilio
+// handoff — the provider's own internal awaits (redirect check, template
+// lookup, customer/location query) are exactly the gap a mover can stamp
+// into. Fail closed: callers treat MOVE_HOLD as a deferral (flags left
+// unmarked, the sweep retries), so a held-on-blip notice is delayed,
+// never lost.
+const MOVE_HOLD_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
+function appointmentMoveHoldApplies(input) {
+  return !!input.appointmentId && MOVE_HOLD_PURPOSES.includes(input.purpose);
+}
+async function appointmentMoveHeld(input) {
+  try {
+    const db = require('../../models/db');
+    const holdRow = await db('appointment_reminders')
+      .where({ scheduled_service_id: input.appointmentId })
+      .first('move_hold_until');
+    return !!(holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now());
+  } catch (err) {
+    logger.warn(`[send-customer-message] move-hold check failed for appointment ${input.appointmentId} — send held: ${err.message}`);
+    return true;
+  }
+}
+
 function nextProviderRetryAt(providerOutcome, now = new Date()) {
   if (!providerOutcome || !providerOutcome.retryable) return null;
   if (providerOutcome.nextAllowedAt) {
@@ -262,20 +289,8 @@ async function sendCustomerMessage(input) {
   //     any earlier await still blocks. Fail closed on a read error: the
   //     callers treat MOVE_HOLD as a deferral (flags left unmarked, the
   //     sweep retries), so a held-on-blip notice is delayed, never lost.
-  const MOVE_HOLD_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
-  if (sendInput.appointmentId && MOVE_HOLD_PURPOSES.includes(sendInput.purpose)) {
-    let held = false;
-    try {
-      const db = require('../../models/db');
-      const holdRow = await db('appointment_reminders')
-        .where({ scheduled_service_id: sendInput.appointmentId })
-        .first('move_hold_until');
-      held = !!(holdRow && holdRow.move_hold_until && new Date(holdRow.move_hold_until).getTime() > Date.now());
-    } catch (err) {
-      logger.warn(`[send-customer-message] move-hold check failed for appointment ${sendInput.appointmentId} — send held: ${err.message}`);
-      held = true;
-    }
-    if (held) {
+  if (appointmentMoveHoldApplies(sendInput)) {
+    if (await appointmentMoveHeld(sendInput)) {
       const blocked = { code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held' };
       const audit = await persistAudit({
         input: sendInput,
@@ -350,7 +365,18 @@ async function sendCustomerMessage(input) {
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
   const providerOutcome = await dispatchToProvider(sendInput, {
-    preSendCheck: () => checkSendWindow(sendInput, policy, contactState),
+    preSendCheck: async () => {
+      const windowVerdict = checkSendWindow(sendInput, policy, contactState);
+      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
+      // Move-hold boundary re-check at the ACTUAL Twilio handoff (uncapped
+      // codex audit P1): the step-6.4 check runs before the provider's own
+      // internal awaits — a unit move stamping during them must still hold
+      // the send. Same deferral contract as the window hold.
+      if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
+        return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true };
+      }
+      return { ok: true };
+    },
   });
 
   // 7.5 Provider-handoff block (preSendCheck said no): map back onto the

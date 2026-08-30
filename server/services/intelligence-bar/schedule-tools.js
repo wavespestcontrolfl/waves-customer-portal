@@ -718,7 +718,26 @@ async function moveStopsToDay(input) {
     });
     let updatedRows = 0;
     try {
-      updatedRows = await runMoveTrx();
+      // Deadlock retry (codex #3609 r31 P2): this trx holds the tech-day
+      // locks and then waits on the visit stop lock inside
+      // assertRowMovableAlone, while a concurrent createOrJoinVisit holds
+      // that stop lock and waits on the same tech-day lock via
+      // alignMemberTechnician → assignDispatchJob. Postgres aborts one
+      // side with 40P01 — retry the whole transaction (locks re-acquired
+      // fresh) so the batch still lands the move or the intended
+      // grouped-row skip instead of failing the staff action.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          updatedRows = await runMoveTrx();
+          break;
+        } catch (err) {
+          if (err && err.code === '40P01' && attempt < 2) {
+            stopOverlapped = false;
+            continue;
+          }
+          throw err;
+        }
+      }
     } catch (err) {
       if (err && (err.code === 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' || err.code === 'VISIT_FROZEN_MOVE_UNSUPPORTED')) {
         groupedSkip = err.code; // grouped/frozen member: skipped per-row, never aborts the batch
