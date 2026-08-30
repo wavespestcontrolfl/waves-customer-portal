@@ -295,7 +295,21 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         idempotencyKey: recipientKey,
         categories: builtCategories,
         suppressionGroupKey: TRANSACTIONAL_GROUP,
+        // Move-hold recheck at the library's own dispatch boundary (codex
+        // r41 uncapped): sendTemplate performs template/idempotency/
+        // suppression awaits before the provider call — a hold stamped in
+        // that gap must still abort. onQueued resolving false aborts
+        // PRE-dispatch; moveHoldLive fails closed internally, so a read
+        // error holds rather than sends.
+        ...(moveHoldServiceId ? { onQueued: async () => !(await moveHoldLive(moveHoldServiceId, renderedSlotMs)) } : {}),
       });
+      // An onQueued abort is a HELD outcome, not a delivery failure: stop
+      // the fan-out (the hold covers the visit) and let the caller defer.
+      if (moveHoldServiceId && result?.aborted) {
+        logger.info(`[appointment-email] ${eventType} for ${moveHoldServiceId} held at the dispatch boundary — grouped move in progress`);
+        await logEmailAttempt({ customerId: customer.id, templateKey, eventType, status: 'skipped', failureReason: 'move_hold', metadata });
+        return { ok: false, held: true, reason: 'move_hold' };
+      }
       outcomes.push(result);
       if (!result.deduped) {
         const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
