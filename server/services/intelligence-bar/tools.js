@@ -1751,17 +1751,20 @@ async function createAppointment(input) {
   // the operator never approved. A pinned technician_id (set at proposal
   // time so the confirmation card names the tech) resolves by immutable id.
   let technician_id = null;
+  let resolvedTechnicianName = null;
   if (input.technician_id) {
     // Same active bar as name resolution — a model-provided id, or a tech
     // deactivated during the confirmation window, must not take new visits.
     const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
     if (!tech) return { error: 'Technician not found or no longer active' };
     technician_id = tech.id;
+    resolvedTechnicianName = tech.name;
   } else if (technician_name) {
     const tech = await resolveTechnicianByName(technician_name);
     if (!tech) return { error: 'No technician matches that name — nothing was created. Retry with a corrected name, a technician_id, or omit the technician to leave the visit unassigned.' };
     if (tech.error) return tech;
     technician_id = tech.id;
+    resolvedTechnicianName = tech.name;
   }
 
   // A today target whose window already elapsed in ET is unreachable — the
@@ -1877,7 +1880,9 @@ async function createAppointment(input) {
     customer_name: `${customer.first_name} ${customer.last_name}`,
     date: dateStr,
     service_type,
-    technician: technician_name || 'Unassigned',
+    // The RESOLVED tech's canonical name — never the raw input, which can be
+    // absent on an id-only retry or disagree with the id it rode in with.
+    technician: resolvedTechnicianName || 'Unassigned',
     // Advisory occupancy-overlap note (gated probe) — the booking stands.
     ...(overlapAdvisory ? { warning: overlapAdvisory } : {}),
   };
