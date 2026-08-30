@@ -552,19 +552,23 @@ function normalizeEngineLineItems(result) {
     // Number(null) is a finite 0 — nullish values must fall through, not
     // zero out revenue or cadence (codex pre-push P1 x2).
     const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
-    const monthly = num(item.monthly);
+    const pickNum = (...vals) => vals.map(num).find((v) => Number.isFinite(v));
+    // TWO persisted shapes reach this normalizer (GH codex P1):
+    // - the quote-wizard PROJECTION: annual/monthly/price are already NET,
+    //   with *BeforeDiscount originals alongside;
+    // - the RAW engine result (estimator_engine/agent drafts persist it
+    //   unprojected): annual/price stay GROSS while the customer-paid
+    //   amounts live in manualFinal*/​*AfterDiscount.
+    // Net = first customer-paid witness; gross = first pre-discount witness.
+    const monthly = pickNum(item.monthlyAfterDiscount, item.monthly);
     const isRecurring = Number.isFinite(monthly) && monthly !== 0;
-    const annual = num(item.annual);
+    const netAnnual = pickNum(item.manualFinalAnnual, item.annualAfterDiscount, item.annual);
     const price = isRecurring
-      ? money(Number.isFinite(annual) ? annual : monthly * 12)
-      : money(Number.isFinite(num(item.price)) ? num(item.price) : (Number.isFinite(num(item.total)) ? num(item.total) : 0));
-    // The projection persists AFTER-discount values in annual/monthly/price
-    // and the pre-discount originals alongside — recover the real
-    // before-discount price instead of claiming the line was undiscounted
-    // (GH codex on #3628).
+      ? money(Number.isFinite(netAnnual) ? netAnnual : monthly * 12)
+      : money(pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price, item.totalAfterDiscount, item.total) ?? 0);
     const before = isRecurring
-      ? num(item.annualBeforeDiscount)
-      : (Number.isFinite(num(item.priceBeforeDiscount)) ? num(item.priceBeforeDiscount) : num(item.totalBeforeDiscount));
+      ? pickNum(item.annualBeforeDiscount, item.annual)
+      : pickNum(item.priceBeforeDiscount, item.price, item.totalBeforeDiscount, item.total);
     const priceBeforeDiscount = Number.isFinite(before) && before > 0 ? money(before) : price;
     const discount = priceBeforeDiscount > 0 && priceBeforeDiscount > price
       ? Math.round((1 - price / priceBeforeDiscount) * 1000) / 1000
@@ -574,7 +578,17 @@ function normalizeEngineLineItems(result) {
     const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.frequency]
       .map(num)
       .find((v) => Number.isFinite(v) && v > 0);
+    // Raw mosquito lines carry their station/dunk add-ons — without the
+    // mosquitoCogs overrides their per-visit COGS misses the hardware
+    // (GH codex P1; mirrors normalizeRecurringLines' mosquito branch).
+    const mosquitoExtras = /mosquito/.test(String(serviceKey))
+      ? mosquitoCogs(item.program, item.addOns || {})
+      : null;
     lines.push({
+      ...(mosquitoExtras ? {
+        cogsServiceTypes: mosquitoExtras.serviceTypes,
+        cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,
+      } : {}),
       ...(quoted ? { quoted } : {}),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,

@@ -192,11 +192,18 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
             { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
+            // RAW agent shape: gross annual, net in annualAfterDiscount.
+            { service: 'mosquito', name: 'Mosquito', monthly: 80, monthlyAfterDiscount: 72, annual: 960, annualAfterDiscount: 864, visits: 12, program: 'precision', addOns: { stationCount: 3 } },
           ],
         },
       },
     });
-    expect(audit.lines).toHaveLength(4);
+    expect(audit.lines).toHaveLength(5);
+    const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
+    // Net wins the price; gross survives as priceBeforeDiscount.
+    expect(mq).toMatchObject({ price: 864, monthly: 72, priceBeforeDiscount: 960, discount: 0.1 });
+    expect(mq.cogsServiceTypes).toEqual(expect.arrayContaining(['Mosquito Treatment - Stations']));
+    expect(mq.cogsServiceTypeFixedMultipliers).toMatchObject({ 'Mosquito Treatment - Stations': 3 });
     const lawnLine = audit.lines.find((l) => l.serviceKey === 'lawn_care');
     expect(lawnLine.price).toBe(660); // annual:null falls through to monthly*12, never 0
     expect(lawnLine.visitsPerYear).toBe(9); // numeric frequency counts as cadence
