@@ -914,24 +914,31 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     //     lotSqFt never reaches pricing without lotSizeConfirmed, so a
     //     caller cannot select rodent-bait brackets by attesting a lot.
     const lotVerifyFlagged = trustedProfileFound && !lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    // The channel distinction is the REQUEST CONTRACT, never cache state
+    // (pre-push P0 r5 + GH P0 r6: the cache is global with a 180-day TTL,
+    // so keying on trustedProfileFound made an unchanged direct-API request
+    // price differently depending on whether anyone else had looked the
+    // address up). Wizard requests carry the `enriched` payload; the
+    // documented direct-API shape (public-mcp how_to_request_quote) does
+    // not, and keeps its legacy posted-lotSqFt engine-fallback role:
+    // never "measured", never persisted, commercial mosquito still manual —
+    // while the lot-flag park below still applies uniformly (a flagged
+    // condo parks on every channel; that protection is this PR's point).
+    const wizardShaped = !!(enriched && typeof enriched === 'object');
     const realLotSqFt = resolveRealLotSqFt({
-      enrichedLotSqFt: trustedProfileFound && !lotVerifyFlagged && Number(trustedTurf.lotSqFt) > 0
+      enrichedLotSqFt: wizardShaped && trustedProfileFound && !lotVerifyFlagged
+        && Number(trustedTurf.lotSqFt) > 0
         ? trustedTurf.lotSqFt
         : null,
       lotSqFt,
       lotSizeConfirmed,
     });
     const lotSizeMeasured = realLotSqFt != null;
-    // Engine fallback ladder (pre-push codex P0 r5): when NO server profile
-    // exists at all — the documented direct-API shape (public-mcp
-    // how_to_request_quote advertises top-level lotSqFt; those callers
-    // never ran the wizard's lookup step) — the posted lotSqFt keeps its
-    // documented engine-fallback role: never "measured", never persisted,
-    // commercial mosquito still manual. When a profile EXISTS, server
-    // values govern absolutely: a flagged or profile-less lot falls to the
-    // sqft×4 synthetic (a request-controlled number must not select
-    // rodent-bait brackets past the server's own record — codex P0 r3).
-    const engineFallbackLot = !trustedProfileFound && Number(lotSqFt) > 0
+    // Wizard requests: server values govern absolutely — a flagged or
+    // profile-less lot falls to the sqft×4 synthetic (a request-controlled
+    // number must not select rodent-bait brackets past the server's own
+    // record — codex P0 r3).
+    const engineFallbackLot = !wizardShaped && Number(lotSqFt) > 0
       ? Number(lotSqFt)
       : sqft * 4;
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
@@ -1073,11 +1080,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // The commercial auto-pricers additionally price directly from bed /
       // tree / impervious dimensions. Pass those through so the profile
       // doesn't fall back to lot-derived estimates and mis-quote (then
-      // persist/book/invoice the wrong commercial price).
-      engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
-      engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
-      engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
-      if (ep.bedAreaSource) engineInput.bedAreaSource = ep.bedAreaSource;
+      // persist/book/invoice the wrong commercial price). EXCEPT on a
+      // lot-flagged profile (office-condo folio carrying the development's
+      // parcel): its bed/impervious estimates describe the SHARED grounds
+      // — the same wrong scope as the lot — and the engine prefers the
+      // absolute bed estimate over deriving from a corrected lot, so an
+      // office-condo unit could still price the development's beds after a
+      // lotSizeConfirmed correction (GH codex P1 r6).
+      if (!lotVerifyFlagged) {
+        engineInput.imperviousSurfacePercent = num(ep.imperviousSurfacePercent ?? ep.imperviosSurfacePercent);
+        engineInput.estimatedBedAreaSf = num(ep.estimatedBedAreaSf);
+        engineInput.estimatedBedAreaPercent = num(ep.estimatedBedAreaPercent);
+        if (ep.bedAreaSource) engineInput.bedAreaSource = ep.bedAreaSource;
+      }
       engineInput.treeDensity = (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined;
       engineInput.shrubDensity = (ep.shrubDensity || ep.shrubs || '').toString().toLowerCase() || undefined;
       engineInput.landscapeComplexity = (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined;
