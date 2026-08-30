@@ -664,6 +664,54 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
+// Evergreen public links for the composer's Insert Link menu. Unlike the
+// reschedule / re-service bearer links these are the same for every
+// recipient: no server lookup, no per-recipient strip tracking, and a second
+// click is a no-op instead of a re-mint. The quote page is the portal's own
+// /quote redirect target (server/config/estimate-marketing-redirects.js);
+// store URLs mirror the server's WAVES_IOS_APP_URL / WAVES_ANDROID_APP_URL
+// envs (VITE_-prefixed for the client build, same defaults — see
+// AppShowcaseCard). Clause copy stays plain ASCII for the same UCS-2 reason
+// as the prefill builders above.
+const QUOTE_PAGE_URL = "https://www.wavespestcontrol.com/quote/";
+const APP_STORE_URL =
+  import.meta.env.VITE_IOS_APP_URL ||
+  "https://apps.apple.com/us/app/waves-pest-control/id6782775654";
+const PLAY_STORE_URL =
+  import.meta.env.VITE_ANDROID_APP_URL ||
+  "https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal";
+
+export const STATIC_COMPOSER_LINKS = {
+  quote: {
+    url: QUOTE_PAGE_URL,
+    clause: `Get your free quote here: ${QUOTE_PAGE_URL}`,
+    added: "Quote link added.",
+    already: "The quote link is already in the message.",
+  },
+  appStore: {
+    url: APP_STORE_URL,
+    clause: `Download the Waves app on the App Store: ${APP_STORE_URL}`,
+    added: "App Store link added.",
+    already: "The App Store link is already in the message.",
+  },
+  playStore: {
+    url: PLAY_STORE_URL,
+    clause: `Get the Waves app on Google Play: ${PLAY_STORE_URL}`,
+    added: "Google Play link added.",
+    already: "The Google Play link is already in the message.",
+  },
+};
+
+// Append a static link clause to the composer body (empty body gets the
+// clause alone). Returns the body unchanged when the URL is already present
+// — a second click must not stack a duplicate link.
+export function appendStaticLinkClause(body, { url, clause }) {
+  const b = String(body || "");
+  if (b.includes(url)) return b;
+  if (!b.trim()) return clause;
+  return `${b.replace(/\s+$/, "")}\n\n${clause}`;
+}
+
 function SmsTab() {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
@@ -721,6 +769,9 @@ function SmsTab() {
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
+  // Insert Link dropdown (reschedule / re-service / quote / app stores) —
+  // same toggle-and-close-on-pick contract as the attach sheet above.
+  const [showLinkMenu, setShowLinkMenu] = useState(false);
 
   // Filters
   const [dirFilter, setDirFilter] = useState("all");
@@ -1534,6 +1585,20 @@ function SmsTab() {
       });
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
+
+  // Insert one of the evergreen links (quote page / app store listings).
+  // Static URLs need none of the bearer-link machinery — append once,
+  // confirm in the result line, and refuse to stack a duplicate.
+  const handleInsertStaticLink = (key) => {
+    const link = STATIC_COMPOSER_LINKS[key];
+    if (!link) return;
+    if (msgBody.includes(link.url)) {
+      setSendResult({ ok: true, text: link.already });
+      return;
+    }
+    setMsgBody((b) => appendStaticLinkClause(b, link));
+    setSendResult({ ok: true, text: link.added });
+  };
 
   const handleRewriteSms = async () => {
     const cleanBody = msgBody.trim();
@@ -2356,22 +2421,100 @@ function SmsTab() {
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
           </Button>{" "}
-          <Button
-            variant="secondary"
-            onClick={handleInsertRescheduleLink}
-            disabled={insertingResched || !toNumber.trim()}
-            title="Insert this customer's self-serve reschedule link"
-          >
-            {insertingResched ? "Adding…" : "Reschedule Link"}
-          </Button>{" "}
-          <Button
-            variant="secondary"
-            onClick={handleInsertReserviceLink}
-            disabled={insertingReservice || !toNumber.trim()}
-            title="Insert this customer's free re-service booking link"
-          >
-            {insertingReservice ? "Adding…" : "Re-Service Link"}
-          </Button>{" "}
+          {/* Insert Link dropdown — the reschedule/re-service buttons plus
+              the evergreen quote + app store links, one menu. Same
+              toggle-and-close-on-pick contract as the attach sheet. */}
+          <div className="relative">
+            {" "}
+            <Button
+              variant="secondary"
+              onClick={() => setShowLinkMenu((v) => !v)}
+              disabled={insertingResched || insertingReservice || !toNumber.trim()}
+              title="Insert a booking, quote, or app link into the message"
+              aria-haspopup="menu"
+              aria-expanded={showLinkMenu}
+            >
+              {insertingResched || insertingReservice ? "Adding…" : "Insert Link"}
+              <svg
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="ml-1.5"
+                aria-hidden="true"
+              >
+                {" "}
+                <polyline points="6 9 12 15 18 9" />{" "}
+              </svg>
+            </Button>
+            {showLinkMenu && (
+              <div
+                className="absolute top-full left-0 mt-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
+                style={{ width: 230 }}
+              >
+                {" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkMenu(false);
+                    handleInsertRescheduleLink();
+                  }}
+                  title="Insert this customer's self-serve reschedule link"
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                >
+                  Reschedule link
+                </button>{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkMenu(false);
+                    handleInsertReserviceLink();
+                  }}
+                  title="Insert this customer's free re-service booking link"
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                >
+                  Re-service link
+                </button>{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkMenu(false);
+                    handleInsertStaticLink("quote");
+                  }}
+                  title="Insert the free quote page link"
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                >
+                  Free quote link
+                </button>{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkMenu(false);
+                    handleInsertStaticLink("appStore");
+                  }}
+                  title="Insert the Waves app's App Store link"
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                >
+                  App Store link (iPhone)
+                </button>{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLinkMenu(false);
+                    handleInsertStaticLink("playStore");
+                  }}
+                  title="Insert the Waves app's Google Play link"
+                  className="block w-full text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                >
+                  Google Play link (Android)
+                </button>{" "}
+              </div>
+            )}
+          </div>{" "}
         </div>
         {sendResult && (
           <div

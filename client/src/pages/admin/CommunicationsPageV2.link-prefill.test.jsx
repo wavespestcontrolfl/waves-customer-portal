@@ -5,8 +5,10 @@
 // an em dash or curly quote flips the SMS to UCS-2 (70-char segments).
 import { describe, expect, it } from "vitest";
 import {
+  appendStaticLinkClause,
   buildReschedulePrefill,
   buildReservicePrefill,
+  STATIC_COMPOSER_LINKS,
 } from "./CommunicationsPageV2";
 
 const URL = "https://portal.wavespestcontrol.com/l/abc123";
@@ -97,5 +99,46 @@ describe("buildReservicePrefill", () => {
     expect(
       buildReservicePrefill({ firstName: null, laneLabel: "pest", url: URL }),
     ).toBeNull();
+  });
+});
+
+// The Insert Link menu's evergreen entries (quote page, app store listings)
+// share one append helper: clause alone into an empty composer, clause
+// appended below a typed draft, and never a stacked duplicate.
+describe("appendStaticLinkClause", () => {
+  const link = STATIC_COMPOSER_LINKS.quote;
+
+  it("an empty composer gets the clause alone", () => {
+    expect(appendStaticLinkClause("", link)).toBe(link.clause);
+    expect(appendStaticLinkClause("   ", link)).toBe(link.clause);
+    expect(appendStaticLinkClause(null, link)).toBe(link.clause);
+  });
+
+  it("a typed draft keeps its text and gets the clause appended", () => {
+    expect(appendStaticLinkClause("Hi PersonA, quick question.  ", link)).toBe(
+      `Hi PersonA, quick question.\n\n${link.clause}`,
+    );
+  });
+
+  it("does not stack a second copy of a link already in the body", () => {
+    const once = appendStaticLinkClause("Hi PersonA.", link);
+    expect(appendStaticLinkClause(once, link)).toBe(once);
+  });
+});
+
+describe("STATIC_COMPOSER_LINKS", () => {
+  it("carries the quote page and both app store listings", () => {
+    expect(STATIC_COMPOSER_LINKS.quote.url).toBe(
+      "https://www.wavespestcontrol.com/quote/",
+    );
+    expect(STATIC_COMPOSER_LINKS.appStore.url).toContain("apps.apple.com");
+    expect(STATIC_COMPOSER_LINKS.playStore.url).toContain("play.google.com");
+  });
+
+  it("keeps every clause plain ASCII (UCS-2 guard) and carries its own URL", () => {
+    for (const link of Object.values(STATIC_COMPOSER_LINKS)) {
+      expect(link.clause).toMatch(/^[\x00-\x7F]+$/);
+      expect(link.clause).toContain(link.url);
+    }
   });
 });
