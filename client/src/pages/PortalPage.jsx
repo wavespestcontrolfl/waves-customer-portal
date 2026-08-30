@@ -9873,13 +9873,9 @@ function MyPlanTab({ customer, focusService }) {
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
   const [serviceHistory, setServiceHistory] = useState([]);
-  const [showPauseForm, setShowPauseForm] = useState(false);
   const [showCancelForm, setShowCancelForm] = useState(false);
-  const [pauseDuration, setPauseDuration] = useState('1');
-  const [pauseReason, setPauseReason] = useState('');
   const [cancelReason, setCancelReason] = useState('');
   const [cancelDetails, setCancelDetails] = useState('');
-  const [pauseSubmitted, setPauseSubmitted] = useState(false);
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
   // Server-reported outcome of the synchronous cancel (H0): true = the plan
   // is already closed; false = the office is finishing it by hand.
@@ -9888,7 +9884,6 @@ function MyPlanTab({ customer, focusService }) {
   // ET calendar date the server reports the cancel took effect (YYYY-MM-DD);
   // on a retry this is the ORIGINAL request's date, never "today".
   const [cancelEffectiveDate, setCancelEffectiveDate] = useState(null);
-  const [pauseSubmitting, setPauseSubmitting] = useState(false);
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
@@ -10744,89 +10739,10 @@ function MyPlanTab({ customer, focusService }) {
           {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
-            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Pause or cancel your plan any time.</div>
-            {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cancel your plan any time.</div>
+            {!showCancelForm && !cancelSubmitted && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-                <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Request a Pause</button>
                 <button type="button" onClick={() => setShowCancelForm(true)} style={smallLinkButton}>Cancel</button>
-              </div>
-            )}
-
-            {showPauseForm && !pauseSubmitted && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Request a Pause</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  {/* This only files an office request — the copy must not
-                      promise a hold the office hasn't confirmed. */}
-                  Send us a pause request and we&apos;ll confirm the dates and any billing changes with you before your plan is held.
-                </div>
-                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                  {['1', '2'].map(d => (
-                    <button data-glass-accent={pauseDuration === d ? '' : undefined} key={d} type="button" onClick={() => setPauseDuration(d)} style={{
-                      border: `1px solid ${pauseDuration === d ? B.yellow : '#D8D0C0'}`,
-                      background: pauseDuration === d ? '#F8FCFE' : '#fff',
-                      color: pauseDuration === d ? B.glassNavy : B.grayDark,
-                      borderRadius: 8,
-                      padding: '8px 12px',
-                      cursor: 'pointer',
-                      fontSize: 14,
-                      fontWeight: 800,
-                      fontFamily: FONTS.body,
-                    }}>
-                      {d} month{d === '2' ? 's' : ''}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  value={pauseReason}
-                  onChange={e => setPauseReason(e.target.value)}
-                  placeholder="Reason (optional)"
-                  aria-label="Pause reason"
-                  className="waves-focus-ring"
-                  style={{
-                    width: '100%',
-                    marginTop: 10,
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    fontSize: 14,
-                    border: '1px solid #D8D0C0',
-                    fontFamily: FONTS.body,
-                    boxSizing: 'border-box',
-                  }}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                  <button
-                    type="button"
-                    disabled={pauseSubmitting}
-                    onClick={async () => {
-                      if (pauseSubmitting) return;
-                      setPauseSubmitting(true);
-                      try {
-                        await api.createRequest?.({
-                          category: 'pause',
-                          subject: `Pause plan for ${pauseDuration} month(s)`,
-                          description: `Customer requested to pause their WaveGuard ${tierName} plan for ${pauseDuration} month(s). Reason: ${pauseReason || 'Not specified'}`,
-                        });
-                        setPauseSubmitted(true);
-                        setShowPauseForm(false);
-                      } catch (err) {
-                        showCustomerAlert(`Couldn't submit pause request: ${err.message || 'please try again or call us at (941) 297-5749.'}`);
-                      } finally {
-                        setPauseSubmitting(false);
-                      }
-                    }}
-                    data-glass-accent="" style={{ ...primaryButton, opacity: pauseSubmitting ? 0.65 : 1, cursor: pauseSubmitting ? 'wait' : 'pointer' }}
-                  >
-                    {pauseSubmitting ? 'Sending...' : 'Submit Pause'}
-                  </button>
-                  <button data-glass-accent="" type="button" onClick={() => setShowPauseForm(false)} style={secondaryButton}>Never mind</button>
-                </div>
-              </div>
-            )}
-
-            {pauseSubmitted && (
-              <div style={{ marginTop: 12, color: B.glassNavy, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
-                Pause request submitted. We will confirm within 1 business day.
               </div>
             )}
 

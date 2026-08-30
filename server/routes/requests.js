@@ -11,6 +11,8 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const CancellationResolution = require('../services/cancellation-resolution');
+const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { etDateString } = require('../utils/datetime-et');
 
 function etDisplayDate(value) {
@@ -74,6 +76,14 @@ const createSchema = Joi.object({
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
   photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
+  // Cancellation resolution engine (PR E, GATE_CANCEL_FLOW_V2) — additive,
+  // all optional so every existing client payload validates unchanged. The
+  // structured v2 reason + the card the customer saw and what they did with
+  // it; recorded on the cancellation_cases row, never trusted for money
+  // (offer grants re-derive eligibility server-side in C1).
+  reasonCode: Joi.string().valid(...REASON_CODE_VALUES).optional(),
+  resolutionTemplateId: Joi.string().trim().max(60).optional(),
+  resolutionOutcome: Joi.string().valid('shown', 'accepted', 'declined').optional(),
 });
 
 // Strip any HTML-ish characters before storage so admin/UI surfaces can never
@@ -300,6 +310,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // itself remain even if this fails.
     let cancellationResult = null;
     let cancellationProcessed = false;
+    // Case snapshot must be read BEFORE the processor runs — with
+    // GATE_CANCEL_FLOW_V2 on, the churn wind-down clears tier/rate.
+    let caseSnapshot = null;
+    if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
+      try {
+        caseSnapshot = await db('customers')
+          .where({ id: req.customer.id })
+          .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'pipeline_stage');
+      } catch (snapErr) {
+        logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
+      }
+    }
     if (isCancellation) {
       try {
         cancellationResult = await processCancellationRequest({
@@ -311,6 +333,33 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
       cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
+
+      // Cancellation case (PR E) — the durable record of the reason, the one
+      // card shown, and its outcome. Best-effort AFTER the processor: a case
+      // write failure never blocks or un-reports a completed cancel.
+      if (CancellationResolution.cancelFlowV2Enabled()) {
+        try {
+          await CancellationResolution.openCancellationCase({
+            customerId: req.customer.id,
+            serviceRequestId: request.id,
+            reasonCode: value.reasonCode || null,
+            reasonText: cleanDescription || null,
+            resolution: value.resolutionTemplateId
+              ? { kind: 'card', card: { templateId: value.resolutionTemplateId, slots: {}, action: {} } }
+              : null,
+            resolutionOutcome: value.resolutionOutcome || null,
+            snapshot: {
+              tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
+              monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
+              billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
+              processed: cancellationProcessed,
+            },
+            processed: cancellationProcessed,
+          });
+        } catch (caseErr) {
+          logger.warn(`Cancellation case write failed for request ${request.id}: ${caseErr.message}`);
+        }
+      }
     }
 
     // Internal admin alert only. Service requests should surface in the admin
@@ -493,6 +542,70 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
               request.created_at
             ),
           }
+        : {}),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// GET /api/requests/cancel-resolution — resolution preview (PR E, dark)
+// =========================================================================
+// Read-only: reason + context → the ONE retention card (or hard-stop /
+// nothing) the C1 flow will render. Writes nothing, sends nothing, and only
+// ever quotes facts already on the customer's own account. 404 while
+// GATE_CANCEL_FLOW_V2 is off so the surface simply does not exist dark.
+const cancelResolutionSchema = Joi.object({
+  reason: Joi.string().valid(...REASON_CODE_VALUES).optional(),
+  families: Joi.string().trim().max(200).optional(), // csv of family keys
+  new_address: Joi.string().trim().max(400).optional(),
+  competitor_quote: Joi.string().valid('true', 'false').optional(),
+  adverse_event: Joi.string().valid('true', 'false').optional(),
+  safety_complaint: Joi.string().valid('true', 'false').optional(),
+});
+
+router.get('/cancel-resolution', authenticate, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    const { value, error } = cancelResolutionSchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+
+    const families = String(value.families || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // Moving: the transfer card only appears once the stated new address
+    // verifies INSIDE the service area; a verified out-of-area address is a
+    // clean-cancel hard stop; anything unverifiable resolves to no card.
+    let newAddressInServiceArea = null;
+    if (value.new_address) {
+      const { validateAddress } = require('../services/address-validation');
+      const verdict = await validateAddress({ addressLines: [value.new_address] });
+      newAddressInServiceArea = verdict && typeof verdict.inServiceArea === 'boolean' ? verdict.inServiceArea : null;
+    }
+
+    const preview = await CancellationResolution.previewCancellationResolution({
+      customerId: req.customer.id,
+      reasonCode: value.reason || null,
+      families,
+      context: {
+        newAddressInServiceArea,
+        hasCompetitorQuote: value.competitor_quote === 'true',
+        adverseEvent: value.adverse_event === 'true',
+        safetyComplaint: value.safety_complaint === 'true',
+      },
+    });
+    if (!preview) return res.status(404).json({ error: 'Not found' });
+
+    const { resolution } = preview;
+    res.json({
+      kind: resolution.kind,
+      reasonCode: resolution.reasonCode || null,
+      ...(resolution.kind === 'hard_stop' ? { reviewType: resolution.reviewType } : {}),
+      ...(resolution.kind === 'card'
+        ? { card: { templateId: resolution.card.templateId, headline: resolution.card.headline, body: resolution.card.body, action: resolution.card.action } }
         : {}),
     });
   } catch (err) {

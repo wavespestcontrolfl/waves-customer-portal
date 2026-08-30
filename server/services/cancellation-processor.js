@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
@@ -150,7 +151,33 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         update.churn_reason_detail = cancelReason;
         update.churn_reason_code = 'unclassified';
       }
+      // PR E (GATE_CANCEL_FLOW_V2): tier/rate wind-down — the 2026-08-30
+      // audit's money leak. Tier alignment only ever PROMOTES
+      // (self-booking-plan-sync), so a churned account that kept its
+      // waveguard_tier / monthly_rate rejoins later at the old discount
+      // forever. churn_mrr above already snapshotted the rate for reporting
+      // (first churn); on a repeat churn it was stamped the first time.
+      // Applied even when the stage was already 'churned' so admin
+      // stage-flip residue self-heals on the next processor run. Dark:
+      // gate off → byte-identical to H0.
+      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+        update.waveguard_tier = null;
+        update.waveguard_tier_source = null;
+        update.monthly_rate = null;
+      }
       await db('customers').where({ id: customerId }).update(update);
+
+      // Per-family rate components follow the scalar (canonical path:
+      // plan-rate-ledger; hasTable-guarded, no-op when the ledger is absent).
+      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+        try {
+          const { resetLedgerToScalar } = require('./plan-rate-ledger');
+          await resetLedgerToScalar(db, customerId, 0, { source: 'cancellation' });
+        } catch (ledgerErr) {
+          // Advisory store — never let it block the billing wind-down.
+          logger.warn(`[cancellation-processor] plan-rate wind-down failed for ${customerId}: ${ledgerErr.message}`);
+        }
+      }
 
       // Also disable the saved payment METHODS, mirroring the customer
       // autopay-off path: StripeService.charge() picks the default method by

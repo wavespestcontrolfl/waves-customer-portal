@@ -1,0 +1,147 @@
+'use strict';
+
+/**
+ * Retention offer — the ONE money rail in the cancel flow (owner ruling
+ * 2026-08-30): 15% off the next 2 charges of the service being cancelled,
+ * $75 cap total, applied as its own line AFTER the WaveGuard tier discount,
+ * once per customer per 18 months. Reasons that may reach it: price, diy.
+ *
+ * Eligibility is HARD FACTS ONLY (owner ruling 2026-08-29: the churn/risk
+ * signal is broken and nothing may key on it). The predicate is pure so the
+ * resolver and the tests share one definition; the ledger writes live below.
+ */
+
+const db = require('../../models/db');
+const { RETENTION_OFFER } = require('./templates');
+
+const OFFER_REASONS = Object.freeze(['price', 'diy']);
+// Families the percentage may apply to. Termite bait (rented equipment),
+// WDO and one-time work are excluded by ruling; unattributed never qualifies.
+const OFFER_FAMILIES = Object.freeze(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
+const MIN_TENURE_DAYS = 365;
+const MIN_PAID_VISITS = 4;
+const COOLDOWN_DAYS = 18 * 30;
+const OFFER_TTL_DAYS = 365;
+
+function daysBetween(a, b) {
+  return Math.floor((b.getTime() - a.getTime()) / 86400000);
+}
+
+/**
+ * Pure eligibility verdict. `facts` is the shape facts.js produces.
+ * Returns { eligible, familyKey, blockers[] } — blockers name every failed
+ * rule so the case row can record WHY no money card was shown.
+ */
+function offerEligibility(facts, { reasonCode, families = [], now = new Date() } = {}) {
+  const blockers = [];
+  if (!OFFER_REASONS.includes(reasonCode)) blockers.push('reason_not_money_eligible');
+  const scope = families.length ? families : (facts.families || []);
+  const familyKey = OFFER_FAMILIES.find((f) => scope.includes(f)) || null;
+  if (!familyKey) blockers.push('no_eligible_family');
+  if (!(facts.tenureDays >= MIN_TENURE_DAYS)) blockers.push('tenure_under_12_months');
+  if (!(facts.completedPaidVisits >= MIN_PAID_VISITS)) blockers.push('under_4_paid_visits');
+  if (facts.accountCurrent !== true) blockers.push('account_not_current');
+  if (facts.openComplaint) blockers.push('open_complaint');
+  if (facts.openCallbackLanes && facts.openCallbackLanes.length) blockers.push('open_callback');
+  if (facts.prepay) blockers.push('annual_prepay');
+  if (facts.billingMode && facts.billingMode !== 'monthly_membership' && facts.billingMode !== 'per_application') {
+    blockers.push('billing_lane_not_recurring');
+  }
+  if (facts.priorRetentionOfferAt) {
+    const at = new Date(facts.priorRetentionOfferAt);
+    if (!Number.isNaN(at.getTime()) && daysBetween(at, now) < COOLDOWN_DAYS) blockers.push('offer_within_18_months');
+  }
+  if (facts.manualPriceOverrideAt) {
+    const at = new Date(facts.manualPriceOverrideAt);
+    if (!Number.isNaN(at.getTime()) && daysBetween(at, now) < COOLDOWN_DAYS) blockers.push('manual_override_within_18_months');
+  }
+  return { eligible: blockers.length === 0, familyKey, blockers };
+}
+
+/**
+ * Grant = one retention_offers row. Idempotent per case: a second grant for
+ * the same cancellation case returns the existing row. Caller passes a trx
+ * when the grant is part of a larger commit.
+ */
+async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }, dbh = db) {
+  if (!customerId || !familyKey) throw new Error('grantRetentionOffer requires customerId and familyKey');
+  if (cancellationCaseId) {
+    const existing = await dbh('retention_offers').where({ cancellation_case_id: cancellationCaseId }).first();
+    if (existing) return existing;
+  }
+  const now = new Date();
+  const [row] = await dbh('retention_offers')
+    .insert({
+      customer_id: customerId,
+      cancellation_case_id: cancellationCaseId || null,
+      family_key: familyKey,
+      percent_off: RETENTION_OFFER.percentOff,
+      max_charges: RETENTION_OFFER.charges,
+      cap_amount: RETENTION_OFFER.capAmount,
+      status: 'granted',
+      granted_at: now,
+      expires_at: new Date(now.getTime() + OFFER_TTL_DAYS * 86400000),
+    })
+    .returning('*');
+  return row;
+}
+
+/**
+ * Pure: given an open offer row and the eligible recurring subtotal of ONE
+ * invoice (after the tier discount), return the discount line to append and
+ * the ledger delta — or null when nothing applies. The cap is on the TOTAL
+ * across the offer's charges, so the last charge may be partial.
+ */
+function retentionDiscountForInvoice(offer, eligibleSubtotal) {
+  if (!offer || offer.status !== 'granted') return null;
+  const applied = Number(offer.charges_applied) || 0;
+  if (applied >= Number(offer.max_charges)) return null;
+  const subtotal = Number(eligibleSubtotal);
+  if (!(subtotal > 0)) return null;
+  const capLeft = Math.round((Number(offer.cap_amount) - (Number(offer.amount_applied) || 0)) * 100) / 100;
+  if (!(capLeft > 0)) return null;
+  const raw = Math.round(subtotal * (Number(offer.percent_off) / 100) * 100) / 100;
+  const amount = Math.min(raw, capLeft);
+  if (!(amount > 0)) return null;
+  return {
+    amount,
+    lineItem: {
+      description: `Stay offer — ${Number(offer.percent_off)}% off (${applied + 1} of ${Number(offer.max_charges)})`,
+      quantity: 1,
+      unit_price: -amount,
+      amount: -amount,
+      category: 'retention_offer',
+    },
+    exhaustsOffer: applied + 1 >= Number(offer.max_charges) || Math.round((capLeft - amount) * 100) / 100 <= 0,
+  };
+}
+
+/**
+ * Record one application against the offer. Runs inside the caller's trx;
+ * guarded so two invoices minted in a race can never both take the same
+ * charge slot (UPDATE ... WHERE charges_applied = expected).
+ */
+async function consumeRetentionOffer({ offerId, expectedChargesApplied, amount, invoiceId, exhaustsOffer }, dbh = db) {
+  const updated = await dbh('retention_offers')
+    .where({ id: offerId, status: 'granted', charges_applied: expectedChargesApplied })
+    .update({
+      charges_applied: expectedChargesApplied + 1,
+      amount_applied: dbh.raw('COALESCE(amount_applied, 0) + ?', [amount]),
+      applied_invoice_ids: dbh.raw("COALESCE(applied_invoice_ids, '[]'::jsonb) || ?::jsonb", [JSON.stringify([invoiceId])]),
+      status: exhaustsOffer ? 'exhausted' : 'granted',
+      updated_at: new Date(),
+    });
+  return updated === 1;
+}
+
+module.exports = {
+  OFFER_REASONS,
+  OFFER_FAMILIES,
+  MIN_TENURE_DAYS,
+  MIN_PAID_VISITS,
+  COOLDOWN_DAYS,
+  offerEligibility,
+  grantRetentionOffer,
+  retentionDiscountForInvoice,
+  consumeRetentionOffer,
+};

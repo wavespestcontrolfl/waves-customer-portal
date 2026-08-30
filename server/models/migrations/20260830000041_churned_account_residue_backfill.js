@@ -1,0 +1,90 @@
+'use strict';
+
+/**
+ * Churned-account residue backfill (owner-approved 2026-08-30, rides PR E).
+ *
+ * The 2026-08-30 prod audit (server/scripts/audit-churned-accounts-live-state.js)
+ * found 18 churned/inactive accounts of which 5 carry stale live state: the
+ * admin stage-flip path never deactivated (pipeline_stage='churned' but
+ * active=true), tiers/rates linger (money leak: a partial win-back keeps the
+ * old discount forever), and recurring_ongoing=true survives on CANCELLED
+ * rows. $0 was moving (autopay off everywhere) — this is state hygiene, not
+ * billing repair.
+ *
+ * Guarded: a churned-stage account is only wound down when it has NO
+ * upcoming cancellable visit and NO live (non-cancelled) ongoing series —
+ * an account an admin stage-flipped by mistake while service continues is
+ * left alone and keeps showing up in the audit script instead.
+ *
+ * churn_mrr is snapshotted before the rate is cleared when the stamp is
+ * missing (admin stage-flips never wrote it), so churn reporting keeps its
+ * dollars. Rows changed get an audit note on the customer timeline.
+ * No customer comms. Down = no-op (data fix; the audit script is the check).
+ */
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('customers'))) return;
+
+  // 1. Stale flag first, everywhere it is unambiguous: recurring_ongoing on a
+  // CANCELLED row never dispatches but can confuse series-extension sweeps.
+  await knex('scheduled_services')
+    .where({ status: 'cancelled', recurring_ongoing: true })
+    .update({ recurring_ongoing: false, updated_at: knex.fn.now() });
+
+  // 2. Churned-stage accounts still carrying live state.
+  const candidates = await knex('customers')
+    .where({ pipeline_stage: 'churned' })
+    .where(function orResidue() {
+      this.where('active', true)
+        .orWhereNotNull('waveguard_tier')
+        .orWhereRaw('COALESCE(monthly_rate, 0) > 0');
+    })
+    .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr');
+
+  const hasLedger = await knex.schema.hasTable('customer_plan_rates');
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (const customer of candidates) {
+    const [liveSeries, upcoming] = await Promise.all([
+      knex('scheduled_services')
+        .where({ customer_id: customer.id, recurring_ongoing: true })
+        .whereNot('status', 'cancelled')
+        .first('id'),
+      knex('scheduled_services')
+        .where({ customer_id: customer.id })
+        .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
+        .where('scheduled_date', '>=', today)
+        .first('id'),
+    ]);
+    if (liveSeries || upcoming) continue; // possibly a mistaken stage-flip — leave for the audit script
+
+    const update = {
+      active: false,
+      autopay_enabled: false,
+      next_charge_date: null,
+      waveguard_tier: null,
+      monthly_rate: null,
+      updated_at: knex.fn.now(),
+    };
+    if ((await knex.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
+    if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
+    await knex('customers').where({ id: customer.id }).update(update);
+    if (hasLedger) await knex('customer_plan_rates').where({ customer_id: customer.id }).del();
+
+    await knex('customer_interactions').insert({
+      customer_id: customer.id,
+      interaction_type: 'note',
+      subject: 'Churn residue backfill (2026-08-30)',
+      body:
+        'One-off cleanup with the cancellation engine ship: account was pipeline_stage=churned but still carried ' +
+        `${customer.active ? 'active=true' : ''}${customer.active && (customer.waveguard_tier || Number(customer.monthly_rate) > 0) ? ' and ' : ''}` +
+        `${customer.waveguard_tier ? `tier ${customer.waveguard_tier}` : ''}${customer.waveguard_tier && Number(customer.monthly_rate) > 0 ? ' / ' : ''}` +
+        `${Number(customer.monthly_rate) > 0 ? `rate $${Number(customer.monthly_rate).toFixed(2)}` : ''}` +
+        '. Deactivated, cleared tier/rate/plan-rate components, autopay off. No visits or billing were live; no customer contact.',
+    }).catch(() => {});
+  }
+};
+
+exports.down = async function down() {
+  // Data fix — nothing to restore; re-run the audit script to verify state.
+};
