@@ -421,13 +421,16 @@ async function agentEstimateEnabled(req) {
   return isUserFeatureEnabled(req.technicianId, AGENT_ESTIMATE_FEATURE_KEY, false);
 }
 
-function summarizeProposal(toolName, params) {
+function summarizeProposal(toolName, params, displayParams = params) {
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
   // changed (the confirmation card must show everything the commit will do).
+  // The flatten runs over the CURATED display params (same source as the
+  // card's param list), never the stored execution params — those carry
+  // pinned opaque ids and internal `_`-prefixed pins that must not surface.
   const flat = [];
-  for (const [k, v] of Object.entries(params || {})) {
-    if (v === undefined || v === null) continue;
+  for (const [k, v] of Object.entries(displayParams || {})) {
+    if (v === undefined || v === null || k.startsWith('_')) continue;
     if (typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
         if (v2 !== undefined && v2 !== null && typeof v2 !== 'object') flat.push(`${k}.${k2}: ${String(v2)}`);
@@ -708,7 +711,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   const row = await PendingActions.createPendingAction({
     toolName: toolUse.name,
     params,
-    summary: summarizeProposal(toolUse.name, params),
+    summary: summarizeProposal(toolUse.name, params, confirmationDisplayParams(toolUse.name, params, preview)),
     requestedBy: getAdminActorId(req),
     context,
   });

@@ -727,6 +727,10 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.technician_id).toBe('tech-uuid-9');
       expect(stored.params.technician_name).toBe('Testd Tech');
+      // The summary is built from the CURATED display params: it names the
+      // tech and never carries the opaque uuid.
+      expect(stored.summary).toContain('Testd Tech');
+      expect(stored.summary).not.toContain('tech-uuid-9');
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.technician).toBe('Testd Tech');

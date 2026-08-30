@@ -282,7 +282,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
       type: 'object',
       properties: {
         limit: { type: 'number', description: 'Max results (default 5, max 20)' },
-        days: { type: 'number', description: 'Look back this many days (default 2, max 30)' },
+        days: { type: 'number', description: 'Look back this many ET calendar days including today (default 2 = today + yesterday, max 30)' },
       },
     },
   },
@@ -1656,12 +1656,17 @@ const CLOSED_OUT_AT_SQL = `COALESCE(
 async function getRecentCompletions(input = {}) {
   const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 20);
   const days = Math.min(Math.max(Number(input.days) || 2, 1), 30);
+  // ET calendar-day cutoff (not a rolling 24h window): "today" must mean the
+  // America/New_York service day, so days=1 never leaks yesterday-evening
+  // completions into a morning query. timestamptz AT TIME ZONE ET → ::date
+  // is the house pattern for ET day comparison.
+  const cutoffEtDay = etDateString(addETDays(new Date(), -(days - 1)));
   const rows = await db('scheduled_services as ss')
     .join('customers as c', 'c.id', 'ss.customer_id')
     .leftJoin('technicians as t', 't.id', 'ss.technician_id')
     .where('ss.status', 'completed')
     .whereRaw(`${CLOSED_OUT_AT_SQL} IS NOT NULL`)
-    .whereRaw(`${CLOSED_OUT_AT_SQL} >= NOW() - (? || ' days')::interval`, [days])
+    .whereRaw(`(${CLOSED_OUT_AT_SQL} AT TIME ZONE 'America/New_York')::date >= ?::date`, [cutoffEtDay])
     .orderByRaw(`${CLOSED_OUT_AT_SQL} DESC`)
     .limit(limit)
     .select(
