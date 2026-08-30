@@ -2721,12 +2721,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // A DIRECT rodent series' setup rode this prepay as its own line
           // and the mint retired the parent's per-application claim; the
           // fee is owed again now (codex #3591 r34 P1). Record-keyed and
-          // one-shot; best-effort, never blocks the void/refund sync.
-          try {
-            await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, conn, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
-          } catch (err) {
-            logger.error(`[annual-prepay] FIX: retired setup-fee claim restore FAILED for term ${updated.id} (prepay invoice ${updated.prepay_invoice_id}): ${err.message}. The series parent's pending_setup_fee is still clear — re-stamp it or bill the bait-station setup manually.`);
-          }
+          // one-shot. PROPAGATES on failure (codex #3591 r46 local P0):
+          // the term flip and this restore commit TOGETHER — a swallowed
+          // error left the cancelled term unselectable by any later sync,
+          // the claim record unused, and the $99 cleared forever. A throw
+          // rolls the whole void/refund sync back and the event retries.
+          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(updated.prepay_invoice_id, conn, { sourceEstimateId: updated.source_estimate_id || null, customerId: updated.customer_id || null, coverageServiceType: updated.coverage_service_type || null });
         }
       }
     }
@@ -2879,11 +2879,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // Same one-shot claim restore as the true-void branch (codex #3591
         // r34 P1) — a decided term's refund removes the prepay that billed
         // the direct rodent setup, so the per-application claim comes back.
-        try {
-          await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(decided.prepay_invoice_id, conn, { sourceEstimateId: decided.source_estimate_id || null, customerId: decided.customer_id || null, coverageServiceType: decided.coverage_service_type || null });
-        } catch (err) {
-          logger.error(`[annual-prepay] FIX: retired setup-fee claim restore FAILED for decided term ${decided.id} (prepay invoice ${decided.prepay_invoice_id}): ${err.message}. The series parent's pending_setup_fee is still clear — re-stamp it or bill the bait-station setup manually.`);
-        }
+        // PROPAGATES on failure (codex #3591 r46 local P0) — same
+        // atomic-with-the-transition posture as the true-refund branch.
+        await require('./invoice').restoreRetiredSetupFeeClaimForPrepay(decided.prepay_invoice_id, conn, { sourceEstimateId: decided.source_estimate_id || null, customerId: decided.customer_id || null, coverageServiceType: decided.coverage_service_type || null });
       }
     }
   }

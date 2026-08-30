@@ -280,7 +280,7 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     }
   });
 
-  test('EXISTING customer (ask gated) + saved card + owed setup → coverage auto-secured WITHOUT the fee, fee forgone + logged, no link (codex #3591 r31 P1)', async () => {
+  test('EXISTING customer + saved card + owed setup → the July gate is BYPASSED and the ask proceeds — the /secure page discloses the $99, nothing is forgone (owner ruling 2026-08-30)', async () => {
     const plans = require('../services/secure-appointment-plans');
     const logger = require('../services/logger');
     const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
@@ -288,15 +288,54 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
       mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
       mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
       const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
-      expect(res.action).toBe('auto_secured');
-      expect(mockEnrollConsentedMethod).toHaveBeenCalledTimes(1);
-      // The resolver ran once (the deferral), NOT again on the forgo pass.
-      expect(spy).toHaveBeenCalledTimes(1);
+      // NOT auto-secured without the fee, NOT skipped as existing_customer —
+      // the funnel falls through to the ask rail like a first-time customer.
+      expect(res.action).not.toBe('auto_secured');
+      expect(res.reason).not.toBe('existing_customer');
+      expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+      // Nothing stamped undisclosed; no fee forgone.
       const stamped = touches('scheduled_services')
         .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'pending_setup_fee' in patch));
       expect(stamped).toHaveLength(0);
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('FORGONE'));
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('existing-customer gate bypassed'));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('EXISTING customer + NO saved card + owed setup → the gate is bypassed too (the page also collects the card); a failed probe keeps the gate (owner ruling 2026-08-30)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(res.reason).not.toBe('existing_customer');
+      // Probe failure → fail closed to the July gate (no ask the rule may forbid).
+      spy.mockRejectedValueOnce(new Error('db down'));
+      const gated = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(gated.reason).toBe('existing_customer');
+      // Non-rodent existing customer stays gated.
+      spy.mockResolvedValueOnce(0);
+      const pest = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
+      expect(pest.reason).toBe('existing_customer');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("delivery 'none' (TCPA-blocked call booking) + owed rodent setup → staff review page, never a silent loss (codex #3591 r46 P1)", async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99);
+    try {
+      const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'none' });
+      expect(res.reason).toBe('rodent_setup_staff_review');
+      expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.stringContaining('Rodent setup'), expect.stringContaining('svc-1'), expect.anything());
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('FORGONE'));
+      // Non-rodent (no obligation) keeps the plain suppression.
+      spy.mockResolvedValueOnce(0);
+      const plain = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'none' });
+      expect(plain.reason).toBe('delivery_suppressed');
     } finally {
       spy.mockRestore();
     }

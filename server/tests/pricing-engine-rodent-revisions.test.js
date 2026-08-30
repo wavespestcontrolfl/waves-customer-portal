@@ -297,8 +297,16 @@ describe('revised rodent pricing rules', () => {
     const plain = mapV1ToLegacyShape(generateEstimate(baseInput({ services: { rodentBait: {} } })))
       .recurring.services.find(s => s.service === 'rodent_bait');
     expect(plain.perApplicationBilled).toBe(true);
-    expect(plain.tierQualifier).toBeUndefined();
-    expect(plain.excludeFromPctDiscount).toBeUndefined();
+    // Default posture is persisted EXPLICITLY (codex #3591 r46 P1) so the
+    // replay signal can freeze it — a later flag flip never re-prices the
+    // saved estimate.
+    expect(plain).toEqual(expect.objectContaining({
+      tierQualifier: true, countsTowardWaveGuardTier: true,
+      excludeFromPctDiscount: false, waveGuardDiscountEligible: true,
+    }));
+    const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    expect(rodentWaveguardPostureReplaySignal({ result: { recurring: { services: [plain] } } }))
+      .toEqual({ tierQualifier: true, excludeFromPctDiscount: false });
   });
 
   test('commercial rodent detail states the MONTHLY figure (commercial bills monthly) — never a per-application price (codex #3591 r10 P2)', () => {

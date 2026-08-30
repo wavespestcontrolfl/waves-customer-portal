@@ -937,6 +937,13 @@ async function loadAnnualPrepayTermForInvoice(invoiceId) {
 // ══════════════════════════════════════════════════════════════
 // INVOICE SERVICE
 // ══════════════════════════════════════════════════════════════
+// Durable machine marker linking a rodent-setup re-bill draft to the
+// reversed invoice it replaced (codex #3591 r46 P1) — the revival sweep
+// voids unsent replacements by it.
+function rodentSetupRebillMarker(invoiceId) {
+  return `[rodent-setup-rebill:${invoiceId}]`;
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -4994,88 +5001,87 @@ const InvoiceService = {
    * pending_setup_fee stamp on the series anchor or the fee is silently
    * gone. Anchor resolution: the invoice's own scheduled_service_id's root
    * first, else the customer's live direct rodent root. CAS onto a NULL
-   * stamp only; best-effort (never blocks the void/refund — a miss pages a
-   * human at FIX level). Prepay invoices are the claims ledger's job and
-   * are skipped here (setup_fee_claims row present).
+   * stamp only. UNEXPECTED failures PROPAGATE (codex #3591 r46 local P0):
+   * the caller's transaction rolls back and the void/refund retries, so a
+   * transient blip can never commit a reversal that lost the obligation.
+   * Deliberate data-states (no setup line, prepay claims-ledger row,
+   * occupied stamp, no rodent anchor) return null — no-anchor pages a
+   * human rather than wedging the reversal forever. Prepay invoices are
+   * the claims ledger's job and are skipped here.
    */
   async restoreRodentSetupObligationForReversedInvoice(conn, invoiceRow) {
-    try {
-      if (!invoiceRow || !invoiceRow.customer_id) return null;
-      let lines = invoiceRow.line_items;
-      if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
-      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
-      const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
-      if (!setupLine || !(amount > 0)) return null;
-      const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
-      if (claimRecord) return null; // prepay lane — restored via the claims ledger
-      const { authoritativeServiceKey } = require("./secure-appointment-plans");
-      let anchorId = null;
-      if (invoiceRow.scheduled_service_id) {
-        const own = await conn("scheduled_services")
-          .where({ id: invoiceRow.scheduled_service_id })
-          .first("id", "recurring_parent_id", "service_type", "service_id");
-        const root = own && own.recurring_parent_id
-          ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
-          : own;
-        if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+    if (!invoiceRow || !invoiceRow.customer_id) return null;
+    let lines = invoiceRow.line_items;
+    if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+    const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    if (!setupLine || !(amount > 0)) return null;
+    const claimRecord = await conn("setup_fee_claims").where({ invoice_id: invoiceRow.id }).first("id");
+    if (claimRecord) return null; // prepay lane — restored via the claims ledger
+    const { authoritativeServiceKey } = require("./secure-appointment-plans");
+    let anchorId = null;
+    if (invoiceRow.scheduled_service_id) {
+      const own = await conn("scheduled_services")
+        .where({ id: invoiceRow.scheduled_service_id })
+        .first("id", "recurring_parent_id", "service_type", "service_id");
+      const root = own && own.recurring_parent_id
+        ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+        : own;
+      if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+    }
+    if (!anchorId) {
+      const roots = await conn("scheduled_services")
+        .where({ customer_id: invoiceRow.customer_id })
+        .whereNull("recurring_parent_id")
+        .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
+        .select("id", "service_type", "service_id");
+      for (const root of roots || []) {
+        if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
       }
-      if (!anchorId) {
-        const roots = await conn("scheduled_services")
-          .where({ customer_id: invoiceRow.customer_id })
-          .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-          .select("id", "service_type", "service_id");
-        for (const root of roots || []) {
-          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
-        }
-      }
-      if (!anchorId) {
-        logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
-        return null;
-      }
-      // Same billable-visit guard as the prepay restoration (codex #3591 r45
-      // P1): a stamp on a series with no future completion is inert — mint a
-      // collectible DRAFT re-bill instead.
-      const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status", "pending_setup_fee");
-      let billable = ["pending", "confirmed", "rescheduled"].includes(String(anchorRow?.status || "").toLowerCase());
-      if (!billable) {
-        const liveChild = await conn("scheduled_services")
-          .where({ recurring_parent_id: anchorId })
-          .whereIn("status", ["pending", "confirmed", "rescheduled"])
-          .first("id");
-        billable = !!liveChild;
-      }
-      if (!billable) {
-        const reInvoice = await this.create({
-          database: conn,
-          customerId: invoiceRow.customer_id,
-          title: "Bait Station Setup",
-          lineItems: [{
-            description: "Bait Station Setup — one-time setup fee",
-            quantity: 1,
-            unit_price: amount,
-            category: "Setup fee",
-          }],
-          notes: `Re-billed after invoice ${invoiceRow.id} was voided/refunded — the series has no future visit left to collect the setup on (visit ${anchorId}).`,
-          dueDate: etDateString(),
-        });
-        logger.info(`[invoice] reversed invoice ${invoiceRow.id}: setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${anchorId}`);
-        return { scheduledServiceId: anchorId, amount, reInvoiceId: reInvoice?.id || null };
-      }
-      const stamped = await conn("scheduled_services")
-        .where({ id: anchorId })
-        .whereNull("pending_setup_fee")
-        .update({ pending_setup_fee: amount, updated_at: new Date() });
-      if (stamped !== 1) {
-        logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
-        return null;
-      }
-      logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed`);
-      return { scheduledServiceId: anchorId, amount };
-    } catch (err) {
-      logger.error(`[invoice] FIX: rodent setup restore failed for reversed invoice ${invoiceRow?.id}: ${err.message} — re-bill the setup manually`);
+    }
+    if (!anchorId) {
+      logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
       return null;
     }
+    // Same billable-visit guard as the prepay restoration (codex #3591 r45
+    // P1): a stamp on a series with no future completion is inert — mint a
+    // collectible DRAFT re-bill instead.
+    const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status", "pending_setup_fee");
+    let billable = ["pending", "confirmed", "rescheduled"].includes(String(anchorRow?.status || "").toLowerCase());
+    if (!billable) {
+      const liveChild = await conn("scheduled_services")
+        .where({ recurring_parent_id: anchorId })
+        .whereIn("status", ["pending", "confirmed", "rescheduled"])
+        .first("id");
+      billable = !!liveChild;
+    }
+    if (!billable) {
+      const reInvoice = await this.create({
+        database: conn,
+        customerId: invoiceRow.customer_id,
+        title: "Bait Station Setup",
+        lineItems: [{
+          description: "Bait Station Setup — one-time setup fee",
+          quantity: 1,
+          unit_price: amount,
+          category: "Setup fee",
+        }],
+        notes: `Re-billed after invoice ${invoiceRow.id} was voided/refunded — the series has no future visit left to collect the setup on (visit ${anchorId}). ${rodentSetupRebillMarker(invoiceRow.id)}`,
+        dueDate: etDateString(),
+      });
+      logger.info(`[invoice] reversed invoice ${invoiceRow.id}: setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${anchorId}`);
+      return { scheduledServiceId: anchorId, amount, reInvoiceId: reInvoice?.id || null };
+    }
+    const stamped = await conn("scheduled_services")
+      .where({ id: anchorId })
+      .whereNull("pending_setup_fee")
+      .update({ pending_setup_fee: amount, updated_at: new Date() });
+    if (stamped !== 1) {
+      logger.warn(`[invoice] reversed invoice ${invoiceRow.id}: rodent setup NOT re-stamped on series ${anchorId} (stamp occupied) — obligation already tracked`);
+      return null;
+    }
+    logger.info(`[invoice] rodent setup obligation restored on series ${anchorId} ($${amount.toFixed(2)}) — invoice ${invoiceRow.id} reversed`);
+      return { scheduledServiceId: anchorId, amount };
   },
 
   /**
@@ -5085,62 +5091,85 @@ const InvoiceService = {
    * setup line is live again, so the restored stamp must be retired and
    * the claims-ledger record recreated — or the next completion bills the
    * setup a SECOND time. Idempotent (record insert is onConflict-ignored;
-   * stamp CAS by exact value); best-effort — a miss pages a human.
+   * stamp CAS by exact value). Unexpected failures PROPAGATE so the
+   * revival sync retries (codex #3591 r46 local P0); a missing anchor or
+   * mid-mint stamp pages a human instead of wedging the revival.
    */
   async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
-    try {
-      if (!prepayInvoiceId) return null;
-      const invoiceRow = await conn("invoices")
-        .where({ id: prepayInvoiceId })
-        .first("id", "customer_id", "scheduled_service_id", "line_items");
-      if (!invoiceRow) return null;
-      let lines = invoiceRow.line_items;
-      if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
-      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
-      const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
-      if (!setupLine || !(amount > 0)) return null;
-      const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
-      let anchorId = null;
-      if (invoiceRow.scheduled_service_id) {
-        const own = await conn("scheduled_services")
-          .where({ id: invoiceRow.scheduled_service_id })
-          .first("id", "recurring_parent_id", "service_type", "service_id");
-        const root = own && own.recurring_parent_id
-          ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
-          : own;
-        if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+    if (!prepayInvoiceId) return null;
+    const invoiceRow = await conn("invoices")
+      .where({ id: prepayInvoiceId })
+      .first("id", "customer_id", "scheduled_service_id", "line_items");
+    if (!invoiceRow) return null;
+    let lines = invoiceRow.line_items;
+    if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+    const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+    const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+    if (!setupLine || !(amount > 0)) return null;
+    const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
+    let anchorId = null;
+    if (invoiceRow.scheduled_service_id) {
+      const own = await conn("scheduled_services")
+        .where({ id: invoiceRow.scheduled_service_id })
+        .first("id", "recurring_parent_id", "service_type", "service_id");
+      const root = own && own.recurring_parent_id
+        ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+        : own;
+      if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+    }
+    if (!anchorId) {
+      const roots = await conn("scheduled_services")
+        .where({ customer_id: invoiceRow.customer_id })
+        .whereNull("recurring_parent_id")
+        .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
+        .select("id", "service_type", "service_id");
+      for (const root of roots || []) {
+        if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
       }
-      if (!anchorId) {
-        const roots = await conn("scheduled_services")
-          .where({ customer_id: invoiceRow.customer_id })
-          .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
-          .select("id", "service_type", "service_id");
-        for (const root of roots || []) {
-          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
-        }
-      }
-      if (!anchorId) {
-        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} bills a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — clear any restored pending_setup_fee manually`);
-        return null;
-      }
-      await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
-      const parent = await conn("scheduled_services").where({ id: anchorId }).first("id", "pending_setup_fee");
-      const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
-      let retired = 0;
-      if (stamp != null && stamp > 0) {
-        retired = await conn("scheduled_services")
-          .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
-          .update({ pending_setup_fee: null, updated_at: new Date() });
-      } else if (stamp != null && stamp < 0) {
-        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim (negative stamp) — reconcile the setup manually`);
-      }
-      logger.info(`[invoice] revived prepay ${prepayInvoiceId}: setup claim re-ledgered on series ${anchorId}${retired === 1 ? " and the restored stamp retired" : ""}`);
-      return { scheduledServiceId: anchorId, amount, retired: retired === 1 };
-    } catch (err) {
-      logger.error(`[invoice] FIX: revived-prepay setup retire failed for ${prepayInvoiceId}: ${err.message} — reconcile the setup manually`);
+    }
+    if (!anchorId) {
+      logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} bills a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — clear any restored pending_setup_fee manually`);
       return null;
     }
+    await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
+    // SERIALIZED with completion (codex #3591 r46 P1): the parent is read
+    // FOR UPDATE so a technician's in-flight claim (negative stamp) cannot
+    // slip between an unlocked read and the CAS. A mid-claim stamp FAILS
+    // the revival — the sync rolls back and the event retries after the
+    // completion settles, instead of double-billing the setup.
+    const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
+    const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+    if (stamp != null && stamp < 0) {
+      throw new Error(`revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim — retrying after it settles`);
+    }
+    let retired = 0;
+    if (stamp != null && stamp > 0) {
+      retired = await conn("scheduled_services")
+        .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
+        .update({ pending_setup_fee: null, updated_at: new Date() });
+    }
+    // A dead-series reversal minted a replacement setup draft instead of a
+    // stamp (codex #3591 r46 P1) — the revived prepay's own line is live
+    // again, so an UNSENT draft replacement is voided here; anything
+    // already sent/paid pages a human instead of a silent double-collect.
+    const rebills = await conn("invoices")
+      .where("notes", "like", `%${rodentSetupRebillMarker(prepayInvoiceId)}%`)
+      .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id");
+    let voidedRebills = 0;
+    for (const rb of rebills || []) {
+      const untouchedDraft = String(rb.status).toLowerCase() === "draft" && !rb.sent_at && !rb.paid_at && !rb.payment_recorded_at && !rb.stripe_payment_intent_id;
+      if (untouchedDraft) {
+        voidedRebills += await conn("invoices")
+          .where({ id: rb.id, status: rb.status })
+          .whereNull("sent_at").whereNull("paid_at")
+          .update({ status: "void", updated_at: new Date() });
+      } else {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: replacement setup invoice ${rb.id} is ${rb.status}${rb.sent_at ? "/sent" : ""} — reconcile so the setup is not collected twice`);
+      }
+    }
+    logger.info(`[invoice] revived prepay ${prepayInvoiceId}: setup claim re-ledgered on series ${anchorId}${retired === 1 ? ", restored stamp retired" : ""}${voidedRebills ? `, ${voidedRebills} replacement draft(s) voided` : ""}`);
+    return { scheduledServiceId: anchorId, amount, retired: retired === 1 };
   },
 
   async restoreRetiredSetupFeeClaimForPrepay(prepayInvoiceId, conn = db, { sourceEstimateId = null, customerId = null, coverageServiceType = null } = {}) {
@@ -5172,10 +5201,13 @@ const InvoiceService = {
     if (!anchorId) {
       const { authoritativeServiceKey } = require("./secure-appointment-plans");
       if (sourceEstimateId) {
+        // 'rescheduled' roots stay (codex #3591 r46 P1): the legacy customer
+        // reschedule marks the ROOT while live children remain — the
+        // billable-visit check below already treats it as live.
         const roots = await conn("scheduled_services")
           .where({ source_estimate_id: sourceEstimateId })
           .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+          .whereNotIn("status", ["cancelled", "canceled"])
           .select("id", "service_type", "service_id");
         for (const root of roots || []) {
           if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
@@ -5189,7 +5221,7 @@ const InvoiceService = {
         const roots = await conn("scheduled_services")
           .where({ customer_id: customerId })
           .whereNull("recurring_parent_id")
-          .whereNotIn("status", ["cancelled", "canceled", "rescheduled"])
+          .whereNotIn("status", ["cancelled", "canceled"])
           .select("id", "service_type", "service_id", "source_estimate_id");
         for (const root of roots || []) {
           if (root.source_estimate_id || !serviceMatchesCoverage(root, coverageServiceType)) continue;
@@ -5242,7 +5274,7 @@ const InvoiceService = {
             unit_price: amount,
             category: "Setup fee",
           }],
-          notes: `Re-billed after prepay invoice ${prepayInvoiceId} was voided/refunded — the series has no future visit left to collect the setup on (visit ${parent.id}).`,
+          notes: `Re-billed after prepay invoice ${prepayInvoiceId} was voided/refunded — the series has no future visit left to collect the setup on (visit ${parent.id}). ${rodentSetupRebillMarker(prepayInvoiceId)}`,
           dueDate: etDateString(),
         });
         await conn("setup_fee_claims").where({ id: claim.id }).delete();
@@ -5919,6 +5951,7 @@ InvoiceService._internals = {
 InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'canceled', 'cancelled'];
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
+InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;

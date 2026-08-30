@@ -892,17 +892,18 @@ function mapV1ToLegacyShape(v1Result) {
           // Billing-unit marker — new rows bill per application; legacy
           // monthly-billed rodent rows never carry it.
           perApplicationBilled: true,
-          // The LIVE eligibility posture the pricer stamped from
-          // pricing_config.rodent_waveguard (codex #3591 r22 P1): an
-          // operator who turned tier_qualifier off or the % exclusion on
-          // must see that on the mapped row, or every downstream reader
-          // (cross-sell copy, PriceCard tag, portal) defaults it back to a
-          // qualifying, discountable member.
-          ...(rbLI.tierQualifier === false || rbLI.countsTowardWaveGuardTier === false
-            ? { tierQualifier: false, countsTowardWaveGuardTier: false }
-            : {}),
+          // The eligibility posture the pricer stamped from
+          // pricing_config.rodent_waveguard, persisted EXPLICITLY in both
+          // directions (codex #3591 r22 P1, r46 P1): the affirmative
+          // booleans must survive too, or rodentWaveguardPostureReplaySignal
+          // reads null on a default-posture save and a later flag flip
+          // re-prices the sent estimate.
+          tierQualifier: !(rbLI.tierQualifier === false || rbLI.countsTowardWaveGuardTier === false),
+          countsTowardWaveGuardTier: !(rbLI.tierQualifier === false || rbLI.countsTowardWaveGuardTier === false),
+          excludeFromPctDiscount: rbLI.excludeFromPctDiscount === true || rbLI.discountable === false,
+          waveGuardDiscountEligible: !(rbLI.excludeFromPctDiscount === true || rbLI.discountable === false),
           ...(rbLI.excludeFromPctDiscount === true || rbLI.discountable === false
-            ? { excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false, discountEligible: false }
+            ? { discountable: false, discountEligible: false }
             : {}),
         }),
     });

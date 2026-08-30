@@ -536,12 +536,15 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     ],
   };
   const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
-  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow } = {}) {
+  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow, rebills = [] } = {}) {
     const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
     const inner = c;
     const wrapped = (table) => {
       const q = inner(table);
-      if (table === 'invoices') q.first = async () => invoiceRow;
+      if (table === 'invoices') {
+        q.first = async () => invoiceRow;
+        q.select = async () => rebills;
+      }
       return q;
     };
     wrapped.writes = inner.writes;
@@ -558,16 +561,40 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
     ]);
   });
 
-  test('no restored stamp → record only; negative stamp → record + FIX (never cleared); no setup line → no-op', async () => {
+  test('no restored stamp → record only; a completion mid-claim (negative stamp, read FOR UPDATE) FAILS the revival so the sync retries (codex #3591 r46 P1); no setup line → no-op', async () => {
     const clean = revivalConn({ stamp: null });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(clean, 'inv-prepay')).toMatchObject({ retired: false });
     expect(clean.writes.map((w) => w.table)).toEqual(['setup_fee_claims']);
     const busy = revivalConn({ stamp: '-99.00' });
-    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(busy, 'inv-prepay')).toMatchObject({ retired: false });
+    await expect(InvoiceService.retireRodentSetupObligationForRevivedPrepay(busy, 'inv-prepay'))
+      .rejects.toThrow(/completion mid-claim/);
     expect(busy.writes.filter((w) => w.op === 'update')).toEqual([]);
     const noSetup = revivalConn({ invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] } });
     expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(noSetup, 'inv-prepay')).toBeNull();
     expect(noSetup.writes).toEqual([]);
+  });
+
+  test('a dead-series replacement draft is VOIDED on revival; a sent/paid replacement pages a human instead (codex #3591 r46 P1)', async () => {
+    const marker = InvoiceService.rodentSetupRebillMarker('inv-prepay');
+    const draft = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'draft', sent_at: null, paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(draft, 'inv-prepay')).toMatchObject({ retired: false });
+    expect(draft.writes).toEqual([
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert' }),
+      expect.objectContaining({ table: 'invoices', op: 'update', where: { id: 'inv-rebill', status: 'draft' }, patch: expect.objectContaining({ status: 'void' }) }),
+    ]);
+    expect(marker).toBe('[rodent-setup-rebill:inv-prepay]');
+    const sent = revivalConn({ stamp: null, rebills: [{ id: 'inv-rebill', status: 'sent', sent_at: '2026-08-30', paid_at: null, payment_recorded_at: null, stripe_payment_intent_id: null }] });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(sent, 'inv-prepay')).toMatchObject({ retired: false });
+    expect(sent.writes.filter((w) => w.table === 'invoices')).toEqual([]);
+  });
+
+  test('anchor-less restore lookups keep RESCHEDULED roots (source contract, codex #3591 r46 P1)', () => {
+    const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
+    const lockedAt = invoiceSrc.indexOf('_restoreRetiredSetupFeeClaimLocked(conn, prepayInvoiceId');
+    const section = invoiceSrc.slice(lockedAt, invoiceSrc.indexOf('const parent = await conn("scheduled_services")', lockedAt));
+    expect(section).not.toMatch(/whereNotIn\("status", \["cancelled", "canceled", "rescheduled"\]\)/);
+    // Both re-bill mints carry the machine marker the revival sweep voids by.
+    expect((invoiceSrc.match(/rodentSetupRebillMarker\(/g) || []).length).toBeGreaterThanOrEqual(3);
   });
 
   test('wired into BOTH term revival transitions (source contract)', () => {

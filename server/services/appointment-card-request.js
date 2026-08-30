@@ -291,7 +291,7 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
 // A refused/failed enrollment returns a retryable skip so the next
 // trigger re-attempts; enrollment is idempotent, so a concurrent double
 // run resolves as already_enrolled.
-async function autoSecureFromSavedMethod({ visit, savedMethod, trigger, forgoDirectRodentSetup = false }) {
+async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
   // ONE transaction, visit row locked first (Codex #3361 r26 P1,
   // superseding the r9 read-only re-check): the live-status check, the
   // enrollment (a savepoint via enrollConsentedMethod's dbh param), and
@@ -348,10 +348,7 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger, forgoDir
       // (accepted_setup_fee) and the per-application choice stamps exactly
       // the disclosed figure. Resolved BEFORE the enrollment savepoint so a
       // skip writes nothing; a resolver failure throws → skip (fail closed).
-      // forgoDirectRodentSetup: the caller already resolved the obligation,
-      // decided (existing customer, ask gated) to secure coverage without it,
-      // and logged the forgone fee — never a silent default.
-      if (!forgoDirectRodentSetup) {
+      {
         const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
         const directRodentSetup = await resolveDirectRodentSetupObligation(trx, visit);
         if (directRodentSetup > 0) return skip('rodent_setup_undisclosed', { setupFee: directRodentSetup });
@@ -526,21 +523,17 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     } catch (err) {
       logger.warn(`[appt-card-request] prior-service check failed — proceeding to request: ${err.message}`);
     }
+    let rodentSetupNeedsDisclosure = false;
     if (savedMethod) {
       const secured = await autoSecureFromSavedMethod({ visit, savedMethod, trigger });
-      // An undisclosed rodent setup is the ONE skip that does not end here.
-      // First-time customer: fall through to the ask — the /secure plan page
-      // discloses and freezes the fee. Existing customer (ask gated by the
-      // owner rule above; codex #3591 r31 P1): the visit must not lose its
-      // card coverage, so auto-secure runs WITHOUT the fee — the setup is
-      // never billed undisclosed (owner ruling pending on whether the
-      // disclosure link should reach existing customers; until then the
-      // $99 is forgone and logged, never charged silently).
+      // An undisclosed rodent setup is the ONE skip that does not end here:
+      // EVERY customer falls through to the ask — the /secure plan page
+      // discloses and freezes the fee. Owner ruling 2026-08-30: direct
+      // rodent-bait bookings are an EXCEPTION to the 2026-07-30
+      // existing-customer ask gate (the page is a fee disclosure, not an
+      // add-a-card nag), so the fee is never forgone or billed undisclosed.
       if (secured.reason !== 'rodent_setup_undisclosed') return secured;
-      if (existingCustomer) {
-        logger.warn(`[appt-card-request] direct rodent setup ($${secured.setupFee}) FORGONE for visit ${visit.id}: existing customer, ask gated (owner rule 2026-07-30) — auto-securing coverage without the fee`);
-        return autoSecureFromSavedMethod({ visit, savedMethod, trigger, forgoDirectRodentSetup: true });
-      }
+      rodentSetupNeedsDisclosure = true;
       logger.info(`[appt-card-request] saved-card auto-secure deferred for visit ${visit.id} — direct rodent setup ($${secured.setupFee}) needs the plan-page disclosure`);
     }
 
@@ -549,12 +542,57 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // uses it when the call-level TCPA verdict blocked messaging, so this
     // path must never mint a token or send a card link on stored consent
     // (Codex #3361 r3 P1). The pre-visit sweep and a later cleared trigger
-    // remain the ask's delivery surfaces.
-    if (delivery === 'none') return skip('delivery_suppressed');
+    // remain the ask's delivery surfaces. EXCEPT (codex #3591 r46 P1): a
+    // direct rodent series that owes its setup would exit here with no link
+    // ever minted and no stamp — the pre-visit sweep skips it (its own
+    // recurring row satisfies the recurring probe) and the $99 silently
+    // vanishes. Messaging stays blocked (TCPA); staff get paged to handle
+    // the disclosure themselves. Probe failure falls back to the plain skip.
+    if (delivery === 'none') {
+      let rodentOwedHere = rodentSetupNeedsDisclosure;
+      if (!rodentOwedHere && !savedMethod) {
+        try {
+          const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+          rodentOwedHere = (await resolveDirectRodentSetupObligation(db, { id: visit.id })) > 0;
+        } catch (err) {
+          logger.warn(`[appt-card-request] rodent setup probe failed for suppressed-delivery visit ${visit.id}: ${err.message}`);
+        }
+      }
+      if (rodentOwedHere) {
+        logger.error(`[appt-card-request] FIX: visit ${visit.id} owes the rodent bait-station setup but messaging is suppressed (TCPA) — send the /secure link or collect the setup manually`);
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Rodent setup needs manual disclosure',
+            `A direct rodent bait booking owes its bait-station setup, but the call's TCPA verdict blocked messaging — no /secure link was sent. Handle the disclosure from the schedule (visit ${visit.id}).`,
+            { icon: '🐀', link: '/admin/schedule' },
+          );
+        } catch { /* best-effort page */ }
+        return skip('rodent_setup_staff_review');
+      }
+      return skip('delivery_suppressed');
+    }
 
     // Owner rule 2026-07-30 (probed above): only the ASK is gated for
-    // existing customers; saved-card auto-secure already ran.
-    if (existingCustomer) return skip('existing_customer');
+    // existing customers; saved-card auto-secure already ran. EXCEPTION
+    // (owner ruling 2026-08-30): a direct rodent series that owes its
+    // bait-station setup still gets the /secure page — with no saved card
+    // it also collects the card; either way the $99 is disclosed and
+    // frozen there instead of silently forgone. A failed probe keeps the
+    // gate (never send an ask the rule may forbid).
+    if (existingCustomer) {
+      let rodentSetupOwed = rodentSetupNeedsDisclosure;
+      if (!rodentSetupOwed) {
+        try {
+          const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+          rodentSetupOwed = (await resolveDirectRodentSetupObligation(db, { id: visit.id })) > 0;
+        } catch (err) {
+          logger.warn(`[appt-card-request] rodent setup probe failed for visit ${visit.id} — keeping the existing-customer gate: ${err.message}`);
+        }
+      }
+      if (!rodentSetupOwed) return skip('existing_customer');
+      logger.info(`[appt-card-request] existing-customer gate bypassed for visit ${visit.id} — direct rodent series owes its bait-station setup (owner ruling 2026-08-30)`);
+    }
 
     // 3. Existing pending/complete capture for this appointment. An inline
     // caller re-running (page refresh, booking retry) gets the SAME pending
