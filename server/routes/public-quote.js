@@ -1199,6 +1199,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
     const quoteRequiredReason = manualQuoteLine?.reason
+      // The turf-review lines expose their reason via customQuoteReason /
+      // manualReviewReasons, not `reason` — without these legs a parked
+      // RESIDENTIAL lawn quote fell through to the commercial fallback copy
+      // below and told the customer commercial properties need a manual
+      // quote (GH codex P2 on 2aaf7d9a5).
+      || manualQuoteLine?.customQuoteReason
+      || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
@@ -2206,6 +2213,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? `${keyedService?.name || serviceInterest} is priced by our team, not the calculator — we'll send your estimate shortly.`
           : quoteRequiredReason === 'unit_in_multi_unit_building'
           ? 'Condo and multi-unit pricing is set per unit, not per building — the Waves team will confirm the exact price for your unit.'
+          : quoteRequiredReason === 'low_confidence_turf_requires_field_verification'
+          ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
+          : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
+          ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
