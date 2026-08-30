@@ -985,9 +985,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
     engineInput.measuredTurfSf = num(trustedTurf.measuredTurfSf);
-    engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
-    if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
-    if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+    // A parcel-capped vision estimate only describes the parcel it was
+    // capped against. When the lot the ENGINE will price differs from the
+    // lookup profile's lot (customer corrected it — lotSizeConfirmed wins),
+    // the capped figure is stale and must not ride in as a MEDIUM vision
+    // estimate; dropping it lands on the lot fallback → LOW → review
+    // (GH codex P1 on 5b23b152d). An uncapped estimate is lot-independent
+    // and forwards regardless.
+    const parcelCapStale = trustedTurf.turfCappedToParcel === true
+      && Number(trustedTurf.lotSqFt) > 0
+      && Math.abs(Number(lot) - Number(trustedTurf.lotSqFt)) > 1;
+    if (!parcelCapStale) {
+      engineInput.estimatedTurfSf = num(trustedTurf.estimatedTurfSf);
+      if (trustedTurf.turfSource) engineInput.turfSource = trustedTurf.turfSource;
+      if (trustedTurf.turfCappedToParcel === true) engineInput.turfCappedToParcel = true;
+    }
     if (num(trustedTurf.countyTurfPriorSf) !== undefined) engineInput.countyTurfPriorSf = num(trustedTurf.countyTurfPriorSf);
     // The county-derived ceiling clamps a vision estimate that exceeds the
     // trusted county geometry (computeTurfArea's plausible-max path) — the
