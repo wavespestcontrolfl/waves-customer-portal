@@ -114,25 +114,27 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey, 
         err.code = 'retention_offer_case_mismatch';
         throw err;
       }
-      // The DURABLE case authorizes the grant, not the caller: its recorded
-      // reason must be the money-eligible reason claimed, and when the case
-      // recorded a resolution action it must be a retention offer for this
-      // family. A caller cannot upgrade an 'away' case into a 'price' offer.
-      if (caseRow) {
-        if (caseRow.reason_code && caseRow.reason_code !== reasonCode) {
-          const err = new Error('retention_offer_case_reason_mismatch');
-          err.code = 'retention_offer_case_reason_mismatch';
-          throw err;
-        }
-        let action = caseRow.resolution_action;
-        if (typeof action === 'string') { try { action = JSON.parse(action); } catch { action = null; } }
-        if (action && typeof action === 'object' && Object.keys(action).length) {
-          if (action.type !== 'retention_offer' || (action.familyKey && action.familyKey !== familyKey)) {
-            const err = new Error('retention_offer_case_action_mismatch');
-            err.code = 'retention_offer_case_action_mismatch';
-            throw err;
-          }
-        }
+      // The DURABLE case authorizes the grant, not the caller — FAIL CLOSED
+      // on anything missing: the case must exist, its recorded reason must
+      // exactly match the claimed money reason, and its recorded resolution
+      // action must be a retention offer for this exact family. A case that
+      // never recorded an offer (NULL fields included) authorizes nothing.
+      if (!caseRow) {
+        const err = new Error('retention_offer_case_missing');
+        err.code = 'retention_offer_case_missing';
+        throw err;
+      }
+      if (caseRow.reason_code !== reasonCode) {
+        const err = new Error('retention_offer_case_reason_mismatch');
+        err.code = 'retention_offer_case_reason_mismatch';
+        throw err;
+      }
+      let action = caseRow.resolution_action;
+      if (typeof action === 'string') { try { action = JSON.parse(action); } catch { action = null; } }
+      if (!action || typeof action !== 'object' || action.type !== 'retention_offer' || action.familyKey !== familyKey) {
+        const err = new Error('retention_offer_case_action_mismatch');
+        err.code = 'retention_offer_case_action_mismatch';
+        throw err;
       }
     }
     // Re-derive FULL eligibility from fresh facts under the advisory lock —
