@@ -5994,7 +5994,12 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // move and text them as separate stops. Same rule as
               // update-details: refuse before the first write; the schedule's
               // move (the unit mover) carries the whole visit.
-              if (svc.visit_id && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+              // ANY effective slot change (codex #3609 r25 P1) — a same-day
+              // window move detaches a member just as a date move does.
+              const bulkSlotChanges = dateOnly(svc.scheduled_date) !== bulkTargetDate
+                || (payload?.windowStart !== undefined && payload?.windowStart !== null && payload?.windowStart !== '')
+                || (payload?.windowEnd !== undefined && payload?.windowEnd !== null && payload?.windowEnd !== '');
+              if (svc.visit_id && bulkSlotChanges) {
                 // Under the row's STOP lock (the visit writers' own key, after
                 // rung 1 — the order update-details uses), so a
                 // createOrJoinVisit that would add a sibling serializes

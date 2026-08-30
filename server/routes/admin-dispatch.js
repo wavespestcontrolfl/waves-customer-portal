@@ -15079,10 +15079,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // admin-schedule lazily requires this module too; neither runs at load.
       const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
       const win = parseRescheduleWindow(effectiveWindow);
+      // A grouped stop moved as a unit: the one notice quotes the STOP's
+      // landed arrival start (visitMove.visitStart — the earliest member),
+      // not the tapped member's requested start (codex #3609 r25 P1).
+      const noticeStart = result.visitMove?.visitStart || win.start;
       const notice = await sendRescheduleNoticeForVisit(
         req.params.serviceId,
         String(newDate).split('T')[0],
-        win.start,
+        noticeStart,
       );
       return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }

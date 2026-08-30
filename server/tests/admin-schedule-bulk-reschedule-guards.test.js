@@ -191,6 +191,22 @@ test('a GROUPED member is refused before any write (codex #3609 r23 P1): the bul
   expect(updateChain.update).not.toHaveBeenCalled();
 });
 
+test('a GROUPED member is refused on a SAME-DAY window move too (codex #3609 r25 P1) — any effective slot change detaches it', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, scheduled_date: '2099-01-15', status: 'pending', visit_id: 'visit-1' }) }),
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2099-01-15' }) }),
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2099-01-15' }) }),
+      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1' }, { id: 'svc-2' }]) }),
+      updateChain,
+    ],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15', windowStart: '13:00', windowEnd: '14:00' } });
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: expect.stringMatching(/grouped with another service/) }]);
+  expect(updateChain.update).not.toHaveBeenCalled();
+});
+
 test('an UNGROUPED row pins visit_id IS NULL in its CAS (a row grouped since the read misses instead of moving alone)', async () => {
   const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
   wireTrx({

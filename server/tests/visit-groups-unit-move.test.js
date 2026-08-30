@@ -769,6 +769,17 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
+  test('visitMove.visitStart is the STOP\'s landed arrival start (earliest represented member), for the caller\'s one notice (codex #3609 r25 P1)', async () => {
+    // tapped 10:00 sibling moved to 11:00 (+1h) shifts its 09:00 sibling to 10:00 ⇒ the stop starts at 10:00, not 11:00
+    db.__script = script({ visit: { ...VISIT, window_start: '09:00', window_end: '11:00' }, members: [member('b', { window_start: '09:00', window_end: '10:00' }), member('a', { window_start: '10:00', window_end: '11:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '11:00', window_end: '12:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: '10:00', window_end: '11:00', technician_id: 't1' },
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '11:00-12:00', initiatedBy: 'admin' });
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
+    expect(out.visitMove.visitStart).toBe('10:00');
+  });
+
   test('a sibling whose shifted window would cross midnight is refused before any write — shiftClock must not wrap it into an early-morning window on the same date (codex r24 P2)', async () => {
     // 14:00–19:00 anchor chained to a 19:00–20:00 sibling, anchor moved to 19:00–20:00 (+5h) ⇒ sibling 00:00–01:00 next day
     db.__script = script({ visit: { ...VISIT, window_start: '14:00', window_end: '20:00' }, members: [member('a', { window_start: '14:00', window_end: '19:00' }), member('b', { window_start: '19:00', window_end: '20:00' })] });

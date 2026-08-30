@@ -50,6 +50,9 @@ jest.mock('../services/rebooker', () => ({
   collectiveMoveGateOn: () => process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
   previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, occurrenceIds: ['o1', 'o2', 'o3', 'o4'], skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
 }));
+jest.mock('../routes/admin-schedule', () => ({
+  sendRescheduleNoticeForVisit: jest.fn(async () => ({ sent: true, error: null })),
+}));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
 }));
@@ -142,6 +145,20 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     mockOpenMembers = [{ id: 'a', status: 'confirmed' }];
     expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' })).body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('the single customer notice for a grouped unit move quotes the STOP\'s landed start (visitMove.visitStart), not the tapped member\'s (codex #3609 r25 P1)', async () => {
+    const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: '11111111-1111-4111-8111-111111111111' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true, visitMove: { visitId: 'v1', moved: ['a', 'b'], failed: [], unchanged: [], visitStart: '10:00' } });
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(status).toBe(200);
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '10:00');
+    // ungrouped: the requested start
+    jest.clearAllMocks();
+    mockVisitRow = { ...recurringRow(), is_recurring: false, visit_id: null };
+    await reschedule({ newDate: TARGET, newWindow: { start: '11:00', end: '12:00' }, scope: 'this_only', notifyCustomer: true });
+    expect(sendRescheduleNoticeForVisit).toHaveBeenCalledWith(expect.any(String), TARGET, '11:00');
   });
 
   test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {

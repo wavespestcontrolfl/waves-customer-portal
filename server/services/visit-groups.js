@@ -2245,7 +2245,17 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // visit's move without a write, so batch callers treat them as covered
   // (codex r19): never re-moved or re-texted as a second stop.
   const unchanged = plan.targets.filter((x) => x.alreadyAtTarget).map((x) => String(x.id));
-  const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
+  // visitStart: the STOP's landed arrival start — the earliest start among
+  // the members this move represents (moved + already-at-target) — so a
+  // caller's ONE customer notice quotes the stop's window, not the tapped
+  // member's (a later chained member moved to 11:00 can shift its 09:00
+  // sibling to 10:00: the customer is told 10:00, codex #3609 r25 P1).
+  const representedStarts = plan.targets
+    .filter((x) => moved.includes(x.id) || x.alreadyAtTarget)
+    .map((x) => (landedState[x.id] && landedState[x.id].window_start) || x.startHHMM || null)
+    .filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
+  const visitStart = representedStarts[0] || null;
+  const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, visitStart, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
 }
 

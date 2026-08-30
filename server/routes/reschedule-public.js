@@ -924,3 +924,7 @@ router._test = {
 };
 
 module.exports = router;
+// Shared with the logged-in schedule payload (codex #3609 r25 P2): the same
+// grouped verdict that makes this page refuse, so the portal never advertises
+// a self-serve link this route will turn away.
+module.exports.groupedVisit = groupedVisit;

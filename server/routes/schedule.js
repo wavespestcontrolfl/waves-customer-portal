@@ -110,6 +110,18 @@ router.get('/', async (req, res, next) => {
       logger.warn(`[schedule] reservice tie-in lookup failed for ${req.customerId}: ${err.message}`);
     }
 
+    // Grouped visits (codex #3609 r25 P2): the self-serve reschedule page
+    // refuses a grouped stop (reason 'grouped'), so the payload must not
+    // advertise the link. Same verdict as that page (groupedVisit), per
+    // grouped row only; an unreadable membership fails closed (no link).
+    const { groupedVisit } = require('./reschedule-public');
+    const groupedById = new Map();
+    for (const s of upcoming) {
+      if (!s.visit_id) continue;
+      const g = await groupedVisit(s);
+      groupedById.set(String(s.id), g === true || g === 'unknown');
+    }
+
     res.json({
       hasCancellableWork: cancellable,
       reservice,
@@ -148,7 +160,7 @@ router.get('/', async (req, res, next) => {
         // to the office. Same-customer row, so exposing the token here adds
         // no reach beyond what the customer's own texts already carry.
         // Null for legacy pre-backfill rows → the button falls back to SMS.
-        rescheduleUrl: s.reschedule_token ? `/reschedule/${s.reschedule_token}` : null,
+        rescheduleUrl: s.reschedule_token && !groupedById.get(String(s.id)) ? `/reschedule/${s.reschedule_token}` : null,
         // Add-to-calendar deep link — the tokenized public appointment page's
         // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
         // window). Same-customer token, same posture as rescheduleUrl above;
@@ -448,6 +460,10 @@ router.get('/next', async (req, res, next) => {
     if (!nextService) {
       return res.json({ next: null });
     }
+    // Same group-aware posture as the list payload (codex #3609 r25 P2).
+    const nextGrouped = nextService.visit_id
+      ? (await require('./reschedule-public').groupedVisit(nextService)) !== false
+      : false;
 
     res.json({
       next: {
@@ -464,7 +480,7 @@ router.get('/next', async (req, res, next) => {
         isRecurring: nextService.is_recurring === true,
         isCallback: nextService.is_callback === true,
         // Self-serve deep link — see the list route's note above.
-        rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
+        rescheduleUrl: nextService.reschedule_token && !nextGrouped ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
         calendarUrl: calendarUrlFor(nextService),
         calendarExpiresAt: calendarExpiresAtFor(nextService),
