@@ -35,8 +35,17 @@ function calendarUrlFor(row, now = new Date()) {
 // membership blocks (fail closed, the route's own posture).
 async function groupedCalendarBlocked(visitId) {
   try {
-    const members = await require('../services/visit-groups').openMembers(db, visitId);
-    return members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()));
+    const vg = require('../services/visit-groups');
+    const members = await vg.openMembers(db, visitId);
+    if (members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) return true;
+    // The ICS route also fails closed unless the members still form ONE stop
+    // (codex #3609 r27 P1) — one date, one technician, connected windows;
+    // a partially committed unit move can leave rows that do not. Same
+    // invariant, or the payload hands out a link that deterministically 404s.
+    const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : '');
+    if (new Set(members.map((m) => day(m.scheduled_date))).size > 1) return true;
+    if (new Set(members.map((m) => String(m.technician_id || ''))).size > 1) return true;
+    return !vg.windowedMembersConnected(members);
   } catch {
     return true;
   }

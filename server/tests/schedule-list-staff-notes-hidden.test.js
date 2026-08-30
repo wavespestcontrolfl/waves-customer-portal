@@ -102,8 +102,12 @@ test('a GROUPED upcoming visit carries no rescheduleUrl (the self-serve page wou
   ];
   const listChainRows = listChain(rows);
   const countChain = { where: jest.fn(() => countChain), whereNotIn: jest.fn(() => countChain), count: jest.fn(() => countChain), first: jest.fn(async () => ({ n: 2 })) };
-  // openMembers (groupedCalendarBlocked): a sibling awaiting rebook ⇒ the ICS route would 404 ⇒ no calendar link either
-  const membersChain = { where: jest.fn(() => membersChain), whereNotIn: jest.fn(() => membersChain), select: jest.fn(async () => [{ id: 'svc-g', status: 'confirmed' }, { id: 'svc-s', status: 'rescheduled' }]) };
+  // openMembers (groupedCalendarBlocked): members on SPLIT DATES (a partially
+  // committed unit move) ⇒ the ICS route would 404 ⇒ no calendar link either
+  const membersChain = { where: jest.fn(() => membersChain), whereNotIn: jest.fn(() => membersChain), select: jest.fn(async () => [
+    { id: 'svc-g', status: 'confirmed', scheduled_date: '2099-01-15', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+    { id: 'svc-s', status: 'pending', scheduled_date: '2099-01-16', window_start: '10:00', window_end: '11:00', technician_id: 't1' },
+  ]) };
   let calls = 0;
   db.mockImplementation(() => { calls += 1; return calls === 1 ? listChainRows : calls === 2 ? countChain : membersChain; });
   const prevGate = process.env.GATE_APPOINTMENT_PAGE;
