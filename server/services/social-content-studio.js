@@ -2151,16 +2151,6 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
     }
     const publishResult = publishOutcome.result;
-    // Only a CONFIRMED external publish of the legacy card is worth an email —
-    // a disabled channel, compliance rejection, or provider failure would
-    // otherwise report a card that never went out. Draft runs park in the
-    // approval queue where the admin sees the card; they never reach here.
-    if (usedLegacyCard && !SOCIAL_FLAGS.dryRun && publishResult.success) {
-      await alertLegacyCardFallback(plan, {
-        link: finalPreview.suggestedLink,
-        creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
-      });
-    }
     // The claim is held through the durable published stamp below —
     // releasing it right after the publish would let a second draft run
     // referencing the same review acquire and double-publish in the
@@ -2234,6 +2224,19 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       socialMediaPostId: post?.id,
       skipReason: publishResult.success ? null : 'all platforms skipped or failed',
     });
+
+    // Only a CONFIRMED external publish of the legacy card is worth an email —
+    // a disabled channel, compliance rejection, or provider failure would
+    // otherwise report a card that never went out — and only AFTER the
+    // durable published stamp above, so a slow SendGrid call can never sit
+    // between a live post and its record. Draft runs park in the approval
+    // queue where the admin sees the card; they never reach here.
+    if (usedLegacyCard && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      await alertLegacyCardFallback(plan, {
+        link: finalPreview.suggestedLink,
+        creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+      });
+    }
 
     return {
       success: publishResult.success,
