@@ -1811,9 +1811,15 @@ function SmsTab() {
   }, [insertedCustomerLinks, msgBody, toNumber, selectedCustomerId]);
 
   // The sheet's full list: the customer group first, then the library rows.
+  // Every dynamic row dispatches to a requireAdmin endpoint (reschedule-link,
+  // reservice-link, customer-link) — a technician selecting one would only
+  // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
-    () => [...CUSTOMER_COMPOSER_LINKS, ...(libraryLinks || [])],
-    [libraryLinks],
+    () => [
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => smsIsAdminRole || !l.dynamic),
+      ...(libraryLinks || []),
+    ],
+    [libraryLinks, smsIsAdminRole],
   );
 
   const handleInsertSheetPick = (link) => {

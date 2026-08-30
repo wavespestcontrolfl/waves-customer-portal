@@ -37,16 +37,63 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 // needs a human quote first.
 const OPEN_ESTIMATE_STATUSES = ['sending', 'sent', 'viewed'];
 
-async function buildReviewRequestLink(customerId) {
+// The gate outcomes checkUnscheduledAskGates can return, phrased for the
+// composer (mirrors the messages create() throws for the same outcomes).
+const REVIEW_GATE_REASONS = {
+  in_cadence: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off link.',
+  at_cap: 'Customer has already received 3 review requests in the last 6 months',
+  cooldown: 'Customer received a review request in the last 30 days',
+  already_queued: 'A review request to this customer is already queued and will send automatically.',
+};
+
+async function buildReviewRequestLink(customerId, { selectedLast10 = null } = {}) {
   const ReviewService = require('./review-request');
-  const customer = await db('customers').where({ id: customerId }).first('id', 'has_left_google_review');
+  const { runExclusive } = require('../utils/cron-lock');
+  const customer = await db('customers').where({ id: customerId }).first();
   if (customer?.has_left_google_review) {
     return { url: null, line: '', reason: 'This customer is already marked as having left a review' };
   }
-  const inline = await ReviewService.createInline({ customerId });
+
+  // A composer mint is an unscheduled ask like /trigger — it must pass the
+  // SAME gate stack (cadence, 3-in-180d cap, 30-day cooldown, already-queued)
+  // or the sheet becomes a path around the caps. Gate-check + mint run under
+  // the per-customer advisory lock create() uses so a concurrent trigger
+  // can't slip a second ask past the gates between check and insert.
+  const minted = await runExclusive(
+    `review-send:${customerId}`,
+    async () => {
+      const gate = await ReviewService.checkUnscheduledAskGates(customerId);
+      if (!gate.allowed) return { gate };
+      return { inline: await ReviewService.createInline({ customerId }) };
+    },
+    { recordHealth: false },
+  );
+  if (minted?.skipped) {
+    return { url: null, line: '', reason: 'A review request to this customer is already being sent — try again in a moment' };
+  }
+  if (minted?.gate) {
+    return { url: null, line: '', reason: REVIEW_GATE_REASONS[minted.gate.outcome] || 'Review request blocked' };
+  }
+  const inline = minted?.inline;
   if (!inline?.url) {
     return { url: null, line: '', reason: 'No review link for this customer — review texts may be turned off in their notification preferences' };
   }
+
+  // The +120min safety net delivers through ReviewService.sendSMS, which
+  // routes to the service contact (customer-contact.js). When that policy
+  // resolves to a DIFFERENT number than the one the operator is composing
+  // to, disarm the net (clear scheduled_for): the operator's own send is
+  // then the only delivery, so the fallback can never text a second person
+  // an ask the operator addressed to the first.
+  if (selectedLast10 && inline.requestId) {
+    const { getServiceContactSmsRecipient } = require('./customer-contact');
+    const contact = getServiceContactSmsRecipient(customer);
+    const contactLast10 = String(contact?.phone || '').replace(/\D/g, '').slice(-10);
+    if (contactLast10 && contactLast10 !== String(selectedLast10)) {
+      await db('review_requests').where({ id: inline.requestId }).update({ scheduled_for: null });
+    }
+  }
+
   return {
     url: inline.url,
     line: `Would you share how we did? It takes 30 seconds: ${inline.url}\n\n`,
@@ -108,13 +155,23 @@ async function buildPayBalanceLink(customerIds) {
 
 async function buildLatestEstimateLink(customerIds) {
   const { isEstimateCustomerViewable } = require('../routes/estimate-public');
-  const rows = await db('estimates')
-    .whereIn('customer_id', customerIds)
-    .whereIn('status', OPEN_ESTIMATE_STATUSES)
-    .whereNull('archived_at')
-    .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
-    .limit(15);
-  const estimate = rows.find((row) => isEstimateCustomerViewable(row));
+  // Viewability (expiry, linkage-invalidation) is a predicate the query can't
+  // express, and a filter applied AFTER a limit lets newer hidden rows mask an
+  // older estimate the customer can still open (the relay-money.js trap).
+  // Page through until a viewable row is found or the candidates run out.
+  const PAGE = 15;
+  let estimate = null;
+  for (let offset = 0; ; offset += PAGE) {
+    const rows = await db('estimates')
+      .whereIn('customer_id', customerIds)
+      .whereIn('status', OPEN_ESTIMATE_STATUSES)
+      .whereNull('archived_at')
+      .orderByRaw('COALESCE(last_viewed_at, viewed_at, sent_at, updated_at, created_at) DESC')
+      .offset(offset)
+      .limit(PAGE);
+    estimate = rows.find((row) => isEstimateCustomerViewable(row)) || null;
+    if (estimate || rows.length < PAGE) break;
+  }
   if (!estimate?.token) {
     return { url: null, line: '', reason: 'No open estimate on this account' };
   }

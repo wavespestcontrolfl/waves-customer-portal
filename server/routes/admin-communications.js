@@ -1487,7 +1487,9 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     const kind = String(req.body?.kind || '');
     const builders = require('../services/composer-customer-links');
     const builderByKind = {
-      review_request: (ids, primaryId) => builders.buildReviewRequestLink(primaryId),
+      // selectedLast10 (bound below, after phone validation) lets the builder
+      // disarm the safety net when its fallback would text a different number.
+      review_request: (ids, primaryId, selectedLast10) => builders.buildReviewRequestLink(primaryId, { selectedLast10 }),
       pay_balance: (ids) => builders.buildPayBalanceLink(ids),
       estimate: (ids) => builders.buildLatestEstimateLink(ids),
       referral: (ids, primaryId) => builders.buildReferralLink(primaryId),
@@ -1550,7 +1552,7 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
       primaryId = phoneRows.map((r) => r.id).sort()[0] || [...customerIds].sort()[0];
     }
 
-    const result = await builderByKind[kind](customerIds, primaryId);
+    const result = await builderByKind[kind](customerIds, primaryId, last10);
     if (!result?.url) {
       return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
     }
@@ -1649,7 +1651,18 @@ router.delete('/link-library/:id', requireAdmin, async (req, res) => {
 router.post('/link-library/sync', requireAdmin, async (req, res) => {
   try {
     const linkLibrary = require('../services/link-library');
-    const result = await linkLibrary.syncSitemapLinks();
+    // Same advisory lock as the 2:50 AM job — an unlocked second execution
+    // path (two "Sync now" clicks, or a manual run overlapping the cron)
+    // reads the same snapshot and races inserts into the unique url index.
+    const { runExclusive } = require('../utils/cron-lock');
+    const result = await runExclusive(
+      'link-library-sitemap-sync',
+      () => linkLibrary.syncSitemapLinks(),
+      { recordHealth: false },
+    );
+    if (result?.skipped) {
+      return res.status(409).json({ error: 'A sitemap sync is already running — try again in a moment' });
+    }
     res.json(result);
   } catch (err) {
     logger.error(`link-library sync failed: ${err.message}`);

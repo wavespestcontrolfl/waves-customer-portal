@@ -33,6 +33,9 @@ const SITE_HOST = 'wavespestcontrol.com';
 // hollow out the library.
 const MIN_SANE_SITEMAP_URLS = 10;
 
+// Schema limit on link_library.name (migration 20260831000001).
+const MAX_NAME_LENGTH = 120;
+
 const CATEGORIES = ['reviews', 'booking', 'app', 'website', 'social'];
 // The composer also renders a 'customer' group (the minted per-customer
 // links) but those are endpoint config, never library rows.
@@ -60,7 +63,10 @@ function nameForSiteUrl(url) {
     if (w === 'faqs') return 'FAQs';
     return w.charAt(0).toUpperCase() + w.slice(1);
   });
-  return words.join(' ') || null;
+  // link_library.name is varchar(120); an over-long derived name would abort
+  // the sync at this page on every run, freezing later pages and removals.
+  const name = words.join(' ').slice(0, MAX_NAME_LENGTH).trimEnd();
+  return name || null;
 }
 
 /** Library category for a site URL: the booking-funnel pages, else website. */
@@ -228,7 +234,7 @@ async function sitemapLastSyncedAt() {
 function validateManualLink({ name, url, category, clause, keywords }) {
   const cleanName = String(name || '').trim();
   const cleanUrl = String(url || '').trim();
-  if (!cleanName || cleanName.length > 120) return { error: 'name is required (max 120 chars)' };
+  if (!cleanName || cleanName.length > MAX_NAME_LENGTH) return { error: `name is required (max ${MAX_NAME_LENGTH} chars)` };
   let parsed;
   try {
     parsed = new URL(cleanUrl);

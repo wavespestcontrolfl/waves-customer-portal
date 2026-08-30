@@ -15,7 +15,14 @@ jest.mock('../services/short-url', () => ({
 jest.mock('../services/open-balance', () => ({ openBalanceSummary: jest.fn() }));
 jest.mock('../services/referral-engine', () => ({ enrollPromoter: jest.fn() }));
 jest.mock('../routes/estimate-public', () => ({ isEstimateCustomerViewable: jest.fn() }));
-jest.mock('../services/review-request', () => ({ createInline: jest.fn() }));
+jest.mock('../services/review-request', () => ({
+  createInline: jest.fn(),
+  checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
+}));
+// The builder runs gate+mint under the review advisory lock — run the body
+// inline; the skipped path is exercised explicitly.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
+jest.mock('../services/customer-contact', () => ({ getServiceContactSmsRecipient: jest.fn(() => ({ phone: null })) }));
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
@@ -39,8 +46,10 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
   b.whereNull = jest.fn(() => b);
   b.join = jest.fn(() => b);
   b.orderByRaw = jest.fn(() => b);
+  b.offset = jest.fn(() => b);
   b.limit = jest.fn(async () => rows);
   b.first = jest.fn(async () => firstRow);
+  b.update = jest.fn(async () => 1);
   return b;
 }
 
@@ -107,6 +116,20 @@ describe('buildLatestEstimateLink', () => {
     expect(r.estimate).toEqual({ id: 'e-ok', serviceType: 'Quarterly Pest Control', status: 'viewed' });
   });
 
+  test('pages past a full page of hidden estimates to an older viewable one', async () => {
+    const hidden = Array.from({ length: 15 }, (_, i) => ({ id: `h${i}`, token: `tkh${i}`, customer_id: 'c1', status: 'sent' }));
+    const b = chainBuilder({});
+    b.limit
+      .mockResolvedValueOnce(hidden)
+      .mockResolvedValueOnce([{ id: 'e-old', token: 'tk-old', customer_id: 'c1', status: 'sent', service_type: 'Pest' }]);
+    mockBuilders = { estimates: b };
+    isEstimateCustomerViewable.mockImplementation((row) => row.id === 'e-old');
+
+    const r = await buildLatestEstimateLink(['c1']);
+    expect(r.url).toContain('/estimate/tk-old');
+    expect(b.offset).toHaveBeenCalledWith(15);
+  });
+
   test('no viewable open estimate answers a plain reason', async () => {
     mockBuilders = { estimates: chainBuilder({ rows: [] }) };
     const r = await buildLatestEstimateLink(['c1']);
@@ -134,6 +157,51 @@ describe('buildReviewRequestLink', () => {
     expect(r.url).toContain('/l/rv123');
     expect(r.requestId).toBe('rr-1');
     expect(r.line).toContain(r.url);
+  });
+
+  test('a gate-blocked customer gets the reason, not a mint', async () => {
+    mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
+    ReviewService.checkUnscheduledAskGates.mockResolvedValueOnce({ allowed: false, outcome: 'cooldown' });
+    const r = await buildReviewRequestLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/last 30 days/);
+    expect(ReviewService.createInline).not.toHaveBeenCalled();
+  });
+
+  test('a held advisory lock answers a retry reason instead of minting past it', async () => {
+    mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
+    const { runExclusive } = require('../utils/cron-lock');
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    const r = await buildReviewRequestLink('c1');
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/already being sent/);
+    expect(ReviewService.createInline).not.toHaveBeenCalled();
+  });
+
+  test('disarms the safety net when the recipient policy resolves to a different number', async () => {
+    const customers = chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false, phone: '9415551234' } });
+    const reviewRequests = chainBuilder({});
+    mockBuilders = { customers, review_requests: reviewRequests };
+    ReviewService.createInline.mockResolvedValue({ url: 'https://x/l/rv1', requestId: 'rr-1', token: 't' });
+    const { getServiceContactSmsRecipient } = require('../services/customer-contact');
+    getServiceContactSmsRecipient.mockReturnValueOnce({ phone: '+19415559999' });
+
+    const r = await buildReviewRequestLink('c1', { selectedLast10: '9415551234' });
+    expect(r.requestId).toBe('rr-1');
+    expect(reviewRequests.update).toHaveBeenCalledWith({ scheduled_for: null });
+  });
+
+  test('keeps the safety net armed when the policy targets the composed number', async () => {
+    const customers = chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false, phone: '9415551234' } });
+    const reviewRequests = chainBuilder({});
+    mockBuilders = { customers, review_requests: reviewRequests };
+    ReviewService.createInline.mockResolvedValue({ url: 'https://x/l/rv1', requestId: 'rr-1', token: 't' });
+    const { getServiceContactSmsRecipient } = require('../services/customer-contact');
+    getServiceContactSmsRecipient.mockReturnValueOnce({ phone: '+19415551234' });
+
+    const r = await buildReviewRequestLink('c1', { selectedLast10: '9415551234' });
+    expect(r.requestId).toBe('rr-1');
+    expect(reviewRequests.update).not.toHaveBeenCalled();
   });
 });
 

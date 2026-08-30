@@ -31,6 +31,13 @@ describe('nameForSiteUrl', () => {
     expect(nameForSiteUrl('https://www.wavespestcontrol.com/faqs/')).toBe('FAQs');
   });
 
+  it('bounds a derived name to the schema limit so one long slug cannot abort every sync', () => {
+    const longSlug = Array.from({ length: 40 }, () => 'word').join('-');
+    const name = nameForSiteUrl(`https://www.wavespestcontrol.com/${longSlug}/`);
+    expect(name.length).toBeLessThanOrEqual(120);
+    expect(name.endsWith(' ')).toBe(false);
+  });
+
   it('names the root Homepage and uses the LAST path segment for nested URLs', () => {
     expect(nameForSiteUrl('https://www.wavespestcontrol.com/')).toBe('Homepage');
     // Blog protocol is /{category}/{slug}/ — the slug names the page.

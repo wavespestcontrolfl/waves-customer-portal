@@ -249,7 +249,7 @@ describe('POST /admin/communications/customer-link', () => {
       const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request' });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(builders.buildReviewRequestLink).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(builders.buildReviewRequestLink).toHaveBeenCalledWith(CUSTOMER_UUID, { selectedLast10: '5551234567' });
       expect(body.requestId).toBe('rr-1');
     });
   });
