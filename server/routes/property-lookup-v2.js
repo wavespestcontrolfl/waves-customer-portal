@@ -3205,16 +3205,19 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // scoping) would quote the entire grounds for one door (estimator-engine
   // audit 2026-08-30 #3). Lawn self-defends (lot-derived turf grades LOW
   // and parks), so this surfaces the parcel-scale lot for verification.
-  // HOA common-area parcels are deliberately EXCLUDED: there the
-  // association is the customer and the parcel-scale lot is the correct
-  // quoting basis (codex P1) — the master-parcel guidance flag below
-  // already covers that workflow.
+  // HOA common-area parcels and aggregated/association records are
+  // deliberately EXCLUDED: there the association or complex owner is the
+  // customer, the parcel-scale lot is the correct quoting basis, and the
+  // master-parcel guidance flag below covers that workflow (codex P1 ×2).
+  // The wording stays scope-aware, not prescriptive — a whole-property
+  // request keeps the parcel basis.
   if (rc && rc.lotSize
+    && !rc._parcel?.aggregated && !rc._parcel?.association
     && !/hoa\s*common/i.test(String(rc.propertyType || ''))
     && /condo|apartment|multifamily/i.test(String(rc.propertyType || ''))) {
     flags.push({
       field: 'lotSize',
-      reason: 'Unit-type property carries a parcel-scale lot size (likely the association’s whole parcel) — verify the unit’s own treatable area before mosquito, rodent, or other lot-priced quoting',
+      reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
       priority: 'HIGH',
     });
   }

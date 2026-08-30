@@ -471,8 +471,21 @@ describe('unit-type parcel-scale lot verify flag', () => {
     const flag = flags.find((f) => f.field === 'lotSize');
     expect(flag).toBeDefined();
     expect(flag.priority).toBe('HIGH');
-    expect(flag.reason).toMatch(/association/i);
+    expect(flag.reason).toMatch(/parcel/i);
     expect(flag.reason).toMatch(/mosquito/i);
+  });
+
+  test('aggregated multifamily association record → no unit-lot flag (whole-property workflow)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '5 Example Complex Dr, Testville, FL 00000',
+      propertyType: 'Multifamily',
+      squareFootage: 63096,
+      lotSize: 93940,
+      unitCount: 8,
+      _source: 'county',
+      _parcel: { aggregated: true },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
   test('single-family with a lotSize → no lotSize flag', () => {
