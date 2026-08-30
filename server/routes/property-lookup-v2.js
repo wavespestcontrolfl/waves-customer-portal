@@ -3242,18 +3242,24 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // "Office Condominium" land use behind a normalized 'Commercial' type is
   // caught the same way the unit-scope model catches it (codex P1 r4).
   // Land-use text is county metadata riding on the trusted-record read.
+  const unitLotLandUse = rc?._parcel?.landUseDescription || rc?._raw?.landUse || null;
   const unitLotIsCondo = !!unitLotSignalRc
     && shadowIsCondoRecord({
       aggregated: rc?._parcel?.aggregated === true,
       propertyType: unitLotSignalRc.propertyType,
-      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+      landUseDescription: unitLotLandUse,
     });
+  // The association/common-area exclusion scans the SAME two texts the
+  // condo predicate scans (codex P1 r5): a "Condominium Common Area" land
+  // use behind a normalized type is an association parcel, not a unit.
+  const unitLotAssociationText = /hoa\s*common|common\s*area|association/i;
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
     && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
     && !smallSharedParcel
-    && !/hoa\s*common|association/i.test(String(unitLotSignalRc?.propertyType || ''))
+    && !unitLotAssociationText.test(String(unitLotSignalRc?.propertyType || ''))
+    && !unitLotAssociationText.test(String(unitLotLandUse || ''))
     && unitLotIsCondo) {
     flags.push({
       field: 'lotSize',
