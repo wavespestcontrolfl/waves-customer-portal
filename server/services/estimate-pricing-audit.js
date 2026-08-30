@@ -212,7 +212,7 @@ function mosquitoCogs(program, addOns = {}) {
 // which is exactly what this snapshot exists to prevent.
 const QUOTED_LINE_KEYS = [
   'service', 'tier', 'program', 'pricingVersion', 'cadence', 'frequency', 'frequencyKey',
-  'visitsPerYear', 'visits', 'perTreatment',
+  'visitsPerYear', 'visits', 'appsPerYear', 'perTreatment',
   'annualAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime',
   'priceAfterDiscount', 'recurringCustomerDiscountRate', 'setupCharge',
   'taxable', 'taxCategory', 'quoteRequired',
@@ -554,6 +554,9 @@ function normalizeEngineLineItems(result) {
     const price = isRecurring
       ? money(Number.isFinite(Number(item.annual)) ? Number(item.annual) : monthly * 12)
       : money(item.price ?? item.total ?? 0);
+    // Palm cadence persists ONLY as appsPerYear (public-quote projection) —
+    // without it visitsFor costs the program as one visit (codex pre-push P1).
+    const visitsPerYear = Number(item.visitsPerYear ?? item.visits ?? item.appsPerYear);
     lines.push({
       ...(quoted ? { quoted } : {}),
       serviceKey,
@@ -564,6 +567,7 @@ function normalizeEngineLineItems(result) {
       priceBeforeDiscount: price,
       discount: 0,
       priceSource: 'saved_estimate.engineResult.lineItems',
+      ...(Number.isFinite(visitsPerYear) && visitsPerYear > 0 ? { visitsPerYear } : {}),
     });
   }
   return lines;

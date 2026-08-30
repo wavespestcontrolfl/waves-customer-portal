@@ -191,11 +191,16 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, pricingVersion: 'v2' },
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660 },
             { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
+            { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
           ],
         },
       },
     });
-    expect(audit.lines).toHaveLength(3);
+    expect(audit.lines).toHaveLength(4);
+    const palm = audit.lines.find((l) => l.serviceKey === 'palm_injection');
+    expect(palm.visitsPerYear).toBe(2); // appsPerYear reaches the COGS visit count
+    expect(palm.quoted).toMatchObject({ appsPerYear: 2 });
+    expect(palm.cogs.visitsPerYear).toBe(2);
     const pest = audit.lines.find((l) => l.serviceKey === 'pest_control');
     expect(pest).toMatchObject({ cadence: 'recurring', monthly: 55, price: 660, priceSource: 'saved_estimate.engineResult.lineItems' });
     expect(pest.quoted).toMatchObject({ pricingVersion: 'v2' });
