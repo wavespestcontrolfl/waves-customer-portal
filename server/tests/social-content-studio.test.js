@@ -593,9 +593,53 @@ describe('autonomous review-milestone lane', () => {
     expect(plan.angle).toBe('review milestone');
     expect(plan.topic).toBe('300 Google reviews');
     expect(Object.keys(plan.preview.drafts).sort()).toEqual(['facebook', 'gbp']);
-    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/reviews/');
+    expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/pest-control-reviews/');
     expect(plan.preview.sources[0].label).toContain('312 Google-reported reviews');
     const card = Studio.buildMilestoneCardInput(plan);
     expect(card).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.9 });
+  });
+});
+
+describe('studio link gate (live-only, topic-matched, probed)', () => {
+  const live = { title: 'Your Parrish Garage Door Seal Is Letting In More Roaches', slug: 'parrish-garage-door-seal-roach-entry', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/garage-door-seal-roaches-parrish-fl/' };
+  const legacy = { title: 'Legacy row', slug: 'parrish-garage-door-seal-roach-entry', astro_status: 'draft', astro_live_url: null };
+
+  test('liveUrlForRow never rebuilds a URL from slug — only the pages-poll live URL counts', () => {
+    // The 2026-08-29 regression: a status=published row with a planned-era
+    // slug and no astro_live_url produced /parrish-garage-door-seal-roach-entry/ → 404.
+    expect(Studio.liveUrlForRow(legacy)).toBeNull();
+    expect(Studio.liveUrlForRow(live)).toBe(live.astro_live_url);
+    expect(Studio.liveUrlForRow({ astro_live_url: 'javascript:alert(1)' })).toBeNull();
+  });
+
+  test('suggestedLink / suggestedLinkTitle read the chosen link page, and are empty without one', () => {
+    expect(Studio.suggestedLink({ content: [legacy], linkPage: null })).toBe('');
+    expect(Studio.suggestedLinkTitle({ content: [legacy], linkPage: null })).toBe('');
+    expect(Studio.suggestedLink({ content: [live], linkPage: live })).toBe(live.astro_live_url);
+    expect(Studio.suggestedLinkTitle({ content: [live], linkPage: live })).toBe(live.title);
+  });
+
+  test('firstLivePage skips dead pages, is bounded, and fails closed to no link', async () => {
+    const dead = { ...live, astro_live_url: 'https://www.wavespestcontrol.com/retired-post/' };
+    const probed = [];
+    const probe = async (url) => { probed.push(url); return url === live.astro_live_url; };
+    expect(await Studio.firstLivePage([legacy, dead, live], probe)).toBe(live);
+    expect(probed).toEqual([dead.astro_live_url, live.astro_live_url]); // legacy row never probed (no live URL)
+    // Four dead candidates: only the first three are probed, result is null.
+    const many = [1, 2, 3, 4].map((n) => ({ ...live, astro_live_url: `https://www.wavespestcontrol.com/dead-${n}/` }));
+    probed.length = 0;
+    expect(await Studio.firstLivePage(many, async (url) => { probed.push(url); return false; })).toBeNull();
+    expect(probed).toHaveLength(3);
+  });
+
+  test('linkIsLive probes only wavespestcontrol.com and treats any failure as dead', async () => {
+    const ok = async () => ({ ok: true });
+    const notFound = async () => ({ ok: false, status: 404 });
+    const boom = async () => { throw new Error('ECONNRESET'); };
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', ok)).toBe(true);
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/parrish-garage-door-seal-roach-entry/', notFound)).toBe(false);
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/book/', boom)).toBe(false);
+    expect(await Studio.linkIsLive('https://evil.example.com/', ok)).toBe(false); // never probed off-domain
+    expect(await Studio.linkIsLive('', ok)).toBe(false);
   });
 });

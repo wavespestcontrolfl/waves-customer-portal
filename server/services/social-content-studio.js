@@ -647,11 +647,17 @@ async function getCampaignContext({ topic, city, service }) {
   if (await hasTable('blog_posts')) {
     try {
       let query = db('blog_posts')
-        .select('id', 'title', 'slug', 'city', 'tag', 'keyword', 'meta_description', 'status', 'publish_date', 'source')
-        // suggestedLink turns context.content[0] into a public social CTA, so
-        // only live posts may feed copy/links — never queued/draft/idea rows
-        // (unapproved facts, 404 slugs).
+        .select('id', 'title', 'slug', 'city', 'tag', 'keyword', 'meta_description', 'status', 'publish_date', 'source', 'astro_live_url', 'astro_status')
+        // suggestedLink turns a content row into a public social CTA, so only
+        // posts the hub has actually served may feed copy/links. status =
+        // 'published' alone is NOT enough: legacy rows keep a planned-era
+        // slug (e.g. parrish-garage-door-seal-roach-entry) that never became
+        // a path — that row shipped a 404 to every network on 2026-08-29.
+        // astro_live_url is stamped by the pages-poll worker only after the
+        // production build served the post, so it is the one column that
+        // can't lie about the URL.
         .where('status', 'published')
+        .whereNotNull('astro_live_url')
         .orderBy('publish_date', 'desc')
         // Rank relevance BEFORE capping: take a wider recency window so a
         // topic/service-relevant post that isn't in the 8 newest still wins,
@@ -670,14 +676,19 @@ async function getCampaignContext({ topic, city, service }) {
           .map((v) => String(v || '').toLowerCase()).join(' ');
         return intentKeywords.some((kw) => text.includes(kw));
       };
-      context.content = rows
+      const ranked = rows
         .filter((row) => contentRowMatchesCity(row, location.city))
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
-        .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index))
-        .map((entry) => entry.row)
-        .slice(0, 8);
+        .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index));
+      context.content = ranked.map((entry) => entry.row).slice(0, 8);
+      // The link is chosen by topic/service, never by city alone: a city-only
+      // match sent a roach headline to the Venice office-opening (termite)
+      // post on 2026-08-27. No relevant live page → no link (the post still
+      // goes out; a wrong or dead link is worse than none).
+      context.linkPage = await firstLivePage(ranked.filter((entry) => entry.relevant).map((entry) => entry.row));
     } catch {
       context.content = [];
+      context.linkPage = null;
     }
   }
 
@@ -735,12 +746,87 @@ async function getCampaignContext({ topic, city, service }) {
   return context;
 }
 
+// A row's public URL is ONLY its pages-poll-stamped astro_live_url — never a
+// URL rebuilt from `slug` (flat, category-less, and stale for legacy rows).
+// Used verbatim: the hub's canonical form keeps the trailing slash, which
+// normalizeUrl would strip (every link would then ship as a 301 hop).
+function liveUrlForRow(row = {}) {
+  return httpUrlOrNull(row.astro_live_url);
+}
+
+// Liveness probe for a link about to ship to every network. The DB stamp says
+// the page WAS live; the hub can still retire/rename it (redirect rules,
+// content rebases). Only wavespestcontrol.com is probed; any failure = dead.
+async function linkIsLive(url, fetchImpl = globalThis.fetch) {
+  try {
+    const parsed = new URL(String(url || ''));
+    if (!/(^|\.)wavespestcontrol\.com$/i.test(parsed.hostname)) return false;
+    const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(10000) });
+    return !!res?.ok;
+  } catch {
+    return false;
+  }
+}
+
+const LINK_PROBE_LIMIT = 3;
+
+// First candidate whose live URL answers 200 — bounded so a hub outage costs
+// at most LINK_PROBE_LIMIT fetches and yields "no link", never a dead one.
+async function firstLivePage(rows = [], probe = linkIsLive) {
+  const candidates = rows.filter((row) => liveUrlForRow(row)).slice(0, LINK_PROBE_LIMIT);
+  for (const row of candidates) {
+    if (await probe(liveUrlForRow(row))) return row;
+  }
+  return null;
+}
+
 function suggestedLink(context) {
-  const page = context.content.find((item) => item.slug || item.source_url);
-  if (!page) return '';
-  if (page.source_url) return normalizeUrl(page.source_url) || page.source_url;
-  const slug = cleanText(page.slug, 200).replace(/^\/+/, '');
-  return slug ? `https://www.wavespestcontrol.com/${slug}/` : '';
+  return context?.linkPage ? liveUrlForRow(context.linkPage) || '' : '';
+}
+
+// LinkedIn does not scrape article URLs — the portal supplies the article
+// title itself, so a linked post carries the page's real headline instead of
+// the lowercase topic literal ("ants and roaches after heavy rain").
+function suggestedLinkTitle(context) {
+  return context?.linkPage ? cleanText(context.linkPage.title, 200) : '';
+}
+
+// Hero photo of the linked page (og:image re-hosted as JPEG) — the visual the
+// studio prefers over the legacy fixed SVG brand card whenever a live page is
+// attached. null = no link, page had no og:image, or the fetch failed.
+async function heroImageForLink(link) {
+  if (!link || typeof SocialMediaService.blogHeroSocialImageUrl !== 'function') return null;
+  try {
+    return await SocialMediaService.blogHeroSocialImageUrl(link);
+  } catch {
+    return null;
+  }
+}
+
+// The legacy SVG card is the fallback of last resort, not a design choice —
+// surface every publish that fell back to it so the owner sees it (ops
+// convention: FIX: subject, contact@). Never throws.
+async function alertLegacyCardFallback(plan = {}, { link, creativeEnabled }) {
+  try {
+    const sendgrid = require('./sendgrid-mail');
+    const to = process.env.SOCIAL_STUDIO_ALERT_EMAIL || 'contact@wavespestcontrol.com';
+    const fromEmail = process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
+    const why = [
+      creativeEnabled ? 'creative engine returned no image (provider/upload failure)' : 'SOCIAL_CREATIVE_ENGINE_ENABLED is not true',
+      link ? `linked page hero unavailable (${link})` : 'no live page matched the topic, so no hero to use',
+    ].join('; ');
+    await sendgrid.sendOne({
+      to,
+      fromEmail,
+      fromName: 'Waves Pest Control',
+      subject: `FIX: social studio fell back to the legacy brand card — ${cleanText(plan.topic, 80)} (${cleanText(plan.city, 40)})`,
+      text: `The autonomous social studio published with the legacy fixed SVG card.\n\nTopic: ${plan.topic}\nCity: ${plan.city}\nChannels: ${(plan.channels || []).join(', ')}\nLink: ${link || '(none)'}\n\nWhy: ${why}\n\nFix: set SOCIAL_CREATIVE_ENGINE_ENABLED=true on Railway, or make sure a live blog post matches this topic so its hero photo is used.`,
+      categories: ['ops', 'social-studio'],
+      suppressErrorLog: true,
+    });
+  } catch (err) {
+    logger.warn(`[social-studio] legacy-card fallback alert failed: ${err.message}`);
+  }
 }
 
 function sourceDetailForCard(preview) {
@@ -840,7 +926,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, gbpImageUrl, variant, templateKey, creative, variants, videoUrl }) {
+function previewWithVisual(preview, { imageUrl, gbpImageUrl, gbpImageBranded, variant, templateKey, creative, variants, videoUrl }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -848,6 +934,10 @@ function previewWithVisual(preview, { imageUrl, gbpImageUrl, variant, templateKe
       imageUrl,
       variant,
       templateKey: templateKey || (variant === 'review' ? 'waves_clean_square' : 'waves_campaign_square'),
+      // gbpImageBranded:false = the GBP image is a hero PHOTO (no chrome), so
+      // postToGBP must watermark it on approval; omitted/true = deterministic
+      // card whose chrome already carries the logo.
+      ...(gbpImageUrl && gbpImageBranded === false ? { gbpImageBranded: false } : {}),
       // Creative-engine metadata: which scene concept made this image (feeds the
       // no-repeat rotation) and, on draft runs, the alternate variants the admin
       // can pick from in the approval queue. videoUrl records an approved Reel
@@ -1008,7 +1098,7 @@ async function selectAutonomousReviewPlan(now = new Date()) {
         cta: 'book inspection',
         channels: AUTONOMOUS_FLAGS.channels,
       },
-      suggestedLink: 'https://www.wavespestcontrol.com/reviews/',
+      suggestedLink: 'https://www.wavespestcontrol.com/pest-control-reviews/',
       drafts: Object.fromEntries(AUTONOMOUS_FLAGS.channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
       validation: validateDrafts(drafts),
       sources: [{
@@ -1272,7 +1362,7 @@ function planMilestone({ threshold, count, average, city, channels }) {
     averageRating: average,
     preview: {
       inputs: { topic, city, service: 'review proof', angle: MILESTONE_ANGLE, cta: 'read guide', channels },
-      suggestedLink: 'https://www.wavespestcontrol.com/reviews/',
+      suggestedLink: 'https://www.wavespestcontrol.com/pest-control-reviews/',
       drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
       validation: validateDrafts(drafts),
       sources: [{
@@ -1570,6 +1660,7 @@ async function previewCampaign(input) {
       channels: normalizeChannels(input.channels),
     },
     suggestedLink: suggestedLink(context),
+    suggestedLinkTitle: suggestedLinkTitle(context),
     drafts,
     validation: validateDrafts(drafts),
     sources: buildSourcePanel(context, input),
@@ -1864,16 +1955,29 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
       })
       : [];
+    // Campaign runs with a live page attached use that page's hero photo
+    // wherever a deterministic visual is needed (GBP under the creative
+    // engine, and the whole post when the engine is off/failed) — the legacy
+    // fixed SVG card is the last resort, and every publish that lands on it
+    // is emailed as a FIX:.
+    const campaignHeroUrl = (!isReviewRun && !isVersusRun && !isMilestoneRun)
+      ? await heroImageForLink(finalPreview.suggestedLink)
+      : null;
+    let gbpImageBranded = true;
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
       if (wantsGbp) {
-        gbpImageUrl = isReviewRun
-          ? await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp')
-          : await renderCampaignImageUrl(plan, preview, 'gbp');
+        if (isReviewRun) {
+          gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
+        } else {
+          gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
+          gbpImageBranded = !campaignHeroUrl;
+        }
       }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
+        gbpImageBranded,
         variant: isReviewRun ? 'review' : 'campaign',
         templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
         creative: {
@@ -1916,14 +2020,24 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         templateKey: 'waves_versus_square',
       });
     } else {
-      imageUrl = await renderCampaignImageUrl(plan, preview);
-      if (wantsGbp) gbpImageUrl = await renderCampaignImageUrl(plan, preview, 'gbp');
+      imageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview);
+      if (wantsGbp) gbpImageUrl = campaignHeroUrl || await renderCampaignImageUrl(plan, preview, 'gbp');
+      gbpImageBranded = !campaignHeroUrl;
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
+        gbpImageBranded,
         variant: 'campaign',
-        templateKey: 'waves_campaign_square',
+        templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
       });
+      // Draft runs park in the approval queue where the admin sees the card;
+      // only an unattended PUBLISH of the legacy card is worth an email.
+      if (!campaignHeroUrl && effectiveMode !== 'draft' && !SOCIAL_FLAGS.dryRun) {
+        await alertLegacyCardFallback(plan, {
+          link: finalPreview.suggestedLink,
+          creativeEnabled: CreativeEngine.CREATIVE_FLAGS.enabled,
+        });
+      }
     }
 
     if (effectiveMode === 'draft') {
@@ -1984,7 +2098,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // the reconcile cannot stamp the source row (review runs) and the stats
     // sync cannot move the fleet count (milestone runs) between here and the post.
     const publishFn = () => SocialMediaService.publishToAll({
-        title: plan.topic,
+        // LinkedIn renders `title` as the article headline — use the linked
+        // page's real title when there is one, the topic literal otherwise.
+        title: finalPreview.suggestedLinkTitle || plan.topic,
         description: plan.service,
         link: finalPreview.suggestedLink,
         guid,
@@ -1993,7 +2109,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         channels: plan.channels,
         imageUrl,
         gbpImageUrl,
-        gbpImageBranded: true, // deterministic card render — chrome carries the logo
+        gbpImageBranded, // card = chrome carries the logo; hero photo = watermark in postToGBP
         noAiImage: true, // brand card only — never a literal AI image
         gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
         // Durable stamp at the FIRST provider success — a crash or stall in a
@@ -2527,7 +2643,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
     const publishOutcome = remainingChannels.length
       ? await withPublishLock(() => SocialMediaService.publishToAll({
-        title: run.topic || preview.inputs?.topic || 'Waves update',
+        title: preview.suggestedLinkTitle || run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
         link: preview.suggestedLink,
         guid: `${AUTONOMOUS_SOURCE}_approved_${run.id}`,
@@ -2542,7 +2658,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         // publish AI imagery to GBP on approval. publishToAll posts GBP
         // text-only when the card is absent.
         gbpImageUrl: httpUrlOrNull(preview.visual?.gbpImageUrl),
-        gbpImageBranded: true, // stored deterministic card — already logo'd
+        // Stored deterministic card (already logo'd) unless the run recorded a
+        // hero PHOTO for GBP — then postToGBP watermarks it.
+        gbpImageBranded: preview.visual?.gbpImageBranded !== false,
         videoUrl: chosenVideoUrl,
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
@@ -3214,6 +3332,11 @@ module.exports = {
   getCampaignContext,
   mentionsOtherCity,
   contentRowMatchesCity,
+  liveUrlForRow,
+  linkIsLive,
+  firstLivePage,
+  suggestedLink,
+  suggestedLinkTitle,
   listCompetitorSwipeFile,
   listAutonomousRuns,
   listReviewGraphicCandidates,
