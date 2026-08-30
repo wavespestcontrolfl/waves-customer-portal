@@ -22,6 +22,7 @@
  * requireTechOrAdmin, and the tech portal already calls /api/admin/*).
  */
 const db = require('../models/db');
+const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const logger = require('./logger');
 const { transitionJobStatus } = require('./job-status');
 const trackTransitions = require('./track-transitions');
@@ -401,10 +402,42 @@ async function submitRecap({
 
     // 2. Upsert the service_records row keyed by the direct FK. Under the
     // row lock this lookup is race-free — the loser sees the committed row.
+    // Column probe fail-open to the LEGACY insert shape (schema probe or a
+    // limited test double) — the snapshot is additive; the recap itself must
+    // never block on it.
+    let serviceRecordCols = {};
+    try { serviceRecordCols = await trx('service_records').columnInfo(); } catch { serviceRecordCols = {}; }
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes', 'service_data');
+      .first(
+        'id', 'status', 'recap_sms_sent_at', 'structured_notes', 'service_data',
+        ...(serviceRecordCols.is_callback ? ['is_callback'] : []),
+        ...(serviceRecordCols.service_tier ? ['service_tier'] : []),
+        ...(serviceRecordCols.service_tier_source ? ['service_tier_source'] : []),
+      );
+
+    // Tier/provenance/callback snapshot — the SAME shared builder the heavy
+    // /complete path uses (completion-tier-snapshot.js), so a recap-created
+    // record carries the callback identity and the membership provenance the
+    // permanent report trusts (codex #3617 r4 P1). Customer tier read
+    // column-guarded: pre-provenance schemas freeze 'manual'.
+    let tierSnapshot = {};
+    try {
+      const customerCols = await trx('customers').columnInfo();
+      const custRow = customerCols.waveguard_tier
+        ? await trx('customers').where({ id: svc.customer_id }).first(
+          'waveguard_tier',
+          ...(customerCols.waveguard_tier_source ? ['waveguard_tier_source'] : []),
+        )
+        : null;
+      tierSnapshot = completionTierSnapshotFields({
+        serviceRecordCols,
+        waveguardTier: custRow?.waveguard_tier || null,
+        waveguardTierSource: custRow?.waveguard_tier_source || null,
+        isCallback: !!svc.is_callback,
+      });
+    } catch { tierSnapshot = {}; /* legacy insert shape — never block the recap */ }
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
@@ -507,9 +540,17 @@ async function submitRecap({
           mergedServiceData = JSON.stringify({ ...existingData, ...missing });
         }
       } catch { /* leave service_data untouched */ }
+      // Backfill ONLY what the existing row never froze (a row an older
+      // recap created without the snapshot) — never overwrite an existing
+      // freeze, matching this file's frozen-identity pattern above.
+      const snapshotBackfill = {};
+      for (const [key, value] of Object.entries(tierSnapshot)) {
+        if (existing[key] == null) snapshotBackfill[key] = value;
+      }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,
         status: 'completed',
+        ...snapshotBackfill,
         ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
@@ -525,6 +566,7 @@ async function submitRecap({
         service_type: svc.service_type || 'Pest Control',
         status: 'completed',
         technician_notes: note || null,
+        ...tierSnapshot,
         ...(Object.keys(frozenTraceIdentity).length
           ? { service_data: JSON.stringify(frozenTraceIdentity) }
           : {}),

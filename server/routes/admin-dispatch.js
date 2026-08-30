@@ -7105,17 +7105,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
           if (serviceRecordCols.report_template_version && useServiceReportV1) recordInsert.report_template_version = 'service_report_v1';
           if (serviceRecordCols.service_line) recordInsert.service_line = reportServiceLine;
-          if (serviceRecordCols.service_tier) recordInsert.service_tier = svc.cust_waveguard_tier || null;
-          // Freeze the tier's PROVENANCE beside it: a permanent report must be
-          // able to tell a real membership from an auto-derived label AT THE
-          // TIME OF THE VISIT, because the customer's current row changes
-          // later (codex #3617 r3 P1). 'manual' when the customer has a tier
-          // but no recorded source (pre-provenance member rows).
-          if (serviceRecordCols.service_tier_source) {
-            recordInsert.service_tier_source = svc.cust_waveguard_tier
-              ? (svc.cust_waveguard_tier_source || 'manual')
-              : null;
-          }
+          // Tier + provenance + callback identity frozen via the SHARED
+          // completion snapshot (completion-tier-snapshot.js) — the same
+          // builder the pest-recap path uses, so no completion path can
+          // create a record without them (codex #3617 r3/r4).
+          Object.assign(recordInsert, completionTierSnapshotFields({
+            serviceRecordCols,
+            waveguardTier: svc.cust_waveguard_tier,
+            waveguardTierSource: svc.cust_waveguard_tier_source,
+            isCallback: !!svc.is_callback,
+          }));
           if (serviceRecordCols.visit_number) recordInsert.visit_number = Number(priorVisitCountRow?.count || 0) + 1;
           const recordTimingFields = buildServiceRecordCompletionTimingFields({
             scheduledService: svc,
@@ -7134,7 +7133,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (isBackfillCompletion) applyBackfillRecordTimingPolicy(recordTimingFields, effectiveTimeOnSite, svc);
           Object.assign(recordInsert, recordTimingFields);
           if (serviceRecordCols.conditions && conditionsAtApplication) recordInsert.conditions = serializeJsonb(conditionsAtApplication);
-          if (serviceRecordCols.is_callback) recordInsert.is_callback = !!svc.is_callback;
           if (serviceRecordCols.service_data) recordInsert.service_data = serializeJsonb(serviceData);
           if (serviceRecordCols.advisory && useServiceReportV1) {
             // Pass the completed-action scopes so an interior treatment keeps
@@ -13162,6 +13160,7 @@ router.get('/products/catalog', async (req, res, next) => {
 // portal reaches these too. See services/pest-recap.js.
 // =========================================================================
 const PestRecap = require('../services/pest-recap');
+const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
 
 function recapActor(req) {
   return {

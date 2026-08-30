@@ -1,0 +1,29 @@
+/**
+ * The ONE completion-time tier/callback snapshot builder both completion
+ * paths (heavy /complete and pest-recap) share — codex #3617 r4 P1.
+ */
+const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
+
+const COLS = { service_tier: {}, service_tier_source: {}, is_callback: {} };
+
+describe('completionTierSnapshotFields', () => {
+  test('freezes tier + provenance + callback identity', () => {
+    expect(completionTierSnapshotFields({
+      serviceRecordCols: COLS, waveguardTier: 'Gold', waveguardTierSource: 'auto', isCallback: true,
+    })).toEqual({ service_tier: 'Gold', service_tier_source: 'auto', is_callback: true });
+  });
+
+  test("pre-provenance member rows freeze 'manual'; no tier freezes NULL source", () => {
+    expect(completionTierSnapshotFields({
+      serviceRecordCols: COLS, waveguardTier: 'Silver', waveguardTierSource: null, isCallback: false,
+    })).toEqual({ service_tier: 'Silver', service_tier_source: 'manual', is_callback: false });
+    expect(completionTierSnapshotFields({
+      serviceRecordCols: COLS, waveguardTier: null, waveguardTierSource: null, isCallback: false,
+    })).toEqual({ service_tier: null, service_tier_source: null, is_callback: false });
+  });
+
+  test('column-guarded: pre-migration schemas keep the legacy shape; unknown callback stays unset', () => {
+    expect(completionTierSnapshotFields({ serviceRecordCols: {}, waveguardTier: 'Gold', isCallback: true })).toEqual({});
+    expect(completionTierSnapshotFields({ serviceRecordCols: COLS, waveguardTier: 'Gold', waveguardTierSource: 'manual', isCallback: null })).toEqual({ service_tier: 'Gold', service_tier_source: 'manual' });
+  });
+});

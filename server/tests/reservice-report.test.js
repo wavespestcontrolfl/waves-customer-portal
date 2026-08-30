@@ -179,13 +179,20 @@ describe('reservice-report (gate on)', () => {
     expect(missing.includedWithWaveGuard).toBe(false);
   });
 
-  test('an auto-derived tier LABEL is not a membership — no $0 claim (money-gate fail direction)', async () => {
-    const labelKnex = fakeKnex({ customer: { id: 'cust-1', waveguard_tier: 'Gold', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: null } });
-    const block = await buildReserviceReport(member, { serviceLine: 'pest', knex: labelKnex });
-    expect(block.includedWithWaveGuard).toBe(false);
-    expect(block.billingLine).toBeNull();
-    expect(block.billingReason).toBe('tier_label');
-    expect(await reserviceReportPdfSignature(member, { knex: labelKnex })).toBe('-rs1nt');
+  test('the frozen snapshot is the sole authority — current customer state never rewrites history in either direction', async () => {
+    // Visit frozen as a real membership; customer LATER becomes a label —
+    // the historic claim stands.
+    const nowLabelKnex = fakeKnex({ customer: { id: 'cust-1', waveguard_tier: 'Gold', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: null } });
+    const stands = await buildReserviceReport(member, { serviceLine: 'pest', knex: nowLabelKnex });
+    expect(stands.includedWithWaveGuard).toBe(true);
+    // Visit frozen as a label; customer LATER becomes a paying member —
+    // the old callback never gains the claim.
+    const nowMemberKnex = fakeKnex();
+    const refused = await buildReserviceReport({ ...member, service_tier_source: 'auto' }, { serviceLine: 'pest', knex: nowMemberKnex });
+    expect(refused.includedWithWaveGuard).toBe(false);
+    expect(refused.billingReason).toBe('tier_label');
+    // No customers-table read happens at all.
+    expect(nowLabelKnex.calls).not.toContain('customers');
   });
 
   test('inspection_only / customer_declined outcomes never claim re-treatment, and key the cache distinctly', async () => {

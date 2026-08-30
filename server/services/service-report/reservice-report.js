@@ -23,9 +23,9 @@
  *    Non-member callbacks may bill (owner doctrine 2026-08-27: record-only,
  *    no enforcement), so no money claim is ever made for them. A tier that
  *    is an auto-derived LABEL is not a membership either — the claim reads
- *    the provenance FROZEN on the record (service_tier_source; NULL =
- *    pre-freeze record = unprovable = no claim) AND the current row's
- *    tierLabelStatus, same fail direction as the money gates.
+ *    ONLY the provenance FROZEN on the record (service_tier_source; NULL =
+ *    pre-freeze record = unprovable = no claim; the mutable customer row is
+ *    never consulted, so later membership changes cannot rewrite history).
  *  - inspection_only / customer_declined callbacks performed NO application
  *    (admin-dispatch visitPerformed), so their copy inspects/records — it
  *    never claims areas "were re-treated".
@@ -34,7 +34,6 @@
  */
 
 const { detectServiceLine } = require('./service-line-configs');
-const { tierLabelStatus } = require('../self-booking-plan-sync');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
 // report gates (cockroach-report-v2.js / termite-report-v2.js) and the
@@ -216,14 +215,14 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
     // on the record at completion (service_tier_source, migration
     // 20260830000050): 'auto' was a label, and NULL/absent (a record that
     // predates the freeze) is unprovable — both refuse (codex r3 P1).
+    // The frozen snapshot is the SOLE authority (codex r4 P1): re-checking
+    // the CURRENT customer row would let later membership changes rewrite —
+    // or churn — what a permanent report claims about a past visit, in
+    // either direction. 'auto' was a label at the visit; NULL predates the
+    // freeze and is unprovable; anything else was a real membership then.
     const frozenSource = service.service_tier_source;
     if (frozenSource == null || frozenSource === 'auto') {
       billing = { free: false, reason: frozenSource === 'auto' ? 'tier_label' : 'tier_provenance_unfrozen' };
-    } else {
-      // Belt and braces: the current row must ALSO resolve 'not_label'
-      // (shared money-gate resolver) — anything else refuses the claim.
-      const labelStatus = knex ? await tierLabelStatus(service.customer_id, knex) : 'unknown';
-      if (labelStatus !== 'not_label') billing = { free: false, reason: 'tier_label' };
     }
   }
   const includedWithWaveGuard = Boolean(tier) && billing.free === true;
