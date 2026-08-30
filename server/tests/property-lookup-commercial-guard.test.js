@@ -555,6 +555,22 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('a web-sourced unit count on an authoritative-type hybrid cannot exempt the flag (codex P1 r8)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '15 Example Condo Way Unit 5, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 48,
+      _source: 'hybrid',
+      _fieldEvidence: {
+        propertyType: { value: 'Condominium', sourceType: 'county' },
+        unitCount: { value: 48, sourceType: 'web_listing', fieldVerify: true },
+      },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
   test('a "Multifamily Condominium" master parcel attesting 8 units is whole-property — no flag (codex P1 r7)', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '14 Example Complex Dr, Testville, FL 00000',

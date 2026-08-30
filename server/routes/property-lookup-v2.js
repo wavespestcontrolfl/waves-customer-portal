@@ -3237,7 +3237,11 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // below — two lotSize flags double-count in the win/loss slices (P2).
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
   const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
-  const unitLotTrustedUnitCount = Number(unitLotSignalRc?.unitCount);
+  // trustedUnitCount, not the raw record count: commercialSignalRecord
+  // returns the whole record when the TYPE is authoritative, so a hybrid
+  // county-condo record with a web-sourced development unit count could
+  // otherwise exempt itself from the flag (codex P1 r6).
+  const unitLotTrustedUnitCount = unitLotSignalRc ? Number(trustedUnitCount(unitLotSignalRc)) : NaN;
   const smallSharedParcel = (Number.isFinite(unitLotParcelUnits) && unitLotParcelUnits >= 2)
     || (Number.isFinite(unitLotTrustedUnitCount) && unitLotTrustedUnitCount >= 2);
   // Condo identity via the estimator's OWN predicate (isCondoRecord —
