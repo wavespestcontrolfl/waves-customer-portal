@@ -8,7 +8,8 @@
  * these rows.
  *
  * Source of truth: the record's OWN creation-time evidence — the recap
- * marker in field_flags plus the frozen service_type naming a re-service.
+ * marker in field_flags plus the FROZEN catalog identity
+ * (service_data.completedServiceKey ∈ pest_re_service/lawn_re_service).
  * Only false/NULL records are promoted; nothing is ever demoted.
  *
  * down(): intentionally a no-op — the repaired value IS the authoritative
@@ -22,13 +23,14 @@ exports.up = async function up(knex) {
     return;
   }
   // Scope: ONLY rows the recap path created (field_flags.recap = true)
-  // whose OWN frozen service_type names a re-service — both stamped at
-  // record creation, so the repair rests on creation-time evidence alone.
-  // The scheduled row's CURRENT is_callback is deliberately not consulted:
-  // update-details can repoint a visit after the fact in either direction,
-  // and this migration must never rewrite what was true at completion
-  // (codex GH-r3 P2 + local r8 P1). The name regex is the same safety net
-  // re-service.js uses (\bre-?service\b, case-insensitive).
+  // whose FROZEN catalog identity is a re-service key — service_data.
+  // completedServiceKey is stamped at record creation from the completion
+  // profile, so the repair rests on durable creation-time evidence: not the
+  // scheduled row's CURRENT is_callback (update-details can repoint a visit
+  // after the fact — codex GH-r3 P2) and not the editable display name
+  // (a "Re-Service" name can belong to a non-callback — codex r9 P1).
+  // Recap rows whose identity freeze transiently failed carry no key and
+  // are deliberately left alone (fail closed).
   const hasFieldFlags = await knex.schema.hasColumn('service_records', 'field_flags');
   if (!hasFieldFlags) {
     console.log('[migration] field_flags column missing — no recap-created rows to repair');
@@ -36,10 +38,7 @@ exports.up = async function up(knex) {
   }
   const repaired = await knex('service_records')
     .whereRaw("(field_flags ->> 'recap') = 'true'")
-    // The pattern rides as a BINDING: a bare `?` inside knex.raw SQL text is
-    // a placeholder and mangled this regex to `re-$2service` (CI migrate
-    // failure; the standing knex.raw micro-rule).
-    .whereRaw('service_type ~* ?', ['\\mre-?service\\M'])
+    .whereRaw("(service_data ->> 'completedServiceKey') in ('pest_re_service', 'lawn_re_service')")
     .where(function notTrue() {
       this.where('is_callback', false).orWhereNull('is_callback');
     })

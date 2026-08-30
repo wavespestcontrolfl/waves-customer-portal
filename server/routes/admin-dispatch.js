@@ -7108,13 +7108,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Tier + provenance + callback identity frozen via the SHARED
           // completion snapshot (completion-tier-snapshot.js) — the same
           // builder the pest-recap path uses, so no completion path can
-          // create a record without them (codex #3617 r3/r4).
+          // create a record without them (codex #3617 r3/r4). The customer
+          // fields are RE-READ inside this transaction: the handler-entry
+          // read is minutes stale by insert time, and a concurrent
+          // membership edit would freeze the wrong provenance on a
+          // permanent report (codex r9 P1). Fallback = the entry read.
+          let snapshotCustomer = null;
+          try {
+            snapshotCustomer = await trx('customers').where({ id: svc.customer_id }).first(
+              'waveguard_tier',
+              'monthly_rate',
+              ...(customerTierSourceColumnExists ? ['waveguard_tier_source'] : []),
+              ...(billingModeColumnsExist ? ['billing_mode'] : []),
+            );
+          } catch { snapshotCustomer = null; }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,
-            waveguardTier: svc.cust_waveguard_tier,
-            waveguardTierSource: svc.cust_waveguard_tier_source,
-            monthlyRate: svc.cust_monthly_rate,
-            billingMode: svc.cust_billing_mode,
+            waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,
+            waveguardTierSource: snapshotCustomer ? snapshotCustomer.waveguard_tier_source : svc.cust_waveguard_tier_source,
+            monthlyRate: snapshotCustomer ? snapshotCustomer.monthly_rate : svc.cust_monthly_rate,
+            billingMode: snapshotCustomer ? snapshotCustomer.billing_mode : svc.cust_billing_mode,
             // The LOCKED completion row's flag — svc was read before the
             // FOR UPDATE and a concurrent update-details reclassify would
             // freeze a stale callback identity forever (codex GH-r3 P2;

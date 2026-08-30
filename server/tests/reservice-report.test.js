@@ -158,12 +158,13 @@ describe('reservice-report (gate on)', () => {
     expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs1nt');
   });
 
-  test('incomplete outcome: never claims treatment, distinct cache key', async () => {
+  test('incomplete outcome: claims neither treatment NOR "no application" (partial applications exist), distinct cache key', async () => {
     const knex = fakeKnex();
     const block = await buildReserviceReport(member, { serviceLine: 'pest', knex, visitOutcome: 'incomplete' });
     expect(block.outcome).toBe('incomplete');
     expect(block.result).toMatch(/could not be completed/);
     expect(`${block.result} ${block.completedFallback}`).not.toMatch(/re-?treated/i);
+    expect(`${block.result} ${block.completedFallback} ${block.expectation}`).not.toMatch(/no application/i);
     expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1mx');
   });
 

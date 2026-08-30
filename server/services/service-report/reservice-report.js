@@ -97,9 +97,11 @@ const COPY = {
       expectation: 'If the problem areas are not improving, contact us and we will get back out.',
     },
     incomplete: {
+      // 'incomplete' can include a PARTIAL application (unlike
+      // inspection_only/customer_declined) — no claim either way.
       heading: 'about your visit',
       result: 'We returned for your lawn re-service, but the visit could not be completed.',
-      completedFallback: 'No application was made today.',
+      completedFallback: 'The visit was not completed.',
       expectation: 'We will follow up to finish the visit — contact us if the problem areas are getting worse in the meantime.',
     },
   },
@@ -123,9 +125,10 @@ const COPY = {
       expectation: 'If you are still seeing activity, contact us and we will get back out.',
     },
     incomplete: {
+      // 'incomplete' can include a PARTIAL application — no claim either way.
       heading: 'about your visit',
       result: 'We returned for your re-service, but the visit could not be completed.',
-      completedFallback: 'No application was made today.',
+      completedFallback: 'The visit was not completed.',
       expectation: 'We will follow up to finish the visit — contact us if you are still seeing activity in the meantime.',
     },
   },
