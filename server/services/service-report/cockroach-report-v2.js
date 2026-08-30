@@ -271,17 +271,21 @@ function betweenVisitsCopy({ german, large, rw }) {
     : 'Activity usually tapers over the first week after treatment. Text us if it gets worse rather than better.';
 }
 
-function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, work = [], nextStep = null }) {
+function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved = false, work = [], nextStep = null, positionReason = null }) {
   const german = isGerman(species);
   const large = isLargeRoach(species);
   const rw = recordedWork(work);
   const lines = [];
   let nextVisitMissing = false;
   if (program.treatmentNumber == null) {
-    // Unknown position: no plan promises, no badge, no completion claim —
-    // only what holds either way, plus an honest note.
+    // Unknown position: no numbering, no badge, no completion claim. The
+    // next booked treatment still references its date (owner ruling) when
+    // the live calendar found one; a FAILED lookup says so honestly.
+    if (scheduleResolved && nextVisit) lines.push({ label: 'Next treatment', kind: 'next_visit' });
     lines.push({ label: 'Between now and then', text: betweenVisitsCopy({ german, large, rw }) });
-    lines.push({ label: 'Your program', text: 'We could not confirm your treatment position while building this report — the office has the full schedule, text us any time.' });
+    if (positionReason === 'failed') {
+      lines.push({ label: 'Your program', text: 'We could not confirm your treatment position while building this report — the office has the full schedule, text us any time.' });
+    }
     if (nextStep) lines.push({ label: 'From your technician', text: nextStep });
     return { title: programTitle(program), badge: null, lines, nextVisitMissing: false };
   }
@@ -358,6 +362,7 @@ function buildCockroachReportV2({
   nextVisit = null,
   scheduleResolved = false,
   upcomingRoachVisits = null,
+  positionReason = null,
 } = {}) {
   if (typedReportType !== COCKROACH_TYPED_TYPE) return null;
   const values = typedSnapshotValues && typeof typedSnapshotValues === 'object' ? typedSnapshotValues : {};
@@ -374,7 +379,7 @@ function buildCockroachReportV2({
   const statusReconciled = Boolean(status.reconciled);
   delete status.reconciled;
   const program = resolveProgram({ serviceKey, treatmentNumber, upcomingRoachVisits });
-  const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, work, nextStep });
+  const whatsNext = buildWhatsNext({ program, species, nextVisit, scheduleResolved, work, nextStep, positionReason });
 
   const metrics = [
     // A reconciled reading reports what the evidence says, not the stale select.
@@ -481,10 +486,15 @@ function attachCockroachReportV2(data, service = {}) {
   // records of the same program are immutable, so the PDF may print it).
   const positionResolved = Object.prototype.hasOwnProperty.call(data, 'cockroachProgramPosition');
   const treatmentNumber = positionResolved
-    ? (data.cockroachProgramPosition && Number.isFinite(Number(data.cockroachProgramPosition.treatmentNumber))
+    ? (data.cockroachProgramPosition && data.cockroachProgramPosition.treatmentNumber != null
+      && Number.isFinite(Number(data.cockroachProgramPosition.treatmentNumber))
       ? Number(data.cockroachProgramPosition.treatmentNumber)
       : null)
     : 1;
+  // null field = the lookup FAILED; { treatmentNumber: null, reason } = no lineage
+  const positionReason = positionResolved && treatmentNumber == null
+    ? (data.cockroachProgramPosition && data.cockroachProgramPosition.reason) || 'failed'
+    : null;
   delete data.cockroachNextTreatmentVisit;
   delete data.cockroachUpcomingRoachVisits;
   delete data.cockroachProgramPosition;
@@ -511,6 +521,7 @@ function attachCockroachReportV2(data, service = {}) {
       nextVisit,
       scheduleResolved,
       upcomingRoachVisits,
+      positionReason,
     });
     if (built) {
       data.cockroachReportV2 = { ...built, source: 'primary' };
@@ -666,7 +677,17 @@ async function resolveCockroachProgram(service = {}, knex, { upcomingRows = null
         if (!nextRow) nextRow = row;
       }
     }
-    return { failed: false, treatmentNumber: prior + 1, upcoming, nextRow, lineageKnown: lineage.known };
+    // No lineage (legacy / hand-booked): the position is NOT guessed across
+    // purchases (codex P2 #3613 r3) — treatmentNumber null, no completion
+    // claim; the bounded same-key pick still supplies the next booked date.
+    return {
+      failed: false,
+      treatmentNumber: lineage.known ? prior + 1 : null,
+      positionReason: lineage.known ? null : 'no_lineage',
+      upcoming,
+      nextRow,
+      lineageKnown: lineage.known,
+    };
   } catch {
     return { failed: true };
   }

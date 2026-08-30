@@ -759,6 +759,16 @@ describe('cockroach treatment program (COCKROACH_REPORT_V2) — program lineage'
     expect(data.cockroachUpcomingRoachVisits).toBe(1);
   });
 
+  test('a hand-booked visit with no lineage is never numbered across purchases, but still references its next booked date', async () => {
+    const fx = fixtures();
+    fx.scheduled_services = fx.scheduled_services.map((r) => ({ ...r, source_estimate_id: undefined }));
+    const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-nolineage', makeKnex(fx), LIVE_V2);
+    expect(data.cockroachProgramPosition).toEqual({ treatmentNumber: null, reason: 'no_lineage' });
+    // bounded same-key pick: the first same-key booking inside the window
+    expect(data.cockroachNextTreatmentVisit?.scheduledDate).toBeUndefined();
+    expect(data.cockroachReportV2RenderedSignature).toBe('-roachv2a-px');
+  });
+
   test('gate off → no program fields at all', async () => {
     process.env.COCKROACH_REPORT_V2 = 'false';
     const data = await buildReportV1Data(ROACH_SERVICE, 'token-roach-off', makeKnex(fixtures()), LIVE_V2);

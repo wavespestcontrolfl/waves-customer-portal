@@ -220,8 +220,12 @@ describe('unknown program position (lineage lookup failed) → no program claims
     expect(out.whatsNext.title).toBe("Today's treatment");
     expect(out.whatsNext.title).not.toMatch(/complete/i);
     expect(out.whatsNext.badge).toBeNull();
-    expect(out.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then', 'Your program']);
+    // no lineage: the next booked date still references, no numbering, no honesty note
+    expect(out.whatsNext.lines.map((l) => l.label)).toEqual(['Next treatment', 'Between now and then']);
     expect(JSON.stringify(out.whatsNext)).not.toMatch(/complete/i);
+    // a FAILED lookup says so
+    const failed = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: null, positionReason: 'failed', scheduleResolved: true, nextVisit: null });
+    expect(failed.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then', 'Your program']);
     expect(out.whatsNext.nextVisitMissing).toBe(false);
     expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: null })).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
   });
@@ -320,7 +324,13 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     const failed = attachCockroachReportV2({ ...payload(), cockroachProgramPosition: null }, service);
     expect(failed.cockroachReportV2.program.treatmentNumber).toBeNull();
     expect(failed.cockroachReportV2.whatsNext.badge).toBeNull();
+    expect(failed.cockroachReportV2.whatsNext.lines.some((l) => l.label === 'Your program')).toBe(true);
     expect(failed).not.toHaveProperty('cockroachProgramPosition');
+    // no lineage (legacy / hand-booked): unnumbered, no claim, but the booked next date still shows
+    const legacy = attachCockroachReportV2({ ...payload(), cockroachProgramPosition: { treatmentNumber: null, reason: 'no_lineage' } }, service);
+    expect(legacy.cockroachReportV2.program.treatmentNumber).toBeNull();
+    expect(legacy.cockroachReportV2.whatsNext.lines[0]).toEqual({ label: 'Next treatment', kind: 'next_visit' });
+    expect(legacy.cockroachReportV2.whatsNext.lines.some((l) => l.label === 'Your program')).toBe(false);
   });
 
   it('live view with the field present but null → exception copy; pdf (fields absent) → no date line either way', () => {
