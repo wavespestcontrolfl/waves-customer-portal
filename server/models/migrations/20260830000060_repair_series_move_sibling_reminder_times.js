@@ -33,7 +33,7 @@
 exports.up = async function up(knex) {
   const repaired = await knex.raw(`
     UPDATE appointment_reminders ar
-    SET appointment_time = (ss.scheduled_date::timestamp + ss.window_start) AT TIME ZONE 'America/New_York',
+    SET appointment_time = (ss.scheduled_date + ss.window_start) AT TIME ZONE 'America/New_York',
         updated_at = now()
     FROM scheduled_services ss
     WHERE ss.id = ar.scheduled_service_id
@@ -44,7 +44,7 @@ exports.up = async function up(knex) {
       AND ss.window_start <> time '08:00'
       AND ss.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show')
       AND ss.scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date
-      AND ar.appointment_time = (ss.scheduled_date::timestamp + time '08:00') AT TIME ZONE 'America/New_York'
+      AND ar.appointment_time = (ss.scheduled_date + time '08:00') AT TIME ZONE 'America/New_York'
     RETURNING ar.id
   `);
   const ids = (repaired.rows || []).map((r) => r.id);
