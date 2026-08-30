@@ -1638,10 +1638,12 @@ function parseTimeWindowStart(timeWindow) {
 // elapsed guard.
 
 // Recency resolver for "the customer we just finished": completed visits,
-// newest first. Ordering coalesces to updated_at because the tracker's
-// completed_at can carry a backdated service DAY (see admin-dispatch
-// BACKFILL_RECORD_END_FIELDS notes) and older rows predate the column —
-// "most recently closed out" is the honest recency signal either way.
+// newest first. Recency is GREATEST(completed_at, updated_at): the
+// tracker's completed_at can carry a backdated service DAY (see
+// admin-dispatch BACKFILL_RECORD_END_FIELDS notes) — a visit closed out NOW
+// for an older service day must still surface as "just finished", which
+// updated_at (touched by the close-out write) guarantees; rows predating
+// the completed_at column fall back to updated_at the same way.
 async function getRecentCompletions(input = {}) {
   const limit = Math.min(Math.max(Number(input.limit) || 5, 1), 20);
   const days = Math.min(Math.max(Number(input.days) || 2, 1), 30);
@@ -1649,8 +1651,8 @@ async function getRecentCompletions(input = {}) {
     .join('customers as c', 'c.id', 'ss.customer_id')
     .leftJoin('technicians as t', 't.id', 'ss.technician_id')
     .where('ss.status', 'completed')
-    .whereRaw("COALESCE(ss.completed_at, ss.updated_at) >= NOW() - (? || ' days')::interval", [days])
-    .orderByRaw('COALESCE(ss.completed_at, ss.updated_at) DESC')
+    .whereRaw("GREATEST(COALESCE(ss.completed_at, ss.updated_at), ss.updated_at) >= NOW() - (? || ' days')::interval", [days])
+    .orderByRaw('GREATEST(COALESCE(ss.completed_at, ss.updated_at), ss.updated_at) DESC')
     .limit(limit)
     .select(
       'ss.id', 'ss.customer_id', 'c.first_name', 'c.last_name',
@@ -1734,8 +1736,10 @@ async function createAppointment(input) {
   // time so the confirmation card names the tech) resolves by immutable id.
   let technician_id = null;
   if (input.technician_id) {
-    const tech = await db('technicians').where('id', input.technician_id).first();
-    if (!tech) return { error: 'Technician not found' };
+    // Same active bar as name resolution — a model-provided id, or a tech
+    // deactivated during the confirmation window, must not take new visits.
+    const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
+    if (!tech) return { error: 'Technician not found or no longer active' };
     technician_id = tech.id;
   } else if (technician_name) {
     const tech = await resolveTechnicianByName(technician_name);
