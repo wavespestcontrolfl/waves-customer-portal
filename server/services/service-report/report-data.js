@@ -4989,7 +4989,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Re-service hero/PDF copy (reservice-report.js) — null while
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
-    reserviceReport: await buildReserviceReport(service, { serviceLine, knex }),
+    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || 'completed' }),
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

@@ -16,12 +16,18 @@ afterEach(() => {
   else process.env.GATE_RESERVICE_REPORT_COPY = ORIGINAL;
 });
 
-const member = { id: 'rec-1', scheduled_service_id: 'visit-1', is_callback: true, service_tier: 'Gold', service_type: 'Pest Control Re-Service' };
+const member = { id: 'rec-1', customer_id: 'cust-1', scheduled_service_id: 'visit-1', is_callback: true, service_tier: 'Gold', service_type: 'Pest Control Re-Service' };
 const nonMember = { ...member, service_tier: null, waveguard_tier: 'One-Time' };
 
 // Minimal knex fake: `visit` = the scheduled row (or null), `invoices` = rows
 // the collectible-invoice query returns. `throws` makes every query reject.
-function fakeKnex({ visit = { id: 'visit-1', estimated_price: null, is_callback: true }, invoices = [], throws = false } = {}) {
+function fakeKnex({
+  visit = { id: 'visit-1', estimated_price: null, is_callback: true },
+  invoices = [],
+  customer = { id: 'cust-1', waveguard_tier: 'Gold', waveguard_tier_source: 'manual', monthly_rate: 120, billing_mode: null },
+  customerColumns = { waveguard_tier_source: {} },
+  throws = false,
+} = {}) {
   const calls = [];
   return Object.assign((table) => {
     calls.push(table);
@@ -31,10 +37,15 @@ function fakeKnex({ visit = { id: 'visit-1', estimated_price: null, is_callback:
       whereNull() { return chain; },
       orWhereNotIn() { return chain; },
       whereNotIn() { return chain; },
+      async columnInfo() {
+        if (throws) throw new Error('db down');
+        return table === 'customers' ? customerColumns : {};
+      },
       async first() {
         if (throws) throw new Error('db down');
         if (table === 'scheduled_services') return visit;
         if (table === 'invoices') return invoices[0] || null;
+        if (table === 'customers') return customer;
         return null;
       },
     };
@@ -74,8 +85,8 @@ describe('reservice-report (gate on)', () => {
     expect(block.includedWithWaveGuard).toBe(true);
     expect(block.billingLine).toBe('This re-service was included with your WaveGuard Gold membership — $0.00 billed.');
     expect(block.billingReason).toBe('free');
-    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1m');
-    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1m');
+    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1mt');
+    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1mt');
   });
 
   test('PAID member callback (is_callback + positive estimated_price): no money claim', async () => {
@@ -84,7 +95,7 @@ describe('reservice-report (gate on)', () => {
     expect(block.includedWithWaveGuard).toBe(false);
     expect(block.billingLine).toBeNull();
     expect(block.billingReason).toBe('priced');
-    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1n');
+    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1nt');
   });
 
   test('PREPAID member callback (prepaid_amount, no invoice): no money claim', async () => {
@@ -112,7 +123,7 @@ describe('reservice-report (gate on)', () => {
   });
 
   test('store-side signature follows the RENDERED block, not a re-resolve (fell-closed render keys as no-claim)', () => {
-    expect(reserviceReportRenderedSignature({ reserviceReport: { includedWithWaveGuard: false } }, member)).toBe('-rs1n');
+    expect(reserviceReportRenderedSignature({ reserviceReport: { includedWithWaveGuard: false } }, member)).toBe('-rs1nt');
     expect(reserviceReportRenderedSignature({ reserviceReport: null }, member)).toBe('');
     expect(reserviceReportRenderedSignature({}, member)).toBe('');
   });
@@ -134,7 +145,7 @@ describe('reservice-report (gate on)', () => {
   });
 
   test('signature resolves the line from the record when the builder line is not passed', async () => {
-    expect(await reserviceReportPdfSignature({ ...member, service_line: 'lawn' }, { knex: fakeKnex() })).toBe('-rs1m');
+    expect(await reserviceReportPdfSignature({ ...member, service_line: 'lawn' }, { knex: fakeKnex() })).toBe('-rs1mt');
   });
 
   test('non-member callback (One-Time tier): no money claim, no billing lookup, distinct key component', async () => {
@@ -144,7 +155,32 @@ describe('reservice-report (gate on)', () => {
     expect(block.billingLine).toBeNull();
     expect(block.billingReason).toBe('non_member');
     expect(knex.calls).toEqual([]);
-    expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs1n');
+    expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs1nt');
+  });
+
+  test('an auto-derived tier LABEL is not a membership — no $0 claim (money-gate fail direction)', async () => {
+    const labelKnex = fakeKnex({ customer: { id: 'cust-1', waveguard_tier: 'Gold', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: null } });
+    const block = await buildReserviceReport(member, { serviceLine: 'pest', knex: labelKnex });
+    expect(block.includedWithWaveGuard).toBe(false);
+    expect(block.billingLine).toBeNull();
+    expect(block.billingReason).toBe('tier_label');
+    expect(await reserviceReportPdfSignature(member, { knex: labelKnex })).toBe('-rs1nt');
+  });
+
+  test('inspection_only / customer_declined outcomes never claim re-treatment, and key the cache distinctly', async () => {
+    const knex = fakeKnex();
+    const inspect = await buildReserviceReport(member, { serviceLine: 'pest', knex, visitOutcome: 'inspection_only' });
+    expect(inspect.outcome).toBe('inspection_only');
+    expect(inspect.result).toMatch(/inspected the areas you reported/);
+    expect(`${inspect.result} ${inspect.completedFallback} ${inspect.expectation}`).not.toMatch(/re-?treated/i);
+    expect(reserviceReportRenderedSignature({ reserviceReport: inspect }, member)).toBe('-rs1mi');
+    const declined = await buildReserviceReport(member, { serviceLine: 'lawn', knex, visitOutcome: 'customer_declined' });
+    expect(declined.result).toMatch(/treatment was not performed/);
+    expect(`${declined.result} ${declined.completedFallback}`).not.toMatch(/re-?treated/i);
+    expect(reserviceReportRenderedSignature({ reserviceReport: declined }, member)).toBe('-rs1md');
+    // Pre-render signature path reads the outcome frozen in service_data.
+    const frozen = { ...member, service_data: JSON.stringify({ protocol: { visitOutcome: 'inspection_only' } }) };
+    expect(await reserviceReportPdfSignature(frozen, { knex })).toBe('-rs1mi');
   });
 
   test('ONLY the tier frozen on the record qualifies — the customer\'s current tier never rewrites an old callback as free', async () => {

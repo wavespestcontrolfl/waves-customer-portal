@@ -21,12 +21,18 @@
  *    linked by record OR scheduled-service id. Missing row / failed lookup
  *    ⇒ not proven ⇒ no claim.
  *    Non-member callbacks may bill (owner doctrine 2026-08-27: record-only,
- *    no enforcement), so no money claim is ever made for them.
+ *    no enforcement), so no money claim is ever made for them. A tier that
+ *    is an auto-derived LABEL (tierLabelStatus !== 'not_label') is not a
+ *    membership either — same fail direction as the money gates.
+ *  - inspection_only / customer_declined callbacks performed NO application
+ *    (admin-dispatch visitPerformed), so their copy inspects/records — it
+ *    never claims areas "were re-treated".
  *  - No field observations are invented: every sentence is about what a
  *    re-service IS, not about what was found today.
  */
 
 const { detectServiceLine } = require('./service-line-configs');
+const { tierLabelStatus } = require('../self-booking-plan-sync');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
 // report gates (cockroach-report-v2.js / termite-report-v2.js) and the
@@ -65,20 +71,70 @@ function lineOf(service, serviceLine) {
   return serviceLine || service?.service_line || detectServiceLine(service?.service_type) || null;
 }
 
+// Copy per line × visit outcome. `treated` is the performed-application
+// default; `inspection_only` and `customer_declined` completions performed
+// NO application (admin-dispatch's visitPerformed rule), so their copy must
+// never claim anything was re-treated.
 const COPY = {
   lawn: {
-    heading: 'we came back and took care of it!',
-    result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.',
-    completedFallback: 'Reported problem areas were re-treated today.',
-    expectation: 'Lawn treatments take time to show — weeds and disease can take two to three weeks to respond after an application. Contact us if the problem areas are not improving after three weeks.',
+    treated: {
+      heading: 'we came back and took care of it!',
+      result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.',
+      completedFallback: 'Reported problem areas were re-treated today.',
+      expectation: 'Lawn treatments take time to show — weeds and disease can take two to three weeks to respond after an application. Contact us if the problem areas are not improving after three weeks.',
+    },
+    inspection_only: {
+      heading: 'we came back to check on it!',
+      result: 'Lawn re-service visit completed — we returned and inspected the problem areas you reported. No application was made on this visit.',
+      completedFallback: 'Reported problem areas were inspected today.',
+      expectation: 'If the problem areas are not improving, contact us and we will get back out.',
+    },
+    customer_declined: {
+      heading: 'your visit is complete!',
+      result: 'We returned for your lawn re-service; treatment was not performed at this visit.',
+      completedFallback: 'No application was made today.',
+      expectation: 'If the problem areas are not improving, contact us and we will get back out.',
+    },
   },
   pest: {
-    heading: 'we came back and took care of it!',
-    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
-    completedFallback: 'Reported activity areas were re-treated today.',
-    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    treated: {
+      heading: 'we came back and took care of it!',
+      result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+      completedFallback: 'Reported activity areas were re-treated today.',
+      expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    },
+    inspection_only: {
+      heading: 'we came back to check on it!',
+      result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+      completedFallback: 'Reported activity areas were inspected today.',
+      expectation: 'If you are still seeing activity, contact us and we will get back out.',
+    },
+    customer_declined: {
+      heading: 'your visit is complete!',
+      result: 'We returned for your re-service; treatment was not performed at this visit.',
+      completedFallback: 'No application was made today.',
+      expectation: 'If you are still seeing activity, contact us and we will get back out.',
+    },
   },
 };
+
+const NON_PERFORMED_OUTCOMES = new Set(['inspection_only', 'customer_declined']);
+
+// Explicit param (report-data's resolved protocol.visitOutcome) wins; the
+// pre-render signature paths fall back to the protocol frozen in
+// service_data. Anything unrecognized renders the treated copy — the same
+// default the completion billing rule applies.
+function outcomeOf(service, visitOutcome) {
+  let outcome = visitOutcome;
+  if (!outcome) {
+    try {
+      const raw = typeof service?.service_data === 'string' ? JSON.parse(service.service_data) : service?.service_data;
+      outcome = raw?.protocol?.visitOutcome || service?.visit_outcome || null;
+    } catch { outcome = service?.visit_outcome || null; }
+  }
+  const key = String(outcome || '').toLowerCase();
+  return NON_PERFORMED_OUTCOMES.has(key) ? key : 'treated';
+}
 
 /**
  * Was this callback visit actually free? Fails CLOSED: anything short of
@@ -120,17 +176,28 @@ async function resolveCallbackBilling(service = {}, knex = null) {
  * dark, the record is not a callback, or the service line is one this copy
  * does not describe.
  */
-async function buildReserviceReport(service = {}, { serviceLine = null, knex = null } = {}) {
+async function buildReserviceReport(service = {}, { serviceLine = null, knex = null, visitOutcome = null } = {}) {
   if (!gateOn()) return null;
   if (!isCallbackRecord(service)) return null;
   const line = lineOf(service, serviceLine);
-  const copy = COPY[line];
-  if (!copy) return null;
+  const lineCopy = COPY[line];
+  if (!lineCopy) return null;
+  const outcome = outcomeOf(service, visitOutcome);
+  const copy = lineCopy[outcome];
   const tier = memberTier(service);
-  const billing = tier ? await resolveCallbackBilling(service, knex) : { free: false, reason: 'non_member' };
+  let billing = tier ? await resolveCallbackBilling(service, knex) : { free: false, reason: 'non_member' };
+  if (billing.free === true) {
+    // A tier can be an auto-derived LABEL with no paid membership lane —
+    // completion still copies it into service_records.service_tier. Same
+    // fail direction as the money gates: anything except a verified
+    // 'not_label' is not a membership, so no claim.
+    const labelStatus = knex ? await tierLabelStatus(service.customer_id, knex) : 'unknown';
+    if (labelStatus !== 'not_label') billing = { free: false, reason: 'tier_label' };
+  }
   const includedWithWaveGuard = Boolean(tier) && billing.free === true;
   return {
     serviceLine: line,
+    outcome,
     heading: copy.heading,
     result: copy.result,
     completedFallback: copy.completedFallback,
@@ -146,7 +213,8 @@ async function buildReserviceReport(service = {}, { serviceLine = null, knex = n
 
 function signatureFor(block) {
   if (!block) return '';
-  return block.includedWithWaveGuard ? '-rs1m' : '-rs1n';
+  const outcomeKey = block.outcome === 'inspection_only' ? 'i' : block.outcome === 'customer_declined' ? 'd' : 't';
+  return `${block.includedWithWaveGuard ? '-rs1m' : '-rs1n'}${outcomeKey}`;
 }
 
 /**
