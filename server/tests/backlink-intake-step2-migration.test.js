@@ -74,7 +74,7 @@ describe('up()', () => {
       ['uuid', 'id'], ['string', 'source'], ['text', 'source_detail'], ['uuid', 'source_ref'],
       ['text', 'raw_url'], ['text', 'item_key'], ['string', 'state'], ['integer', 'attempts'],
       ['timestamp', 'next_retry_at'], ['text', 'last_error'], ['text', 'resolved_url'], ['text', 'resolved_host'],
-      ['uuid', 'domain_id'], ['uuid', 'source_row_id'], ['string', 'drop_reason'], ['jsonb', 'pending_touches'], ['jsonb', 'pending_touches'], ['jsonb', 'pending_touches'],
+      ['uuid', 'domain_id'], ['uuid', 'source_row_id'], ['string', 'drop_reason'], ['jsonb', 'pending_touches'],
       ['timestamp', 'first_seen_at'], ['timestamp', 'last_seen_at'],
     ]);
     expect(hasMod(colOf(items, 'id'), 'primary')).toBe(true);
@@ -83,10 +83,6 @@ describe('up()', () => {
     }
     expect(hasMod(colOf(items, 'state'), 'defaultTo', ['pending'])).toBe(true);
     expect(hasMod(colOf(items, 'attempts'), 'defaultTo', [0])).toBe(true);
-    expect(hasMod(colOf(items, 'pending_touches'), 'notNullable')).toBe(true);
-    expect(hasMod(colOf(items, 'pending_touches'), 'defaultTo', ['[]'])).toBe(true);
-    expect(hasMod(colOf(items, 'pending_touches'), 'notNullable')).toBe(true);
-    expect(hasMod(colOf(items, 'pending_touches'), 'defaultTo', ['[]'])).toBe(true);
     expect(hasMod(colOf(items, 'pending_touches'), 'notNullable')).toBe(true);
     expect(hasMod(colOf(items, 'pending_touches'), 'defaultTo', ['[]'])).toBe(true);
     expect(hasMod(colOf(items, 'first_seen_at'), 'defaultTo', ['now()'])).toBe(true);
