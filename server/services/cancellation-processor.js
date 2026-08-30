@@ -602,9 +602,13 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
           this.select(1).from('scheduled_services as s')
             .whereRaw('s.customer_id = customers.id')
             .where(function unsettled() {
-              this.where(function liveNow() {
-                this.whereIn('s.status', ['en_route', 'on_site']).orWhereIn('s.track_state', LIVE_TRACK_STATES);
-              })
+              // Anything not fully settled blocks the clear: a cancellable
+              // visit the sweep failed to flip (transitionJobStatus error →
+              // manual review), live in-progress work, or a completed
+              // application not yet invoiced. Only 'cancelled' rows and
+              // invoiced completions are settled.
+              this.whereIn('s.status', ['pending', 'confirmed', 'rescheduled', 'scheduled', 'en_route', 'on_site'])
+                .orWhereIn('s.track_state', LIVE_TRACK_STATES)
                 .orWhere(function completedUninvoiced() {
                   this.where('s.status', 'completed')
                     .whereNotExists(function invoiced() {
