@@ -2859,7 +2859,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
       : recurringPayPerApplication
         ? 'Pay per application'
         : paymentPreference === 'prepay_annual'
-          ? 'Pay the 12-month plan in full'
+          ? 'Prepay 12 months'
           : 'Pay at the visit';
   const confirmLabel = confirmLabelOverride || (invoiceOnly
     ? 'Accept + send invoice'

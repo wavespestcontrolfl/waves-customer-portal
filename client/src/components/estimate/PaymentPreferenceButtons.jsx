@@ -145,6 +145,10 @@ export default function PaymentPreferenceButtons({
     cursor: disabled ? 'wait' : 'pointer',
     border: 'none', textAlign: 'center', width: '100%',
     opacity: disabled ? 0.65 : 1,
+    // Both option buttons share one height so the two columns line up even
+    // when one label wraps.
+    minHeight: 54,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
   };
   const optionNote = {
     fontSize: 14,
@@ -160,9 +164,50 @@ export default function PaymentPreferenceButtons({
   // accept intentionally creates no invoice to open.
   const invoiceRows = heldRecurring ? [] : [
     ...(hasSetupInvoice ? [{ label: 'WaveGuard Membership Setup', amount: setupAmount }] : []),
-    ...(firstVisit ? [{ label: 'First service visit', amount: firstVisit }] : []),
+    ...(firstVisit ? [{ label: 'Per application', amount: firstVisit }] : []),
   ];
   const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
+  // Prepay preview mirrors the per-application invoice box. The plan amount is
+  // the selected frequency's list annual — the minted prepay invoice can only
+  // be equal or LOWER (lawn/tree/commercial lines earn the 5% prepay discount
+  // server-side), so this never understates what the customer owes.
+  const annualAmount = firstPositiveNumber(selectedFrequency?.annual);
+  const prepayRows = !heldRecurring && annualAmount ? [
+    ...(hasSetupInvoice && waivableSetupFee ? [{ label: 'WaveGuard Membership Setup', amountText: 'Waived' }] : []),
+    { label: '12-month plan', amountText: fmtMoney(annualAmount) },
+  ] : [];
+  const invoiceBox = {
+    // Fill the shared box row so both boxes match top AND bottom.
+    alignSelf: 'stretch',
+    marginTop: 16,
+    border: `1px solid ${W.border}`,
+    borderRadius: 12,
+    padding: 16,
+    background: '#F8FAFC',
+    textAlign: 'left',
+  };
+  const invoiceRowStyle = {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 12,
+    alignItems: 'baseline',
+    fontSize: 14,
+    color: W.navy,
+    lineHeight: 1.35,
+    marginBottom: 8,
+  };
+  const invoiceTotalStyle = {
+    borderTop: `1px solid ${W.border}`,
+    paddingTop: 12,
+    marginTop: 2,
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: 12,
+    alignItems: 'baseline',
+    fontSize: 14,
+    fontWeight: 800,
+    color: W.blueDeeper,
+  };
   const hasFirstVisitInvoice = Number(firstVisit || 0) > 0;
   const payPerApplicationInvoiceLabel = hasSetupInvoice && hasFirstVisitInvoice
     ? 'setup + first application invoice'
@@ -171,14 +216,10 @@ export default function PaymentPreferenceButtons({
       : hasFirstVisitInvoice
         ? 'first application invoice'
         : 'invoice';
-  // 'a setup invoice' but 'an invoice' — the bare fallback label starts with
-  // a vowel, so pick the article from the label instead of hardcoding 'a'.
-  const payPerApplicationInvoiceArticle = /^[aeiou]/i.test(payPerApplicationInvoiceLabel) ? 'an' : 'a';
-
   const payPerApplicationLabel = isOneTime ? 'Book visit' : 'Pay per application';
-  const fineprint = offerPrepay
-    ? `Choose pay per application with ${payPerApplicationInvoiceArticle} ${payPerApplicationInvoiceLabel} after confirmation, or annual prepay to approve the 12-month plan up front with setup included.`
-    : invoiceMode
+  // No combined fineprint when both breakdown boxes render (owner
+  // 2026-08-30) — the offerPrepay branch below never shows it.
+  const fineprint = invoiceMode
       ? 'No card setup here. Once you accept, we send an invoice pay link due immediately.'
       : isOneTime
         ? 'This books a single visit. We do not charge you now.'
@@ -190,8 +231,8 @@ export default function PaymentPreferenceButtons({
   const payPerApplicationOptionNote = heldRecurring
     ? 'Approve now — no payment today. We confirm your exact price on site before your first invoice.'
     : invoiceRows.length > 0
-      ? 'Approve now; after confirmation we send the invoice and open secure payment.'
-      : 'Approve now; your first service visit will be billed after completion.';
+      ? 'Approve now — invoice and secure payment after you approve.'
+      : 'Approve now — your first application is billed after completion.';
 
   if (invoiceMode) {
     return (
@@ -263,80 +304,72 @@ export default function PaymentPreferenceButtons({
         {isOneTime ? 'Book your visit' : 'Reserve your spot'}
       </div>
 
-      <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+      {/* Stacked (owner 2026-08-30): prepay sits BELOW the full pay-per-application
+          block — button, note, breakdown — never beside it. */}
+      <div style={{ display: 'grid', gap: 20, gridTemplateColumns: '1fr' }}>
         <div style={optionWrap}>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onSelect('pay_at_visit')}
-            style={{ ...btnBase, background: ACTION_BG, color: W.white }}
-          >{payPerApplicationLabel}</button>
-          <div style={optionNote}>{payPerApplicationOptionNote}</div>
           {invoiceRows.length > 0 ? (
-            <div style={{
-              marginTop: 16,
-              border: `1px solid ${W.border}`,
-              borderRadius: 12,
-              padding: 16,
-              background: '#F8FAFC',
-              textAlign: 'left',
-            }}>
+            <div style={invoiceBox}>
               {invoiceRows.map((row) => (
-                <div
-                  key={row.label}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    alignItems: 'baseline',
-                    fontSize: 14,
-                    color: W.navy,
-                    lineHeight: 1.35,
-                    marginBottom: 8,
-                  }}
-                >
+                <div key={row.label} style={invoiceRowStyle}>
                   <span>{row.label}</span>
                   <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(row.amount)}</strong>
                 </div>
               ))}
               {invoiceTotal > 0 ? (
-                <div style={{
-                  borderTop: `1px solid ${W.border}`,
-                  paddingTop: 12,
-                  marginTop: 2,
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                  alignItems: 'baseline',
-                  fontSize: 14,
-                  fontWeight: 800,
-                  color: W.blueDeeper,
-                }}>
+                <div style={invoiceTotalStyle}>
                   <span>Invoice total</span>
                   <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(invoiceTotal)}</strong>
                 </div>
               ) : null}
-              <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
-                No payment is charged on this page. After confirmation, we open the invoice
-                {invoiceTotal > 0 ? ` for ${fmtMoney(invoiceTotal)}` : ''} so you can pay in-flow.
-                {Number(oneTimeExtrasTotal) > 0
-                  ? ` One-time services on this estimate (${fmtMoney(oneTimeExtrasTotal)}) are billed separately after they're completed.`
-                  : ''}
-              </div>
+              {prepayCardCapture || Number(oneTimeExtrasTotal) > 0 ? (
+                <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
+                  {prepayCardCapture ? 'Nothing due today — Auto Pay bills your card after your first application.' : ''}
+                  {Number(oneTimeExtrasTotal) > 0
+                    ? ` One-time services (${fmtMoney(oneTimeExtrasTotal)}) are billed after completion.`
+                    : ''}
+                </div>
+              ) : null}
             </div>
           ) : null}
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onSelect('pay_at_visit')}
+            style={{ ...btnBase, background: ACTION_BG, color: W.white, marginTop: invoiceRows.length > 0 ? 16 : 0 }}
+          >{payPerApplicationLabel}</button>
+          {invoiceRows.length === 0 ? <div style={optionNote}>{payPerApplicationOptionNote}</div> : null}
         </div>
         {offerPrepay && (
           <div style={optionWrap}>
+            {prepayRows.length > 0 ? (
+              <div style={invoiceBox}>
+                {prepayRows.map((row) => (
+                  <div key={row.label} style={invoiceRowStyle}>
+                    <span>{row.label}</span>
+                    <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{row.amountText}</strong>
+                  </div>
+                ))}
+                <div style={invoiceTotalStyle}>
+                  <span>Prepay total</span>
+                  <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(annualAmount)}</strong>
+                </div>
+                {prepayInLane ? (
+                  <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
+                    One payment covers the year — charged when you approve.
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <button
               type="button"
               disabled={disabled}
               onClick={() => onSelect('prepay_annual')}
-              style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative' }}
+              style={{ ...btnBase, background: ACTION_BG, color: W.white, position: 'relative', marginTop: prepayRows.length > 0 ? 16 : 0 }}
             >
-              Pay the 12-month plan in full
+              Prepay 12 months
             </button>
-            <div style={optionNote}>
+            {prepayRows.length === 0 ? <div style={optionNote}>
               {(() => {
                 // Tender-accurate in-lane copy (Codex #3492 r10): a card
                 // capture instructs the save step; an auto-satisfy accept
@@ -345,19 +378,24 @@ export default function PaymentPreferenceButtons({
                   ? 'Save your card at checkout; the 12-month total is charged when you confirm.'
                   : 'Your saved payment method on file is charged the 12-month total when you confirm.';
                 return waivableSetupFee
-                  ? `Approve annual prepay and the setup is included at no charge.${prepayInLane ? ` ${inLaneNote}` : ''}`
+                  ? `Approve the year up front — setup fee waived.${prepayInLane ? ` ${inLaneNote}` : ''}`
                   : prepayInLane
                     ? inLaneNote
-                    : '12-month invoice opens after confirmation.';
+                    : '12-month invoice opens after you approve.';
               })()}
-            </div>
+            </div> : null}
           </div>
         )}
       </div>
 
-      <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
-        {fineprint}
-      </div>
+      {/* With both breakdown boxes on screen the combined summary line is
+          redundant (owner 2026-08-30) — the boxes each carry their own
+          when-money-moves sentence. Other branches keep their fineprint. */}
+      {!offerPrepay ? (
+        <div style={{ fontSize: 14, color: W.textCaption, marginTop: 12, lineHeight: 1.5 }}>
+          {fineprint}
+        </div>
+      ) : null}
     </div>
   );
 }
