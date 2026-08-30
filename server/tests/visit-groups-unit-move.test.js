@@ -812,17 +812,20 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', memberId: 'b', rolledBack: ['a', 'b'] }); // reported in move order; executed in reverse
     const rollbacks = rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0]);
     expect(rollbacks).toEqual(['b', 'a']);
-    // BOTH technicians restored through the canonical writer (the primary's rode its own move), fenced on the tech this move set
+    // b's re-point FAILED, so b still sits on t1: its rollback CAS expects t1 and no tech restore runs for it;
+    // the primary's tech rode its own move, so a IS restored through the canonical writer, fenced on t9 (local audit)
+    const rbB = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback' && c[0] === 'b');
+    expect(rbB[5].expect).toMatchObject({ technician_id: 't1' });
+    const rbA = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback' && c[0] === 'a');
+    expect(rbA[5].expect).toMatchObject({ technician_id: 't9' });
     const restores = assignDispatchJob.mock.calls.filter((c) => c[0].technicianId === 't1').map((c) => c[0]);
     expect(restores).toEqual([
-      expect.objectContaining({ jobId: 'b', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }),
       expect.objectContaining({ jobId: 'a', technicianId: 't1', expectTechnicianId: 't9', skipVisitSeam: true }),
     ]);
     // a technician-restore failure is a rollback failure (never "nothing was moved" with state still at the destination)
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     assignDispatchJob
-      .mockRejectedValueOnce(Object.assign(new Error('stale'), { code: 'ASSIGNMENT_STALE' })) // b's re-point
-      .mockResolvedValueOnce({ changed: true })                                                  // b's restore
+      .mockRejectedValueOnce(Object.assign(new Error('stale'), { code: 'ASSIGNMENT_STALE' })) // b's re-point (b stays on t1 ⇒ no restore needed)
       .mockRejectedValueOnce(new Error('restore boom'));                                          // a's restore
     const err2 = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch((e) => e);
     expect(err2).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['b'], rollbackFailed: ['a'] });

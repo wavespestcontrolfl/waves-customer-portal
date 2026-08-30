@@ -1804,6 +1804,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // Landed state per member (date + window at the target) once its move
   // committed — the contract later member moves verify the row against.
   const landedState = {};
+  // Technician each member ACTUALLY landed on (local audit): the primary's own
+  // move carries the caller's technicianId; a sibling keeps its original tech
+  // until its re-point succeeds. The rollback fences on this, never on the
+  // requested tech, so a sibling whose re-point failed still rolls back.
+  const landedTech = {};
   // Landed tuple = what the rebooker actually writes (codex r11): a
   // date-only move keeps BOTH bounds; a start-only window leaves the end
   // to the rebooker's derivation, so window_end is left OUT of the contract
@@ -1858,7 +1863,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             ...(landedState[id] || {}),
             visit_id: plan.visitId,
             status: 'confirmed',
-            technician_id: options.technicianId !== undefined ? (options.technicianId || null) : (t.expect.technician_id || null),
+            technician_id: Object.prototype.hasOwnProperty.call(landedTech, id) ? landedTech[id] : (t.expect.technician_id || null),
             ...(plan.snapshots && plan.snapshots[String(id)] && plan.snapshots[String(id)].customer_confirmed !== undefined
               ? { customer_confirmed: plan.snapshots[String(id)].customer_confirmed } : {}),
           },
@@ -1869,8 +1874,9 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // (technician or reminder) is a rollback failure — the error must
         // never claim "nothing was moved" while state still points at the
         // failed destination (local audit).
-        if (options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
-          await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }));
+        const landedOn = Object.prototype.hasOwnProperty.call(landedTech, id) ? landedTech[id] : (t.expect.technician_id || null);
+        if (String(landedOn || '') !== String(t.expect.technician_id || '')) {
+          await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: landedOn }));
         }
         // Everything the forward move mutated goes back in ONE row-locking
         // transaction (local codex audit P0): the row is re-read FOR UPDATE
@@ -2006,6 +2012,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // that landed after the sibling's move is newer and wins; this
           // member is then reported failed/stale, never overwritten.
           await db.transaction((t) => alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null }));
+          landedTech[target.id] = options.technicianId || null;
           return;
         } catch (err) {
           lastErr = err;
@@ -2036,6 +2043,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       const r = await rebooker.reschedule(target.id, newDate, target.window, reason, initiatedBy, memberOpts);
       moved.push(target.id);
       landedState[target.id] = targetTuple(target);
+      landedTech[target.id] = target.isPrimary && options.technicianId !== undefined ? (options.technicianId || null) : (target.expect.technician_id || null);
       // The status the rebooker's CAS actually matched outranks the plan
       // snapshot (codex r6): an operator confirm between plan and move must
       // not be rewound by a caller restoring 'pending'.
@@ -2058,6 +2066,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (await memberLandedAt(target)) {
         moved.push(target.id);
         landedState[target.id] = targetTuple(target);
+        landedTech[target.id] = target.isPrimary && options.technicianId !== undefined ? (options.technicianId || null) : (target.expect.technician_id || null);
         warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
         if (target.isPrimary) primaryResult = { success: true, newDate };
