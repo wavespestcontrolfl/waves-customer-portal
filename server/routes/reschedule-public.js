@@ -267,7 +267,12 @@ async function groupedVisit(svc) {
     const row = await db('scheduled_services').where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .count({ n: 'id' }).first();
-    return Number(row?.n || 0) >= 2;
+    if (Number(row?.n || 0) >= 2) return true;
+    // One live member on a FROZEN visit (codex #3609 r26 P2): the unit mover
+    // refuses it before its lone-member exit, so self-service must not be
+    // advertised only to reject the pick at commit. Same verdict.
+    const { frozen } = await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id);
+    return frozen;
   } catch (err) {
     // Unknown membership is NOT "ungrouped" (local codex audit): the surfaces
     // would advertise self-service for a possibly grouped visit and the

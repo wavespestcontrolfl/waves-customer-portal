@@ -207,6 +207,29 @@ test('a GROUPED member is refused on a SAME-DAY window move too (codex #3609 r25
   expect(updateChain.update).not.toHaveBeenCalled();
 });
 
+test('one live member on a FROZEN visit is refused by the bulk mover too (codex #3609 r26 P1) — a direct write would strand the parent and its artifacts at the old stop', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, scheduled_date: '2099-01-15', status: 'pending', visit_id: 'visit-1' }) }),
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2099-01-15' }) }), // lockStopForRow peek
+      chain({ first: jest.fn().mockResolvedValue({ property_id: 'p1', customer_id: 'cust-1', scheduled_date: '2099-01-15' }) }), // lockStopForRow verify
+      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'pending' }]) }), // openMembers: ONE live member
+      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1' }, { id: 'svc-t' }]) }),   // frozenVisitVerdict member ids (terminal kept)
+      updateChain,
+    ],
+    service_visits: [chain({ first: jest.fn().mockResolvedValue({ id: 'visit-1', status: 'open', summary_token_issued_at: '2026-08-28T12:00:00Z' }) })],
+    visit_effects: [chain({ first: jest.fn().mockResolvedValue(null) })],
+    visit_completion_packets: [chain({ select: jest.fn().mockResolvedValue([]) })],
+    service_records: [chain({ first: jest.fn().mockResolvedValue(null) })],
+    invoices: [chain({ first: jest.fn().mockResolvedValue(null) })],
+  });
+  const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-02-01' } });
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: expect.stringMatching(/issued link, records or a payment/) }]);
+  expect(updateChain.update).not.toHaveBeenCalled();
+});
+
 test('an UNGROUPED row pins visit_id IS NULL in its CAS (a row grouped since the read misses instead of moving alone)', async () => {
   const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
   wireTrx({

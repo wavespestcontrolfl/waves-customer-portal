@@ -1144,7 +1144,24 @@ class SmartRebooker {
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
 
-    await db.transaction(async (trx) => {
+    // Deadlock victim retry (codex #3609 r26 P2): the solo-visit recheck
+    // takes the row's stop lock AFTER this transaction's tech-day lock,
+    // while createOrJoinVisit holds the stop lock and re-points members
+    // through assignDispatchJob (tech-day). Postgres aborts one side with
+    // 40P01; the grouping writer already retries, so this side must too or
+    // a chosen-victim reschedule fails instead of re-entering the
+    // membership check. Nothing committed on a 40P01 abort.
+    const moveTrx = async (body) => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await db.transaction(body);
+        } catch (err) {
+          if (err && err.code === '40P01' && attempt < 2) { overlapWarned = false; continue; }
+          throw err;
+        }
+      }
+    };
+    await moveTrx(async (trx) => {
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1708,6 +1725,9 @@ class SmartRebooker {
         .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Locked membership recheck below (codex #3609 r26 P1) — read with
+          // the authoritative sweep, never a second query.
+          'visit_id', 'property_id',
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
@@ -1893,6 +1913,32 @@ class SmartRebooker {
             });
           }
           siblings = locked;
+          // Membership recheck from the LOCKED sweep (codex #3609 r26 P1):
+          // an anchor that was ungrouped at the unlocked read can have been
+          // attached by createOrJoinVisit since — a series sweep would move
+          // the anchor and its cadence alone while the committed join's
+          // sibling stays behind, and the post-commit seam would then detach
+          // the anchor. A grouped anchor here gets the same refusal the
+          // up-front unit check gives, under the visit's own stop lock (raw
+          // advisory lock + count — the sweep's read already carries
+          // visit_id/property_id). Explicit single-row member moves
+          // (visitPolicy 'single') keep their own contract.
+          if (options.visitPolicy !== 'single') {
+            const lockedAnchorRow = siblings.find((x) => String(x.id) === String(serviceId));
+            if (lockedAnchorRow && lockedAnchorRow.visit_id) {
+              const vgKey = require('./visit-groups').stopBaseKey({
+                propertyId: lockedAnchorRow.property_id, customerId: service.customer_id, scheduledDate: lockedAnchorRow.scheduled_date,
+              });
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', vgKey]);
+              const liveRes = await trx.raw(
+                "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
+                [lockedAnchorRow.visit_id],
+              );
+              if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
+                throw Object.assign(new Error('This service is grouped with another at the same stop — move the stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
+              }
+            }
+          }
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
           // The acknowledged set: a surface confirmed exactly the previewed

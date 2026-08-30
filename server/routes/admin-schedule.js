@@ -6000,18 +6000,40 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 || (payload?.windowStart !== undefined && payload?.windowStart !== null && payload?.windowStart !== '')
                 || (payload?.windowEnd !== undefined && payload?.windowEnd !== null && payload?.windowEnd !== '');
               if (svc.visit_id && bulkSlotChanges) {
-                // Under the row's STOP lock (the visit writers' own key, after
-                // rung 1 — the order update-details uses), so a
-                // createOrJoinVisit that would add a sibling serializes
-                // BEFORE this count or after the write; the write below also
-                // pins the observed visit_id (local gate r27).
-                const { openMembers, lockStopForRow } = require('../services/visit-groups');
+                // Lock order = the rebooker's (local gate r33): rung 1 (taken
+                // above) → tech-day fence → visit stop lock → row locks. The
+                // tech-day fence below is reentrant, so taking the pairs here
+                // first costs nothing and keeps stop→tech from ever inverting
+                // against a rebooker holding tech→stop.
+                if (normalizeDateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+                  await lockTechDays(trx, [
+                    { techId: svc.technician_id, date: normalizeDateOnly(svc.scheduled_date) },
+                    { techId: svc.technician_id, date: bulkTargetDate },
+                  ]);
+                }
+                // Under the row's STOP lock (the visit writers' own key), so a
+                // createOrJoinVisit that would add a sibling serializes BEFORE
+                // this count or after the write; the write below also pins
+                // the observed visit_id (local gate r27).
+                const { openMembers, lockStopForRow, frozenVisitVerdict } = require('../services/visit-groups');
                 await lockStopForRow(trx, id);
                 const members = await openMembers(trx, svc.visit_id);
                 if (members.length >= 2) {
                   throw Object.assign(
                     new Error('grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first'),
                     { isValidation: true, code: 'VISIT_BULK_MOVE_UNSUPPORTED' },
+                  );
+                }
+                // One live member on a FROZEN / claimed visit (codex #3609 r26
+                // P1): this direct writer neither retargets the parent nor
+                // detaches frozen membership — the unit mover refuses the
+                // same case before its lone-member exit. Refuse.
+                const verdict = await frozenVisitVerdict(trx, svc.visit_id);
+                if (verdict.frozen) {
+                  throw Object.assign(
+                    new Error('this visit already has an issued link, records or a payment in progress — finish it, or contact the office to move it'),
+                    { isValidation: true, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', reason: verdict.reason },
                   );
                 }
               }
@@ -7809,6 +7831,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // single-row path uses, so the two writers never invert — and the
       // open member set is re-counted under it before any slot write.
       if (preReadVisitId) {
+        // Lock order = the rebooker's (local gate r33): rung 1 → tech-day
+        // fence → visit stop lock → row locks. The fences this save takes
+        // later (assignment set, date-move pair) are pre-acquired here as a
+        // sorted union — reentrant, so the later calls never wait — so the
+        // stop lock can never be held while waiting on a tech-day key a
+        // rebooker holds in the opposite order.
+        {
+          const preFence = [];
+          if (assignmentShouldRun) {
+            const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
+            const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
+              .select('id', 'technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            for (const row of preRows) {
+              preFence.push({ techId: row.technician_id, date: row.day });
+              preFence.push({ techId: requestedTechnicianId, date: row.day });
+              if (String(row.id) === String(req.params.id) && updates.scheduled_date !== undefined) {
+                preFence.push({ techId: row.technician_id, date: dateOnly(updates.scheduled_date) });
+                preFence.push({ techId: requestedTechnicianId, date: dateOnly(updates.scheduled_date) });
+              }
+            }
+          }
+          if (updates.scheduled_date !== undefined) {
+            const prov = await trx('scheduled_services').where({ id: req.params.id })
+              .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
+            if (prov) {
+              preFence.push({ techId: prov.technician_id, date: prov.day });
+              preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+            }
+          }
+          if (preFence.length) {
+            const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+            await lockTechDays(trx, preFence);
+          }
+        }
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
         } catch (lockErr) {

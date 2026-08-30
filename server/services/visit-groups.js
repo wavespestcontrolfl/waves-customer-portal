@@ -260,6 +260,34 @@ async function destinationTechClash(t, { technicianId, date, windowStart, window
   return clash ? clash.id : null;
 }
 
+// Is this visit's membership frozen for a direct slot writer (issued link,
+// packet, artifacts, payment attempt — canSplit) or owned by a live
+// completion claim on any member? The unit mover refuses such visits
+// before its lone-member exit; a direct writer (bulk board move,
+// update-details) or a self-serve surface must apply the SAME verdict
+// (codex #3609 r26 P1/P2), or a frozen visit that kept one live member
+// beside a terminal one would be moved under a parent — and artifacts —
+// describing the old stop. Returns { frozen, reason } — an unreadable
+// state reads as frozen (fail closed).
+async function frozenVisitVerdict(t, visitId) {
+  if (!visitId) return { frozen: false, reason: null };
+  try {
+    const activity = await visitActivity(visitId, t);
+    if (!activity) return { frozen: false, reason: null }; // no such visit: the row is effectively ungrouped
+    const split = canSplit(activity);
+    if (!split.ok && split.reason !== 'visit_not_open') return { frozen: true, reason: split.reason };
+    const memberIds = (await t('scheduled_services').where({ visit_id: visitId }).select('id')).map((m) => m.id);
+    const claim = memberIds.length
+      ? await t('service_completion_attempts').whereIn('service_id', memberIds).whereIn('status', LIVE_COMPLETION_CLAIM_STATUSES).first('id')
+      : null;
+    if (claim) return { frozen: true, reason: 'completion_in_flight' };
+    return { frozen: false, reason: null };
+  } catch (err) {
+    require('./logger').warn(`[visit-groups] frozenVisitVerdict(${visitId}) unreadable — treated as frozen: ${err.message}`);
+    return { frozen: true, reason: 'unreadable' };
+  }
+}
+
 async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
@@ -2280,6 +2308,7 @@ module.exports = {
   openMembers,
   visitActivity,
   LIVE_COMPLETION_CLAIM_STATUSES,
+  frozenVisitVerdict,
   fanOutLiveTransition,
   moveVisitAsUnit,
   claimVisitNotification,
