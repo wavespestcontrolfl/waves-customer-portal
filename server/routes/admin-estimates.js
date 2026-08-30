@@ -2809,15 +2809,17 @@ router.post('/:id/archive', async (req, res, next) => {
         // (guard-error), which must NOT mint a phantom conversion here.
         let disposition = 'archived_unresolved';
         try {
-          const { customerConvertedSince, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
-          const since = await customerConvertedSince(estimate);
-          if (since.converted && since.reason !== 'guard-error') {
-            const noPrior = await db('estimates')
-              .where({ id: estimate.id })
-              .modify(whereNoConversionBeforeEstimate)
-              .first('id');
-            if (noPrior) disposition = 'converted_other_path';
-          }
+          const { whereConversionEligibilitySignal, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
+          // EXACTLY the sweep's predicates (narrow paid-invoice/completed-
+          // service evidence + none-before disqualifiers) — a pending
+          // booking or customer stage must not mint a conversion here.
+          const convertedRow = await db('estimates')
+            .where({ id: estimate.id })
+            .whereNotNull('customer_id')
+            .modify(whereConversionEligibilitySignal)
+            .modify(whereNoConversionBeforeEstimate)
+            .first('id');
+          if (convertedRow) disposition = 'converted_other_path';
         } catch { /* classification stays archived_unresolved */ }
         systemUpdates = {
           disposition,

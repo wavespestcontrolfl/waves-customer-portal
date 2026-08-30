@@ -89,6 +89,38 @@ async function customerConvertedSince(est) {
 }
 
 /**
+ * The sweep's NARROW positive-evidence pair (knex `.modify` helper on an
+ * `estimates` query): a paid invoice or a completed service for the
+ * customer. Deliberately narrower than customerConvertedSince (which also
+ * counts pending bookings and customer stage, fine for suppressing
+ * outreach but not for CLASSIFYING a conversion) — exported so the admin
+ * archive route classifies with exactly the sweep's criteria.
+ */
+function whereConversionEligibilitySignal(query) {
+  return query.where((q) =>
+    q
+      .whereExists(function () {
+        this.select(db.raw("1"))
+          .from("invoices")
+          .whereRaw("invoices.customer_id = estimates.customer_id")
+          .where("invoices.status", "paid");
+      })
+      .orWhereExists(function () {
+        // status='completed' alone is the signal — legacy rows (pre
+        // 20260422000009) carry a NULL completed_at, and the none-before
+        // disqualifier times them via scheduled_date. Requiring
+        // completed_at would leave a legacy-only customer permanently
+        // ineligible, so their converted estimate would fall through to
+        // expiration instead of being archived.
+        this.select(db.raw("1"))
+          .from("scheduled_services")
+          .whereRaw("scheduled_services.customer_id = estimates.customer_id")
+          .where("scheduled_services.status", "completed");
+      }),
+  );
+}
+
+/**
  * None-before disqualifiers shared by the archive sweep and the expiration
  * hold (knex `.modify` helper; the two callers must stay in lockstep, and
  * sharing one helper is what keeps them there). Any conversion evidence
@@ -222,27 +254,7 @@ async function archiveConvertedOpenEstimates() {
     .whereIn("status", ["sent", "viewed"])
     .whereNull("archived_at")
     .whereNotNull("customer_id")
-    .where((q) =>
-      q
-        .whereExists(function () {
-          this.select(db.raw("1"))
-            .from("invoices")
-            .whereRaw("invoices.customer_id = estimates.customer_id")
-            .where("invoices.status", "paid");
-        })
-        .orWhereExists(function () {
-          // status='completed' alone is the signal — legacy rows (pre
-          // 20260422000009) carry a NULL completed_at, and the none-before
-          // disqualifier below already times them via scheduled_date.
-          // Requiring completed_at here would leave a legacy-only customer
-          // permanently ineligible, so their converted estimate would fall
-          // through to expiration instead of being archived.
-          this.select(db.raw("1"))
-            .from("scheduled_services")
-            .whereRaw("scheduled_services.customer_id = estimates.customer_id")
-            .where("scheduled_services.status", "completed");
-        }),
-    )
+    .modify(whereConversionEligibilitySignal)
     .modify(whereNoConversionBeforeEstimate)
     // Never archive an estimate holding a received (unconsumed, unrefunded)
     // acceptance deposit: archived rows are excluded from expiration, and
@@ -322,6 +334,7 @@ function excludePendingFirstBookings(query) {
 
 module.exports = {
   customerConvertedSince,
+  whereConversionEligibilitySignal,
   whereNoConversionBeforeEstimate,
   archiveConvertedOpenEstimates,
   excludePendingFirstBookings,
