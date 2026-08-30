@@ -2075,6 +2075,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
         if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+        // Mirror the normal retarget's lifecycle reset (codex r43): a
+        // repaired LIVE move (allowLive) or date change must not leave the
+        // parent marked underway with its tracker one-shots consumed at
+        // the new stop.
+        if (plan.anyLive || newDateStr !== plan.oldDate) {
+          patch.en_route_at = null;
+          patch.arrived_at = null;
+          await t('visit_effects').where({ visit_id: plan.visitId }).whereIn('effect_type', ['tracker_en_route', 'tracker_arrived']).del();
+        }
         await t('service_visits').where({ id: plan.visitId }).update(patch);
         // The stop is whole again — release the RETAINED cohort hold on
         // these members. Same lease semantics as the claim (codex r38): a
@@ -2083,7 +2092,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // writes, so the stop locks here do NOT serialize against it) and
         // must survive; only retained (older) or expired stamps clear.
         const heldRows = await t('appointment_reminders')
-          .whereIn('scheduled_service_id', plan.memberIds)
+          // The CURRENT locked membership, not the plan snapshot (codex
+          // r43): a joiner that inherited the retained token in the gap
+          // between plan and repair must release with the repaired stop.
+          .whereIn('scheduled_service_id', rows.map((r) => r.id))
           .whereNotNull('move_hold_until')
           .forUpdate()
           .select('id', 'move_hold_until');
@@ -2611,7 +2623,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         return true;
       };
       const landed = rows.filter((r) => (plan.memberIds.map(String).includes(String(r.id)) ? landedFor(r) : atTargetStop(r)));
-      if (!landed.length) return;
+      // ZERO landed rows is a retarget FAILURE, never a silent skip (codex
+      // r43): e.g. every date move committed but every post-move alignment
+      // failed — returning here left parentRetargetFailed false and the
+      // "successful" seam then detached the moved children from the stale
+      // parent and could dissolve the visit.
+      if (!landed.length) {
+        throw Object.assign(new Error(`no member of visit ${plan.visitId} could be verified at the target — the visit record was not retargeted`), { code: 'VISIT_PARENT_NO_LANDED' });
+      }
       const starts = landed.map((r) => r.window_start).filter(Boolean).sort();
       const ends = landed.map((r) => r.window_end).filter(Boolean).sort();
       const patch = {
