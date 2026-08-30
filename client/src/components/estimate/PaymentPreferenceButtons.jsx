@@ -167,10 +167,11 @@ export default function PaymentPreferenceButtons({
     ...(firstVisit ? [{ label: 'Per application', amount: firstVisit }] : []),
   ];
   const invoiceTotal = Math.round(invoiceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100) / 100;
-  // Prepay preview mirrors the per-application invoice box. The plan amount is
-  // the selected frequency's list annual — the minted prepay invoice can only
-  // be equal or LOWER (lawn/tree/commercial lines earn the 5% prepay discount
-  // server-side), so this never understates what the customer owes.
+  // Prepay preview mirrors the per-application invoice box, but shows only
+  // the plan's LIST annual — never a "total" row: the invoiced amount is
+  // resolved server-side (prepay discount, margin floor, commercial tax) and
+  // can differ in either direction. The exact charge is quoted at the
+  // confirm step (prepayChargeQuote / the minted invoice).
   const annualAmount = firstPositiveNumber(selectedFrequency?.annual);
   const prepayRows = !heldRecurring && annualAmount ? [
     ...(hasSetupInvoice && waivableSetupFee ? [{ label: 'WaveGuard Membership Setup', amountText: 'Waived' }] : []),
@@ -350,10 +351,6 @@ export default function PaymentPreferenceButtons({
                     <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{row.amountText}</strong>
                   </div>
                 ))}
-                <div style={invoiceTotalStyle}>
-                  <span>Prepay total</span>
-                  <strong style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(annualAmount)}</strong>
-                </div>
                 {prepayInLane ? (
                   <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginTop: 12 }}>
                     One payment covers the year — charged when you approve.
