@@ -2033,7 +2033,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         variant: 'campaign',
         templateKey: campaignHeroUrl ? 'waves_blog_hero' : 'waves_campaign_square',
       });
-      usedLegacyCard = true;
+      usedLegacyCard = !campaignHeroUrl;
     }
 
     if (effectiveMode === 'draft') {
