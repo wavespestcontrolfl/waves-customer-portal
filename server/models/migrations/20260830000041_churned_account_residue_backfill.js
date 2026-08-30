@@ -32,14 +32,19 @@ exports.up = async function up(knex) {
     .update({ recurring_ongoing: false, updated_at: knex.fn.now() });
 
   // 2. Churned-stage accounts still carrying live state.
+  const hasPerAppFee = await knex.schema.hasColumn('customers', 'per_application_fee');
   const candidates = await knex('customers')
     .where({ pipeline_stage: 'churned' })
     .where(function orResidue() {
       this.where('active', true)
         .orWhereNotNull('waveguard_tier')
-        .orWhereRaw('COALESCE(monthly_rate, 0) > 0');
+        .orWhereRaw('COALESCE(monthly_rate, 0) > 0')
+        // Per-application residue: the lane stamp + fee remain the live
+        // price for a straggler completion (customer-offboarding.js) even
+        // when tier/rate are already clear.
+        .orWhere('billing_mode', 'per_application');
     })
-    .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr');
+    .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
 
   const hasLedger = await knex.schema.hasTable('customer_plan_rates');
   const hasPrepayTerms = await knex.schema.hasTable('annual_prepay_terms');
@@ -98,6 +103,10 @@ exports.up = async function up(knex) {
     };
     if ((await knex.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
     if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
+    if (customer.billing_mode === 'per_application') {
+      update.billing_mode = null;
+      if (hasPerAppFee) update.per_application_fee = null;
+    }
     await knex('customers').where({ id: customer.id }).update(update);
     // Independent charge rails (mirrors cancellation-processor): Stripe picks
     // a method by payment_methods.autopay_enabled ALONE, and the failed-
@@ -121,6 +130,7 @@ exports.up = async function up(knex) {
         `${customer.active ? 'active=true' : ''}${customer.active && (customer.waveguard_tier || Number(customer.monthly_rate) > 0) ? ' and ' : ''}` +
         `${customer.waveguard_tier ? `tier ${customer.waveguard_tier}` : ''}${customer.waveguard_tier && Number(customer.monthly_rate) > 0 ? ' / ' : ''}` +
         `${Number(customer.monthly_rate) > 0 ? `rate $${Number(customer.monthly_rate).toFixed(2)}` : ''}` +
+        `${customer.billing_mode === 'per_application' ? ' (per-application lane + fee cleared)' : ''}` +
         '. Deactivated, cleared tier/rate/plan-rate components, autopay off. No visits or billing were live; no customer contact.',
     }).catch(() => {});
   }

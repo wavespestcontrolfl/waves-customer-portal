@@ -119,7 +119,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -196,6 +196,14 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         // the reporting dollars are gone for good.
         if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
           update.churn_mrr = Number(customer.monthly_rate);
+        }
+        // Per-application lane: billing_mode + per_application_fee are the
+        // live price for unpriced visit completions and survive nothing else
+        // clearing them (same reasoning and shape as customer-offboarding).
+        // NULL mode + NULL rate = the billing paths have nothing to charge.
+        if (customer.billing_mode === 'per_application') {
+          update.billing_mode = null;
+          update.per_application_fee = null;
         }
         const { resetLedgerToScalar, planRateLedgerEnabled } = require('./plan-rate-ledger');
         const ledgerAuthoritative = planRateLedgerEnabled();
