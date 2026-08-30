@@ -1728,7 +1728,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // reached individually below and recorded as its own failure/retry
   // (codex #3609 r6).
   const coveredIds = new Set();
-  const coverMoved = (r) => { for (const id of (r?.visitMove?.moved || [])) coveredIds.add(String(id)); };
+  const coverMoved = (r) => { for (const id of coveredIdsFrom(r)) coveredIds.add(id); };
   for (const job of orderedJobs) {
     if (coveredIds.has(String(job.id))) {
       results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
@@ -2047,6 +2047,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   return summarizeCommitResults(results);
 }
 
+// Members a unit move REPRESENTED: the rows it moved plus the rows the plan
+// found already at the target (visitMove.unchanged — e.g. a windowless
+// sibling on a same-day window move). Both are covered by that visit's
+// move: never re-moved, never texted again as a second stop (codex #3609
+// r19). Members the mover reported failed are not covered — the loop
+// reaches them individually.
+function coveredIdsFrom(r) {
+  const vm = r && r.visitMove;
+  if (!vm) return [];
+  return [...(vm.moved || []), ...(vm.unchanged || [])].map(String);
+}
+
 // The commit summary the sheets render. A member already carried by its
 // visit's unit move (coveredByVisit) is not a second physical stop (local
 // codex audit): the tech sheet compares movedCount with texts sent, so
@@ -2084,6 +2096,7 @@ module.exports = {
   conflictsForTarget,
   _test: {
     summarizeCommitResults,
+    coveredIdsFrom,
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
     EXTRA_REASON_LEADS, GATE_ACCESS_CLAUSE, isValidReason, sanitizeCustomerNote,

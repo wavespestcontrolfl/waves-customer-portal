@@ -16,6 +16,7 @@ jest.mock('../models/db', () => {
       whereNull() { chain._ops.push(['whereNull', ...arguments]); return chain; },
       leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
+      orderBy() { chain._ops.push(['orderBy', ...arguments]); return chain; },
       max() { chain._ops.push(['max', ...arguments]); return chain; },
       first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops, cols) : null); },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
@@ -44,7 +45,7 @@ jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mock
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
-jest.mock('../services/rebooker', () => ({ FROZEN_ROLLBACK_SNAPSHOT_COLUMNS: ['route_order', 'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date', 'track_state', 'en_route_at'] }));
+jest.mock('../services/rebooker', () => ({ FROZEN_ROLLBACK_SNAPSHOT_COLUMNS: ['route_order', 'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date', 'customer_confirmed', 'confirmed_at', 'track_state', 'en_route_at'] }));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -80,7 +81,8 @@ describe('moveVisitAsUnit', () => {
   // `revalidate` (default: the members as planned, i.e. unchanged).
   const script = ({ visit = VISIT, members, landed = null, maxSeq = 0, revalidate = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: maxSeq } : visit) },
-    scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+    scheduled_services: { select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
+        : ops.some((o) => o[0] === 'forUpdate') ? members
       : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? (revalidate || members.map((m) => ({ ...m, visit_id: 'v1' })))
         : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))) },
   });
@@ -441,7 +443,8 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
   const script = ({ members, landed = null, landedRows = {} }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : VISIT) },
     scheduled_services: {
-      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+      select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
+        : ops.some((o) => o[0] === 'forUpdate') ? members
         : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
           : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
       first: (ops, cols) => {
@@ -519,7 +522,8 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
   const script = ({ members, landed = null, first = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : VISIT) },
     scheduled_services: {
-      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+      select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
+        : ops.some((o) => o[0] === 'forUpdate') ? members
         : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
           : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
       first: (ops, cols) => (first ? first(ops, cols) : null),
@@ -613,7 +617,8 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
   const script = ({ visit = FROZEN, members, landed = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
     scheduled_services: {
-      select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? members
+      select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
+        : ops.some((o) => o[0] === 'forUpdate') ? members
         : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
           : (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' })))),
     },
@@ -632,7 +637,8 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
       ['a', '2026-08-30', 'visit_move_rollback'],     // primary rolled back
     ]);
     expect(calls[2][2]).toBe('09:00-10:00');
-    expect(calls[2][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true, expect: { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1' } });
+    // the compensation CAS pins the COMPLETE landed state (codex r19): slot, visit, forced status, the tech the row was left on
+    expect(calls[2][5]).toMatchObject({ visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true, expect: { scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', visit_id: 'v1', status: 'confirmed', technician_id: 't1' } });
     expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
   });
 
@@ -713,6 +719,33 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     const put = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.route_order === 3);
     expect(put.ops).toEqual([['where', { id: 'a', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00' }]]);
     expect(put.values).toMatchObject({ route_order: 3, date_exception: false, track_state: 'scheduled', en_route_at: null });
+  });
+
+  test('the compensation CAS carries the snapshotted confirmation marker and the requested technician (codex r19)', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    const base = db.__script.scheduled_services.select;
+    db.__script.scheduled_services.select = (ops) => (ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') && !ops.some((o) => o[0] === 'forUpdate')
+      ? [{ id: 'a', visit_id: 'v1', customer_confirmed: false }, { id: 'b', visit_id: 'v1', customer_confirmed: true }] : base(ops));
+    const rebooker = fakeRebooker({ b: 'throw' });
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } }).catch(() => {});
+    const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
+    expect(rb[5].expect).toMatchObject({ visit_id: 'v1', status: 'confirmed', technician_id: 't9', customer_confirmed: false });
+  });
+
+  test('members the plan found already at the target are reported as unchanged (covered by this visit\'s move), never as moved (codex r19)', async () => {
+    db.__script = script({ visit: VISIT, members: [member('a'), member('b', { window_start: null, window_end: null })], landed: [
+      { id: 'a', scheduled_date: '2026-08-30', window_start: '13:00', window_end: '14:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-08-30', window_start: null, window_end: null, technician_id: 't1' },
+    ] });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-08-30', newWindow: '13:00-14:00' });
+    expect(out.visitMove.moved).toEqual(['a']);
+    expect(out.visitMove.unchanged).toEqual(['b']); // windowless sibling stays windowless on a same-day window move
+    db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
+    const noop = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
+    expect(noop.visitMove).toMatchObject({ alreadyAtTarget: true, unchanged: ['a', 'b'] });
   });
 
   test('a member that diverged before the retarget on a FROZEN visit rolls the rest back and refuses (codex r18)', async () => {
@@ -802,11 +835,12 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     db.__script = {
       service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : base) },
       scheduled_services: {
-        select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [member('a'), member('b'), member('c')]
-          : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? [member('a'), member('b'), member('c')].map((m) => ({ ...m, visit_id: 'v1' }))
-            // at retarget: b is GONE from the visit (a newer assignment's seam detached it), c moved again to another window
-            : [{ id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
-              { id: 'c', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' }]),
+        // at retarget (FOR UPDATE + ORDER BY): b is GONE from the visit (a newer assignment's seam detached it), c moved again to another window
+        select: (ops) => (ops.some((o) => o[0] === 'orderBy')
+          ? [{ id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+            { id: 'c', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' }]
+          : ops.some((o) => o[0] === 'forUpdate') ? [member('a'), member('b'), member('c')]
+            : [member('a'), member('b'), member('c')].map((m) => ({ ...m, visit_id: 'v1' }))),
       },
     };
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });

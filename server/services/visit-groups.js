@@ -1773,7 +1773,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // and repeat the caller's effects, or 409 a fenced retry.
     if (plan.primaryRecurring && options.seriesPolicy !== 'single' && process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true') {
       const replay = await rebooker.reschedule(serviceId, newDate, newWindow, reason, initiatedBy, { ...options, visitPolicy: 'single', skipVisitSeam: true });
-      return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
+      return { ...replay, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
     }
     // The caller's `expect` fence still applies to a no-op (local codex
     // audit): every member already sits at the target, so the rebooker —
@@ -1787,7 +1787,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         throw Object.assign(new Error('Cannot move this stop — it changed since it was read (another writer already placed it here)'), { statusCode: 409, code: 'VISIT_EXPECT_STALE', isOperational: true });
       }
     }
-    return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true } };
+    return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
   }
 
   // ---- 2. move members: primary first, then siblings ----
@@ -1849,7 +1849,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         await rebooker.reschedule(id, t.original.date, t.original.window, 'visit_move_rollback', initiatedBy, {
           ...siblingBase, visitPolicy: 'single', skipVisitSeam: true, seriesPolicy: 'single', allowLive: true,
           excludeServiceIds: plan.memberIds.map(String),
-          expect: { ...(landedState[id] || {}), visit_id: plan.visitId },
+          // Complete landed state (codex r19): slot, visit, the status the
+          // forward move wrote, the technician it left the row on, and the
+          // confirmation marker as snapshotted — a confirm/reassignment that
+          // landed AFTER the forward move misses this CAS (row reported
+          // stuck), never rolled back underneath the newer state.
+          expect: {
+            ...(landedState[id] || {}),
+            visit_id: plan.visitId,
+            status: 'confirmed',
+            technician_id: options.technicianId !== undefined ? (options.technicianId || null) : (t.expect.technician_id || null),
+            ...(plan.snapshots && plan.snapshots[String(id)] && plan.snapshots[String(id)].customer_confirmed !== undefined
+              ? { customer_confirmed: plan.snapshots[String(id)].customer_confirmed } : {}),
+          },
         });
         // The rebooker keeps a destination end when the restored window has
         // none (windowEnd = win.end || row.window_end) — clear it explicitly,
@@ -2064,8 +2076,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // must see (parentRetargetFailed), never a silent success (local audit).
         throw Object.assign(new Error(`visit ${plan.visitId} is ${visit ? visit.status : 'missing'} — members moved but the visit record could not be retargeted`), { code: 'VISIT_PARENT_NOT_OPEN' });
       }
+      // FOR UPDATE (codex r19): assignDispatchJob row-locks without the stop
+      // lock, so the verified members stay locked through the parent write
+      // and a reassignment linearizes AFTER this move (its seam then sees the
+      // retargeted parent) instead of slipping between verify and update.
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
+        .orderBy('id').forUpdate()
         .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
       // Every member reported MOVED must still be a member of this visit
       // sitting at its landed target under these locks (codex r17): a
@@ -2198,7 +2215,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
   // so a caller's post-move bookkeeping can fence its writes on it (a newer
   // move/confirm after the unit move must never be rewound — local audit).
   const members = plan.targets.filter((x) => moved.includes(x.id)).map((x) => ({ id: x.id, isPrimary: x.isPrimary, previousStatus: x.previousStatus, landed: landedState[x.id] || null }));
-  const visitMove = { visitId: plan.visitId, moved, failed, members, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
+  // unchanged: members the plan found already at the target (e.g. a
+  // windowless sibling on a same-day window move) — represented by this
+  // visit's move without a write, so batch callers treat them as covered
+  // (codex r19): never re-moved or re-texted as a second stop.
+  const unchanged = plan.targets.filter((x) => x.alreadyAtTarget).map((x) => String(x.id));
+  const visitMove = { visitId: plan.visitId, moved, failed, members, unchanged, ...(parentRetargetFailed ? { parentRetargetFailed: true } : {}) };
   return { ...(primaryResult || { success: true, newDate }), visitMove, ...(warnings.length ? { warnings } : {}) };
 }
 

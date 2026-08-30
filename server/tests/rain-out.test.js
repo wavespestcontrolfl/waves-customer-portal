@@ -3303,7 +3303,12 @@ describe('rain-out service', () => {
 });
 
 describe('commit summary — visit-covered members are not separate stops (local codex audit)', () => {
-  const { summarizeCommitResults } = require('../services/rain-out')._test;
+  const { summarizeCommitResults, coveredIdsFrom } = require('../services/rain-out')._test;
+  test('coverage = moved + unchanged (already-at-target) members, never failed ones (codex r19)', () => {
+    expect(coveredIdsFrom({ visitMove: { moved: ['a'], unchanged: ['b'], failed: [{ id: 'c' }] } })).toEqual(['a', 'b']);
+    expect(coveredIdsFrom({ visitMove: { moved: [], failed: [], alreadyAtTarget: true, unchanged: ['a', 'b'] } })).toEqual(['a', 'b']);
+    expect(coveredIdsFrom({ success: true })).toEqual([]);
+  });
   test('movedCount counts physical stops; covered members are counted apart; failures exclude covered', () => {
     const out = summarizeCommitResults([
       { id: 'a', ok: true, newDate: '2026-09-02', smsSent: true, warnings: ['w1'] },

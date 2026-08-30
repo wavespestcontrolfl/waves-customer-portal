@@ -483,6 +483,10 @@ const LIVE_LIFECYCLE_RESET = {
 const FROZEN_ROLLBACK_SNAPSHOT_COLUMNS = [
   'route_order', 'time_window', 'window_display', 'track_token_expires_at',
   'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
+  // Confirmation marker + stamp (codex #3609 r19): a confirm that lands after
+  // the forward move is newer state the compensation CAS must miss on, and
+  // a rolled-back row must read exactly as it did before the move.
+  'customer_confirmed', 'confirmed_at',
   ...Object.keys(LIVE_LIFECYCLE_RESET),
 ];
 
