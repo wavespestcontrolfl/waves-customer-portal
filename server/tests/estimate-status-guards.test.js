@@ -409,6 +409,29 @@ describe('POST /api/admin/estimates/:id/archive disposition', () => {
     }));
   });
 
+  test('post-archive verification upgrades a racing conversion: evidence visible after the write flips the stamp', async () => {
+    const estimate = { id: 'e1', status: 'sent', archived_at: null, disposition: null, customer_id: 'c1' };
+    const readBuilder = makeBuilder({ first: estimate });
+    const depositBuilder = makeBuilder({ first: null });
+    const classifyBuilder = makeBuilder({ first: null }); // pre-write: no evidence yet
+    const archivedRow = { ...estimate, archived_at: 'NOW', disposition: 'archived_unresolved', disposition_source: 'system' };
+    const writeBuilder = makeBuilder({});
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [archivedRow]) }));
+    const recheckBuilder = makeBuilder({ first: { id: 'e1' } }); // evidence committed during the write
+    const upgradeBuilder = makeBuilder({});
+    upgradeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ ...archivedRow, disposition: 'converted_other_path' }]) }));
+    db.mockImplementationOnce(() => readBuilder)
+      .mockImplementationOnce(() => depositBuilder)
+      .mockImplementationOnce(() => classifyBuilder)
+      .mockImplementationOnce(() => writeBuilder)
+      .mockImplementationOnce(() => recheckBuilder)
+      .mockImplementationOnce(() => upgradeBuilder);
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(upgradeBuilder.where).toHaveBeenCalledWith({ id: 'e1', disposition: 'archived_unresolved' });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'converted_other_path' }));
+  });
+
   test('no sweep-predicate match (or a lookup error) → archived_unresolved, never a phantom conversion', async () => {
     const estimate = { id: 'e1', status: 'viewed', archived_at: null, disposition: null, customer_id: 'c1' };
     const { writeBuilder } = makeArchiveBuilders(estimate, { classification: null });

@@ -2844,6 +2844,30 @@ router.post('/:id/archive', async (req, res, next) => {
     if (!updated) {
       return res.status(409).json({ error: 'Estimate changed while you were archiving it. Refresh and retry.' });
     }
+    // Post-write verification (GH codex P2): conversion evidence can commit
+    // between the classification SELECT and the archive UPDATE, and the
+    // sweep never rescans archived rows — so after a SYSTEM
+    // archived_unresolved stamp, re-run the same predicates once. Evidence
+    // seen now committed before this check and therefore effectively at
+    // archive time; evidence landing later genuinely postdates archival.
+    if (updated.disposition === 'archived_unresolved' && updated.disposition_source === 'system') {
+      try {
+        const { whereConversionEligibilitySignal, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
+        const convertedNow = await db('estimates')
+          .where({ id: updated.id })
+          .whereNotNull('customer_id')
+          .modify(whereConversionEligibilitySignal)
+          .modify(whereNoConversionBeforeEstimate)
+          .first('id');
+        if (convertedNow) {
+          const [upgraded] = await db('estimates')
+            .where({ id: updated.id, disposition: 'archived_unresolved' })
+            .update({ disposition: 'converted_other_path' })
+            .returning('*');
+          if (upgraded) return res.json(upgraded);
+        }
+      } catch { /* the unresolved stamp stands */ }
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });

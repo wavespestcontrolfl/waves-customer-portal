@@ -87,3 +87,21 @@ describe('extension revival', () => {
     expect(update).toMatchObject({ disposition: null, disposition_source: null, disposition_at: null });
   });
 });
+
+
+// Never-delivered rows cannot be extended (GH codex P2): reviving an
+// expired_unsent draft to 'sent' would erase the classification that keeps
+// internal drafts out of the loss rates.
+test('extending a never-sent expired draft is rejected', async () => {
+  const { extendEstimate } = require('../services/estimate-extension');
+  await expect(extendEstimate({
+    estimate: {
+      id: 'e1', status: 'expired', sent_at: null, viewed_at: null,
+      expires_at: '2026-08-08T00:00:00Z', archived_at: null, estimate_data: {},
+      disposition: 'expired_unsent', estimate_group_id: null,
+    },
+    days: 7,
+    silent: true,
+    entryPoint: 'test',
+  })).rejects.toThrow(/never sent/);
+});
