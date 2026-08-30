@@ -117,7 +117,10 @@ function parseOpportunities(text) {
       else {
         if (!prev.url && url) prev.url = url;
         if (!prev.raws.includes(token)) prev.raws.push(token);
-        if (!prev.note && input.note) prev.note = input.note;
+        if (input.note) { // every row's context survives the dedupe (CSV contract): distinct notes, in order
+          const parts = prev.note ? prev.note.split(' | ') : [];
+          if (!parts.includes(input.note)) prev.note = [...parts, input.note].join(' | ').slice(0, 160);
+        }
       }
     }
   }
@@ -231,7 +234,12 @@ const BACKOFF_MS = Object.freeze([60 * 60e3, 6 * 60 * 60e3, 24 * 60 * 60e3, 72 *
 const MAX_ATTEMPTS = BACKOFF_MS.length;
 // A claimed item is invisible to a parallel tick for this long (fleet overlap
 // during deploys); the final update always rewrites next_retry_at.
-const CLAIM_HOLD_MS = 15 * 60e3;
+// Lease > worst-case batch: 50 items × up to 3 hops × 8 s ≈ 20 min sequential.
+// The hold timestamp doubles as the claim token — every final write is
+// conditional on it (finalize), so a run that outlives its lease can never
+// overwrite a reclaiming run's newer result.
+const CLAIM_HOLD_MS = 30 * 60e3;
+const LOST_CLAIM = Symbol('lost_claim');
 // X posts need the X feeder (a later step) to read their outbound link — the
 // hop-follower cannot resolve them. Re-queued a week out without spending an
 // attempt so they neither churn nor exhaust.
@@ -262,21 +270,28 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
     return { ...out, dryRun: true, due: rows.length, wouldPark, wouldFetch: rows.length - wouldPark };
   }
 
+  const hold = new Date(now.getTime() + CLAIM_HOLD_MS);
   const claimed = await db.transaction(async (trx) => {
     const rows = await due(trx).forUpdate().skipLocked();
     if (!rows.length) return rows;
-    await trx('seo_link_intake_items').whereIn('id', rows.map((r) => r.id))
-      .update({ next_retry_at: new Date(now.getTime() + CLAIM_HOLD_MS) });
+    await trx('seo_link_intake_items').whereIn('id', rows.map((r) => r.id)).update({ next_retry_at: hold });
     return rows;
   });
   out.claimed = claimed.length;
+  out.lost = 0;
+  // Final write for a claimed item: only while OUR claim stamp is still on the
+  // row. 0 rows ⇒ another run reclaimed it after our lease lapsed — its
+  // result stands, ours is discarded (thrown inside a trx ⇒ rolled back).
+  const finalize = async (q, item, patch) => {
+    const n = await q('seo_link_intake_items').where({ id: item.id }).where('next_retry_at', hold).update(patch);
+    if (!n) throw LOST_CLAIM;
+    return n;
+  };
 
   for (const item of claimed) {
     try {
       if (X_POST_RE.test(item.raw_url)) {
-        await db('seo_link_intake_items').where({ id: item.id }).update({
-          state: 'unresolved', last_error: 'awaiting_x_feeder', next_retry_at: new Date(now.getTime() + X_PARK_MS),
-        });
+        await finalize(db, item, { state: 'unresolved', last_error: 'awaiting_x_feeder', next_retry_at: new Date(now.getTime() + X_PARK_MS) });
         out.parked += 1;
         continue;
       }
@@ -285,31 +300,23 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
       const host = page && page.finalUrl ? canonicalProspectDomain(page.finalUrl) : null;
 
       if (page && (page.error === 'invalid_url' || page.error === 'unsupported_protocol' || page.blocked)) {
-        await db('seo_link_intake_items').where({ id: item.id }).update({
-          state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: page.error || 'blocked_host', next_retry_at: null,
-        });
+        await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: page.error || 'blocked_host', next_retry_at: null });
         out.dropped += 1;
         continue;
       }
       if (host && isOwnHost(host)) {
-        await db('seo_link_intake_items').where({ id: item.id }).update({
-          state: 'dropped', drop_reason: 'own_domain', attempts, resolved_url: page.finalUrl, resolved_host: host, last_error: null, next_retry_at: null,
-        });
+        await finalize(db, item, { state: 'dropped', drop_reason: 'own_domain', attempts, resolved_url: page.finalUrl, resolved_host: host, last_error: null, next_retry_at: null });
         out.dropped += 1;
         continue;
       }
       if (host && !isNeverTargetHost(host)) {
-        const r = await db.transaction(async (trx) => {
+        await db.transaction(async (trx) => {
           const d = await registry.ensureDomain(trx, {
             domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
           });
-          await trx('seo_link_intake_items').where({ id: item.id }).update({
-            state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, last_error: null, next_retry_at: null,
-          });
-          return d;
+          await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, last_error: null, next_retry_at: null });
         });
         out.resolved += 1;
-        void r;
         continue;
       }
 
@@ -317,17 +324,14 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
       // never-target host): back off, then exhaust.
       const err = page && page.error ? page.error : (host ? `resolved_to_never_target:${host}` : `status_${(page && page.status) || 0}`);
       if (attempts >= MAX_ATTEMPTS) {
-        await db('seo_link_intake_items').where({ id: item.id }).update({
-          state: 'dropped', drop_reason: 'retry_exhausted', attempts, last_error: err, next_retry_at: null,
-        });
+        await finalize(db, item, { state: 'dropped', drop_reason: 'retry_exhausted', attempts, last_error: err, next_retry_at: null });
         out.dropped += 1;
       } else {
-        await db('seo_link_intake_items').where({ id: item.id }).update({
-          state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(now.getTime() + BACKOFF_MS[attempts - 1]),
-        });
+        await finalize(db, item, { state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(now.getTime() + BACKOFF_MS[attempts - 1]) });
         out.unresolved += 1;
       }
     } catch (e) {
+      if (e === LOST_CLAIM) { out.lost += 1; continue; }
       out.errors.push({ id: item.id, error: (e && e.message) || String(e) });
       // Leave the claim hold in place; the next due tick retries it.
     }

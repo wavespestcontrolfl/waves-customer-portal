@@ -173,6 +173,28 @@ describe('resolveIntakeItems — sweep', () => {
     expect(r).toEqual(expect.objectContaining({ claimed: 1, resolved: 1 }));
   });
 
+  test('every final write is conditional on OUR claim stamp: a row reclaimed by a later run (0 rows updated) is counted lost, its newer result untouched, the domain upsert rolled back', async () => {
+    const db = dbWith([{ id: 'i1', raw_url: 'bit.ly/abc', source: 'list_import', attempts: 0 }], {
+      'seo_link_intake_items.update': (chain, args) => (args[0].next_retry_at instanceof Date && args[0].state === undefined ? 1 : 0), // the hold write succeeds; every finalize finds another run's stamp
+    });
+    const fetchPage = jest.fn(async () => ({ status: 200, finalUrl: 'https://example.org/p', blocked: false, error: null }));
+    const r = await resolveIntakeItems(db, { now, fetchPage });
+    expect(r).toEqual(expect.objectContaining({ claimed: 1, resolved: 0, lost: 1, errors: [] }));
+    // the finalize predicate carries the claim stamp
+    const finalWhere = db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'where' && c.args[0] === 'next_retry_at');
+    expect(finalWhere.map((c) => c.args[1])).toEqual([new Date(now.getTime() + _internals.CLAIM_HOLD_MS)]);
+  });
+
+  test('the lease outlives the worst-case sequential batch (50 items × 3 hops × 8 s)', () => {
+    expect(_internals.CLAIM_HOLD_MS).toBeGreaterThanOrEqual(50 * 3 * 8000);
+  });
+
+  test('CSV rows for the same domain keep every distinct note (nothing silently discarded by the dedupe)', () => {
+    const csv = 'Website,Primary Action\nacademia.edu,Add website to profile\nhttps://academia.edu/upload,Upload a paper\nacademia.edu,Add website to profile\n';
+    const r = parseOpportunities(csv);
+    expect(r.candidates).toEqual([expect.objectContaining({ domain: 'academia.edu', url: 'https://academia.edu/upload', note: 'Add website to profile | Upload a paper' })]);
+  });
+
   test('dryRun reports what the sweep WOULD claim: no hold, no fetch, no writes', async () => {
     const db = makeDb({ 'seo_link_intake_items.limit': [
       { id: 'i1', raw_url: 'bit.ly/abc' }, { id: 'i2', raw_url: 'https://x.com/waves/status/123' },
