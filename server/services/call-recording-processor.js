@@ -2453,7 +2453,7 @@ function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid
 // an obsolete row. Mirrors the phone branch's own predicate set exactly:
 // phone equality, deleted_at, the workableUnnamedLead lifecycle trio, and
 // the ownership arm.
-function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead }) {
+function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead, firstName, lastName }) {
   if (!lockedLead) return false;
   if (lockedLead.deleted_at) return false;
   if (String(lockedLead.phone || '') !== String(phone)) return false;
@@ -2464,6 +2464,12 @@ function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclai
   if (unclaimedOnly && lockedLead.customer_id != null) return false;
   if (customerId && lockedLead.customer_id != null
     && String(lockedLead.customer_id) !== String(customerId)) return false;
+  // The lookup's name corroboration must still hold on the LOCKED state
+  // (codex P1): a concurrent call or admin edit can name the row between
+  // selection and lock, and writing past it re-creates the cross-caller
+  // merge the phone-arm check exists to stop. Same contract as the lookup:
+  // missing names on either side stay compatible.
+  if (!extractedNameMatchesCustomer({ first_name: firstName, last_name: lastName }, lockedLead)) return false;
   return true;
 }
 
@@ -9810,7 +9816,12 @@ const CallRecordingProcessor = {
                 // write repeats it) and the email arm's write enforces its
                 // full predicate set in SQL already.
                 if (existingLeadVia === 'phone'
-                  && !phoneReuseStillValidOnLockedRow(lockedLead, { phone, ...sameCallEligibility })) {
+                  && !phoneReuseStillValidOnLockedRow(lockedLead, {
+                    phone,
+                    ...sameCallEligibility,
+                    firstName: extracted.first_name || null,
+                    lastName: extracted.last_name || null,
+                  })) {
                   phoneReuseRevokedUnderLock = true;
                   return 0;
                 }

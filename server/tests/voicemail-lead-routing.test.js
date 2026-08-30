@@ -1004,6 +1004,17 @@ describe('phoneReuseStillValidOnLockedRow — the phone arm revalidated under th
     expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-9' }, { ...args, customerId: 'cust-1' })).toBe(false);
     expect(phoneReuseStillValidOnLockedRow({ ...base, customer_id: 'cust-1' }, { ...args, customerId: 'cust-1' })).toBe(true);
   });
+
+  test('a name conflict landing between selection and lock revokes the reuse (audit 2026-08-30 #1 race)', () => {
+    // A concurrent call or admin edit named the row after the lookup's
+    // corroboration passed — writing past it is the cross-caller merge.
+    const named = { ...base, first_name: 'Maria', last_name: 'Lopez' };
+    expect(phoneReuseStillValidOnLockedRow(named, { ...args, firstName: 'Pat', lastName: 'Sample' })).toBe(false);
+    // Compatible or missing names keep the reuse (same contract as the lookup).
+    expect(phoneReuseStillValidOnLockedRow(named, { ...args, firstName: 'Maria', lastName: 'Lopez' })).toBe(true);
+    expect(phoneReuseStillValidOnLockedRow(named, { ...args, firstName: null, lastName: null })).toBe(true);
+    expect(phoneReuseStillValidOnLockedRow(base, { ...args, firstName: 'Pat', lastName: 'Sample' })).toBe(true);
+  });
 });
 
 describe('deriveStampLinkAuthority — authority from the selecting arm, never bare phone presence', () => {
