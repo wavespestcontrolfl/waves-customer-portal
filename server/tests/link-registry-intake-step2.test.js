@@ -79,6 +79,14 @@ describe('parseOpportunities (step 2 shape)', () => {
     ]);
   });
 
+  test('CSV grammar: quoted commas, escaped quotes and quoted newlines never shift the Website cell', () => {
+    const csv = 'Name,Website,Action\n"Acme, Inc.",example.com,Claim\n"Say ""hi""","https://sample.example/a,b","multi\nline"\n';
+    expect(parseCsvOpportunities(csv)).toEqual({ rows: [
+      { raw: 'example.com', note: 'Acme, Inc. | Claim' },
+      { raw: 'https://sample.example/a,b', note: 'Say "hi" | multi\nline' },
+    ] });
+  });
+
   test('plain text without a header is not treated as CSV', () => {
     expect(parseCsvOpportunities('foo.com, bar.com\nbaz.com')).toBeNull();
     expect(parseOpportunities('foo.com, bar.com\nbaz.com').candidates.map((c) => c.domain)).toEqual(['foo.com', 'bar.com', 'baz.com']);
@@ -163,6 +171,18 @@ describe('resolveIntakeItems — sweep', () => {
     expect(db.updates[0].set).toEqual({ next_retry_at: new Date(now.getTime() + _internals.CLAIM_HOLD_MS) });
     expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'resolved', resolved_host: 'example.org', domain_id: 'id-example.org', attempts: 1, next_retry_at: null }));
     expect(r).toEqual(expect.objectContaining({ claimed: 1, resolved: 1 }));
+  });
+
+  test('dryRun reports what the sweep WOULD claim: no hold, no fetch, no writes', async () => {
+    const db = makeDb({ 'seo_link_intake_items.limit': [
+      { id: 'i1', raw_url: 'bit.ly/abc' }, { id: 'i2', raw_url: 'https://x.com/waves/status/123' },
+    ] });
+    const fetchPage = jest.fn();
+    const r = await resolveIntakeItems(db, { now, fetchPage, dryRun: true });
+    expect(r).toEqual(expect.objectContaining({ dryRun: true, due: 2, wouldFetch: 1, wouldPark: 1, claimed: 0, resolved: 0 }));
+    expect(fetchPage).not.toHaveBeenCalled();
+    expect(db.calls.some((c) => ['update', 'forUpdate', 'skipLocked', 'insert'].includes(c.op))).toBe(false);
+    expect(registry.ensureDomain).not.toHaveBeenCalled();
   });
 
   test('a chain ending on our own host is dropped own_domain', async () => {

@@ -19,6 +19,8 @@ const LINK_SOURCES = ['owner_seed', 'list_import', 'competitor_gap', 'competitor
 const INTAKE_ITEM_STATES = ['pending', 'unresolved', 'resolved', 'dropped'];
 const INTAKE_DROP_REASONS = ['never_a_target', 'retry_exhausted', 'invalid_url', 'own_domain'];
 
+const LEGACY_PLACEMENT_UNIQUE = 'seo_link_prospects_target_domain_target_page_unique';
+
 const quoted = (arr) => arr.map((v) => `'${v}'`).join(', ');
 const check = (table, name, expr) => `ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`;
 const inSet = (col, arr, { nullable = false } = {}) => (nullable ? `${col} IS NULL OR ${col} IN (${quoted(arr)})` : `${col} IN (${quoted(arr)})`);
@@ -61,9 +63,27 @@ exports.up = async function (knex) {
       t.index(['prospect_id']);
     });
   }
+
+  // ---- §3.3 CONTRACT: drop the legacy 2-column placement key --------------
+  // Step 1 (20260828000040) added UNIQUE (target_domain, target_page,
+  // location_key) and deliberately KEPT the legacy UNIQUE (target_domain,
+  // target_page) through its rolling deploy. Every prospect writer now uses a
+  // constraintless ON CONFLICT DO NOTHING (pinned by
+  // admin-backlink-agent-v2-step1.test.js), so the legacy key goes here:
+  // per-location rows for the same (domain, page) become possible.
+  await knex.raw(`ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS ${LEGACY_PLACEMENT_UNIQUE}`);
 };
 
 exports.down = async function (knex) {
   await knex.schema.dropTableIfExists('seo_link_placement_backlinks');
   await knex.schema.dropTableIfExists('seo_link_intake_items');
+  // Restore the legacy key only when the rows still satisfy it — per-location
+  // duplicates written after step 2 make the restore impossible, and a failing
+  // down() would strand the rollback; the wider step-1 key stays either way.
+  await knex.raw(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '${LEGACY_PLACEMENT_UNIQUE}')
+       AND NOT EXISTS (SELECT 1 FROM seo_link_prospects GROUP BY target_domain, target_page HAVING COUNT(*) > 1) THEN
+      ALTER TABLE seo_link_prospects ADD CONSTRAINT ${LEGACY_PLACEMENT_UNIQUE} UNIQUE (target_domain, target_page);
+    END IF;
+  END $$`);
 };

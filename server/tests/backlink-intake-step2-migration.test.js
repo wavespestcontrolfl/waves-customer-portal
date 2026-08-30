@@ -122,7 +122,16 @@ describe('up()', () => {
     const knex = fakeKnex({ existing: ['seo_link_intake_items', 'seo_link_placement_backlinks'] });
     await migration.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();
-    expect(knex._raws).toEqual([]);
+    expect(knex._raws).toEqual(['ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique']);
+  });
+
+  test('CONTRACT: drops the legacy UNIQUE (target_domain, target_page) that step 1 kept through its rolling deploy (IF EXISTS: re-runs are safe)', async () => {
+    const knex = fakeKnex();
+    await migration.up(knex);
+    expect(knex._raws[knex._raws.length - 1]).toBe('ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique');
+    // no prospect writer may name that constraint as an ON CONFLICT target
+    const routes = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
+    expect(routes).not.toMatch(/onConflict\(\[/);
   });
 });
 
@@ -131,6 +140,14 @@ describe('down()', () => {
     const knex = fakeKnex();
     await migration.down(knex);
     expect(knex.schema.dropTableIfExists.mock.calls.map((c) => c[0])).toEqual(['seo_link_placement_backlinks', 'seo_link_intake_items']);
-    expect(knex._raws).toEqual([]);
+  });
+  test('restores the legacy 2-column key only when no per-location duplicates exist (never strands the rollback)', async () => {
+    const knex = fakeKnex();
+    await migration.down(knex);
+    expect(knex._raws).toHaveLength(1);
+    const sql = knex._raws[0];
+    expect(sql).toMatch(/IF NOT EXISTS \(SELECT 1 FROM pg_constraint WHERE conname = 'seo_link_prospects_target_domain_target_page_unique'\)/);
+    expect(sql).toMatch(/AND NOT EXISTS \(SELECT 1 FROM seo_link_prospects GROUP BY target_domain, target_page HAVING COUNT\(\*\) > 1\)/);
+    expect(sql).toContain('ADD CONSTRAINT seo_link_prospects_target_domain_target_page_unique UNIQUE (target_domain, target_page)');
   });
 });

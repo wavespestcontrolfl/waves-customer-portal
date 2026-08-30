@@ -265,7 +265,7 @@ router.get('/intake-items', async (req, res, next) => {
 // dryRun supported everywhere. `enrich` spends DataForSEO credits and is gated
 // by GATE_SEO_INTELLIGENCE inside the service (reports `gated: true` when off).
 const REGISTRY_JOBS = Object.freeze({
-  resolve: (opts) => require('../services/seo/link-registry-intake').resolveIntakeItems(db, { limit: opts.limit || 50 }),
+  resolve: (opts) => require('../services/seo/link-registry-intake').resolveIntakeItems(db, { limit: opts.limit || 50, dryRun: opts.dryRun }),
   baseline: (opts) => require('../services/seo/link-registry-baseline').importExistingBacklinks(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
   gap: (opts) => require('../services/seo/link-registry-gap-ingest').ingestCompetitorGap(db, { dryRun: opts.dryRun, limit: opts.limit || null }),
   enrich: (opts) => require('../services/seo/link-registry-enrich').enrichDomains(db, { dryRun: opts.dryRun, limit: opts.limit || 200, force: opts.force === true }),

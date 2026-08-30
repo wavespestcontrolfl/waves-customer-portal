@@ -17,6 +17,7 @@
  */
 
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
+const { parse: parseCsv } = require('csv-parse/sync');
 const registry = require('./link-registry');
 const { LINK_SOURCES, isNeverTargetHost, intakeItemKey } = registry;
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
@@ -68,15 +69,19 @@ function isReferenceToken(token) {
  * Pure. Returns null when the text is not that shape.
  */
 function parseCsvOpportunities(text) {
-  const lines = String(text || '').split(/\r?\n/).filter((l) => l.trim());
-  if (lines.length < 2) return null;
-  const header = lines[0].split(',').map((h) => h.trim().replace(/^"|"$/g, '').toLowerCase());
+  let records;
+  try {
+    // Real CSV grammar (quoted commas, escaped quotes, quoted newlines) via the
+    // existing csv-parse dependency; anything it cannot read is not a CSV.
+    records = parseCsv(String(text || ''), { bom: true, trim: true, skip_empty_lines: true, relax_column_count: true });
+  } catch { return null; }
+  if (records.length < 2) return null;
+  const header = records[0].map((h) => String(h).trim().toLowerCase());
   const col = header.findIndex((h) => ['website', 'domain', 'url', 'site', 'link'].includes(h));
   if (col < 0) return null;
   const rows = [];
-  for (const line of lines.slice(1)) {
-    const cells = line.split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
-    const raw = cells[col];
+  for (const cells of records.slice(1)) {
+    const raw = String(cells[col] || '').trim();
     if (!raw) continue;
     const note = cells.filter((_, i) => i !== col).map((c) => c.trim()).filter(Boolean).join(' | ').slice(0, 160) || null;
     rows.push({ raw, note });
@@ -240,17 +245,25 @@ const X_PARK_MS = 7 * 24 * 60 * 60e3;
  * and upserts the resolved host through ensureDomain with the item's own
  * provenance. Network happens outside the claim transaction.
  */
-async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage = null } = {}) {
+async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage = null, dryRun = false } = {}) {
   const fetcher = fetchPage || require('./contact-finder').fetchPage;
   const out = { claimed: 0, resolved: 0, unresolved: 0, dropped: 0, parked: 0, errors: [] };
+  const due = (q) => q('seo_link_intake_items')
+    .whereIn('state', ['pending', 'unresolved'])
+    .andWhere((b) => b.whereNull('next_retry_at').orWhere('next_retry_at', '<=', now))
+    .orderBy('first_seen_at', 'asc')
+    .limit(Math.max(1, Math.min(Number(limit) || 50, 500)));
+
+  if (dryRun) {
+    // Report only: what the next sweep WOULD claim. No claim hold, no network,
+    // no state change — the rows stay due for the real tick.
+    const rows = await due(db);
+    const wouldPark = rows.filter((r) => X_POST_RE.test(r.raw_url)).length;
+    return { ...out, dryRun: true, due: rows.length, wouldPark, wouldFetch: rows.length - wouldPark };
+  }
 
   const claimed = await db.transaction(async (trx) => {
-    const rows = await trx('seo_link_intake_items')
-      .whereIn('state', ['pending', 'unresolved'])
-      .andWhere((b) => b.whereNull('next_retry_at').orWhere('next_retry_at', '<=', now))
-      .orderBy('first_seen_at', 'asc')
-      .limit(Math.max(1, Math.min(Number(limit) || 50, 500)))
-      .forUpdate().skipLocked();
+    const rows = await due(trx).forUpdate().skipLocked();
     if (!rows.length) return rows;
     await trx('seo_link_intake_items').whereIn('id', rows.map((r) => r.id))
       .update({ next_retry_at: new Date(now.getTime() + CLAIM_HOLD_MS) });

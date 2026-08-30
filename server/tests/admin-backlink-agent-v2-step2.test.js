@@ -66,7 +66,9 @@ describe('POST /registry/jobs/:job', () => {
   test('each job runs its service once, bounded, with dryRun passed through', async () => {
     const post = handler('post', '/registry/jobs/:job');
     expect((await call(post, { params: { job: 'resolve' }, body: { limit: '5000' } })).body).toEqual({ job: 'resolve', claimed: 1, resolved: 1 });
-    expect(resolveIntakeItems).toHaveBeenCalledWith(expect.anything(), { limit: 1000 });
+    expect(resolveIntakeItems).toHaveBeenCalledWith(expect.anything(), { limit: 1000, dryRun: false });
+    await call(post, { params: { job: 'resolve' }, body: { dryRun: true } });
+    expect(resolveIntakeItems).toHaveBeenLastCalledWith(expect.anything(), { limit: 50, dryRun: true });
 
     expect((await call(post, { params: { job: 'baseline' }, body: { dryRun: 'true' } })).body).toEqual({ job: 'baseline', scanned: 3 });
     expect(importExistingBacklinks).toHaveBeenCalledWith(expect.anything(), { dryRun: true, limit: null });
