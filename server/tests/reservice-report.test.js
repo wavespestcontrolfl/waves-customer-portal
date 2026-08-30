@@ -28,6 +28,8 @@ function fakeKnex({ visit = { id: 'visit-1', estimated_price: null, is_callback:
     const chain = {
       where(arg) { if (typeof arg === 'function') arg(chain); return chain; },
       orWhere() { return chain; },
+      whereNull() { return chain; },
+      orWhereNotIn() { return chain; },
       whereNotIn() { return chain; },
       async first() {
         if (throws) throw new Error('db down');
@@ -148,13 +150,15 @@ describe('reservice-report (gate on)', () => {
     expect(knex.calls).toEqual([]);
   });
 
-  test('a pre-completion "Charge now" invoice linked only by scheduled_service_id blocks the claim', async () => {
+  test('a pre-completion "Charge now" invoice linked only by scheduled_service_id blocks the claim; NULL status counts as collectible', async () => {
     const seen = [];
     const knex = (table) => {
       const chain = {
         where(arg) { if (typeof arg === 'function') arg(chain); else seen.push(arg); return chain; },
         orWhere(arg) { seen.push(arg); return chain; },
-        whereNotIn() { return chain; },
+        whereNull(col) { seen.push({ whereNull: col }); return chain; },
+        orWhereNotIn(col, vals) { seen.push({ orWhereNotIn: [col, vals] }); return chain; },
+        whereNotIn(col) { seen.push({ whereNotIn: col }); return chain; },
         async first() { return table === 'scheduled_services' ? { id: 'visit-1', estimated_price: null } : { id: 'inv-pre' }; },
       };
       return chain;
@@ -162,5 +166,9 @@ describe('reservice-report (gate on)', () => {
     const block = await buildReserviceReport(member, { serviceLine: 'pest', knex });
     expect(block.billingReason).toBe('invoiced');
     expect(seen).toEqual(expect.arrayContaining([{ service_record_id: 'rec-1' }, { scheduled_service_id: 'visit-1' }]));
+    // NOT IN never matches NULL, so the status filter must be
+    // whereNull(status) OR whereNotIn(status, void-ish) — never a bare NOT IN.
+    expect(seen).toEqual(expect.arrayContaining([{ whereNull: 'status' }, { orWhereNotIn: ['status', ['void', 'cancelled', 'canceled']] }]));
+    expect(seen.find((entry) => entry.whereNotIn)).toBeUndefined();
   });
 });

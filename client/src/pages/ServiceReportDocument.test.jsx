@@ -1370,6 +1370,25 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(screen.getByText(reservice.result)).toBeInTheDocument();
   });
 
+  it('a Pest V2 attention status or a needs-attention snapshot leads the summary; the re-service framing follows', () => {
+    const { container, unmount } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      reserviceReport: reservice,
+      pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' }, statusSummary: 'Ant pressure is still high at the kitchen slider.' },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text.indexOf(reservice.result)).toBeGreaterThan(text.indexOf('Cockroach activity was moderate today.'));
+    unmount();
+    const lawn = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reserviceReport: { ...reservice, serviceLine: 'lawn', result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.' },
+      reportV2: { snapshot: { status: 'needs_attention', statusHeadline: 'Fungus noted in the back lawn.' }, todaysResult: 'We noted fungus in the back lawn and treated it today.' },
+    }} token="tok123" />);
+    const lawnText = lawn.container.textContent;
+    expect(lawnText.indexOf('Lawn re-service completed')).toBeGreaterThan(lawnText.indexOf('We noted fungus in the back lawn and treated it today.'));
+  });
+
   it('no block (gate dark): the document is unchanged', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();

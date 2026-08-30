@@ -98,9 +98,11 @@ async function resolveCallbackBilling(service = {}, knex = null) {
     // against scheduled_service_id only (migration 20260420000002), and a
     // positive invoice that never back-linked to the record must still
     // block the $0 claim.
+    // invoices.status is nullable and SQL NOT IN never matches NULL — a
+    // NULL-status positive invoice is COLLECTIBLE for this proof.
     const invoice = await knex('invoices')
       .where((qb) => qb.where({ service_record_id: service.id }).orWhere({ scheduled_service_id: service.scheduled_service_id }))
-      .whereNotIn('status', NON_COLLECTIBLE_INVOICE_STATUSES)
+      .where((qb) => qb.whereNull('status').orWhereNotIn('status', NON_COLLECTIBLE_INVOICE_STATUSES))
       .where('total', '>', 0)
       .first('id');
     if (invoice) return { free: false, reason: 'invoiced' };

@@ -550,12 +550,16 @@ export default function ServiceReportDocument({ data, token }) {
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
   if (reservice) {
-    // Same precedence as the web hero: a program dashboard's honest status
-    // (cockroach/termite V2) leads; the re-service framing follows it.
-    // Otherwise the re-service sentence leads the summary.
+    // Same precedence as the web hero (smartStatusSummary): an honest
+    // warning — cockroach/termite V2 status, a Pest V2 "recommended"/
+    // "action" status, or a lawn/T&S needs_attention/watch/urgent snapshot
+    // — leads and the re-service framing follows it. Otherwise the
+    // re-service sentence leads the summary.
+    const pestAttention = ['recommended', 'action'].includes(String(data.pestReportV2?.status?.key || ''));
+    const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(data.reportV2?.snapshot?.status || ''));
     const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
     const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
-    if (cockroachV2 || termiteV2Summary) summaryParagraphs.push(...fresh);
+    if (cockroachV2 || termiteV2Summary || pestAttention || snapshotAttention) summaryParagraphs.push(...fresh);
     else summaryParagraphs.unshift(...fresh);
   }
 
