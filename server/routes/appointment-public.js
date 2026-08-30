@@ -253,10 +253,14 @@ async function visitServicesFor(svc) {
       logger.warn(`[appointment-public] visit ${svc.visit_id} members no longer share one stop — page fails closed`);
       return { visitUnknown: true };
     }
-    // The stop's canonical start (service_visits.window_start — the
-    // earliest member's) drives the arrival promise: two links to the same
-    // physical visit must quote the same window (codex r10).
-    const parent = await db('service_visits').where({ id: svc.visit_id }).first('window_start');
+    // The stop's canonical start drives the arrival promise: two links to
+    // the same physical visit must quote the same window (codex r10). It is
+    // the earliest start of THIS validated member snapshot (local codex
+    // audit r23) — never a separate service_visits read: the unit mover
+    // commits member rows before it retargets the parent, so a page or
+    // calendar request in that window would pair the new member slots with
+    // the old parent start and publish a wrong arrival window / ICS event.
+    const windowStart = members.map((m) => hhmm(m.window_start)).filter(Boolean).sort()[0] || null;
     // Per-member PRISTINE labels (codex r15 P2): reminder registration
     // merges same-slot siblings into the owner row's service_type ("Pest
     // Control & Mosquito Control"), so resolving every member from its
@@ -273,7 +277,7 @@ async function visitServicesFor(svc) {
         // Handed back by the confirm POST — see membersMatchShown.
         membershipKey: membershipKeyFor(members),
         services,
-        windowStart: hhmm(parent?.window_start) || null,
+        windowStart,
         // Grouped state is the VISIT's, not the token row's (codex r11): the
         // appointment reads Confirmed only when every member is, and stays
         // confirmable while any member can still be customer-confirmed.

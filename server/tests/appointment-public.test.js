@@ -368,11 +368,11 @@ describe('grouped visit payload (codex #3609 r10)', () => {
       const api = {
         where: () => api, whereNotIn: () => api, orderBy: () => api,
         select: async () => [
-          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true },
-          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false },
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, window_start: '09:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, window_start: '10:00:00' },
         ],
         first: async () => {
-          if (table === 'service_visits') return { window_start: '09:00:00' };
+          if (table === 'service_visits') return { window_start: '09:00:00' }; // not read since r23 — the start comes from the member snapshot
           // the reminder row carries the customer-facing label for member a
           if (table === 'appointment_reminders') return { service_type: 'Quarterly Pest Control' };
           return null;
@@ -596,6 +596,25 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     const gone = idle.map((m) => ({ ...m, scheduled_date: '2026-08-05' }));
     const goneApi = { where: () => goneApi, whereNotIn: () => goneApi, forUpdate: () => goneApi, select: async () => gone };
     await expect(membersMatchShown(jest.fn(() => goneApi), { id: 'a', visit_id: 'v1' }, { membershipKey: membershipKeyFor(gone) })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+  });
+
+  test('windowStart is the earliest start of the validated member snapshot — a stale service_visits.window_start mid-move is never quoted (local audit r23)', async () => {
+    const { visitServicesFor } = appointmentRouter._test;
+    let parentRead = 0;
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async () => [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-08-05', window_start: '13:00:00', window_end: '14:00:00', technician_id: 't1' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'pending', source_action: null, customer_confirmed: false, scheduled_date: '2099-08-05', window_start: '14:00:00', window_end: '15:00:00', technician_id: 't1' },
+        ],
+        first: async () => { if (table === 'service_visits') parentRead += 1; return table === 'service_visits' ? { window_start: '09:00:00' } : null; }, // parent still at the OLD start
+      };
+      return api;
+    });
+    const out = await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '14:00:00' });
+    expect(out.visit).toMatchObject({ windowStart: '13:00', state: 'upcoming' });
+    expect(parentRead).toBe(0);
   });
 
   test('groupedState derives the STOP\'s state from every member and the stop window; pageStateForGroup lets terminal row states win (local audit)', () => {
