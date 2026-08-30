@@ -3633,7 +3633,27 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
   );
 }
 
-function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], onClose, onSaved }) {
+// Does the server's estimate-derived prefill apply to the service the
+// operator is recording? Label match strips cadence words (via
+// normalizeAnnualPrepayLabelKey) plus service/plan/program filler so
+// "Quarterly Pest Control Service" (estimate line) matches "Quarterly Pest
+// Control" (modal default). An unlabeled single-line estimate is accepted —
+// the hint always names the estimate ref, so the operator sees the source.
+function annualPrepaySuggestionLabelKey(value) {
+  return normalizeAnnualPrepayLabelKey(value).replace(/service|plan|program/g, "");
+}
+
+export function estimateSuggestionMatchesService(suggestion, serviceType) {
+  if (!suggestion || suggestion.blocked || !(Number(suggestion.amount) > 0)) return false;
+  const suggestionKey = annualPrepaySuggestionLabelKey(suggestion.serviceLabel);
+  const serviceKey = annualPrepaySuggestionLabelKey(serviceType);
+  if (!suggestionKey || !serviceKey) return true;
+  return suggestionKey === serviceKey
+    || suggestionKey.includes(serviceKey)
+    || serviceKey.includes(suggestionKey);
+}
+
+export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
   const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
@@ -3647,7 +3667,20 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     activeTerm,
     prepaidPlans,
   );
-  const [amount, setAmount] = useState(suggestedAmount ? suggestedAmount.toFixed(2) : "");
+  // Estimate-derived prefill is the LAST fallback: recorded terms, prepaid
+  // plans, and the profile rate all speak to money actually agreed with this
+  // customer and win over a quote.
+  const estimateFallbackAmount = !suggestedAmount
+    && estimateSuggestionMatchesService(estimateSuggestion, defaultServiceType)
+    ? Number(estimateSuggestion.amount)
+    : 0;
+  const [amount, setAmount] = useState(
+    suggestedAmount
+      ? suggestedAmount.toFixed(2)
+      : estimateFallbackAmount > 0
+        ? estimateFallbackAmount.toFixed(2)
+        : "",
+  );
   const [serviceType, setServiceType] = useState(defaultServiceType);
   const [coverageCadence, setCoverageCadence] = useState(defaultCoverageCadence);
   const [visitCount, setVisitCount] = useState(defaultVisitCount);
@@ -3691,7 +3724,11 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
       activeTerm,
       prepaidPlans,
     );
-    if (nextSuggested > 0) setAmount(nextSuggested.toFixed(2));
+    if (nextSuggested > 0) {
+      setAmount(nextSuggested.toFixed(2));
+    } else if (estimateSuggestionMatchesService(estimateSuggestion, nextServiceType)) {
+      setAmount(Number(estimateSuggestion.amount).toFixed(2));
+    }
   };
 
   const handleServiceTypeChange = (value) => {
@@ -3747,6 +3784,12 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
           termEnd,
           reference: reference.trim() || undefined,
           note: note.trim() || undefined,
+          // Provenance: the term covers the service this estimate quoted,
+          // even when the operator overrode the amount. The server re-checks
+          // ownership and skips the link rather than failing the recording.
+          sourceEstimateId: estimateSuggestionMatchesService(estimateSuggestion, serviceType)
+            ? estimateSuggestion.estimateId
+            : undefined,
         }),
       });
       await onSaved?.(result);
@@ -3871,6 +3914,21 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
             {perVisit > 0 && (
               <div className="text-11 text-ink-secondary mt-1">
                 {fmtCurrency(perVisit)} per application
+              </div>
+            )}
+            {estimateSuggestionMatchesService(estimateSuggestion, serviceType) && (
+              <div className="text-11 text-ink-secondary mt-1">
+                From estimate #{estimateSuggestion.shortRef} — quoted prepay
+                year {fmtCurrency(Number(estimateSuggestion.amount))}
+                {Number(estimateSuggestion.discount) > 0
+                  ? ` (includes ${fmtCurrency(Number(estimateSuggestion.discount))} prepay discount)`
+                  : ""}
+              </div>
+            )}
+            {estimateSuggestion?.blocked && (
+              <div className="text-11 text-ink-secondary mt-1">
+                Estimate #{estimateSuggestion.shortRef}: {estimateSuggestion.blockReason} —
+                enter the amount collected.
               </div>
             )}
             {isCommercialCustomer && Number(amount) > 0 && (
@@ -7782,6 +7840,7 @@ export default function Customer360ProfileV2({
           activeTerm={displayedAnnualPrepayTerm}
           prepaidPlans={data.prepaidPlans || []}
           annualPrepayTerms={data.annualPrepayTerms || []}
+          estimateSuggestion={data.annualPrepayEstimateSuggestion || null}
           onClose={() => setAnnualPrepayOpen(false)}
           onSaved={handleAnnualPrepaySaved}
         />

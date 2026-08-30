@@ -112,6 +112,7 @@ function techSafeSort(sort) {
 const TECH_360_STRIPPED_KEYS = [
   'interactions', 'smsLog', 'payments', 'invoices', 'cards',
   'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
+  'annualPrepayEstimateSuggestion',
   'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
   'tags',
   // Sibling properties on the account: authorization is per-customer, so an
@@ -3229,6 +3230,19 @@ router.get('/:id', async (req, res, next) => {
         bankName: contract.bank_name,
       })),
       annualPrepayTerms: (annualPrepayTerms || []).map(mapAnnualPrepayTerm),
+      // Prefill hint for the "Record collected annual prepay" modal — which
+      // estimate this prepay most credibly comes from and the amount its own
+      // accept-as-prepay lane would invoice. Suggestion-only; never blocks
+      // the 360 payload.
+      annualPrepayEstimateSuggestion: (() => {
+        try {
+          return require('../services/annual-prepay-estimate-suggestion')
+            .buildAnnualPrepayEstimateSuggestion(estimates);
+        } catch (e) {
+          logger.warn(`[customers:${c.id}] annual_prepay_estimate_suggestion: ${e.message}`);
+          return null;
+        }
+      })(),
       prepaidPlans: (prepaidPlans || []).map((plan) => ({
         ...plan,
         paidAt: plan.paidAt instanceof Date ? plan.paidAt.toISOString() : plan.paidAt,
@@ -4851,6 +4865,23 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
 
     const reference = cleanOptionalText(req.body?.reference);
     const note = cleanOptionalText(req.body?.note);
+
+    // Estimate provenance (best-effort, never blocks the money recording):
+    // link the term to the estimate the prefill came from. Skip the link —
+    // don't fail — when the id is malformed, isn't this customer's, or is
+    // already referenced by ANY existing term: createTermForAnnualPrepay
+    // upserts by source_estimate_id, so re-linking a used estimate would
+    // UPDATE the prior term (e.g. last year's) instead of creating this one.
+    let sourceEstimateId = null;
+    const sourceEstimateIdRaw = cleanOptionalText(req.body?.sourceEstimateId);
+    if (sourceEstimateIdRaw && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sourceEstimateIdRaw)) {
+      const [estimateRow, linkedTerm] = await Promise.all([
+        db('estimates').where({ id: sourceEstimateIdRaw, customer_id: customer.id }).first('id'),
+        db('annual_prepay_terms').where({ source_estimate_id: sourceEstimateIdRaw }).first('id'),
+      ]);
+      if (estimateRow && !linkedTerm) sourceEstimateId = estimateRow.id;
+    }
+
     const recordedBy = req.technician?.name || req.technician?.email || req.technicianId || 'admin';
     const invoiceNotes = [
       'Created from Customer 360 annual prepay.',
@@ -4904,6 +4935,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: customer.id,
+        sourceEstimateId,
         prepayInvoiceId: updatedInvoice.id,
         planLabel,
         monthlyRate: Number(customer.monthly_rate || 0) || Math.round((amount / 12) * 100) / 100,
