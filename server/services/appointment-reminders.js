@@ -1486,8 +1486,25 @@ async function getReminderPrefs(customerId) {
 // was first read can still suppress the now-stale send.
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
   if (apptTime.getTime() <= Date.now()) {
+    // Deferred path (codex #3609 r22 P2): the time this sender read can have
+    // elapsed while a silent grouped move (keepPendingConfirmation) already
+    // put a NEW future time on the row. Marking by id alone would burn that
+    // confirmation with no text and nothing for the stranded sweep to
+    // repair — re-read, and skip WITHOUT marking when the time moved (the
+    // sweep resends the new time); the mark itself is fenced on the time.
+    let fence = {};
+    if (recheckBeforeSend) {
+      const fresh = await db('appointment_reminders').where({ id: record.id }).first('appointment_time', 'cancelled', 'confirmation_sent');
+      if (!fresh || fresh.cancelled || fresh.confirmation_sent) return false;
+      const freshAt = fresh.appointment_time ? new Date(fresh.appointment_time).getTime() : null;
+      if (freshAt != null && freshAt !== apptTime.getTime()) {
+        logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — the appointment moved to a new time under the send; the sweep resends with the new time`);
+        return false;
+      }
+      if (fresh.appointment_time) fence = { appointment_time: fresh.appointment_time };
+    }
     await db('appointment_reminders')
-      .where({ id: record.id })
+      .where({ id: record.id, ...fence })
       .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
     logger.warn(
       `[appt-remind] Confirmation skipped for past appointment ${scheduledServiceId} ` +

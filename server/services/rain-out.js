@@ -1728,7 +1728,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // reached individually below and recorded as its own failure/retry
   // (codex #3609 r6).
   const coveredIds = new Set();
-  const coverMoved = (r) => { for (const id of coveredIdsFrom(r)) coveredIds.add(id); };
+  const coveredVisitOf = new Map();
+  const coverMoved = (r, job) => {
+    const vid = String((r && r.visitMove && r.visitMove.visitId) || (job && job.visit_id) || '') || null;
+    for (const id of coveredIdsFrom(r)) { coveredIds.add(id); if (vid) coveredVisitOf.set(id, vid); }
+  };
   for (const job of orderedJobs) {
     if (coveredIds.has(String(job.id))) {
       results.push({ id: job.id, ok: true, coveredByVisit: String(job.visit_id), newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
@@ -1853,7 +1857,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
-        coverMoved(moveResult);
+        coverMoved(moveResult, job);
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.
@@ -2042,6 +2046,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
       ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
     });
+  }
+
+  // Carried siblings that were NOT in this batch (a single-stop rain-out of
+  // a grouped service, codex #3609 r22 P2): the unit move moved them, but
+  // the loop had no job row of theirs to record — and the endpoint
+  // broadcasts result.results only, so other open boards would keep them
+  // stale until a full refresh. Record them as covered members.
+  const recorded = new Set(results.map((r) => String(r.id)));
+  for (const id of coveredIds) {
+    if (recorded.has(id)) continue;
+    results.push({ id, ok: true, coveredByVisit: coveredVisitOf.get(id) || 'visit', newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
   }
 
   return summarizeCommitResults(results);

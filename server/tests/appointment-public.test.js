@@ -487,8 +487,12 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     const AB = appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]);
     trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: null, customer_confirmed: false }], after: [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'confirmed' }] });
     expect(await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: AB })).toEqual({ outcome: 'fanned', row: anchor, confirmed: true });
-    expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert']);
+    // sibling confirm + history, then the staff-confirmed anchor is stamped customer_confirmed (codex r22 P2) — CAS on the locked state
+    expect(trx.__log.map((l) => l[0])).toEqual(['update', 'insert', 'update']);
     expect(trx.__log[0][2]).toMatchObject({ status: 'confirmed', customer_confirmed: true });
+    expect(trx.__log[2][1]).toBe('scheduled_services');
+    expect(trx.__log[2][2]).toMatchObject({ customer_confirmed: true });
+    expect(trx.__log[2][2]).not.toHaveProperty('confirmed_at');
     // a dispatch-owned sibling stays pending ⇒ the response reports the visit NOT confirmed (codex r17 P2)
     trx = fakeTrx({ members: [{ id: 'a' }, { id: 'b' }], pendingSiblings: [{ id: 'b', status: 'pending', source_action: 'call_followup', customer_confirmed: false }], after: [{ id: 'a', status: 'confirmed' }, { id: 'b', status: 'pending' }] });
     const res = await confirmGroupedOrSolo(trx, svc, { ...shown, membershipKey: AB });

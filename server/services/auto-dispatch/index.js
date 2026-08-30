@@ -455,7 +455,7 @@ async function runAutoDispatch(opts = {}) {
 
           // A grouped row moves its whole visit: reserve EVERY member row
           // against the per-run cap before applying (codex #3609 r7).
-          const unitSize = await unitMoveSize(pm.service);
+          const unitSize = await unitMoveSize(pm.service, fresh.best);
           if (totals.changed + unitSize > config.maxChangesPerRun) {
             totals.recommended++; // cap-held but still a valid move — count it in the summary
             await audit.logDecision(runId, { action: 'recommended', service: pm.service, reason_code: 'MAX_CHANGES_REACHED', reason_description: `Per-run change cap ${config.maxChangesPerRun} reached (valid move held, +${fresh.improvement}${unitSize > 1 ? `, grouped visit of ${unitSize}` : ''})`, ...fresh.audit });

@@ -469,6 +469,15 @@ async function confirmGroupedOrSolo(trx, svc, shown) {
   const members = await membersMatchShown(trx, svc, shown);
   if (members.length < 2) return { outcome: 'solo', row: cur, confirmed: true };
   await confirmGroupedSiblings(trx, svc);
+  // The customer confirmed the WHOLE visit from this row's link: a staff-
+  // confirmed anchor (customer_confirmed=false) records that action too
+  // (codex #3609 r22 P2) — tracking's confirmation step keys on the flag.
+  // confirmed_at (the status transition) is left as written; updated_at
+  // carries the customer's action time. CAS on the locked state.
+  if (!cur.customer_confirmed) {
+    await trx('scheduled_services').where({ id: svc.id, status: 'confirmed', customer_confirmed: false })
+      .update({ customer_confirmed: true, updated_at: trx.fn.now() });
+  }
   return { outcome: 'fanned', row: cur, confirmed: await visitAllConfirmed(trx, svc.visit_id) };
 }
 

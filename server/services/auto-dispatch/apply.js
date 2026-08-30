@@ -416,12 +416,30 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
  * error counts as 1 (the tapped row) so the cap is never a reason to skip
  * on a transient read failure — the apply path revalidates everything.
  */
-async function unitMoveSize(service) {
+async function unitMoveSize(service, best = null) {
   try {
     const row = await db('scheduled_services').where({ id: service.id }).first('visit_id');
     if (!row || !row.visit_id) return 1;
     const members = await require('../visit-groups').openMembers(db, row.visit_id);
-    return Math.max(1, members.length);
+    if (!best) return Math.max(1, members.length);
+    // Only members the unit plan would actually CHANGE count (codex #3609
+    // r22 P2) — the same already-at-target rule moveVisitAsUnit applies
+    // under its lock: a member stays put when it is already on the target
+    // date, already on the requested technician (when one is requested),
+    // and either windowless (it keeps no window on a same-day move) or the
+    // move shifts no window. The tapped row always changes.
+    const newDate = String(best.date || '').slice(0, 10);
+    const wantTech = best.technician_id && String(best.technician_id) !== String(service.technician_id || '') ? String(best.technician_id) : null;
+    const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+    const windowShifts = !!best.start_time && hhmm(best.start_time) !== hhmm(service.window_start);
+    const changing = members.filter((m) => {
+      if (String(m.id) === String(service.id)) return true;
+      if (String(m.scheduled_date instanceof Date ? m.scheduled_date.toISOString() : m.scheduled_date || '').slice(0, 10) !== newDate) return true;
+      if (wantTech && String(m.technician_id || '') !== wantTech) return true;
+      if (!m.window_start) return false;
+      return windowShifts;
+    });
+    return Math.max(1, changing.length);
   } catch (err) {
     logger.warn(`[auto-dispatch] unit size lookup failed for ${service.id}: ${err.message}`);
     return 1;

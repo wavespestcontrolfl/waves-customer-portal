@@ -1666,13 +1666,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (liveClaim) {
           throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
         }
-        // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
-        // its per-run change budget from an unlocked pre-read; the member
-        // count that actually moves is decided here, under the stop lock,
-        // and must fit the budget the caller still has — or nothing moves.
-        if (Number.isFinite(options.maxUnitSize) && members.length > options.maxUnitSize) {
-          throw Object.assign(new Error(`Cannot move this stop as a unit: ${members.length} grouped services exceed the caller's remaining change budget (${options.maxUnitSize})`), { statusCode: 409, code: 'VISIT_UNIT_OVER_CAP', isOperational: true, memberCount: members.length });
-        }
         // SCOPE (owner decision pending, codex #3609 r3): a grouped stop is
         // moved as a unit by STAFF, on the direct (non-series) path only —
         // the surfaces whose callers handle partial results. A customer
@@ -1775,6 +1768,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             expect: { scheduled_date: dateOnly(m.scheduled_date), window_start: m.window_start || null, window_end: m.window_end || null, visit_id: visit.id, technician_id: m.technician_id || null, status: String(m.status) },
           };
         });
+        // Hard cap from the LOCKED plan (codex r8): auto-dispatch reserves
+        // its per-run change budget from an unlocked pre-read; the member
+        // count that actually CHANGES is decided here, under the stop lock —
+        // members already at the requested placement (a windowless sibling
+        // on a same-day window move, codex r22 P2) are not changes — and
+        // must fit the budget the caller still has, or nothing moves.
+        const changingCount = targets.filter((x) => !x.alreadyAtTarget).length;
+        if (Number.isFinite(options.maxUnitSize) && changingCount > options.maxUnitSize) {
+          throw Object.assign(new Error(`Cannot move this stop as a unit: ${changingCount} grouped services would change, exceeding the caller's remaining change budget (${options.maxUnitSize})`), { statusCode: 409, code: 'VISIT_UNIT_OVER_CAP', isOperational: true, memberCount: changingCount });
+        }
         // Caller-supplied member guard (codex r13 P1): auto-dispatch's
         // apply-time HARD guards (72h reminder freeze, technician capability,
         // live status, preferences) are evaluated for the tapped row only;
