@@ -349,14 +349,22 @@ async function sendRequestReceived({
 // cancellation SMS could not be delivered. By the time this sends the
 // auto-processor has churned the account (active=false blocks portal auth),
 // so the template deliberately carries NO portal CTAs (seeded by migration
-// 20260701000003); copy mirrors the service_cancellation_confirmation SMS.
+// 20260701000003, outcome line added by 20260830000030).
 async function sendCancellationReceived({
   customerId,
   request,
   idempotencyKey,
+  // Processor outcome (H0, migration 20260830000030): fills {{outcome_line}}
+  // so the one template is true whether the cancel completed or the office
+  // is finishing it by hand. Defaults to the neutral line — never claim
+  // billing stopped unless the caller proved it.
+  processed = false,
 } = {}) {
   if (!request?.id) return { ok: false, skipped: true, reason: 'missing_request' };
   const submittedAt = request.created_at || request.createdAt || new Date();
+  const outcomeLine = processed === true
+    ? `Your plan is cancelled as of ${displayDate(submittedAt)}: upcoming visits are off the calendar and autopay is off. Nothing further is charged for future service; charges for visits already completed remain payable, and a visit already inside its late-cancellation window keeps its scheduled-visit fee.`
+    : 'Our office is closing out your plan by hand and will confirm exactly what has stopped within 1 business day.';
   return sendTemplate({
     customerId,
     templateKey: 'account.cancellation_received',
@@ -365,6 +373,7 @@ async function sendCancellationReceived({
       request_id: request.id,
       request_subject: clean(request.subject) || 'Cancellation request',
       submitted_at: displayDate(submittedAt),
+      outcome_line: outcomeLine,
     },
     idempotencyKey: idempotencyKey || `account.cancellation_received:${request.id}`,
     categories: ['cancellation_received'],

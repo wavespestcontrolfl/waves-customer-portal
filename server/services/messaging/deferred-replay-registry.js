@@ -570,6 +570,10 @@ const REGISTRY = {
       const emailRes = await AccountMembershipEmail.sendCancellationReceived({
         customerId: meta.waves_customer_id || request.customer_id,
         request,
+        // Processor outcome stamped on the scheduled row by the request
+        // route; absent (pre-H0 rows) → the neutral "closing out by hand"
+        // line, never a completed-cancel claim we cannot prove.
+        processed: meta.cancellation_processed === true,
       });
       if (emailRes?.ok === false && emailRes?.skipped !== true) {
         throw new Error(`cancellation confirmation fallback email failed for request ${request.id}: ${emailRes?.error || 'unknown'}`);

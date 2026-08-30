@@ -4016,19 +4016,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         .catch(() => {});
     }
 
-    // Fire-and-forget: trigger cancellation save when deactivating a customer
-    if (updates.active === false) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          cancellationSave.initiate(req.params.id, 'default').catch(err =>
-            logger.error(`[customers] Cancellation save on deactivation failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // The automated cancellation-save SMS sequence no longer fires on
+    // deactivation (owner ruling 2026-08-29: it promised a "retention offer"
+    // and a waived setup fee that were never defined; win-back is a manual
+    // send by the owner). The workflow module and its templates stay for
+    // sequences already in flight.
 
     // Contact change events for the 360 timeline — post-commit, best-effort
     // (the recorder never throws). Compaction above puts every slot column in
@@ -4126,20 +4118,8 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Fire-and-forget: trigger cancellation save workflow when moving to churned or at_risk
-    if (stage === 'churned' || (stage === 'at_risk' && oldStage !== 'at_risk')) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          const cancelReason = req.body.churnReason || 'default';
-          cancellationSave.initiate(req.params.id, cancelReason).catch(err =>
-            logger.error(`[customers] Cancellation save failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // Stage moves to churned / at_risk no longer start the cancellation-save
+    // SMS sequence (owner ruling 2026-08-29 — see the deactivation note above).
 
     // Fire-and-forget: update health score on stage change
     try {
