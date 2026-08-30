@@ -108,6 +108,10 @@ describe('staffDispositionUpdates — PATCH payload', () => {
 
     expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: 'lots' }).updates.competitor_price).toBeNull();
     expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '-5' }).updates.competitor_price).toBeNull();
+    // decimal(10,2) range guard — overflow must not become a 500.
+    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '100000000' }).updates.competitor_price).toBeNull();
+    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '1e100' }).updates.competitor_price).toBeNull();
+    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '99999999.99' }).updates.competitor_price).toBe(99999999.99);
   });
 
   test('legacy declineReason alone maps to a code; unknown text is kept as the note', () => {

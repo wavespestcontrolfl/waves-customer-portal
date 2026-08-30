@@ -130,7 +130,12 @@ function positiveMoneyOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(String(value).replace(/[$,\s]/g, ''));
   if (!Number.isFinite(n) || n < 0) return null;
-  return Math.round(n * 100) / 100;
+  const rounded = Math.round(n * 100) / 100;
+  // competitor_price is decimal(10,2) — anything beyond its range would
+  // turn a validation problem into a Postgres numeric-overflow 500
+  // (codex pre-push P1). No competitor price is remotely near this.
+  if (rounded > 99999999.99) return null;
+  return rounded;
 }
 
 /**

@@ -2858,7 +2858,15 @@ router.post('/:id/unarchive', async (req, res, next) => {
     if (markers.supersededAt) return res.status(409).json({ error: supersededMessage });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
     const [updated] = await db('estimates')
-      .where({ id: req.params.id })
+      .where({ id: req.params.id, status: estimate.status })
+      // Observed-state guard, mirroring the archive route (codex pre-push
+      // P1 TOCTOU): a concurrent decline/accept that resolved the archived
+      // row owns its disposition — unarchiving from a stale pre-read must
+      // not erase it.
+      .whereNotNull('archived_at')
+      .modify((q) => (estimate.disposition
+        ? q.where({ disposition: estimate.disposition })
+        : q.whereNull('disposition')))
       .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
       .update({
@@ -2882,7 +2890,13 @@ router.post('/:id/unarchive', async (req, res, next) => {
         } : {}),
       })
       .returning('*');
-    if (!updated) return res.status(409).json({ error: invalidatedMessage });
+    if (!updated) {
+      // Zero rows: either a linkage marker (permanent) or a concurrent
+      // writer moved the row. Re-read once to say which.
+      const fresh = await db('estimates').where({ id: req.params.id }).first('status', 'archived_at', 'disposition');
+      const changed = fresh && (fresh.status !== estimate.status || !fresh.archived_at || (fresh.disposition || null) !== (estimate.disposition || null));
+      return res.status(409).json({ error: changed ? 'Estimate changed while you were unarchiving it. Refresh and retry.' : invalidatedMessage });
+    }
     res.json(updated);
   } catch (err) { next(err); }
 });
