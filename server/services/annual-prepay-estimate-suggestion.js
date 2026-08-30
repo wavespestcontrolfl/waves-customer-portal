@@ -124,17 +124,27 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   try {
     const { buildPricingBundle } = require('../routes/estimate-public');
     const bundle = await buildPricingBundle(estimate);
+    // The finalized bundle's own state is authoritative over the raw estData
+    // checks above: finalizePricingBundle can mark an otherwise-eligible mix
+    // quote-required or prepay-ineligible (no sellable incentive, tier
+    // restrictions) — honor it before deriving any money.
+    if (bundle?.quoteRequired === true) return blocked('estimate needs a manual quote');
+    if (bundle?.annualPrepayEligible === false) return blocked('estimate is not annual-prepay eligible');
     if ((bundle?.serviceCadenceCombos || []).length > 0) {
       return blocked('estimate offers multiple pricing combinations');
     }
-    const frequencyRows = [
+    const pricedRows = [
       ...(Array.isArray(bundle?.frequencies) ? bundle.frequencies : []),
       ...(Array.isArray(bundle?.hiddenLawnFrequencies) ? bundle.hiddenLawnFrequencies : []),
-    ];
-    optionAnnuals = [...new Set(frequencyRows
-      .map((row) => Math.round((Number(row?.annual) || (Number(row?.monthly) || 0) * 12) * 100))
-      .filter((cents) => cents > 0))];
+    ].filter((row) => (Number(row?.annual) || (Number(row?.monthly) || 0) * 12) > 0);
+    optionAnnuals = [...new Set(pricedRows
+      .map((row) => Math.round((Number(row?.annual) || (Number(row?.monthly) || 0) * 12) * 100)))];
     if (optionAnnuals.length > 1) return blocked('estimate offers multiple pricing options');
+    // Per-frequency eligibility (e.g. the mosquito ladder's seasonal tier):
+    // the single sellable option must itself allow prepay.
+    if (pricedRows.length === 1 && pricedRows[0]?.annualPrepayEligible === false) {
+      return blocked('estimate is not annual-prepay eligible');
+    }
   } catch {
     return blocked('estimate pricing options could not be verified');
   }
