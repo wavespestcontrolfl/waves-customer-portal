@@ -11,6 +11,9 @@ const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest } = require('../services/cancellation-processor');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const CancellationResolution = require('../services/cancellation-resolution');
+const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
+const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
 const { etDateString } = require('../utils/datetime-et');
 
 function etDisplayDate(value) {
@@ -74,12 +77,64 @@ const createSchema = Joi.object({
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
   photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
+  // Cancellation resolution engine (PR E, GATE_CANCEL_FLOW_V2) — additive,
+  // all optional so every existing client payload validates unchanged. The
+  // structured v2 reason + the card the customer saw and what they did with
+  // it; recorded on the cancellation_cases row, never trusted for money
+  // (offer grants re-derive eligibility server-side in C1).
+  reasonCode: Joi.string().valid(...REASON_CODE_VALUES).optional(),
+  resolutionTemplateId: Joi.string().trim().max(60).optional(),
+  resolutionOutcome: Joi.string().valid('shown', 'accepted', 'declined').optional(),
+  // The same scope/context the preview took, so the commit-time recompute
+  // resolves the SAME situation the customer was shown (families intersect
+  // server-derived ownership; the address is re-validated server-side).
+  families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
+  newAddress: Joi.string().trim().max(400).optional(),
+  competitorQuote: Joi.boolean().optional(),
+  adverseEvent: Joi.boolean().optional(),
+  safetyComplaint: Joi.boolean().optional(),
 });
 
 // Strip any HTML-ish characters before storage so admin/UI surfaces can never
 // render injected markup, regardless of the client renderer.
 function stripHtml(s) {
   return String(s || '').replace(/[<>]/g, '');
+}
+
+// Cancellation moving-branch address verdict (PR E): the TRANSFER card only
+// appears on a fully accepted in-area validation (validated_accept /
+// corrected); an accepted OUT-of-area address is the clean-cancel hard stop;
+// anything partial (ambiguous, missing component, confirm-needed,
+// API-unavailable) resolves to null → no card, no hard stop.
+function cancelMoveAddressVerdict(verdict, STATUSES) {
+  if (!verdict) return null;
+  if (verdict.status === STATUSES.OUT_OF_SERVICE_AREA) return false;
+  const accepted = verdict.status === STATUSES.VALIDATED_ACCEPT || verdict.status === STATUSES.CORRECTED;
+  if (!accepted || verdict.inServiceArea !== true) return null;
+  return true;
+}
+
+// Durable cancellation case (PR E) — idempotent per request id, best-effort:
+// a case failure never blocks or un-reports a cancel. Called from the fresh
+// create AND both retry branches, so a transient insert failure on the first
+// submit is repaired by any retry.
+async function recordCancellationCase({ customerId, requestId, value = {}, families = [], snapshot = null, resolution = null, resolutionOutcome = null, processed = false, reasonText = null }) {
+  if (!CancellationResolution.cancelFlowV2Enabled()) return;
+  try {
+    await CancellationResolution.openCancellationCase({
+      customerId,
+      serviceRequestId: requestId,
+      families,
+      reasonCode: value.reasonCode || null,
+      reasonText,
+      resolution,
+      resolutionOutcome,
+      snapshot: snapshot || {},
+      processed,
+    });
+  } catch (caseErr) {
+    logger.warn(`Cancellation case write failed for request ${requestId}: ${caseErr.message}`);
+  }
 }
 
 // =========================================================================
@@ -150,6 +205,27 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         } catch (retryErr) {
           logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
         }
+        // Promote the original request's case to committed if this retry
+        // completed the cancel. When the original writes BOTH failed and no
+        // case row exists at all, the retry's structured inputs are the only
+        // reconstruction available — openCancellationCase only fills MISSING
+        // fields, so an intact original record is never overwritten by retry
+        // input, and the taxonomy re-derives the hard-stop/review verdict.
+        // The post-churn snapshot is marked degraded (tier/rate already
+        // cleared, no card can be reconstructed).
+        await recordCancellationCase({
+          customerId: req.customer.id,
+          requestId: dupe.id,
+          value,
+          families: [], // scope unverifiable post-churn — never retry input
+          reasonText: dupe.description || null,
+          // Situational hard stops (adverse event / safety complaint) are
+          // derivable from reason+context alone — reconstruct them so a
+          // repaired-from-nothing case still reaches the incident lane.
+          resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
+          snapshot: { written_on_retry: true, degraded: true },
+          processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+        });
       }
       return res.status(200).json({
         success: true,
@@ -203,6 +279,18 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (retryErr) {
         logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
       }
+      // Same semantics as the dedupe branch above: promote when a row
+      // exists, reconstruct what little can be reconstructed when none does.
+      await recordCancellationCase({
+        customerId: req.customer.id,
+        requestId: priorCancellation.id,
+        value,
+        families: [], // scope unverifiable post-churn — never retry input
+        reasonText: priorCancellation.description || null,
+        resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
+        snapshot: { written_on_retry: true, degraded: true },
+        processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+      });
       return res.status(200).json({
         success: true,
         deduped: true,
@@ -263,6 +351,17 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // the partial-failure repair paths are the 60s dedupe above and the
     // inactive-retry path, and a partial run already raised a review alert.
     if (category === 'cancellation') {
+      // Scoped (per-family) cancellation is C1 scope: the processor below
+      // churns the WHOLE account, so accepting a family list here would let
+      // a customer selecting one plan lose everything. Reject until the
+      // per-family processor exists; the preview endpoint still accepts
+      // scope for card resolution.
+      if (CancellationResolution.cancelFlowV2Enabled() && Array.isArray(value.families) && value.families.length) {
+        return res.status(400).json({
+          error: 'Cancelling individual services is not available yet. Submit without a service selection to cancel the whole plan, or call our office.',
+          code: 'scoped_cancellation_unsupported',
+        });
+      }
       if (!(await hasCancellableWork(req.customer.id))) {
         return res.status(400).json({
           error:
@@ -271,6 +370,60 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         });
       }
     }
+
+    const isCancellation = category === 'cancellation';
+    let caseSnapshot = null;
+    let preChurnFacts = null;
+    let serverResolution = null;
+
+    // Cancellation ordering — FINAL form (codex rounds 27, 30, 38, 46):
+    // MONEY OUTRANKS DURABILITY. The pre-churn snapshot/facts load and the
+    // PURE resolve run BEFORE the acceptance persists (a crash here just
+    // means the customer resubmits); the instant the acceptance persists,
+    // the processor's billing wind-down runs with NOTHING between them —
+    // no facts legs, no case writes, and certainly no external I/O. The
+    // case write and the paid address validation both run after the
+    // wind-down; retries reconstruct a lost case.
+    if (isCancellation && CancellationResolution.cancelFlowV2Enabled()) {
+      try {
+        caseSnapshot = await db('customers')
+          .where({ id: req.customer.id })
+          .first('waveguard_tier', 'monthly_rate', 'billing_mode', 'pipeline_stage');
+      } catch (snapErr) {
+        logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
+      }
+      if (value.reasonCode) {
+        try {
+          const { loadCancellationFacts } = require('../services/cancellation-resolution/facts');
+          preChurnFacts = await loadCancellationFacts(req.customer.id);
+        } catch (factsErr) {
+          logger.warn(`Cancellation facts preload failed for ${req.customer.id}: ${factsErr.message}`);
+        }
+      }
+      // Pure, I/O-free resolve from the preloaded pre-churn facts. The
+      // moving address verdict is deliberately absent here (it needs the
+      // paid external call, which must wait until after the billing
+      // wind-down) — an out-of-area hard stop is added post-processor.
+      if (preChurnFacts && value.reasonCode) {
+        try {
+          const { resolveCancellation } = require('../services/cancellation-resolution/resolve');
+          serverResolution = resolveCancellation({
+            facts: preChurnFacts,
+            reasonCode: value.reasonCode,
+            families: Array.isArray(value.families) ? value.families : [],
+            context: {
+              newAddressInServiceArea: null,
+              hasCompetitorQuote: value.competitorQuote === true,
+              adverseEvent: value.adverseEvent === true,
+              safetyComplaint: value.safetyComplaint === true,
+            },
+          });
+        } catch (resErr) {
+          logger.warn(`Cancellation resolution recompute failed for ${req.customer.id}: ${resErr.message}`);
+        }
+      }
+    }
+
 
     const [request] = await db('service_requests')
       .insert({
@@ -291,7 +444,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     const categoryLabel = category.replace(/_/g, ' ');
     const photoCount = photoData.length;
     const locationLabel = validLocation ? validLocation.replace(/_/g, ' ') : '';
-    const isCancellation = category === 'cancellation';
 
     // A cancellation request is auto-processed: pull the customer's upcoming
     // visits off the calendar, stop any recurring series, and mark the account
@@ -311,6 +463,69 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         logger.error(`Failed to auto-process cancellation for request ${request.id}: ${cancelErr.message}`);
       }
       cancellationProcessed = !!(cancellationResult && cancellationResult.ok && cancellationResult.churned);
+
+      // Moving branch: the paid Google validation runs ONLY NOW — after
+      // the billing wind-down — and only refines the audit verdict (an
+      // accepted out-of-area address becomes the clean-cancel hard stop on
+      // the case; nothing customer-facing depends on it at commit time).
+      if (CancellationResolution.cancelFlowV2Enabled()
+        && value.reasonCode === 'moving_or_property_change' && value.newAddress) {
+        try {
+          const { validateAddress, STATUSES } = require('../services/address-validation');
+          const verdict = await validateAddress({ addressLines: [value.newAddress] });
+          const inArea = cancelMoveAddressVerdict(verdict, STATUSES);
+          if (inArea === false) {
+            serverResolution = { kind: 'hard_stop', reasonCode: value.reasonCode, scope: serverResolution ? serverResolution.scope : [], reviewType: 'none' };
+          } else if (inArea === true && preChurnFacts) {
+            // Verified in-area: re-run the pure resolver with the verdict so
+            // the case records the transfer card the preview showed (the
+            // pre-churn resolve deliberately ran without the paid verdict).
+            const { resolveCancellation } = require('../services/cancellation-resolution/resolve');
+            serverResolution = resolveCancellation({
+              facts: preChurnFacts,
+              reasonCode: value.reasonCode,
+              families: Array.isArray(value.families) ? value.families : [],
+              context: {
+                newAddressInServiceArea: true,
+                hasCompetitorQuote: value.competitorQuote === true,
+                adverseEvent: value.adverseEvent === true,
+                safetyComplaint: value.safetyComplaint === true,
+              },
+            });
+          }
+        } catch (addrErr) {
+          logger.warn(`Cancellation address validation failed for request ${request.id}: ${addrErr.message}`);
+        }
+      }
+
+      // The SOLE case write, after the billing wind-down (codex r46: no
+      // writes between acceptance and wind-down). Idempotent per request;
+      // retries reconstruct a lost case. Caller input can never forge the
+      // card — the resolution is the server's, computed pre-churn.
+      if (CancellationResolution.cancelFlowV2Enabled()) {
+        const serverCard = serverResolution && serverResolution.kind === 'card' ? serverResolution.card : null;
+        // Same outcome rule as the pre-write above: explicit, matching,
+        // never 'accepted' on this path.
+        const outcome = serverCard && value.resolutionTemplateId === serverCard.templateId
+          && ['shown', 'declined'].includes(value.resolutionOutcome)
+          ? value.resolutionOutcome
+          : null;
+        await recordCancellationCase({
+          customerId: req.customer.id,
+          requestId: request.id,
+          value,
+          families: serverResolution && Array.isArray(serverResolution.scope) ? serverResolution.scope : [],
+          reasonText: cleanDescription || null,
+          resolution: serverResolution,
+          resolutionOutcome: outcome,
+          snapshot: {
+            tier_before: caseSnapshot ? caseSnapshot.waveguard_tier : null,
+            monthly_rate_before: caseSnapshot ? caseSnapshot.monthly_rate : null,
+            billing_mode: caseSnapshot ? caseSnapshot.billing_mode : null,
+          },
+          processed: cancellationProcessed,
+        });
+      }
     }
 
     // Internal admin alert only. Service requests should surface in the admin
@@ -493,6 +708,82 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
               request.created_at
             ),
           }
+        : {}),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// =========================================================================
+// POST /api/requests/cancel-resolution — resolution preview (PR E, dark)
+// =========================================================================
+// Read-only despite the verb: reason + context → the ONE retention card (or
+// hard-stop / nothing) the C1 flow will render. Writes nothing, sends
+// nothing, and only ever quotes facts already on the customer's own
+// account. POST because new_address is a street address — in a GET query
+// string it would land verbatim in request logs and browser history
+// (AGENTS.md PII-in-logs rule). 404 while GATE_CANCEL_FLOW_V2 is off so the
+// surface simply does not exist dark.
+const cancelResolutionSchema = Joi.object({
+  reason: Joi.string().valid(...REASON_CODE_VALUES).optional(),
+  families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
+  new_address: Joi.string().trim().max(400).optional(),
+  competitor_quote: Joi.boolean().optional(),
+  adverse_event: Joi.boolean().optional(),
+  safety_complaint: Joi.boolean().optional(),
+});
+
+// Per-customer limiter: the moving branch calls the paid Google Address
+// Validation API, so an authed account must not be able to loop it for free.
+const cancelResolutionLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.customer && req.customer.id) || req.ip,
+  message: { error: 'Too many requests. Please wait a moment and try again.' },
+});
+
+router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    const { value, error } = cancelResolutionSchema.validate(req.body, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+
+    const families = Array.isArray(value.families) ? value.families : [];
+
+    // Moving: the transfer card only appears once the stated new address
+    // verifies INSIDE the service area; a verified out-of-area address is a
+    // clean-cancel hard stop; anything unverifiable resolves to no card.
+    let newAddressInServiceArea = null;
+    // Paid Google call — moving previews only (see the commit path).
+    if (value.new_address && value.reason === 'moving_or_property_change') {
+      const { validateAddress, STATUSES } = require('../services/address-validation');
+      const verdict = await validateAddress({ addressLines: [value.new_address] });
+      newAddressInServiceArea = cancelMoveAddressVerdict(verdict, STATUSES);
+    }
+
+    const preview = await CancellationResolution.previewCancellationResolution({
+      customerId: req.customer.id,
+      reasonCode: value.reason || null,
+      families,
+      context: {
+        newAddressInServiceArea,
+        hasCompetitorQuote: value.competitor_quote === true,
+        adverseEvent: value.adverse_event === true,
+        safetyComplaint: value.safety_complaint === true,
+      },
+    });
+    if (!preview) return res.status(404).json({ error: 'Not found' });
+
+    const { resolution } = preview;
+    res.json({
+      kind: resolution.kind,
+      reasonCode: resolution.reasonCode || null,
+      ...(resolution.kind === 'hard_stop' ? { reviewType: resolution.reviewType } : {}),
+      ...(resolution.kind === 'card'
+        ? { card: { templateId: resolution.card.templateId, headline: resolution.card.headline, body: resolution.card.body, action: resolution.card.action } }
         : {}),
     });
   } catch (err) {

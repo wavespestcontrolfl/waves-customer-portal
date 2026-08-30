@@ -3,6 +3,7 @@ const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const { transitionJobStatus } = require('./job-status');
 const { etDateString } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // customers.churn_reason is varchar(30) — keep this at/under 30 chars.
 const CHURN_REASON = 'Customer cancellation request';
@@ -118,7 +119,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   try {
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('pipeline_stage', 'active', 'monthly_rate');
+      .first('pipeline_stage', 'active', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (customer) {
       wasChurnedStage = customer.pipeline_stage === 'churned';
       const now = new Date();
@@ -150,30 +151,94 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         update.churn_reason_detail = cancelReason;
         update.churn_reason_code = 'unclassified';
       }
-      await db('customers').where({ id: customerId }).update(update);
+      // PR E (GATE_CANCEL_FLOW_V2): tier/rate wind-down — the 2026-08-30
+      // audit's money leak. Tier alignment only ever PROMOTES
+      // (self-booking-plan-sync), so a churned account that kept its
+      // waveguard_tier / monthly_rate rejoins later at the old discount
+      // forever. churn_mrr above already snapshotted the rate for reporting
+      // (first churn); on a repeat churn it was stamped the first time.
+      // Applied even when the stage was already 'churned' so admin
+      // stage-flip residue self-heals on the next processor run. The scalar
+      // clear and the per-family ledger reset run in ONE transaction —
+      // fail-closed: with GATE_PLAN_RATE_LEDGER authoritative, a surviving
+      // positive component would resurrect the old rate on a win-back, so a
+      // ledger failure must fail the churn write (→ 'churn' error → office
+      // review alert), never be swallowed. Dark: gate off → byte-identical
+      // to H0.
+      // Both saved payment METHODS (StripeService.charge() picks the default
+      // by payment_methods.autopay_enabled alone) and any armed
+      // failed-payment retry (the ladder does not check active/churn) are
+      // independent charge rails and belong to the same wind-down.
+      const disarmPaymentRails = async (dbh) => {
+        await dbh('payment_methods')
+          .where({ customer_id: customerId })
+          .update({ autopay_enabled: false });
+        await dbh('payments')
+          .where({ customer_id: customerId, status: 'failed' })
+          .whereNull('superseded_by_payment_id')
+          .whereNotNull('next_retry_at')
+          .update({ next_retry_at: null });
+      };
 
-      // Also disable the saved payment METHODS, mirroring the customer
-      // autopay-off path: StripeService.charge() picks the default method by
-      // payment_methods.autopay_enabled alone (it never re-checks the
-      // customer flags), so a billing run that already preselected this
-      // customer would otherwise still charge the saved card.
-      await db('payment_methods')
-        .where({ customer_id: customerId })
-        .update({ autopay_enabled: false });
-
-      // Disarm any pending failed-payment retry so the retry ladder can't
-      // re-charge a cancelled customer (it does not check active/churn).
-      await db('payments')
-        .where({ customer_id: customerId, status: 'failed' })
-        .whereNull('superseded_by_payment_id')
-        .whereNotNull('next_retry_at')
-        .update({ next_retry_at: null });
+      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+        // PR E: the ENTIRE billing wind-down — customer flags/tier clear,
+        // authoritative ledger reset, payment-method disable, retry disarm —
+        // is ONE transaction. All-or-nothing is what makes the abort below
+        // sound: on a throw here, nothing persisted and the account is
+        // exactly as it was. The advisory ledger reset (gate off for
+        // GATE_PLAN_RATE_LEDGER) runs after commit and only warns — an
+        // advisory hiccup must never take the committed wind-down back.
+        update.waveguard_tier = null;
+        update.waveguard_tier_source = null;
+        update.monthly_rate = null;
+        // Repeat churn (admin stage-flip residue): the first churn may never
+        // have stamped churn_mrr — snapshot the rate before clearing it, or
+        // the reporting dollars are gone for good.
+        if (wasChurnedStage && customer.churn_mrr == null && Number(customer.monthly_rate) > 0) {
+          update.churn_mrr = Number(customer.monthly_rate);
+        }
+        // Per-application lane fields (billing_mode + per_application_fee)
+        // are NOT cleared here: they are the live price for unsettled work
+        // (an in-progress visit, or a completed-but-uninvoiced application),
+        // and any pre-check would race a pending→en_route transition. They
+        // are cleared AFTER the visit sweep by one atomic conditional UPDATE
+        // (see the gated block near the end of this function).
+        const { resetLedgerToScalar } = require('./plan-rate-ledger');
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: customerId }).update(update);
+          // The ledger clear is atomic with the wind-down REGARDLESS of the
+          // ledger-read gate (codex r48): rows left behind while the gate
+          // is off become authoritative the moment it flips, resurrecting
+          // the cancelled rate on a win-back. A failure here rolls the
+          // whole wind-down back and the gated abort below stops the run
+          // BEFORE any service is swept — nothing is left half-done.
+          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+          await disarmPaymentRails(trx);
+        });
+      } else {
+        // Legacy (H0) path, byte-identical: sequential writes, and on failure
+        // the catch below records 'churn' and CONTINUES like H0 did.
+        await db('customers').where({ id: customerId }).update(update);
+        await disarmPaymentRails(db);
+      }
 
       churned = true;
     }
   } catch (err) {
     errors.push('churn');
     logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
+    if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
+      // ABORT (gated path only): the wind-down is a single transaction, so a
+      // throw means NOTHING persisted and the account is still active and
+      // chargeable. Continuing into the recurrence stop and visit sweep
+      // would cancel SERVICE on a live billing account — the exact inversion
+      // this processor exists to prevent. Return partial (ok=false): the
+      // request row + admin review alert carry it, and both retry paths
+      // (60s dedupe, inactive-account) re-run this processor idempotently.
+      // The legacy path deliberately keeps H0's continue-and-flag behavior —
+      // its writes are sequential, so "nothing persisted" cannot be assumed.
+      return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors };
+    }
   }
 
   // 2. Stop any recurring series BEFORE reading the visit list, so a
@@ -519,6 +584,16 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       await processVisit(svc);
     }
   }
+
+  // Per-application lane fields (billing_mode + per_application_fee) are
+  // deliberately RETAINED at churn (codex rounds 14→34 converged here):
+  // they are the price authority for any straggler completion or a
+  // deliberately rebooked visit on the churned account, and no clear can
+  // be made race-free without every booking writer joining a shared lock
+  // protocol. NULL rate + autopay off already stop all automatic billing;
+  // the residue is visible in audit-churned-accounts-live-state.js and the
+  // office clears the lane after quiescence (ops/agents/
+  // churn-residue-backfill.js does it with guards for the backlog).
 
   // Audit trail on the customer timeline — only the first time we churn, and
   // written AFTER the sweep so the note carries the final visit count.

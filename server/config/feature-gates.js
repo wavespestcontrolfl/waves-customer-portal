@@ -1059,6 +1059,16 @@ const gates = {
   // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
   // switch = unset; owner flips after the ops backfill seeds components.
   planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
+  // Cancellation resolution engine + portal cancel v2 (PR E, owner GO
+  // 2026-08-30): the deterministic reason→template retention layer
+  // (server/services/cancellation-resolution/), the customer cancel-
+  // resolution preview endpoint, and the processor's churn tier/rate
+  // wind-down (clears waveguard_tier / monthly_rate / plan-rate components
+  // on full churn — the 08-30 audit's money-leak fix). OFF, every cancel
+  // path behaves byte-identically to H0 (#3614). Most call sites read the
+  // env at call time via gateEnvValue('GATE_CANCEL_FLOW_V2'); kill switch =
+  // unset. Owner flips with the C1 portal flow.
+  cancelFlowV2: process.env.GATE_CANCEL_FLOW_V2 === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;

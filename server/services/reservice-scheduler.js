@@ -201,9 +201,9 @@ const OPEN_CALLBACK_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
  * Advisory only at page level — the COMMIT re-checks under a lane lock via
  * openCallbackExistsForLane below.
  */
-async function openReserviceCallbacks(customerId) {
+async function openReserviceCallbacks(customerId, dbh = db) {
   if (!customerId) return {};
-  const rows = await db('scheduled_services as s')
+  const rows = await dbh('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
     .whereIn('s.status', OPEN_CALLBACK_STATUSES)
