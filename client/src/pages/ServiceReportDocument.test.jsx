@@ -1415,6 +1415,25 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
     expect(text).not.toContain('Cockroach activity was moderate today.');
   });
 
+  it('non-performed outcome: cockroach V2 program copy never leads the summary either', () => {
+    const { container } = render(<ServiceReportDocument data={{
+      ...BASE_DATA,
+      cockroachReportV2: {
+        status: { label: 'Treatment 2 of 3 complete — activity moderate.' },
+        statusSummary: 'We completed today\u2019s treatment in your program.',
+      },
+      reserviceReport: {
+        ...reservice,
+        outcome: 'customer_declined',
+        result: 'We returned for your re-service; treatment was not performed at this visit.',
+        expectation: 'If you are still seeing activity, contact us and we will get back out.',
+      },
+    }} token="tok123" />);
+    const text = container.textContent;
+    expect(text).toContain('treatment was not performed at this visit');
+    expect(text).not.toContain('We completed today\u2019s treatment in your program.');
+  });
+
   it('no block (gate dark): the document is unchanged', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
     expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();

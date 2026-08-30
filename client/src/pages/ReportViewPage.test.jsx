@@ -1161,6 +1161,31 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.completedLine).toBe('Reported activity areas were inspected today.');
   });
 
+  it('a non-performed callback outranks action-needed coverage, re-entry, and dashboard branches', () => {
+    const base = {
+      reserviceReport: {
+        ...reservicePest,
+        outcome: 'inspection_only',
+        heading: 'we came back to check on it!',
+        result: 'Re-service visit completed — we returned and inspected the areas you reported. No application was made on this visit.',
+        completedFallback: 'Reported activity areas were inspected today.',
+      },
+      applications: [],
+    };
+    const coverage = smartStatusSummary({
+      ...base,
+      serviceCoverage: { items: [{ areaName: 'Garage', status: 'inaccessible' }] },
+    }, 'static');
+    expect(coverage.result).toContain('No application was made on this visit');
+    const withDashboards = smartStatusSummary({
+      ...base,
+      cockroachReportV2: { status: { label: 'Treatment 2 of 3 complete.' } },
+      reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'Fungus noted.' } },
+    }, 'static');
+    expect(withDashboards.heading).toBe('we came back to check on it!');
+    expect(withDashboards.result).toContain('No application was made on this visit');
+  });
+
   it('a non-performed callback falls through the pressure-down branch to the outcome-honest copy', () => {
     const status = smartStatusSummary({
       reserviceReport: {

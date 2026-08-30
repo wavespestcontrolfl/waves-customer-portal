@@ -566,7 +566,15 @@ export default function ServiceReportDocument({ data, token }) {
     const snapshotAttention = ['needs_attention', 'watch', 'urgent'].includes(String(snapshot?.status || ''));
     const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
     const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
-    if (cockroachV2 || termiteV2Summary) {
+    if (reserviceNotPerformed) {
+      // No application happened: every other summary source — the cockroach/
+      // termite program copy pushed above, typed headlines, legacy bodies,
+      // dashboard leads — was written for a performed visit and can claim
+      // treatment (codex r7 P1). The outcome-honest callback copy IS the
+      // summary; findings and dashboards keep their own sections below.
+      summaryParagraphs.length = 0;
+      summaryParagraphs.push(...lines);
+    } else if (cockroachV2 || termiteV2Summary) {
       summaryParagraphs.push(...fresh);
     } else if (pestAttention || snapshotAttention) {
       // The honest status must LEAD the document, not merely precede the

@@ -801,6 +801,20 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   // application, so no branch may claim "we treated" (codex r2 P1).
   const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
   const reserviceNotPerformed = Boolean(reservice && reservice.outcome && reservice.outcome !== 'treated');
+  const reserviceStatus = () => ({
+    heading: reservice.heading || 'we came back and took care of it!',
+    status: allReady ? 'Ready now' : 'Service complete',
+    statusTone: 'neutral',
+    result: reservice.result || 'Re-service completed.',
+    completedLine: completedAreas
+      ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
+      : (reservice.completedFallback || 'Reported areas were re-treated today.'),
+    detail: [
+      data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+      reservice.expectation || null,
+      reservice.billingLine || null,
+    ].filter(Boolean).join(' '),
+  });
 
   if (primaryFinding) {
     return {
@@ -819,6 +833,16 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
           ? 'No application was made on this visit — we documented what we found and included the recommended next step below.'
           : 'We treated the documented area today and included the recommended next step below.'),
     };
+  }
+
+  // A non-performed callback (inspection_only / customer_declined /
+  // incomplete) applied nothing — every remaining branch below can claim
+  // areas were serviced/treated/drying or lead with treatment-program copy
+  // (codex r7 P1), so the outcome-honest callback summary returns here.
+  // High-priority findings above still outrank it (their copy is already
+  // outcome-honest); the dashboards keep rendering as cards below.
+  if (reserviceNotPerformed) {
+    return reserviceStatus();
   }
 
   if (actionNeededItems.length) {
@@ -852,11 +876,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     };
   }
 
-  // A non-performed callback (inspection_only / customer_declined /
-  // incomplete) maintained nothing — fall through to the outcome-honest
-  // callback branch instead of claiming the treatment plan was maintained
-  // (codex r3 P1).
-  if (context.pressureTrend?.direction === 'down' && !reserviceNotPerformed) {
+  if (context.pressureTrend?.direction === 'down') {
     return {
       heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -978,20 +998,7 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
         ].filter(Boolean).join(' '),
       };
     }
-    return {
-      heading: reservice.heading || 'we came back and took care of it!',
-      status: allReady ? 'Ready now' : 'Service complete',
-      statusTone: 'neutral',
-      result: reservice.result || 'Re-service completed.',
-      completedLine: completedAreas
-        ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
-        : (reservice.completedFallback || 'Reported areas were re-treated today.'),
-      detail: [
-        data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
-        reservice.expectation || null,
-        reservice.billingLine || null,
-      ].filter(Boolean).join(' '),
-    };
+    return reserviceStatus();
   }
 
   return {
