@@ -190,6 +190,10 @@ async function main() {
         String(customer.waveguard_tier || '') !== String(candidate.waveguard_tier || '')
         || Math.round((Number(customer.monthly_rate) || 0) * 100) !== Math.round((Number(candidate.monthly_rate) || 0) * 100)
         || String(customer.billing_mode || '') !== String(candidate.billing_mode || '')
+        // The fee is billing identity too — an operator setting a new
+        // per_application_fee between selection and the lock is a reprice.
+        || (hasPerAppFee
+          && Math.round((Number(customer.per_application_fee) || 0) * 100) !== Math.round((Number(candidate.per_application_fee) || 0) * 100))
       ) return; // repriced since selection — leave to the audit script
       await trx.raw('LOCK TABLE scheduled_services IN SHARE ROW EXCLUSIVE MODE');
       if (await hasLiveState(trx, customer.id)) return;
