@@ -3219,19 +3219,25 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // type string is read off commercialSignalRecord — an unverified AI
   // web-search "Multifamily" is stripped there and cannot fire this — and a
   // technician-VERIFIED lot is the unit's own treatable area, not a parcel.
-  // County-attested ≤4-unit parcels (duplex/triplex — the ≥5-unit ruling)
-  // are EXEMPT: their lot genuinely describes the small property, and the
-  // customer-pricing path treats a lotSize flag as an unconditional
-  // dimension rejection, which would fail-closed legitimate small-parcel
-  // quotes (GH codex P1). A lot the merge already field-flagged is left to
-  // the generic evidence loop below — two lotSize flags double-count in the
-  // win/loss slices (GH codex P2).
+  // County-GIS parcels attesting 2–4 units (duplex/triplex/quad — the
+  // ≥5-unit ruling) are EXEMPT: their lot genuinely describes the small
+  // property, and the customer-pricing path treats a lotSize flag as an
+  // unconditional dimension rejection, which would fail-closed legitimate
+  // small-parcel quotes (GH codex P1). The floor is 2, NOT ≤4: a condo
+  // UNIT's own folio attests residentialUnits 1, and exempting it
+  // suppressed the flag on exactly the shape this exists to catch (codex
+  // P1 r3). A lot the merge already field-flagged is left to the generic
+  // evidence loop below — two lotSize flags double-count in the win/loss
+  // slices (GH codex P2).
+  const unitLotParcelUnits = Number(rc?._parcel?.residentialUnits);
+  const smallSharedParcel = Number.isFinite(unitLotParcelUnits)
+    && unitLotParcelUnits >= 2 && unitLotParcelUnits <= 4;
   const unitLotSignalRc = rc && rc.lotSize ? commercialSignalRecord(rc) : null;
   if (rc && rc.lotSize
     && rc._fieldEvidence?.lotSize?.sourceType !== 'verified'
     && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
-    && !countyAttestedSmallResidential(rc)
+    && !smallSharedParcel
     && !/hoa\s*common|association/i.test(String(unitLotSignalRc?.propertyType || ''))
     && /condo/i.test(String(unitLotSignalRc?.propertyType || ''))) {
     flags.push({

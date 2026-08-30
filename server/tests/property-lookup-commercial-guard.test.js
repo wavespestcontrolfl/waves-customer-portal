@@ -506,6 +506,19 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
+  test('a condo unit folio attesting residentialUnits 1 STILL flags — that IS the target shape (codex P1 r3)', () => {
+    const flags = buildFieldVerifyFlags({
+      formattedAddress: '10 Example Condo Way Unit 3, Testville, FL 00000',
+      propertyType: 'Condominium',
+      squareFootage: 1200,
+      lotSize: 93940,
+      unitCount: 1,
+      _source: 'county',
+      _parcel: { residentialUnits: 1 },
+    }, null, null);
+    expect(flags.find((f) => f.field === 'lotSize')).toBeDefined();
+  });
+
   test('apartment/multifamily whole-building records never fire the condo unit-lot flag', () => {
     for (const propertyType of ['Multifamily', 'Apartment Building', 'Condo Association']) {
       const flags = buildFieldVerifyFlags({
