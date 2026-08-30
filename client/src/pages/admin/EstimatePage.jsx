@@ -2374,6 +2374,26 @@ function EstimateToolView() {
       }
       resolvedQualifyingKeys = keys;
     }
+    // TIER evidence is PROPERTY-SCOPED (codex #3591 r52 local P1): the save
+    // path resolves families at the quoted street, so the preview must too —
+    // an account-wide tier on a secondary-property quote previews a discount
+    // the save then silently drops. Account-wide keys remain the setup
+    // waiver's evidence. Fail closed like the account-wide load above.
+    let propertyScopedTierKeys = resolvedQualifyingKeys;
+    if (existingCustomerMatch && String(form.address || "").trim()) {
+      try {
+        const scopedRes = await fetch(
+          `/api/admin/customers/${existingCustomerMatch.id}/waveguard-qualifying-services?street=${encodeURIComponent(form.address)}`,
+          { headers: authHeaders },
+        );
+        const scopedBody = scopedRes.ok ? await scopedRes.json() : null;
+        if (!scopedBody || !Array.isArray(scopedBody.keys)) throw new Error("scoped keys unavailable");
+        propertyScopedTierKeys = scopedBody.keys;
+      } catch {
+        alert("The matched customer's services at this address could not be loaded — retry in a moment. (The WaveGuard tier is property-scoped; quotes are blocked rather than previewed on account-wide evidence.)");
+        return;
+      }
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -2435,9 +2455,11 @@ function EstimateToolView() {
       existingOtherQualifyingService: Array.isArray(resolvedQualifyingKeys)
         ? resolvedQualifyingKeys.some((k) => k !== "rodent_bait")
         : false,
-      // The full trusted family set — the fallback tier counts these like
-      // generateEstimate's priorQualifyingServices (codex #3591 r21 P1).
-      existingQualifyingServices: Array.isArray(resolvedQualifyingKeys) ? resolvedQualifyingKeys : [],
+      // The PROPERTY-SCOPED family set — the fallback tier counts these
+      // like the authoritative save's resolveCustomerQualifyingEvidence
+      // (codex #3591 r52 local P1: account-wide keys are the setup-waiver
+      // evidence above, never the tier's).
+      existingQualifyingServices: Array.isArray(propertyScopedTierKeys) ? propertyScopedTierKeys : [],
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",

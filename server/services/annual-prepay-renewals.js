@@ -2625,37 +2625,51 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // marker). It is cleared after the follow-ups run clean; GUARD 5 is
       // unaffected either way (it only reads the marker on payment_pending
       // rows).
-      const [updated] = await conn('annual_prepay_terms')
-        .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
-        .update({ status: 'active', updated_at: new Date() })
-        .returning('*');
+      // The flip and the setup cleanup commit TOGETHER (codex #3591 r52
+      // P1): many callers pass the global handle, and an auto-committed
+      // flip beside a failed cleanup left the restored stamp/replacement
+      // live forever (the retry skips an already-active term).
+      const reviveFromPending = async (t) => {
+        const [updated] = await t('annual_prepay_terms')
+          .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+          .update({ status: 'active', updated_at: new Date() })
+          .returning('*');
+        if (updated) {
+          await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+        }
+        return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(reviveFromPending)
+        : await reviveFromPending(conn);
       current = updated || term;
-      // The prepay's setup line is live again — retire any claim the
-      // refund sync restored and re-ledger the record (codex #3591 r45
-      // local P0); idempotent, best-effort inside the helper.
-      if (updated) {
-        await require('./invoice').retireRodentSetupObligationForRevivedPrepay(conn, invoice.id);
-      }
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
       // (someone else already revived) leaves current cancelled and the
-      // next sync of this invoice picks the term up as active.
-      const [updated] = await conn('annual_prepay_terms')
-        .where({ id: term.id, status: 'cancelled' })
-        .whereNull('renewal_decision')
-        .update({ status: 'active', updated_at: new Date() })
-        .returning('*');
+      // next sync of this invoice picks the term up as active. Flip +
+      // credits + setup cleanup commit TOGETHER (codex #3591 r52 P1).
+      const reviveFromCancelled = async (t) => {
+        const [updated] = await t('annual_prepay_terms')
+          .where({ id: term.id, status: 'cancelled' })
+          .whereNull('renewal_decision')
+          .update({ status: 'active', updated_at: new Date() })
+          .returning('*');
+        if (updated) {
+          logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
+          // The refund clawed the extension credit; the repayment restores
+          // it with the coverage (guards P0). Idempotent (last-event rule).
+          await restoreWaveguardExtensionCredits(updated, t);
+          // …and the setup line is live again — retire the restored claim
+          // and re-ledger the record (codex #3591 r45 local P0).
+          await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+        }
+        return updated;
+      };
+      const updated = typeof conn.transaction === 'function' && !conn.isTransaction
+        ? await conn.transaction(reviveFromCancelled)
+        : await reviveFromCancelled(conn);
       current = updated || term;
-      if (updated) {
-        logger.warn(`[annual-prepay] term ${term.id} revived (cancelled→active) — dispute-cancelled term's invoice ${invoice.id} was re-paid`);
-        // The refund clawed the extension credit; the repayment restores
-        // it with the coverage (guards P0). Idempotent (last-event rule).
-        await restoreWaveguardExtensionCredits(updated, conn);
-        // …and the setup line is live again — retire the restored claim
-        // and re-ledger the record (codex #3591 r45 local P0).
-        await require('./invoice').retireRodentSetupObligationForRevivedPrepay(conn, invoice.id);
-      }
     } else if (nextStatus === 'cancelled') {
       const [updated] = await conn('annual_prepay_terms')
         .where({ id: term.id })

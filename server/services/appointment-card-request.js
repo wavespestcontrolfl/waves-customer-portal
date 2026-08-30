@@ -449,7 +449,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
 
     const visit = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'card_link_sent_at', 'estimated_price');
+      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'service_id', 'card_link_sent_at', 'estimated_price');
     if (!visit) return skip('visit_not_found');
     if (!visit.customer_id) return skip('no_customer');
     if (!LIVE_VISIT_STATUSES.includes(visit.status)) return skip(`visit_not_live:${visit.status}`);

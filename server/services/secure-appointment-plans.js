@@ -351,7 +351,11 @@ async function findDirectRodentSetupObligationForCoverage(database, { customerId
     // the root; codex #3591 r44 P1) IS the outstanding obligation.
     if (root.source_estimate_id) {
       const restored = frozenAnchorSetupStamp(root);
-      return restored != null ? { anchorId: root.id, amount: restored } : null;
+      if (restored != null) return { anchorId: root.id, amount: restored };
+      // Settled at accept — but a LATER matching root (a newer direct
+      // series) may still owe its own setup (codex #3591 r52 P1): keep
+      // scanning instead of concluding the coverage is settled.
+      continue;
     }
     const owed = await directRodentSetupForRow(database, root);
     if (owed > 0) return { anchorId: root.id, amount: owed };
@@ -788,12 +792,19 @@ async function selectSecurePlan({ token, plan }) {
   // still guards the money).
   let coverageServiceType = visit.service_type;
   if (visit.service_id) {
+    // STRICT for linked visits (codex #3591 r52 local P1): a swallowed
+    // catalog failure would mint the term for a stale label's family and
+    // renewals would seed/match the wrong coverage. Fail closed —
+    // plan_unavailable, the customer retries.
+    let catalogRow;
     try {
-      const catalogRow = await db('services').where({ id: visit.service_id }).first('name');
-      if (catalogRow?.name) coverageServiceType = catalogRow.name;
+      catalogRow = await db('services').where({ id: visit.service_id }).first('name');
     } catch (catalogErr) {
-      logger.warn(`[secure-plans] catalog name read failed for visit ${visit.id} — coverage keeps the row label: ${catalogErr.message}`);
+      logger.warn(`[secure-plans] catalog name read failed for linked visit ${visit.id} — refusing the mint: ${catalogErr.message}`);
+      throw fail('plan_unavailable');
     }
+    if (!catalogRow?.name) throw fail('plan_unavailable');
+    coverageServiceType = catalogRow.name;
   }
   const visitCount = context.visitsPerYear;
   // Coverage money (sliced across the prepaid visits) vs. the unwaived

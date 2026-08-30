@@ -608,7 +608,10 @@ describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prep
 
   test('wired into BOTH term revival transitions (source contract)', () => {
     const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
-    expect((renewals.match(/retireRodentSetupObligationForRevivedPrepay\(conn, invoice\.id\)/g) || []).length).toBe(2);
+    // Both revivals run inside a transaction closure now (r52): the flip
+    // and the cleanup commit together, on the closure's handle.
+    expect((renewals.match(/retireRodentSetupObligationForRevivedPrepay\(t, invoice\.id\)/g) || []).length).toBe(2);
+    expect((renewals.match(/typeof conn\.transaction === 'function' && !conn\.isTransaction/g) || []).length).toBe(2);
   });
 });
 

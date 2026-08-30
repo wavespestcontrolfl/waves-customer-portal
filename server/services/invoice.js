@@ -5167,6 +5167,19 @@ const InvoiceService = {
       logger.info(`[invoice] revived prepay ${prepayInvoiceId}: no live rodent anchor (series cancelled?) — claim re-ledgered anchor-less${voidedRebills ? `, ${voidedRebills} replacement draft(s) voided` : ""}`);
       return { scheduledServiceId: null, amount, retired: false };
     }
+    // SERIALIZED with completion (codex #3591 r46 P1): the parent is read
+    // FOR UPDATE so a technician's in-flight claim (negative stamp) cannot
+    // slip between an unlocked read and the CAS. A mid-claim stamp FAILS
+    // the revival — the sync rolls back and the event retries after the
+    // completion settles, instead of double-billing the setup.
+    // Taken BEFORE the sibling scan (codex #3591 r52 P1): a completion
+    // claiming/clearing the stamp between an unlocked scan and this lock
+    // would hide its freshly minted sibling from the reconciliation.
+    const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
+    const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+    if (stamp != null && stamp < 0) {
+      throw new Error(`revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim — retrying after it settles`);
+    }
     // A COMPLETION billed this setup while the prepay was dead (the
     // negative-marker retry path — codex #3591 r48 P1): its claim record
     // sits on the same anchor. The revived prepay's own line is live again,
@@ -5206,16 +5219,6 @@ const InvoiceService = {
       }
     }
     await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
-    // SERIALIZED with completion (codex #3591 r46 P1): the parent is read
-    // FOR UPDATE so a technician's in-flight claim (negative stamp) cannot
-    // slip between an unlocked read and the CAS. A mid-claim stamp FAILS
-    // the revival — the sync rolls back and the event retries after the
-    // completion settles, instead of double-billing the setup.
-    const parent = await conn("scheduled_services").where({ id: anchorId }).forUpdate().first("id", "pending_setup_fee");
-    const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
-    if (stamp != null && stamp < 0) {
-      throw new Error(`revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim — retrying after it settles`);
-    }
     let retired = 0;
     if (stamp != null && stamp > 0) {
       retired = await conn("scheduled_services")
