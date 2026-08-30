@@ -714,7 +714,14 @@ router.get('/:token', async (req, res, next) => {
       // A grouped visit is not customer self-reschedulable while the unit
       // move is staff-only (codex #3609 r4): no token → the page renders the
       // call/text guidance instead of a "See open times" CTA that would 409.
-      rescheduleToken: (dispatchOwnedUnreviewed(svc) || visitInfo.visit) ? null : svc.reschedule_token,
+      // A FROZEN lone-live-member visit gets the same suppression (codex r26
+      // P1 follow-up): visitServicesFor returns {} for it, but
+      // reschedule-public's groupedVisit — the CTA's destination — refuses
+      // it via the shared frozen verdict; the link would be dead on arrival.
+      rescheduleToken: (dispatchOwnedUnreviewed(svc) || visitInfo.visit
+        || (svc.visit_id && !visitInfo.visitUnknown
+          && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
+        ? null : svc.reschedule_token,
     });
   } catch (err) {
     next(err);

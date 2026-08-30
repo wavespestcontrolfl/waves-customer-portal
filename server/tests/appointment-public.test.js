@@ -412,6 +412,14 @@ describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
     expect(confirmedRowStillShown(cur, svc, {})).toBe(false);
   });
 
+  test('a FROZEN lone-live-member visit does not advertise the reschedule CTA (codex r26 P1 follow-up): the page keys the token on the shared frozen verdict', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/appointment-public'), 'utf8');
+    const tokenExpr = src.slice(src.indexOf('rescheduleToken: (dispatchOwnedUnreviewed(svc)'), src.indexOf('? null : svc.reschedule_token'));
+    expect(tokenExpr).toMatch(/visitInfo\.visit\b/);
+    expect(tokenExpr).toMatch(/frozenVisitVerdict\(db, svc\.visit_id\)/);
+    expect(tokenExpr).toMatch(/!visitInfo\.visitUnknown/);
+  });
+
   test('calendar eligibility is the page verdict: a chained stop stays eligible after an earlier member\'s own window ended; ungrouped keeps the row rule (codex r24 P2)', () => {
     const { calendarEligible } = appointmentRouter._test;
     const first = { status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00:00' };
