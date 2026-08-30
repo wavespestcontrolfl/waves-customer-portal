@@ -462,7 +462,7 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, { ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs });
+          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, { ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary });
           totals.changed += result.movedCount || 1;
           await audit.logDecision(runId, {
             action: 'changed',

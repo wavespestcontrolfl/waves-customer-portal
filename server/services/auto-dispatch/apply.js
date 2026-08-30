@@ -19,6 +19,7 @@ const routeTiers = require('./route-tiers');
 const { classifyServiceCategory } = require('./service-category');
 const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
+const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
@@ -101,6 +102,12 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  * transaction, under the stop lock, on the FOR UPDATE member rows.
  *   - status: live pending/confirmed only ('rescheduled' is a customer
  *     request the mover would otherwise treat as movable)
+ *   - per-row eligibility (local audit): the SAME isEligibleForAutoDispatch
+ *     gate the orchestrator applies to the tapped row (recurring child, not
+ *     a parent template, live status, not locked/excluded, outside the
+ *     lock/tier window, active non-archived customer, usable geo) plus the
+ *     active-plan check — a one-time/booster/template/lapsed sibling is
+ *     never dragged through an automatic move
  *   - reminder freeze (route tiers on): any sibling inside the sendable
  *     band, or an unreadable check, refuses (fail closed)
  *   - drift / tier legality (route tiers on): each sibling's OWN durable
@@ -139,9 +146,26 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
         if (violatesPreferredTime(t.startHHMM, config.prefs)) throw refuse(t.id, `would start at ${t.startHHMM}, outside the customer's preferred time window`);
       }
     }
-    const rows = await trx('scheduled_services').whereIn('id', siblings.map((m) => m.id))
-      .select('id', 'service_type', 'recurring_parent_id', 'is_recurring', 'scheduled_date', 'auto_dispatch_change_count', 'skip_weekends');
+    const rows = await trx('scheduled_services as ss')
+      .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+      .whereIn('ss.id', siblings.map((m) => m.id))
+      .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
+        'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
     const memberIds = (members || []).map((m) => m.id);
+    const today = etDateString(new Date());
+    const eligCtx = {
+      today,
+      lockBoundary: config.lockBoundary,
+      lockWindowDays: config.lockWindowDays,
+      ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
+    };
+    for (const r of rows) {
+      if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
+      const elig = isEligibleForAutoDispatch(r, eligCtx);
+      if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
+      const plan = await isRecurringPlanActive(r, trx);
+      if (!plan.active) throw refuse(r.id, `is on an inactive plan (${plan.reason_code})`);
+    }
     if (isSaturday(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a Saturday`);
@@ -157,7 +181,6 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       // inside the sibling's window or the grouped move is refused.
       const anchorMap = await routeTiers.loadAnchorMap(trx, rows.map((r) => r.id));
       if (anchorMap === null) throw refuse(siblings[0].id, 'drift-anchor evidence is unreadable (no move, fail closed)');
-      const today = etDateString(new Date());
       for (const r of rows) {
         const anchor = routeTiers.resolveAnchor(r, anchorMap);
         if (!anchor) throw refuse(r.id, 'has no derivable drift anchor (no move, fail closed)');

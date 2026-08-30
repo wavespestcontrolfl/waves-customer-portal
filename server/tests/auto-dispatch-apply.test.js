@@ -285,17 +285,22 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   // (`siblings`), later calls are the per-sibling same-series date probes
   // (`seriesClash`, keyed by the sibling id the probe's whereNotIn excludes
   // is not observable, so one answer serves every probe).
-  const fakeTrx = ({ siblings = [], caps = [], seriesClash = null } = {}) => {
+  // Sibling rows come back customer-joined (eligibility needs customer_active +
+  // geo); `eligible()` builds a row the orchestrator's gate accepts.
+  const FAR = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() + 40); return d.toISOString().slice(0, 10); })();
+  const eligible = (over = {}) => ({ id: 's2', service_type: 'Lawn Fertilization', is_recurring: true, recurring_parent_id: 'p2', status: 'confirmed', scheduled_date: FAR, auto_dispatch_locked: false, auto_dispatch_excluded: false, customer_active: true, customer_latitude: 27.5, customer_longitude: -82.4, ...over });
+  const fakeTrx = ({ siblings = [], caps = [], seriesClash = null, planAlert = null } = {}) => {
     const calls = [];
     let ssCalls = 0;
     const trx = jest.fn((table) => {
-      calls.push(table);
-      const probe = table === 'scheduled_services' && ssCalls++ > 0;
+      calls.push(String(table).split(' ')[0]);
+      const isSS = String(table).startsWith('scheduled_services');
+      const probe = isSS && ssCalls++ > 0;
       const api = {
         where: (w) => { if (typeof w === 'function') w.call(api); return api; },
-        orWhere: () => api, whereIn: () => api, whereNotIn: () => api,
-        select: async () => (table === 'scheduled_services' ? siblings : caps),
-        first: async () => (probe ? seriesClash : null),
+        orWhere: () => api, whereIn: () => api, whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
+        select: async () => (isSS ? siblings : caps),
+        first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),
       };
       return api;
     });
@@ -346,15 +351,15 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const best = { ...BEST, technician_id: 't9' };
     const guard = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: true });
-    let trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: false }] });
+    let trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: false }] });
     await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
-    expect(trx.__calls).toEqual(['scheduled_services', 'technician_capabilities']); // one-time sibling ⇒ no series probe
-    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [] });
+    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services', 'technician_capabilities']); // member read, plan check, series probe, capability
+    trx = fakeTrx({ siblings: [eligible()], caps: [] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
-    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }], caps: [{ service_category: lawn, active: true }] });
+    trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     const same = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: false });
-    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization' }] });
+    trx = fakeTrx({ siblings: [eligible()] });
     await expect(same({ trx, members })).resolves.toBeUndefined();
     expect(trx.__calls).not.toContain('technician_capabilities');
   });
@@ -364,7 +369,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${today}T12:00`), n));
     const sibDate = dayOffset(30); // tier 1: widest radius
     const members = [primary, { id: 's2', status: 'confirmed' }];
-    const sib = { id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: 'p2', is_recurring: true, scheduled_date: sibDate, auto_dispatch_change_count: 0 };
+    const sib = eligible({ scheduled_date: sibDate, auto_dispatch_change_count: 0 });
     const win = routeTiers.tierMoveWindow({ origDate: sibDate, anchorDate: sibDate, today, radius: routeTiers.tierRadiusForDaysOut(30) });
     expect(win).toBeTruthy();
     const on = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: { routeTiersEnabled: true }, techChanged: false });
@@ -397,7 +402,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const prefs = { preferred_time_window: { startMin: 13 * 60, endMin: 17 * 60 } }; // 13:00–17:00
     const guard = (p) => makeMemberGuard({ service: SERVICE, best: BEST, config: { prefs: p }, techChanged: false });
     const targets = (sibStart) => [{ id: 's1', isPrimary: true, startHHMM: '15:00' }, { id: 's2', isPrimary: false, startHHMM: sibStart }];
-    const sib = { id: 's2', service_type: 'Lawn Fertilization', is_recurring: false };
+    const sib = eligible();
     await expect(guard(prefs)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('17:00') })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
     await expect(guard(prefs)({ trx: fakeTrx({ siblings: [sib] }), members, targets: targets('16:00') })).resolves.toBeUndefined();
     // windowless sibling / no explicit window / no prefs ⇒ nothing to check
@@ -413,25 +418,48 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const friday = shiftDateStr(sat, -1);
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const guard = (date) => makeMemberGuard({ service: SERVICE, best: { ...BEST, date }, config: {}, techChanged: false });
-    const skipper = { id: 's2', service_type: 'Lawn Fertilization', is_recurring: false, skip_weekends: true };
+    const skipper = eligible({ skip_weekends: true });
     await expect(guard(sat)({ trx: fakeTrx({ siblings: [skipper] }), members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
     await expect(guard(friday)({ trx: fakeTrx({ siblings: [skipper] }), members })).resolves.toBeUndefined();
     await expect(guard(sat)({ trx: fakeTrx({ siblings: [{ ...skipper, skip_weekends: false }] }), members })).resolves.toBeUndefined();
   });
 
+  test('per-row eligibility (local audit): a one-time / booster, parent-template, locked, geo-less, archived-customer or lapsed-plan sibling refuses the grouped automatic move', async () => {
+    const members = [primary, { id: 's2', status: 'confirmed' }];
+    const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
+    const cases = [
+      [eligible({ is_recurring: false }), /NON_RECURRING/],
+      [eligible({ recurring_parent_id: null }), /PARENT_TEMPLATE_ROW/],
+      [eligible({ auto_dispatch_locked: true }), /MANUALLY_LOCKED/],
+      [eligible({ customer_latitude: null }), /MISSING_GEO/],
+      [eligible({ customer_active: false }), /CUSTOMER_INACTIVE/],
+      [eligible({ customer_deleted_at: '2026-01-01' }), /archived customer/],
+    ];
+    for (const [row, re] of cases) {
+      const err = await guard({ trx: fakeTrx({ siblings: [row] }), members }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+      expect(err.message).toMatch(re);
+    }
+    // an unresolved plan_lapsed / plan_ending alert on the sibling's series ⇒ inactive plan ⇒ refuse
+    const err = await guard({ trx: fakeTrx({ siblings: [eligible()], planAlert: { id: 'al', alert_type: 'plan_lapsed' } }), members }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    expect(err.message).toMatch(/RECURRING_PLAN_INACTIVE/);
+    // the orchestrator's lock boundary applies to siblings too (legacy flat lock)
+    const locked = makeMemberGuard({ service: SERVICE, best: BEST, config: { lockBoundary: '2099-12-31', lockWindowDays: 14 }, techChanged: false });
+    const err2 = await locked({ trx: fakeTrx({ siblings: [eligible()] }), members }).catch((e) => e);
+    expect(err2.message).toMatch(/INSIDE_LOCK_WINDOW/);
+    // an eligible sibling passes
+    await expect(guard({ trx: fakeTrx({ siblings: [eligible()] }), members })).resolves.toBeUndefined();
+  });
+
   test('same-series date: a sibling whose recurring series already has another visit on the target date refuses (codex r14 P1)', async () => {
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const guard = makeMemberGuard({ service: SERVICE, best: BEST, config: {}, techChanged: false });
-    let trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: 'p2', is_recurring: true }], seriesClash: { id: 'other-occurrence' } });
+    let trx = fakeTrx({ siblings: [eligible()], seriesClash: { id: 'other-occurrence' } });
     await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
-    expect(trx.__calls).toEqual(['scheduled_services', 'scheduled_services']); // member read, then the series probe
-    // a parent-template sibling probes its own children; a clean series passes
-    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: null, is_recurring: true }], seriesClash: null });
+    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services']); // member read, plan check, then the series probe
+    // a clean series passes
+    trx = fakeTrx({ siblings: [eligible()], seriesClash: null });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
-    expect(trx.__calls).toEqual(['scheduled_services', 'scheduled_services']);
-    // a one-time sibling has no series to probe
-    trx = fakeTrx({ siblings: [{ id: 's2', service_type: 'Lawn Fertilization', recurring_parent_id: null, is_recurring: false }], seriesClash: { id: 'never-read' } });
-    await expect(guard({ trx, members })).resolves.toBeUndefined();
-    expect(trx.__calls).toEqual(['scheduled_services']);
   });
 });

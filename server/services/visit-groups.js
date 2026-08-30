@@ -1616,6 +1616,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         // a member failure rolls the landed members back and 409s.
         const split = canSplit(await visitActivity(visit.id, t));
         const frozen = !split.ok && split.reason !== 'visit_not_open';
+        // Frozen ⇒ snapshot every other column the rebooker mutates on a move
+        // (route sequence, date-exception stamp, tracker/lifecycle fields) so
+        // the all-or-nothing rollback puts them back too (local audit).
+        let snapshots = {};
+        if (frozen) {
+          const cols = require('./rebooker').FROZEN_ROLLBACK_SNAPSHOT_COLUMNS;
+          const snapRows = await t('scheduled_services').whereIn('id', members.map((m) => m.id)).select('id', ...cols);
+          for (const r of snapRows) {
+            const snap = {};
+            for (const c of cols) if (r[c] !== undefined) snap[c] = r[c];
+            snapshots[String(r.id)] = snap;
+          }
+        }
         // A frozen visit with a LIVE member (en_route/on_site) cannot be
         // compensated — the rebooker rewinds the lifecycle stamps on the
         // move and nothing can put them back — so it is refused up front
@@ -1735,7 +1748,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         return {
           visitId: visit.id, oldKey: visit.stop_base_key, oldDate: dateOnly(visit.scheduled_date),
           customerId: visit.customer_id, propertyId: visit.property_id,
-          targets, memberIds: members.map((m) => m.id), frozen,
+          targets, memberIds: members.map((m) => m.id), frozen, snapshots,
           anyLive: members.some((m) => UNIT_MOVE_LIVE_STATUSES.has(String(m.status))),
           primaryRecurring: primary.is_recurring === true,
         };
@@ -1868,6 +1881,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             .update({ status: prev, updated_at: db.fn.now() });
           if (Number(restored) !== 1) throw new Error(`status could not be restored to ${prev} (row changed)`);
           await db('job_status_history').insert({ job_id: id, from_status: 'confirmed', to_status: prev, transitioned_by: null });
+        }
+        // Everything else the move mutated (route_order, date-exception stamp,
+        // tracker/lifecycle fields) goes back to its snapshot, fenced on the
+        // restored slot; a miss is a rollback failure (local audit).
+        const snap = plan.snapshots && plan.snapshots[String(id)];
+        if (snap && Object.keys(snap).length) {
+          const put = await db('scheduled_services')
+            .where({ id, visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start })
+            .update({ ...snap, updated_at: db.fn.now() });
+          if (Number(put) !== 1) throw new Error('route/lifecycle/exception state could not be restored (row changed)');
         }
         if (!t.isPrimary) {
           await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${t.original.start || '08:00'}`, {
