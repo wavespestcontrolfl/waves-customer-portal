@@ -22,6 +22,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { normalizeLeadAddress, splitStreetLineUnit, formatAddress } = require('../utils/address-normalizer');
+const { lookupDimensionIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeWebAdditionalProperties } = require('../utils/intake-normalize');
 const { zipToCity } = require('../utils/zip-to-city');
 const { normalizeWebsiteQuoteContact, applyContactNormalization, normalizeContactName } = require('../utils/intake-normalize');
@@ -865,7 +866,44 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // stale/synthetic top-level value. When there's no trusted lot, fall back to
     // the synthetic sqft×4 default: lot-derived commercial lawn/tree still estimate
     // off it, but commercial mosquito reads lotSizeMeasured and stays manual.
-    const realLotSqFt = resolveRealLotSqFt({ enrichedLotSqFt: ep.lotSqFt, lotSqFt, lotSizeConfirmed });
+    // SERVER-SIDE lookup profile, hoisted above the lot resolution so both
+    // the lot-trust check here and the turf forwarding below read the same
+    // trusted record (GH codex P1 on #3626). The cache key is the SAME
+    // normalized street-only parcel address step 1 used
+    // (public-property-lookup's parcelLookupAddress), rebuilt from THIS
+    // request's normalizedAddress — never the raw `address` field alone,
+    // which a crafted request could point at a different cached property
+    // than the structured fields the quote stores (pre-push codex P0 r2).
+    const parcelLookupAddress = normalizedAddress.line2
+      ? formatAddress({
+        line1: normalizedAddress.line1,
+        city: normalizedAddress.city,
+        state: normalizedAddress.state,
+        zip: normalizedAddress.zip,
+      })
+      : (normalizedAddress.fullAddress || String(address || '').trim());
+    let trustedTurf = {};
+    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
+    if (parcelLookupAddress) {
+      try {
+        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
+        trustedTurf = serverLookup?.enriched || {};
+      } catch (turfErr) {
+        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
+        trustedTurf = {};
+      }
+    }
+    // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
+    // a per-unit folio carrying the association's parcel — GH codex P1 on
+    // #3626; or any weak/conflicting lot evidence) is NOT a measured lot on
+    // this no-review-lane path. The customer-confirmed leg still wins — a
+    // hand-entered lot is explicit. Canonical read: lookupDimensionIsTrustworthy.
+    const lotDimensionTrusted = lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
+    const realLotSqFt = resolveRealLotSqFt({
+      enrichedLotSqFt: lotDimensionTrusted ? ep.lotSqFt : null,
+      lotSqFt,
+      lotSizeConfirmed,
+    });
     const lotSizeMeasured = realLotSqFt != null;
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
 
@@ -960,30 +998,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // fields would re-grade as a plain vision measurement downstream and
     // lawn_area would claim 'ai_satellite' for a ratio guess or a capped
     // number — the exact over-claim the source mapping exists to prevent.
-    // The cache key is the SAME normalized street-only parcel address step 1
-    // used (public-property-lookup's parcelLookupAddress), rebuilt from THIS
-    // request's normalizedAddress — never the raw `address` field alone,
-    // which a crafted request could point at a different cached property
-    // than the structured fields the quote stores (pre-push codex P0 r2).
-    const parcelLookupAddress = normalizedAddress.line2
-      ? formatAddress({
-        line1: normalizedAddress.line1,
-        city: normalizedAddress.city,
-        state: normalizedAddress.state,
-        zip: normalizedAddress.zip,
-      })
-      : (normalizedAddress.fullAddress || String(address || '').trim());
-    let trustedTurf = {};
-    const { performPropertyLookup, countyCeilingStillValid } = require('./property-lookup-v2');
-    if (parcelLookupAddress) {
-      try {
-        const serverLookup = await performPropertyLookup(parcelLookupAddress, { cacheOnly: true, persist: false });
-        trustedTurf = serverLookup?.enriched || {};
-      } catch (turfErr) {
-        logger.warn(`[public-quote] server-side turf re-read failed — pricing without turf figures: ${turfErr.message}`);
-        trustedTurf = {};
-      }
-    }
     engineInput.measuredTurfSf = num(trustedTurf.measuredTurfSf);
     // A parcel-capped vision estimate only describes the parcel it was
     // capped against. When the lot the ENGINE will price differs from the
@@ -1211,12 +1225,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // park signal this way, never remove the server's.
     const unitOnMultiUnitParcel = unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, ep)
       || unitOnMultiUnitParcelForcesSiteQuote(normalizedAddress, trustedTurf);
+    // A lot-priced service (mosquito is the lot consumer on this path) on a
+    // profile whose lot the lookup flagged verify-first, with no
+    // customer-confirmed lot to fall back on, parks instead of pricing the
+    // synthetic sqft×4 guess — the condo unit-lot flag exists precisely
+    // because the parcel-scale figure (and any silent substitute) is not a
+    // customer-ready basis (GH codex P1 on #3626). Profiles with NO lot
+    // flag keep today's synthetic-lot pricing.
+    const lotFlagForcesSiteQuote = !lotDimensionTrusted && !lotSizeMeasured && !!services.mosquito;
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
-    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel;
+    const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
+      || lotFlagForcesSiteQuote;
     const quoteRequiredReason = manualQuoteLine?.reason
       // The turf-review lines expose their reason via customQuoteReason /
       // manualReviewReasons, not `reason` — without these legs a parked
@@ -1226,7 +1249,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || manualQuoteLine?.customQuoteReason
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
-      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null);
+      || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
+      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -2236,6 +2260,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Lawn pricing depends on your treatable turf area, and we could not measure it reliably from records alone — the Waves team will confirm it and send your exact price shortly.'
           : quoteRequiredReason === 'unknown_grass_type_priced_st_augustine'
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
+          : quoteRequiredReason === 'lot_size_requires_verification'
+          ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
           : lowConfidenceForcesSiteQuote && !manualQuoteLine
             ? 'This commercial estimate needs a quick site confirmation before we finalize the price. The Waves team has been notified.'
             : 'Commercial properties require a manual quote. The Waves team has been notified.',
