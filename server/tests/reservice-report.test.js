@@ -85,8 +85,8 @@ describe('reservice-report (gate on)', () => {
     expect(block.includedWithWaveGuard).toBe(true);
     expect(block.billingLine).toBe('This re-service was included with your WaveGuard Gold membership — $0.00 billed.');
     expect(block.billingReason).toBe('free');
-    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1mt');
-    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1mt');
+    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs2mt');
+    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs2mt');
   });
 
   test('PAID member callback (is_callback + positive estimated_price): no money claim', async () => {
@@ -95,7 +95,7 @@ describe('reservice-report (gate on)', () => {
     expect(block.includedWithWaveGuard).toBe(false);
     expect(block.billingLine).toBeNull();
     expect(block.billingReason).toBe('priced');
-    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs1nt');
+    expect(await reserviceReportPdfSignature(member, { knex })).toBe('-rs2nt');
   });
 
   test('PREPAID member callback (prepaid_amount, no invoice): no money claim', async () => {
@@ -123,7 +123,7 @@ describe('reservice-report (gate on)', () => {
   });
 
   test('store-side signature follows the RENDERED block, not a re-resolve (fell-closed render keys as no-claim)', () => {
-    expect(reserviceReportRenderedSignature({ reserviceReport: { includedWithWaveGuard: false } }, member)).toBe('-rs1nt');
+    expect(reserviceReportRenderedSignature({ reserviceReport: { includedWithWaveGuard: false } }, member)).toBe('-rs2nt');
     expect(reserviceReportRenderedSignature({ reserviceReport: null }, member)).toBe('');
     expect(reserviceReportRenderedSignature({}, member)).toBe('');
   });
@@ -145,7 +145,7 @@ describe('reservice-report (gate on)', () => {
   });
 
   test('signature resolves the line from the record when the builder line is not passed', async () => {
-    expect(await reserviceReportPdfSignature({ ...member, service_line: 'lawn' }, { knex: fakeKnex() })).toBe('-rs1mt');
+    expect(await reserviceReportPdfSignature({ ...member, service_line: 'lawn' }, { knex: fakeKnex() })).toBe('-rs2mt');
   });
 
   test('non-member callback (One-Time tier): no money claim, no billing lookup, distinct key component', async () => {
@@ -155,7 +155,7 @@ describe('reservice-report (gate on)', () => {
     expect(block.billingLine).toBeNull();
     expect(block.billingReason).toBe('non_member');
     expect(knex.calls).toEqual([]);
-    expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs1nt');
+    expect(await reserviceReportPdfSignature(nonMember, { knex })).toBe('-rs2nt');
   });
 
   test('incomplete outcome: claims neither treatment NOR "no application" (partial applications exist), distinct cache key', async () => {
@@ -165,7 +165,7 @@ describe('reservice-report (gate on)', () => {
     expect(block.result).toMatch(/could not be completed/);
     expect(`${block.result} ${block.completedFallback}`).not.toMatch(/re-?treated/i);
     expect(`${block.result} ${block.completedFallback} ${block.expectation}`).not.toMatch(/no application/i);
-    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs1mx');
+    expect(reserviceReportRenderedSignature({ reserviceReport: block }, member)).toBe('-rs2mx');
   });
 
   test('frozen provenance rules the claim: auto label and pre-freeze NULL both refuse; current row cannot rewrite history', async () => {
@@ -202,28 +202,28 @@ describe('reservice-report (gate on)', () => {
     expect(inspect.outcome).toBe('inspection_only');
     expect(inspect.result).toMatch(/inspected the areas you reported/);
     expect(`${inspect.result} ${inspect.completedFallback} ${inspect.expectation}`).not.toMatch(/re-?treated/i);
-    expect(reserviceReportRenderedSignature({ reserviceReport: inspect }, member)).toBe('-rs1mi');
+    expect(reserviceReportRenderedSignature({ reserviceReport: inspect }, member)).toBe('-rs2mi');
     const declined = await buildReserviceReport(member, { serviceLine: 'lawn', knex, visitOutcome: 'customer_declined' });
     expect(declined.result).toMatch(/treatment was not performed/);
     expect(`${declined.result} ${declined.completedFallback}`).not.toMatch(/re-?treated/i);
-    expect(reserviceReportRenderedSignature({ reserviceReport: declined }, member)).toBe('-rs1md');
+    expect(reserviceReportRenderedSignature({ reserviceReport: declined }, member)).toBe('-rs2md');
     // Pre-render signature path reads the outcome frozen in service_data.
     const frozen = { ...member, service_data: JSON.stringify({ protocol: { visitOutcome: 'inspection_only' } }) };
-    expect(await reserviceReportPdfSignature(frozen, { knex })).toBe('-rs1mi');
+    expect(await reserviceReportPdfSignature(frozen, { knex })).toBe('-rs2mi');
     // Same fallback chain as buildProtocolPayload: a repaired record with
     // ONLY structured_notes.visitOutcome keys identically to what the
     // render stored — never the treated suffix (codex r2 P2).
     const structuredOnly = { ...member, structured_notes: JSON.stringify({ visitOutcome: 'customer_declined' }) };
-    expect(await reserviceReportPdfSignature(structuredOnly, { knex })).toBe('-rs1md');
+    expect(await reserviceReportPdfSignature(structuredOnly, { knex })).toBe('-rs2md');
     // protocol may itself be a JSON string inside service_data.
     const doubleEncoded = { ...member, service_data: JSON.stringify({ protocol: JSON.stringify({ visitOutcome: 'inspection_only' }) }) };
-    expect(await reserviceReportPdfSignature(doubleEncoded, { knex })).toBe('-rs1mi');
+    expect(await reserviceReportPdfSignature(doubleEncoded, { knex })).toBe('-rs2mi');
     // Durable record status: no outcome snapshot anywhere but the row says
     // incomplete — never the treated copy (codex GH-r4 P1).
     const statusOnly = { ...member, status: 'incomplete' };
     const block = await buildReserviceReport(statusOnly, { serviceLine: 'pest', knex });
     expect(block.outcome).toBe('incomplete');
-    expect(await reserviceReportPdfSignature(statusOnly, { knex })).toBe('-rs1mx');
+    expect(await reserviceReportPdfSignature(statusOnly, { knex })).toBe('-rs2mx');
   });
 
   test('ONLY the tier frozen on the record qualifies — the customer\'s current tier never rewrites an old callback as free', async () => {

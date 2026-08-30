@@ -15170,7 +15170,13 @@ export function CompletionPanel({
                 points, and inviting a trace the save route will 403 is a
                 dead end (codex P2 r1). Absent flag (other feeds, gate off)
                 keeps today's behavior; the named lane checks stay as belt. */}
-            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit
+            {/* Offered in quick-complete too (owner 2026-08-30): the pest
+                re-service callback completed via the slim flow shipped with
+                no trace, and the customer report fell back to the schematic
+                diagram — the tracer is the one capture whose absence the
+                report can't recover from. Still optional; the eligibility
+                belts stay. */}
+            {!isBedBugVisit && !isRodentTrappingVisit
               && service.traceEligible !== false && (
               <Field label="Treatment zone map">
                 <button
@@ -15196,7 +15202,7 @@ export function CompletionPanel({
                     yardMode={isMosquitoTrace}
                   />
                 )}
-                <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
+                <span style={{ fontSize: 14, color: "var(--muted, #667085)", marginLeft: 10 }}>
                   {traceOutlineMode
                     ? (isMosquitoTrace
                       ? "Auto-trace the yard — lawn and landscape beds — on the satellite photo; it renders as the treated-area outline on the customer report."
@@ -16980,6 +16986,54 @@ export function CompletionPanel({
                   error: D.red,
                 }}
               />
+            </div>
+          )}
+          {/* Desktop parity with the mobile render (codex P1 r2): the
+              tracer was mobile-only, so a desktop completion could never
+              capture the trace — the one artifact the customer report
+              can't recover without. Same eligibility belts, both flows. */}
+          {!isBedBugVisit && !isRodentTrappingVisit
+            && service.traceEligible !== false && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={labelStyle}>Treatment zone map</label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setZoneMapOpen(true)}
+                  style={{
+                    ...btnBase,
+                    width: "auto",
+                    height: 36,
+                    padding: "0 14px",
+                    background: "transparent",
+                    color: D.text,
+                    border: `1px solid ${D.border}`,
+                  }}
+                >
+                  {traceOutlineMode
+                    ? (isMosquitoTrace ? "Outline the treated yard" : "Outline the treated lawn")
+                    : "Trace where we sprayed"}
+                </button>
+                <span style={{ fontSize: 14, color: D.muted }}>
+                  {traceOutlineMode
+                    ? "Optional — outlines the treated area on the customer report."
+                    : "Optional — replays the traced perimeter on the customer report."}
+                </span>
+              </div>
+              {zoneMapOpen && (
+                <TechTreatmentZoneModal
+                  serviceId={service.id}
+                  customerName={service.customerName || "Customer"}
+                  address={service.address || ""}
+                  lat={service.lat ?? service.customer_latitude}
+                  lng={service.lng ?? service.customer_longitude}
+                  onClose={() => setZoneMapOpen(false)}
+                  onSaved={applyTracedTreatmentZone}
+                  appearance="light"
+                  lawnMode={traceOutlineMode}
+                  yardMode={isMosquitoTrace}
+                />
+              )}
             </div>
           )}
           {calibrationRequired && treatmentPlanStructuredProtocol?.window && (

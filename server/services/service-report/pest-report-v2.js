@@ -217,10 +217,19 @@ function buildPestReportV2({
   forecast = null,
   technicianReport = null,
   customerConcern = null,
+  suppressDefense = false,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
-  const defense = buildDefense(defenseStatus);
+  // Callback (re-service) reports never compose the schematic defense rows
+  // (owner 2026-08-30, first-callback eyeball): "Front entry — Clear · No
+  // active entry finding was documented" is routine-visit framing — and an
+  // inferred claim — on a complaint-driven visit. The technician-traced
+  // spray map, when captured, already replaces the schematic in the hero;
+  // with no trace the report simply carries no invented diagram. The
+  // status/summary/metric shell stays (owner ruling R2: keep Pest V2 on
+  // callbacks).
+  const defense = suppressDefense ? null : buildDefense(defenseStatus);
   const primaryMove = buildPrimaryMove(premiumExperience.primaryMove);
   const bugFiles = buildBugFiles(premiumExperience.bugFiles);
   const supportingMetric = buildSupportingMetric({ pestPressure, activity });
@@ -243,8 +252,26 @@ function buildPestReportV2({
   // guard) — an unscreenable concern drops the card rather than the report.
   const concernCard = buildCustomerConcernCard(customerConcern);
 
-  // Nothing meaningful to show → don't render an empty V2 shell.
-  if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+  // Nothing meaningful to show → don't render an empty V2 shell. Under
+  // suppressDefense the DELIBERATE removal of the schematic must not be
+  // what empties the shell (codex P1 r1): a callback whose remaining
+  // content is the concern card, the tech-reviewed summary, the receipt,
+  // or the weather call keeps the dashboard — on a complaint visit those
+  // are exactly the customer-issue content. Regular visits keep the
+  // original predicate unchanged.
+  if (suppressDefense) {
+    // Callback emptiness counts ONLY fields the composed section MOUNTS
+    // (codex P2 r4 + r5): the hero (supportingMetric + aiSummary), the
+    // primary move, and the concern card. Bug files, the forecast, the
+    // receipt, and the weather call were removed from the composed section
+    // 2026-07-09 — counting them kept an empty status-hero shell alive
+    // that also suppressed the legacy summary/coverage sections.
+    if (!primaryMove && !supportingMetric && !aiSummary && !concernCard) {
+      return null;
+    }
+  } else if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+    // Nothing meaningful to show → don't render an empty V2 shell
+    // (regular visits keep the original predicate unchanged).
     return null;
   }
 

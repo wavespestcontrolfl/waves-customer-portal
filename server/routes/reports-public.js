@@ -487,6 +487,12 @@ async function buildServiceReportV1ResponseData(service, token, {
         // card, so what the customer told the tech never disappears into a
         // summary clause (John Kelleher audit 2026-07-29).
         customerConcern: data.customerConcern || null,
+        // Callback reports drop the schematic defense rows (owner
+        // 2026-08-30) — rides the re-service copy gate so one kill switch
+        // (unset GATE_RESERVICE_REPORT_COPY) restores the pre-lane render.
+        // isCallback rides the payload ungated (report-data), so the gate
+        // term here is what makes the suppression killable.
+        suppressDefense: data.isCallback === true && reserviceReportCopyGateOn(),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
@@ -586,7 +592,12 @@ async function buildServiceReportV1ResponseData(service, token, {
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
   let referral = null;
-  if (mode === 'live' && composeOffers) {
+  // Owner 2026-08-30 (extends the R4 review-ask ruling): a complaint-driven
+  // visit is the wrong moment for an upsell quote or a referral ask, just
+  // as it is for a Google ask — callback reports carry neither card while
+  // the re-service gate is on. Gate-dark keeps today's behavior.
+  const callbackSuppressesOffers = reserviceReportCopyGateOn() && data.isCallback === true;
+  if (mode === 'live' && composeOffers && !callbackSuppressesOffers) {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
@@ -1179,6 +1190,13 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
         // any drift between what the customer saw and what the server now
         // computes rejects, not just key/mode/price/option drift.
         const clickedPrint = String(metadata.fingerprint || '').trim();
+        // Callback reports no longer render offer cards (owner 2026-08-30):
+        // a card retained by a page opened before this deploy/gate flip must
+        // not act — same 409 the customer would get for any vanished offer
+        // (codex P2 r4 on #3631).
+        if (reserviceReportCopyGateOn() && joined?.is_callback === true) {
+          return res.status(409).json({ error: 'This offer is no longer available — please refresh the report' });
+        }
         const offerMismatch = !crossSell
           || !clickedPrint || clickedPrint !== crossSell.fingerprint
           || !clickedKey || clickedKey !== crossSell.serviceKey
@@ -1324,14 +1342,25 @@ function cockroachRecapRetired(service) {
   } catch { return false; }
 }
 
+// One retirement verdict for every public recap surface (codex P1 r4 on the
+// no-schematic PR): callback recaps joined the cockroach family — the video
+// tells the routine-visit barrier/celebration story a complaint re-visit
+// must not carry, and an ALREADY-approved one must stop serving on
+// permanent links, not just stop being rebuilt. Rides the same kill switch
+// as the report-side suppression (unset GATE_RESERVICE_REPORT_COPY).
+function recapRetired(service) {
+  if (cockroachRecapRetired(service)) return true;
+  return reserviceReportCopyGateOn() && service.is_callback === true;
+}
+
 // GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
 // recap the tech has APPROVED (ready-but-unapproved stays private).
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
-    if (cockroachRecapRetired(service)) return res.json({ ready: false, durationMs: null });
+    if (recapRetired(service)) return res.json({ ready: false, durationMs: null });
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
@@ -1343,9 +1372,9 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data', 'is_callback').first();
     if (!service || !service.scheduled_service_id) return res.status(404).end();
-    if (cockroachRecapRetired(service)) return res.status(404).end();
+    if (recapRetired(service)) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
@@ -1392,12 +1421,18 @@ router.post('/:token/referral-link', reportEventLimiter, crossSellActionLimiter,
   try {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .select('id', 'customer_id', 'report_template_version', 'structured_notes')
+      .select('id', 'customer_id', 'report_template_version', 'structured_notes', 'is_callback')
       .first();
     if (!service || service.report_template_version !== 'service_report_v1' || !service.customer_id) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (suppressedTypedReport(service)) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    // Callback reports no longer render the referral card (owner
+    // 2026-08-30) — a stale open page must not enroll a promoter through a
+    // button the report no longer shows (codex P2 r4 on #3631).
+    if (reserviceReportCopyGateOn() && service.is_callback === true) {
       return res.status(404).json({ error: 'Report not found' });
     }
     if (!require('../config/feature-gates').isEnabled('reportCrossSell')) {
@@ -2080,6 +2115,13 @@ router.get('/:token/map.svg', async (req, res, next) => {
     }
 
     const data = await buildReportV1Data(service, req.params.token);
+    // Callback reports suppressed the generated schematic (owner
+    // 2026-08-30) — the standalone map endpoint must not keep serving what
+    // the live page and PDF no longer render (codex P2 r6). Same scoping
+    // as the PDF: only lines whose reservice block composed (rs2-keyed).
+    if (reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
     res.type('image/svg+xml');
     return res.send(data.mapSvg || '');
   } catch (err) { next(err); }
@@ -2215,6 +2257,9 @@ router.get('/:token/data', async (req, res, next) => {
         // on permanent links either (codex P1 #3007 r11; the recap builder
         // stopped producing new ones in r10).
         && !require('../services/service-report/pest-report-v2').isCockroachTypedReportType(v1Data.typedReport?.type)
+        // Callback recaps are retired the same way (codex P1 r4) — don't
+        // advertise a player the /recap endpoints will now 404.
+        && !(reserviceReportCopyGateOn() && v1Data.isCallback === true)
       ) {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');

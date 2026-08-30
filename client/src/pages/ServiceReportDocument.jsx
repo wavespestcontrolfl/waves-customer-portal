@@ -466,7 +466,22 @@ export default function ServiceReportDocument({ data, token }) {
   // script or fetch anything, so no markup from the payload is ever injected
   // into this document. Inline over the /map.svg endpoint: no network fetch
   // to race the PDF capture.
-  const schematicSvg = data.treatmentMap?.schematic?.svg || data.mapSvg || null;
+  // Callback PDFs follow the report's "traced map or nothing" rule (codex
+  // P1 #3631): with the re-service gate on, a callback with no saved trace
+  // prints NO generated schematic — the live report already suppresses the
+  // invented spatial story, and Download PDF must not contradict it. A real
+  // traced map still prints (tracedMapUrl wins below either way).
+  // Scoped to records whose reserviceReport block composed (lawn/pest —
+  // the lines the composer supports), because that block is exactly what
+  // moves the '-rs2' PDF cache key: suppressing an unsupported-line
+  // callback here would change the render while its cached PDF key stands
+  // still, serving the old schematic on permanent links (codex P1 r8).
+  const callbackSchematicSuppressed = data.isCallback === true
+    && data.reserviceGateOn === true
+    && Boolean(data.reserviceReport);
+  const schematicSvg = callbackSchematicSuppressed
+    ? null
+    : (data.treatmentMap?.schematic?.svg || data.mapSvg || null);
   const schematicSrc = schematicSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(schematicSvg)}`
     : null;

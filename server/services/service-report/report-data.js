@@ -4920,6 +4920,100 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // The ONLY recommendation the fold may drop is the irrigation-hold
+  // instruction, and only when ONE CLAUSE of the reviewed narrative carries
+  // the same instruction at the same-or-longer duration. Three codex rounds
+  // (r5–r8 on #3631) showed general narrative-coverage matching cannot be
+  // made safe — cross-sentence token pooling, then cross-clause negation
+  // ("Apply irrigation for 48 hours, but do not mow" must never cover "Do
+  // not apply irrigation for 48 hrs") — so both sides are fingerprinted
+  // instead: an irrigation/water word AND a hold/negation word AND a
+  // parseable hours duration, co-occurring within a single clause. Every
+  // other recommendation keeps its card row unconditionally. Bias runs
+  // toward KEEPING: a duplicate line is noise, a dropped instruction is
+  // information loss.
+  // The hold verb must be grammatically TIED to the irrigation word — a
+  // hold/negation phrase followed by irrigation/watering within at most
+  // three intervening words ("do not apply irrigation", "hold off on any
+  // irrigation", "avoid watering", "wait 48 hours before watering") —
+  // never independently pooled tokens: "Irrigation caused no runoff for
+  // 48 hours" carries all three tokens but no hold instruction and must
+  // cover nothing (codex P1 r9).
+  // No bare "no" alternative (codex P1 r10): "No irrigation occurred for
+  // 72 hours before today's treatment" is a description, not a directive —
+  // only imperative hold verbs qualify, and a "no irrigation for 48 hours"
+  // phrasing simply keeps its card row (the keep-bias direction).
+  // NOUN forms only — irrigation/irrigating/watering, never bare
+  // "water <object>" (codex P1 r12): "Do not water the flower beds for 48
+  // hours" is a NARROWER hold than the lawn-wide irrigation instruction
+  // and must not fold it away.
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+((?:['’\w]+\s+){0,3}?)(?:irrigat\w+|watering)\b/i;
+  // Scope-narrowing belt (same finding): a clause that names a non-lawn
+  // target never covers the property-wide instruction, whatever its verbs.
+  const NARROWED_SCOPE_RE = /\b(?:beds?|flowers?|gardens?|shrubs?|plants?|trees?|pots?|planters?)\b/i;
+  // Double negation (codex P1 r13): "Do not SKIP irrigation" instructs the
+  // OPPOSITE of a hold — a second hold-family verb inside the gap flips the
+  // polarity, so the clause covers nothing.
+  const DOUBLE_NEGATION_GAP_RE = /\b(?:skip|avoid|withhold|miss|forget|stop|hold)\b/i;
+  // An irrigation-hold instruction's duration in hours, or null when the
+  // text is not one (no tied hold phrase, flipped polarity, or no duration).
+  const irrigationHoldHours = (text, { rejectNarrowedScope = false } = {}) => {
+    const s = String(text || '');
+    const phrase = IRRIGATION_HOLD_PHRASE_RE.exec(s);
+    if (!phrase) return null;
+    if (DOUBLE_NEGATION_GAP_RE.test(phrase[1] || '')) return null;
+    if (rejectNarrowedScope && NARROWED_SCOPE_RE.test(s)) return null;
+    const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
+    return m ? Number(m[1]) : null;
+  };
+  const recommendationCoveredByNarrative = (rec, narrative) => {
+    const recHours = irrigationHoldHours(rec);
+    if (recHours == null) return false;
+    return String(narrative || '')
+      .split(/[.!?]+/)
+      .some((sentence) => sentence
+        // "and"/"then" split too (codex P1 r11): "Do not water the flower
+        // beds and wait 72 hours before mowing" must not lend mowing's 72
+        // hours to a watering hold — the duration has to live in the same
+        // conjunct as the tied hold phrase.
+        .split(/[,;]|\bbut\b|\bhowever\b|\band\b|\bthen\b/i)
+        .some((clause) => {
+          const clauseHours = irrigationHoldHours(clause, { rejectNarrowedScope: true });
+          return clauseHours != null && clauseHours >= recHours;
+        }));
+  };
+
+  // Lawn callback reports fold the fragmented cards into the narrative
+  // (owner 2026-08-30, first-callback eyeball): the tech-reviewed AI report
+  // already tells the found/did/recommend story in prose — the "What we
+  // found & did" tiles, the "What we recommend" list, and the generic lawn
+  // program explainer restate it as noise on a complaint visit. Suppressed
+  // ONLY when that narrative actually composed (summarySource
+  // 'technician_report'): a callback whose completion produced no reviewed
+  // narrative keeps every card — removal must never lose the sole record.
+  // The Re-entry card independently carries the irrigation/re-entry timing,
+  // so dropping the recommendation list loses no safety guidance. Same kill
+  // switch as the rest of the lane (unset GATE_RESERVICE_REPORT_COPY).
+  const lawnCallbackNarrativeOwns = reserviceReportCopyGateOn()
+    && service.is_callback === true
+    && serviceLine === 'lawn'
+    && visitSummarySource === 'technician_report';
+
+  // Composed ahead of the payload so the traced-map decision below can read
+  // the outcome. A NON-PERFORMED callback (inspection_only /
+  // customer_declined) must not replay a spray/coverage trace beside copy
+  // saying no application was made (codex P1 r12): a trace captured before
+  // the tech selected that outcome would otherwise render as "where we
+  // sprayed" on web, hero, and PDF. 'incomplete' keeps its trace — partial
+  // treatment is still treatment (#3617 r11). The rs2 signature already
+  // carries the outcome key, so cached PDFs re-render once.
+  const reserviceReportBlock = await buildReserviceReport(
+    service,
+    { serviceLine, knex, visitOutcome: protocol.visitOutcome || null },
+  );
+  const callbackNonPerformed = Boolean(reserviceReportBlock)
+    && ['inspection_only', 'customer_declined'].includes(reserviceReportBlock.outcome);
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -4996,7 +5090,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Re-service hero/PDF copy (reservice-report.js) — null while
     // GATE_RESERVICE_REPORT_COPY is dark or for non-callback records, and
     // the client then keeps its legacy name-regex headline unchanged.
-    reserviceReport: await buildReserviceReport(service, { serviceLine, knex, visitOutcome: protocol.visitOutcome || null }),
+    reserviceReport: reserviceReportBlock,
     // True when the gated composer ran: a null reserviceReport on a callback
     // is then a deliberate withholding (unsupported line), and the client
     // must not fall back to the legacy name-regex copy.
@@ -5050,7 +5144,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         visitSequence: typedSnapshot.visitSequence || 1,
         isProgressVisit: (typedSnapshot.visitSequence || 1) > 1,
         todaysResult: typedSnapshot.todaysResult || null,
-        findings: Array.isArray(typedSnapshot.findings) ? typedSnapshot.findings : [],
+        // Empty on lawn callbacks whose narrative owns the story — hides
+        // the "What we found & did" tiles on web AND PDF from one point.
+        findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
+          ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
         photoSummary: typedSnapshot.photoSummary || null,
         schemaVersion: typedSnapshot.schemaVersion || null,
@@ -5071,7 +5168,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         label: 'Schematic view of inspected and treated zones. Service zones are approximate.',
       },
       satellite: satelliteMap,
-      traced: tracedTreatmentZone,
+      // Non-performed callbacks never replay a treatment trace (codex P1
+      // r12) — the copy says no application was made, and one payload
+      // decision covers the hero, the coverage card, and the PDF.
+      traced: callbackNonPerformed ? null : tracedTreatmentZone,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
@@ -5141,12 +5241,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       ...parseJsonObject(service.weather_data),
     },
     findings,
-    recommendations,
+    // Folded ONLY where the narrative actually covers the instruction
+    // (codex P1 r5 on #3631): summarySource proves the notes parsed, not
+    // that every recommendation made it into the prose — one the narrative
+    // omits stays on the card rather than vanishing from web + PDF.
+    recommendations: lawnCallbackNarrativeOwns
+      ? recommendations.filter((rec) => !recommendationCoveredByNarrative(rec, visitSummary))
+      : recommendations,
     protocol,
     advisory,
     lawnAssessment,
     mowingHeight,
-    lawnProgramOverview,
+    lawnProgramOverview: lawnCallbackNarrativeOwns ? null : lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,
     // Drop the gauge/lawn-length photo from the gallery only when Lawn Report V2

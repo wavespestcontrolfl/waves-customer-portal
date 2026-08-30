@@ -16260,6 +16260,12 @@ const recapVideoActor = (req) => req.technician?.name || req.technicianId || nul
 router.get('/:serviceId/recap-video', async (req, res, next) => {
   try {
     if (!(await recapOwnerOk(req, res))) return undefined;
+    // Retired callback recap → the staff card reads exists:false and hides
+    // (codex P1 #3631) — no approve/send buttons over a video the public
+    // endpoints refuse to serve.
+    if (await recapPipeline.callbackRecapRetired(req.params.serviceId)) {
+      return res.json({ exists: false, status: 'retired' });
+    }
     const recap = await recapPipeline.getRecap(req.params.serviceId);
     if (!recap) return res.json({ exists: false, status: 'none' });
     return res.json({
@@ -16279,6 +16285,7 @@ router.post('/:serviceId/recap-video/generate', async (req, res, next) => {
     if (process.env.PEST_RECAP !== 'true') return res.status(409).json({ error: 'recap rendering is disabled' });
     if (!(await recapOwnerOk(req, res))) return undefined;
     const result = await recapPipeline.enqueueRecap(req.params.serviceId, { force: Boolean(req.body?.force) });
+    if (result.retired) return res.status(409).json({ error: 'Callback visits do not get a recap video while the re-service report is active.' });
     if (!result.ok) return res.status(503).json({ error: 'recap queue unavailable' });
     return res.json({ ok: true, status: result.recap?.status || 'pending' });
   } catch (err) { return next(err); }

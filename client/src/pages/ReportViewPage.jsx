@@ -9155,7 +9155,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Ask-Waves section that used to render into pdf/static documents was
             removed 2026-08-02 (dead chrome in a printed PDF — owner); live
             mode's ask surface is FloatingAskWaves. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary && (
+        {/* Lawn callbacks whose narrative already renders in Today's Result
+            drop the section when it would carry only the "Today's service is
+            complete." dedup stub (owner 2026-08-30) — any real inner content
+            (V2 dashboard, legacy assessment, mowing block) keeps it. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !termiteV2Primary && !cockroachV2Primary && !typedNarrativeOwnsSummary
+          && !(data.isCallback && data.reserviceGateOn && todaysResultCarriesSummary
+            && data.serviceLine === 'lawn' && !data.reportV2 && !data.lawnAssessment && !data.mowingHeight) && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
