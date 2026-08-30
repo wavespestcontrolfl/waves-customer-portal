@@ -4941,6 +4941,9 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // Re-read inside the transaction below: the pre-transaction suggestion
     // check can race a concurrent link of the same estimate.
     let linkEstimateId = sourceEstimateId;
+    // The estimate row claimed accepted inside the transaction (if any) —
+    // drives the post-commit lead-pipeline transition.
+    let claimedEstimate = null;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
         trx, customer.id, termStart, req.body?.allowOverlap === true,
@@ -4994,20 +4997,50 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       if (!updatedInvoice) throw new Error('Annual prepay invoice could not be marked paid');
 
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-      // Close the quote the cash paid for: a sent/viewed estimate linked to
-      // this paid term must not stay publicly acceptable (the standard accept
-      // lane runs no annual-prepay overlap guard and would mint fresh
-      // scheduling/invoice obligations on an already-paid year), and the
-      // follow-up cron keeps chasing sent/viewed rows. A guarded status flip
-      // is the whole finalization ON PURPOSE — the term, invoice, and
-      // payment are created by THIS transaction, so running the manual-
-      // acceptance converter here would double-mint them. Accept-side comms
-      // fire only from the accept routes, never from a status sweep.
+      // Close the quote the cash paid for with the SAME atomic claim the
+      // accept flows run (status flip + price lock + expiry and engine-
+      // quarantine predicates): a sent/viewed estimate linked to this paid
+      // term must not stay publicly acceptable — the standard accept lane
+      // runs no annual-prepay overlap guard and would mint fresh scheduling/
+      // invoice obligations on the already-paid year — and the follow-up
+      // cron keeps chasing sent/viewed rows. The claim MUST succeed for the
+      // link to persist: zero rows means a concurrent accept/decline/expiry
+      // won the row, so the cash recording proceeds UNLINKED (it is money
+      // already in hand, not an acceptance) and the estimate lane keeps
+      // ownership. Deliberately not the manual-acceptance converter — the
+      // term, invoice, and payment are created by THIS transaction and the
+      // converter would double-mint them; accept-side comms fire only from
+      // the accept routes, never from a status change.
       if (linkEstimateId) {
-        await trx('estimates')
+        const claimNow = trx.fn.now();
+        const [claimed] = await trx('estimates')
           .where({ id: linkEstimateId })
           .whereIn('status', ['sent', 'viewed'])
-          .update({ status: 'accepted', accepted_at: trx.fn.now(), updated_at: trx.fn.now() });
+          // A locked price means a prior accept already committed money.
+          .whereNull('price_locked_at')
+          .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
+          // Same engine-draft invalidation predicates as the accept claims.
+          .where(function engineDraftNotQuarantined() {
+            this.whereRaw("COALESCE(estimate_data #>> '{estimatorEngine,callLogId}', '') = ''")
+              .orWhere(function notQuarantined() {
+                this.whereNull('archived_at')
+                  .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+                  .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''");
+              });
+          })
+          .update({
+            status: 'accepted',
+            accepted_at: claimNow,
+            declined_at: null,
+            decline_reason: null,
+            updated_at: claimNow,
+            price_locked_at: claimNow,
+            price_locked_by: 'annual_prepay_record',
+            pricing_authority: 'LOCKED',
+          })
+          .returning('*');
+        if (claimed) claimedEstimate = claimed;
+        else linkEstimateId = null;
       }
 
       const term = await AnnualPrepayRenewals.createTermForAnnualPrepay({
@@ -5097,6 +5130,23 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       termStart,
       termEnd,
     }, true);
+
+    // Lead-pipeline transition for the claimed estimate — the same
+    // best-effort side effect the manual-acceptance path runs (never fails
+    // the recording; the money is already committed).
+    if (claimedEstimate) {
+      try {
+        await require('../services/lead-estimate-link').markLinkedLeadEstimateAccepted({
+          estimateId: claimedEstimate.id,
+          customerId: claimedEstimate.customer_id || null,
+          monthlyValue: claimedEstimate.monthly_total != null ? Number(claimedEstimate.monthly_total) : null,
+          initialServiceValue: claimedEstimate.onetime_total != null ? Number(claimedEstimate.onetime_total) : null,
+          waveguardTier: claimedEstimate.waveguard_tier || null,
+        });
+      } catch (leadErr) {
+        logger.warn(`[customers:${customer.id}] annual-prepay linked-lead transition failed for estimate ${claimedEstimate.id}: ${leadErr.message}`);
+      }
+    }
 
     res.status(201).json({
       success: true,
