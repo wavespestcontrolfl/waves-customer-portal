@@ -184,9 +184,15 @@ describe('lead estimate automation gate', () => {
     // The persisted shape must NOT read as a pre-realignment legacy plan.
     const { rodentBaitLegacyReplaySignal } = require('../services/rodent-bait-legacy-replay');
     expect(rodentBaitLegacyReplaySignal(draft.estimateData)).toBeNull();
-    // Default policy: no opt-out flags ride the compact row.
-    expect(rodent.tierQualifier).toBeUndefined();
-    expect(rodent.excludeFromPctDiscount).toBeUndefined();
+    // Default policy is persisted EXPLICITLY (codex #3591 r45 local P0):
+    // the replay posture signal must fire for normal quotes too, or a later
+    // flag flip re-prices the sent token.
+    expect(rodent).toEqual(expect.objectContaining({
+      tierQualifier: true, countsTowardWaveGuardTier: true,
+      excludeFromPctDiscount: false, waveGuardDiscountEligible: true,
+    }));
+    const { rodentWaveguardPostureReplaySignal } = require('../services/rodent-bait-legacy-replay');
+    expect(rodentWaveguardPostureReplaySignal(draft.estimateData)).toEqual({ tierQualifier: true, excludeFromPctDiscount: false });
     // Live policy OFF at generation is frozen into the draft (codex #3591 r23 P1).
     const constants = require('../services/pricing-engine/constants');
     const original = { tq: constants.RODENT.tierQualifier, ex: constants.RODENT.excludeFromPctDiscount };

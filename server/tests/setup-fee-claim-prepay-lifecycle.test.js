@@ -468,7 +468,7 @@ describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded S
   beforeEach(() => { mockQualifyingKeys = async () => []; });
 
   test('re-stamps the customer\'s live rodent root by CAS; a linked visit resolves through its root first', async () => {
-    const c = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }, rodentRoot], claim: null });
+    const c = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }, rodentRoot], claim: null, scheduledService: { id: 'root-rb', status: 'confirmed' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, setupInvoice()))
       .toEqual({ scheduledServiceId: 'root-rb', amount: 99 });
     expect(c.writes).toEqual([
@@ -486,20 +486,112 @@ describe('restoreRodentSetupObligationForReversedInvoice — a voided/refunded S
     const prepay = conn({ rootsForCoverage: [rodentRoot], claim: { id: 'claim-1' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(prepay, setupInvoice())).toBeNull();
     expect(prepay.writes).toEqual([]);
-    const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0 });
+    const occupied = conn({ rootsForCoverage: [rodentRoot], claim: null, updateResult: 0, scheduledService: { id: 'root-rb', status: 'confirmed' } });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(occupied, setupInvoice())).toBeNull();
     const noRoot = conn({ rootsForCoverage: [{ id: 'root-pest', service_type: 'Quarterly Pest Control', service_id: null }], claim: null });
     expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(noRoot, setupInvoice())).toBeNull();
     expect(noRoot.writes).toEqual([]);
   });
 
-  test('wired into the void + webhook refund transitions (source contract)', () => {
+  test('wired into the void transition and the refund TRANSITION WINNER (source contract, codex #3591 r45 P1)', () => {
     const invoiceSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'invoice.js'), 'utf8');
-    const webhookSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    const creditSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-credit.js'), 'utf8');
     const voidAt = invoiceSrc.indexOf('async voidInvoice(id) {');
     const flipAt = invoiceSrc.indexOf('.update({ status: "void", updated_at: new Date() })', voidAt);
     const restoreAt = invoiceSrc.indexOf('restoreRodentSetupObligationForReversedInvoice(trx, updated)', flipAt);
     expect(restoreAt).toBeGreaterThan(flipAt);
-    expect(webhookSrc).toMatch(/status: 'refunded', paid_at: null, updated_at: trx\.fn\.now\(\) \}\)\s*\n\s*\.returning\('\*'\);[\s\S]{0,400}restoreRodentSetupObligationForReversedInvoice\(trx, refundFlipped\)/);
+    // Refunds terminalize inside returnAppliedCreditOnRefund; the restore
+    // rides its !alreadyTerminal winner under the same row lock.
+    const winnerAt = creditSrc.indexOf('if (!alreadyTerminal) {');
+    const creditRestoreAt = creditSrc.indexOf("require('./invoice').restoreRodentSetupObligationForReversedInvoice(trx, inv)");
+    expect(winnerAt).toBeGreaterThan(-1);
+    expect(creditRestoreAt).toBeGreaterThan(winnerAt);
+    // The locked read carries every column the restore needs.
+    expect(creditSrc).toMatch(/first\('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items', 'scheduled_service_id'\)/);
+  });
+
+  test('a reversed STANDARD invoice on a DEAD series re-bills as a draft instead of stamping an inert root (codex #3591 r45 P1)', async () => {
+    const createSpy = jest.spyOn(InvoiceService, 'create').mockResolvedValue({ id: 'inv-rebill-std', invoice_number: 'WPC-2026-0501' });
+    try {
+      const c = conn({ rootsForCoverage: [rodentRoot], claim: null, scheduledService: { id: 'root-rb', status: 'completed' }, liveVisitProbe: null });
+      expect(await InvoiceService.restoreRodentSetupObligationForReversedInvoice(c, setupInvoice()))
+        .toEqual({ scheduledServiceId: 'root-rb', amount: 99, reInvoiceId: 'inv-rebill-std' });
+      expect(createSpy.mock.calls[0][0]).toMatchObject({
+        customerId: 'cust-1',
+        lineItems: [expect.objectContaining({ description: 'Bait Station Setup — one-time setup fee', unit_price: 99 })],
+      });
+      expect(c.writes.filter((w) => w.table === 'scheduled_services')).toEqual([]);
+    } finally {
+      createSpy.mockRestore();
+    }
+  });
+});
+
+describe('retireRodentSetupObligationForRevivedPrepay — a re-paid/revived prepay disarms the restored claim (codex #3591 r45 local P0)', () => {
+  const prepayInvoiceRow = {
+    id: 'inv-prepay', customer_id: 'cust-1', scheduled_service_id: null,
+    line_items: [
+      { description: 'Rodent Bait Stations - Annual Prepay', unit_price: 486.4, amount: 486.4 },
+      { description: 'Bait Station Setup — one-time setup fee', unit_price: 99, amount: 99 },
+    ],
+  };
+  const rodentRoot = { id: 'root-rb', service_type: 'Rodent Bait Stations', service_id: null, recurring_parent_id: null };
+  function revivalConn({ stamp = '99.00', invoiceRow = prepayInvoiceRow } = {}) {
+    const c = conn({ rootsForCoverage: [rodentRoot], scheduledService: { id: 'root-rb', pending_setup_fee: stamp } });
+    const inner = c;
+    const wrapped = (table) => {
+      const q = inner(table);
+      if (table === 'invoices') q.first = async () => invoiceRow;
+      return q;
+    };
+    wrapped.writes = inner.writes;
+    return wrapped;
+  }
+
+  test('re-ledgers the claim and CAS-retires the restored positive stamp', async () => {
+    const c = revivalConn();
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(c, 'inv-prepay'))
+      .toEqual({ scheduledServiceId: 'root-rb', amount: 99, retired: true });
+    expect(c.writes).toEqual([
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', onConflict: 'invoice_id', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'root-rb', amount: 99 } }),
+      expect.objectContaining({ table: 'scheduled_services', op: 'update', where: { id: 'root-rb', pending_setup_fee: '99.00' }, patch: expect.objectContaining({ pending_setup_fee: null }) }),
+    ]);
+  });
+
+  test('no restored stamp → record only; negative stamp → record + FIX (never cleared); no setup line → no-op', async () => {
+    const clean = revivalConn({ stamp: null });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(clean, 'inv-prepay')).toMatchObject({ retired: false });
+    expect(clean.writes.map((w) => w.table)).toEqual(['setup_fee_claims']);
+    const busy = revivalConn({ stamp: '-99.00' });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(busy, 'inv-prepay')).toMatchObject({ retired: false });
+    expect(busy.writes.filter((w) => w.op === 'update')).toEqual([]);
+    const noSetup = revivalConn({ invoiceRow: { ...prepayInvoiceRow, line_items: [{ description: 'Annual Prepay', amount: 486.4 }] } });
+    expect(await InvoiceService.retireRodentSetupObligationForRevivedPrepay(noSetup, 'inv-prepay')).toBeNull();
+    expect(noSetup.writes).toEqual([]);
+  });
+
+  test('wired into BOTH term revival transitions (source contract)', () => {
+    const renewals = fs.readFileSync(path.join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8');
+    expect((renewals.match(/retireRodentSetupObligationForRevivedPrepay\(conn, invoice\.id\)/g) || []).length).toBe(2);
+  });
+});
+
+describe('compact mirrors persist EXPLICIT rodent posture (codex #3591 r45 local P0)', () => {
+  test('public-quote and the automated-lead mirror both write true/false posture for new-model rows', () => {
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/tierQualifier: item\.tierQualifier !== false && item\.countsTowardWaveGuardTier !== false,/);
+    expect(publicQuote).toMatch(/excludeFromPctDiscount: item\.excludeFromPctDiscount === true \|\| item\.waveGuardDiscountEligible === false,/);
+    const { _test } = require('../services/lead-estimate-automation');
+    const freeze = _test?.rodentEligibilityFreeze;
+    if (freeze) {
+      expect(freeze({ service: 'rodent_bait', perApplicationBilled: true, stations: 5 }))
+        .toMatchObject({ tierQualifier: true, countsTowardWaveGuardTier: true, excludeFromPctDiscount: false, waveGuardDiscountEligible: true });
+      expect(freeze({ service: 'rodent_bait', perApplicationBilled: true, tierQualifier: false }))
+        .toMatchObject({ tierQualifier: false, excludeFromPctDiscount: false });
+    } else {
+      const lead = fs.readFileSync(path.join(__dirname, '..', 'services', 'lead-estimate-automation.js'), 'utf8');
+      expect(lead).toMatch(/tierQualifier: !nonQualifying,/);
+      expect(lead).toMatch(/waveGuardDiscountEligible: !pctExcluded,/);
+    }
   });
 });

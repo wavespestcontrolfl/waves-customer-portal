@@ -5033,6 +5033,35 @@ const InvoiceService = {
         logger.error(`[invoice] FIX: reversed invoice ${invoiceRow.id} billed a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — re-bill the setup manually`);
         return null;
       }
+      // Same billable-visit guard as the prepay restoration (codex #3591 r45
+      // P1): a stamp on a series with no future completion is inert — mint a
+      // collectible DRAFT re-bill instead.
+      const anchorRow = await conn("scheduled_services").where({ id: anchorId }).first("id", "status", "pending_setup_fee");
+      let billable = ["pending", "confirmed", "rescheduled"].includes(String(anchorRow?.status || "").toLowerCase());
+      if (!billable) {
+        const liveChild = await conn("scheduled_services")
+          .where({ recurring_parent_id: anchorId })
+          .whereIn("status", ["pending", "confirmed", "rescheduled"])
+          .first("id");
+        billable = !!liveChild;
+      }
+      if (!billable) {
+        const reInvoice = await this.create({
+          database: conn,
+          customerId: invoiceRow.customer_id,
+          title: "Bait Station Setup",
+          lineItems: [{
+            description: "Bait Station Setup — one-time setup fee",
+            quantity: 1,
+            unit_price: amount,
+            category: "Setup fee",
+          }],
+          notes: `Re-billed after invoice ${invoiceRow.id} was voided/refunded — the series has no future visit left to collect the setup on (visit ${anchorId}).`,
+          dueDate: etDateString(),
+        });
+        logger.info(`[invoice] reversed invoice ${invoiceRow.id}: setup re-billed as draft ${reInvoice?.invoice_number || reInvoice?.id} — dead series ${anchorId}`);
+        return { scheduledServiceId: anchorId, amount, reInvoiceId: reInvoice?.id || null };
+      }
       const stamped = await conn("scheduled_services")
         .where({ id: anchorId })
         .whereNull("pending_setup_fee")
@@ -5045,6 +5074,71 @@ const InvoiceService = {
       return { scheduledServiceId: anchorId, amount };
     } catch (err) {
       logger.error(`[invoice] FIX: rodent setup restore failed for reversed invoice ${invoiceRow?.id}: ${err.message} — re-bill the setup manually`);
+      return null;
+    }
+  },
+
+  /**
+   * A refunded/disputed prepay that billed the rodent setup was REVIVED
+   * (re-paid / dispute won back) after the refund sync restored the
+   * per-application claim (codex #3591 r45 local P0): the prepay's own
+   * setup line is live again, so the restored stamp must be retired and
+   * the claims-ledger record recreated — or the next completion bills the
+   * setup a SECOND time. Idempotent (record insert is onConflict-ignored;
+   * stamp CAS by exact value); best-effort — a miss pages a human.
+   */
+  async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
+    try {
+      if (!prepayInvoiceId) return null;
+      const invoiceRow = await conn("invoices")
+        .where({ id: prepayInvoiceId })
+        .first("id", "customer_id", "scheduled_service_id", "line_items");
+      if (!invoiceRow) return null;
+      let lines = invoiceRow.line_items;
+      if (typeof lines === "string") { try { lines = JSON.parse(lines); } catch { lines = []; } }
+      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => /^Bait Station Setup — one-time setup fee$/.test(String(li?.description || "").trim()));
+      const amount = Math.round(Number(setupLine?.amount ?? setupLine?.unit_price) * 100) / 100;
+      if (!setupLine || !(amount > 0)) return null;
+      const { authoritativeServiceKey, recordSetupFeeClaimForInvoice } = require("./secure-appointment-plans");
+      let anchorId = null;
+      if (invoiceRow.scheduled_service_id) {
+        const own = await conn("scheduled_services")
+          .where({ id: invoiceRow.scheduled_service_id })
+          .first("id", "recurring_parent_id", "service_type", "service_id");
+        const root = own && own.recurring_parent_id
+          ? await conn("scheduled_services").where({ id: own.recurring_parent_id }).first("id", "service_type", "service_id")
+          : own;
+        if (root && (await authoritativeServiceKey(conn, root)) === "rodent_bait") anchorId = root.id;
+      }
+      if (!anchorId) {
+        const roots = await conn("scheduled_services")
+          .where({ customer_id: invoiceRow.customer_id })
+          .whereNull("recurring_parent_id")
+          .whereNotIn("status", ["cancelled", "canceled", "skipped", "no_show"])
+          .select("id", "service_type", "service_id");
+        for (const root of roots || []) {
+          if ((await authoritativeServiceKey(conn, root)) === "rodent_bait") { anchorId = root.id; break; }
+        }
+      }
+      if (!anchorId) {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId} bills a $${amount.toFixed(2)} bait-station setup but no rodent series anchor was found — clear any restored pending_setup_fee manually`);
+        return null;
+      }
+      await recordSetupFeeClaimForInvoice(conn, { invoiceId: prepayInvoiceId, anchorId, amount });
+      const parent = await conn("scheduled_services").where({ id: anchorId }).first("id", "pending_setup_fee");
+      const stamp = parent?.pending_setup_fee != null ? Number(parent.pending_setup_fee) : null;
+      let retired = 0;
+      if (stamp != null && stamp > 0) {
+        retired = await conn("scheduled_services")
+          .where({ id: anchorId, pending_setup_fee: parent.pending_setup_fee })
+          .update({ pending_setup_fee: null, updated_at: new Date() });
+      } else if (stamp != null && stamp < 0) {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: series ${anchorId} has a completion mid-claim (negative stamp) — reconcile the setup manually`);
+      }
+      logger.info(`[invoice] revived prepay ${prepayInvoiceId}: setup claim re-ledgered on series ${anchorId}${retired === 1 ? " and the restored stamp retired" : ""}`);
+      return { scheduledServiceId: anchorId, amount, retired: retired === 1 };
+    } catch (err) {
+      logger.error(`[invoice] FIX: revived-prepay setup retire failed for ${prepayInvoiceId}: ${err.message} — reconcile the setup manually`);
       return null;
     }
   },

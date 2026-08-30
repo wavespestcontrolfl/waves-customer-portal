@@ -1271,7 +1271,17 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           constants.RODENT.baitBracketExtension.perVisitPerStep = Math.round(Number(ext.per_visit_per_step ?? ext.perVisitPerStep) * 100) / 100;
         }
       }
-      if (Number(rb.visits_per_year) > 0) constants.RODENT.baitVisitsPerYear = Number(rb.visits_per_year);
+      // Quarterly is an INVARIANT, not a knob (codex #3591 r45 P2): customer
+      // copy and follow-up seeding are hard-quarterly (admin PUT enforces
+      // exactly 4), so a seeded/imported row with any other cadence must not
+      // reach the pricer — it would charge for N applications while
+      // describing and scheduling four.
+      const rbVisits = Number(rb.visits_per_year);
+      if (rbVisits === 4) {
+        constants.RODENT.baitVisitsPerYear = 4;
+      } else if (rbVisits > 0) {
+        console.warn(`[db-bridge] rodent_bait_brackets.visits_per_year=${rbVisits} rejected — the bait program is quarterly by invariant (4); keeping ${constants.RODENT.baitVisitsPerYear}`);
+      }
     }
     // One-time setup fee for non-WaveGuard members (owner 2026-08-29: $99;
     // migration 20260829000040 rewrites the legacy $199 row). A zero/absent

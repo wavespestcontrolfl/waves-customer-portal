@@ -1811,11 +1811,18 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             // the list rate instead of the engine-authorized net.
             perApplicationBilled: item.perApplicationBilled === true ? true : undefined,
             stations: Number(item.stations) > 0 ? Number(item.stations) : undefined,
-            // Tier-count opt-out frozen at quote time (codex #3591 r23 P1
-            // parity with the automated-lead mirror; the %-exclusion flags
-            // above already ride generically).
-            ...(item.service === 'rodent_bait' && (item.tierQualifier === false || item.countsTowardWaveGuardTier === false)
-              ? { tierQualifier: false, countsTowardWaveGuardTier: false }
+            // WaveGuard posture frozen EXPLICITLY at quote time (codex #3591
+            // r45 local P0): the default qualifying/discountable posture must
+            // survive this compact mirror too, or the replay signal reads
+            // null and a later admin flag flip re-prices the sent token.
+            ...(item.service === 'rodent_bait'
+              && (item.perApplicationBilled === true || Number(item.stations) > 0 || item.pricingBasis === 'RODENT_BAIT_BRACKET')
+              ? {
+                tierQualifier: item.tierQualifier !== false && item.countsTowardWaveGuardTier !== false,
+                countsTowardWaveGuardTier: item.tierQualifier !== false && item.countsTowardWaveGuardTier !== false,
+                excludeFromPctDiscount: item.excludeFromPctDiscount === true || item.waveGuardDiscountEligible === false,
+                waveGuardDiscountEligible: !(item.excludeFromPctDiscount === true || item.waveGuardDiscountEligible === false),
+              }
               : {}),
           })),
           waveGuard: estimate?.waveGuard || null,

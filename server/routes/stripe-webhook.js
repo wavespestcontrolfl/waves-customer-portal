@@ -3337,18 +3337,15 @@ async function handleChargeRefunded(charge) {
             const refInvPi = refInvoice?.stripe_payment_intent_id ? String(refInvoice.stripe_payment_intent_id) : null;
             const rowPi = row.stripe_payment_intent_id ? String(row.stripe_payment_intent_id) : null;
             if (refInvoice && refInvPi && rowPi && refInvPi === rowPi) {
+              // The rodent setup-obligation restore rides INSIDE
+              // returnAppliedCreditOnRefund's terminal transition (codex
+              // #3591 r45 P1) — by the time this legacy flip runs the
+              // status is already 'refunded', so it matches nothing.
               await returnAppliedCreditOnRefund({ invoiceId: invId, createdBy: 'system:refund_webhook' }, trx);
-              const [refundFlipped] = await trx('invoices')
+              await trx('invoices')
                 .where({ id: invId })
                 .whereIn('status', ['paid', 'processing'])
-                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() })
-                .returning('*');
-              // A refunded standard invoice that billed the rodent
-              // bait-station setup restores the obligation on the living
-              // series (codex #3591 r44 P1); best-effort inside the helper.
-              if (refundFlipped) {
-                await require('../services/invoice').restoreRodentSetupObligationForReversedInvoice(trx, refundFlipped);
-              }
+                .update({ status: 'refunded', paid_at: null, updated_at: trx.fn.now() });
             } else {
               const resolvedReinstated = await trx('stripe_orphan_charges')
                 .where({ resolved: false, source: 'combined_pay_webhook' })

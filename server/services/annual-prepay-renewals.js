@@ -2630,6 +2630,12 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         .update({ status: 'active', updated_at: new Date() })
         .returning('*');
       current = updated || term;
+      // The prepay's setup line is live again — retire any claim the
+      // refund sync restored and re-ledger the record (codex #3591 r45
+      // local P0); idempotent, best-effort inside the helper.
+      if (updated) {
+        await require('./invoice').retireRodentSetupObligationForRevivedPrepay(conn, invoice.id);
+      }
     } else if (nextStatus === 'active' && term.status === 'cancelled') {
       // Lost-dispute revival (see the marker-gated select above). The
       // conditional WHERE keeps it race-safe and replay-idempotent; a miss
@@ -2646,6 +2652,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         // The refund clawed the extension credit; the repayment restores
         // it with the coverage (guards P0). Idempotent (last-event rule).
         await restoreWaveguardExtensionCredits(updated, conn);
+        // …and the setup line is live again — retire the restored claim
+        // and re-ledger the record (codex #3591 r45 local P0).
+        await require('./invoice').retireRodentSetupObligationForRevivedPrepay(conn, invoice.id);
       }
     } else if (nextStatus === 'cancelled') {
       const [updated] = await conn('annual_prepay_terms')

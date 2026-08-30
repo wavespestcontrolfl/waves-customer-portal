@@ -321,10 +321,24 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
 
 function rodentEligibilityFreeze(item = {}) {
   if (String(item?.service || '').toLowerCase() !== 'rodent_bait') return {};
+  // EXPLICIT posture booleans for new-model rows (codex #3591 r45 local
+  // P0): the default qualifying/discountable posture must survive the
+  // mirror too, or the replay signal reads null and a later flag flip
+  // re-prices the sent quote. Legacy rows keep the negative-only stamps.
+  const newModel = item.perApplicationBilled === true || Number(item.stations) > 0 || item.pricingBasis === 'RODENT_BAIT_BRACKET';
+  const nonQualifying = item.tierQualifier === false || item.countsTowardWaveGuardTier === false;
+  const pctExcluded = item.excludeFromPctDiscount === true || item.discountable === false || item.waveGuardDiscountEligible === false;
+  if (newModel) {
+    return {
+      tierQualifier: !nonQualifying,
+      countsTowardWaveGuardTier: !nonQualifying,
+      excludeFromPctDiscount: pctExcluded,
+      waveGuardDiscountEligible: !pctExcluded,
+      ...(pctExcluded ? { discountable: false, discountEligible: false } : {}),
+    };
+  }
   return {
-    ...(item.tierQualifier === false || item.countsTowardWaveGuardTier === false
-      ? { tierQualifier: false, countsTowardWaveGuardTier: false }
-      : {}),
+    ...(nonQualifying ? { tierQualifier: false, countsTowardWaveGuardTier: false } : {}),
     ...(item.excludeFromPctDiscount === true || item.discountable === false
       ? { excludeFromPctDiscount: true, discountable: false, waveGuardDiscountEligible: false, discountEligible: false }
       : {}),
