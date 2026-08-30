@@ -4920,58 +4920,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // A recommendation is "covered" only when EVERY content word appears in
-  // the reviewed narrative — exact for numbers and short words (negation
-  // and short verbs like "not"/"mow" are content, never dropped; codex P1
-  // r6), shared-prefix (≥4 chars) for longer words so inflection matches
-  // ("apply" ≈ "applied", "mow" stays exact and "Do not mow for 48 hrs"
-  // is NOT covered by an irrigation sentence). Only function words are
-  // discarded. Bias runs toward KEEPING the row: a duplicate line is
-  // noise, a dropped instruction is information loss (codex P1 r5).
-  const RECOMMENDATION_STOPWORDS = new Set([
-    'a', 'an', 'the', 'and', 'or', 'for', 'to', 'of', 'on', 'in', 'at',
-    'is', 'are', 'be', 'as', 'by', 'it', 'this', 'that', 'with', 'any',
-    'so', 'from', 'your', 'our', 'you', 'we', 'do', 'please', 'least',
-  ]);
-  const contentTokens = (text) => String(text || '')
-    .toLowerCase()
-    .replace(/n['’]t\b/g, ' not')
-    .replace(/\bhrs?\b/g, 'hours')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w && !RECOMMENDATION_STOPWORDS.has(w));
-  // ONE sentence must carry the whole instruction (codex P1 r7): pooling
-  // tokens across the narrative let "Do not mow for 48 hours. Apply
-  // irrigation…" cover "Do not apply irrigation for 48 hrs" — words from
-  // unrelated sentences, negation cross-attributed. Sentence scope keeps
-  // the correspondence clause-level; the cost is only an occasional
-  // duplicate row, the information-preserving direction.
-  const sentenceCoversAllTokens = (recTokens, sentence) => {
-    const narrativeTokens = [...new Set(contentTokens(sentence))];
-    const narrativeSet = new Set(narrativeTokens);
-    return recTokens.every((token) => {
-      if (narrativeSet.has(token)) return true;
-      // Inflection tolerance for real words only — numbers and short
-      // tokens must match exactly. Two words correspond when they share a
-      // prefix of ≥4 chars covering all but the (≤2-char) inflection tail
-      // of the shorter word: apply≈applied, weed≈weeds — but
-      // irrigation≉irritation (shared 4 ≪ length) and mow matches nothing
-      // inexactly (short → exact-only above).
-      if (token.length < 4 || /^\d+$/.test(token)) return false;
-      return narrativeTokens.some((n) => {
-        if (n.length < 4) return false;
-        let shared = 0;
-        while (shared < token.length && shared < n.length && token[shared] === n[shared]) shared += 1;
-        return shared >= 4 && shared >= Math.min(token.length, n.length) - 2;
-      });
-    });
+  // The ONLY recommendation the fold may drop is the irrigation-hold
+  // instruction, and only when ONE CLAUSE of the reviewed narrative carries
+  // the same instruction at the same-or-longer duration. Three codex rounds
+  // (r5–r8 on #3631) showed general narrative-coverage matching cannot be
+  // made safe — cross-sentence token pooling, then cross-clause negation
+  // ("Apply irrigation for 48 hours, but do not mow" must never cover "Do
+  // not apply irrigation for 48 hrs") — so both sides are fingerprinted
+  // instead: an irrigation/water word AND a hold/negation word AND a
+  // parseable hours duration, co-occurring within a single clause. Every
+  // other recommendation keeps its card row unconditionally. Bias runs
+  // toward KEEPING: a duplicate line is noise, a dropped instruction is
+  // information loss.
+  const IRRIGATION_WORD_RE = /\b(?:irrigat\w*|water\w*)\b/i;
+  const HOLD_WORD_RE = /\b(?:do\s+not|don['’]?t|hold(?:\s+off)?|avoid|wait|skip|withhold|no)\b/i;
+  // An irrigation-hold instruction's duration in hours, or null when the
+  // text is not one (no irrigation word, no hold word, or no duration).
+  const irrigationHoldHours = (text) => {
+    const s = String(text || '');
+    if (!IRRIGATION_WORD_RE.test(s) || !HOLD_WORD_RE.test(s)) return null;
+    const m = s.match(/(\d+(?:\.\d+)?)\s*h(?:ou)?rs?\b/i);
+    return m ? Number(m[1]) : null;
   };
   const recommendationCoveredByNarrative = (rec, narrative) => {
-    const recTokens = [...new Set(contentTokens(rec))];
-    if (!recTokens.length) return false;
+    const recHours = irrigationHoldHours(rec);
+    if (recHours == null) return false;
     return String(narrative || '')
       .split(/[.!?]+/)
-      .some((sentence) => sentence.trim() && sentenceCoversAllTokens(recTokens, sentence));
+      .some((sentence) => sentence
+        .split(/[,;]|\bbut\b|\bhowever\b/i)
+        .some((clause) => {
+          const clauseHours = irrigationHoldHours(clause);
+          return clauseHours != null && clauseHours >= recHours;
+        }));
   };
 
   // Lawn callback reports fold the fragmented cards into the narrative

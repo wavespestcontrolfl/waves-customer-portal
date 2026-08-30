@@ -139,7 +139,7 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     expect(data.recommendations).toContain('Trim shrubs back from the exterior walls before the next visit');
   });
 
-  test('bag-of-words near-misses stay: "Do not mow for 48 hrs" is not covered by an irrigation sentence (codex P1 r6)', async () => {
+  test('non-irrigation instructions always stay: "Do not mow for 48 hrs" is never folded (codex P1 r6)', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const svc = lawnCallbackService({
       structured_notes: JSON.stringify({
@@ -148,6 +148,27 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
     });
     const data = await buildReportV1Data(svc, 'tok-fold-6', makeKnex());
     expect(data.recommendations).toContain('Do not mow for 48 hrs');
+  });
+
+  test('cross-clause negation never covers: "Apply irrigation …, but do not mow" keeps the hold instruction (codex P1 r8)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const svc = lawnCallbackService({
+      technician_notes: [
+        'WHAT WE DID',
+        '',
+        'Weed control was applied across the turf today.',
+        '',
+        'WHAT WE FOUND',
+        '',
+        'Apply irrigation for at least 48 hours to settle the product in, but do not mow until the turf recovers.',
+      ].join('\n'),
+    });
+    const data = await buildReportV1Data(svc, 'tok-fold-7', makeKnex());
+    // The narrative ADVISES irrigation — the opposite of the hold. No
+    // clause carries irrigation + hold + duration together, so the
+    // instruction stays on the card.
+    expect(data.summarySource).toBe('technician_report');
+    expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 
   test('callback with NO reviewed narrative keeps every card — removal never loses the sole record', async () => {
