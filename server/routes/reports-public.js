@@ -166,7 +166,7 @@ const {
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
-const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('../services/service-report/reservice-report');
+const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -1623,6 +1623,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           // leaks a later same-day sibling the moment a rating is submitted
           // (codex P2 #2824 r2).
           currentServiceRecordId: service.id || null,
+          // Same exclusion as buildReportV1Data: this response replaces the
+          // page's filtered history client-side, so without the flag the
+          // callback points reappear the moment a rating is submitted
+          // (codex #3623 r2 P1).
+          excludeCallbacks: reserviceReportCopyGateOn(),
         }).catch(() => [])
       : [];
 
