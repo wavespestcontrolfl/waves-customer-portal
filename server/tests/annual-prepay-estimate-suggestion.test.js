@@ -88,6 +88,13 @@ describe('pickAnnualPrepayEstimate', () => {
     expect(pickAnnualPrepayEstimate([midAge, resent]).id).toBe(resent.id);
   });
 
+  test('price-locked estimates never suggest (money already committed)', () => {
+    const locked = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-08-29T00:00:00Z', price_locked_at: '2026-08-29T01:00:00Z' });
+    const open = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-10T00:00:00Z' });
+    expect(pickAnnualPrepayEstimate([locked, open]).id).toBe(open.id);
+    expect(pickAnnualPrepayEstimate([locked])).toBeNull();
+  });
+
   test('past-due sent/viewed estimates are excluded', () => {
     const expiredViewed = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-26T00:00:00Z' });
     const olderLive = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-10T00:00:00Z', expires_at: '2099-01-01T00:00:00Z' });

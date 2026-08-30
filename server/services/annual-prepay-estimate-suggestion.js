@@ -40,6 +40,10 @@ function pickAnnualPrepayEstimate(estimates = [], { excludeIds = [] } = {}) {
   const ranked = (Array.isArray(estimates) ? estimates : [])
     .filter((e) => e && SUGGESTION_STATUSES[String(e.status)] && !e.archived_at
       && !excluded.has(String(e.id))
+      // A locked price is proof money was already committed by a prior
+      // accept, whatever the status column says (same rule as the accept
+      // claims' whereNull guard).
+      && !e.price_locked_at
       // The expiration sweep isn't the boundary: a still-`sent`/`viewed` row
       // whose expires_at has passed is a stale quote (public helpers reject it
       // the same way).
