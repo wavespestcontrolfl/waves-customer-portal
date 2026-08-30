@@ -149,11 +149,11 @@ function money(value) {
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
 }
 
-function dimensionsFrom(data) {
+function dimensionsFrom(data, resultOverride) {
   // engineInput (singular) is the quote wizard's NORMALIZED, actually-
   // priced input — clamped/trusted values that outrank the raw shapes.
   const inputs = data?.engineInput || data?.inputs || data?.engineInputs || {};
-  const result = data?.result || data?.engineResult || {};
+  const result = resultOverride || data?.result || data?.engineResult || {};
   const property = result.property || {};
   // Nullish-aware pick: a MEASURED 0 is authoritative (computeTurfArea
   // treats any non-negative measured value as final) and must not fall
@@ -635,9 +635,7 @@ function normalizeEngineLineItems(result) {
 
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
-  const result = data.result || data.engineResult || {};
-  const dimensions = dimensionsFrom(data);
-  const inventory = context.inventory || await loadInventoryCostRows();
+  let result = data.result || data.engineResult || {};
   let rawLines = [
     ...normalizeRecurringLines(result),
     ...normalizeOneTimeLines(result),
@@ -646,11 +644,22 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   // engineResult.lineItems (no recurring/oneTime blocks) — without this
   // fallback such snapshots had empty lines, zero cost, and a falsely
   // perfect margin (GH codex P1). An ancillary data.result can shadow
-  // engineResult in the `result` alias, so the fallback tries BOTH.
-  if (!rawLines.length) rawLines = normalizeEngineLineItems(result);
-  if (!rawLines.length && data.engineResult && data.engineResult !== result) {
-    rawLines = normalizeEngineLineItems(data.engineResult);
+  // the priced engineResult in the alias — when the alternate object is
+  // the one with priced lines, it becomes THE result for the whole audit
+  // (dimensions, visit counts, provenance), not just the lines (codex
+  // pre-push P1).
+  if (!rawLines.length) {
+    rawLines = normalizeEngineLineItems(result);
+    if (!rawLines.length && data.engineResult && data.engineResult !== result) {
+      const alt = normalizeEngineLineItems(data.engineResult);
+      if (alt.length) {
+        result = data.engineResult;
+        rawLines = alt;
+      }
+    }
   }
+  const dimensions = dimensionsFrom(data, result);
+  const inventory = context.inventory || await loadInventoryCostRows();
   const lines = [];
 
   for (const raw of rawLines) {

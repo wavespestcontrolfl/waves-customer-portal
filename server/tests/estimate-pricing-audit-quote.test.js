@@ -325,8 +325,8 @@ describe('coverage: every delivery path snapshots', () => {
   });
   test('click-mint delivery saves a cta_mint snapshot after commit, fail-soft', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
-    const idx = src.indexOf("trigger: 'cta_mint'");
+    const idx = src.indexOf("'cta_reuse_backfill' : 'cta_mint'");
     expect(idx).toBeGreaterThan(0);
-    expect(src.slice(idx - 900, idx + 400)).toMatch(/pricing audit snapshot failed \(mint .* stands\)/);
+    expect(src.slice(idx - 1400, idx + 600)).toMatch(/pricing audit snapshot failed \(mint .* stands\)/);
   });
 });

@@ -1283,7 +1283,15 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
                 : null;
               if (!mintedEstimate.reused || !existing) {
                 const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
-                if (mintedRow) await saveEstimatePricingAuditSnapshot(mintedRow, { trigger: 'cta_mint' });
+                // A recovery row for an OLD reused mint quotes the persisted
+                // send-time prices but costs them with TODAY's inventory —
+                // the distinct trigger keeps it from masquerading as a
+                // mint-time record (codex pre-push P1).
+                if (mintedRow) {
+                  await saveEstimatePricingAuditSnapshot(mintedRow, {
+                    trigger: mintedEstimate.reused ? 'cta_reuse_backfill' : 'cta_mint',
+                  });
+                }
               }
             } catch (auditErr) {
               logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
