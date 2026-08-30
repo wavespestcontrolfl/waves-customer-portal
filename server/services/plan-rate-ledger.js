@@ -564,6 +564,11 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
       resource_id: customerId,
       metadata: { source, monthly_rate: rate == null ? null : Number(rate) },
       trx: database,
+      // critical: the cooldown evidence and the rate write commit or fail
+      // TOGETHER — a swallowed insert failure would both lose the 18-month
+      // money evidence and leave the enclosing pg transaction aborted with
+      // no propagated cause.
+      critical: true,
     });
   }
 }

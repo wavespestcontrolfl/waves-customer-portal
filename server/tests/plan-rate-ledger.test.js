@@ -19,7 +19,21 @@ const { classifyAddOnAcceptContext } = require('../services/estimate-converter')
 // where().del(), schema.hasTable).
 function makeLedgerDb(initialRows = [], { hasTable = true } = {}) {
   const store = initialRows.map((r) => ({ ...r }));
+  const auditRows = [];
   const db = (table) => {
+    // Manual-rate cooldown evidence (PR E): human-source syncs write a
+    // critical audit_log event on the same handle — accept and record it.
+    if (table === 'audit_log') {
+      return {
+        insert(row) {
+          auditRows.push({ ...row });
+          return {
+            returning: () => Promise.resolve([{ id: `audit-${auditRows.length}` }]),
+            then(resolve, reject) { return Promise.resolve().then(resolve, reject); },
+          };
+        },
+      };
+    }
     if (table !== 'customer_plan_rates') throw new Error(`unexpected table ${table}`);
     const ctx = { filter: null };
     const q = {
