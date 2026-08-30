@@ -39,6 +39,10 @@ const FAMILY = 'recurring_property_service';
 exports.up = async function up(knex) {
   await knex('services')
     .whereIn('service_key', GROUPABLE_KEYS)
+    // Active-only enforced in the predicate, not just the key list (codex):
+    // a key archived before this runs must stay non-groupable — grouping
+    // reads only groupable/group_family and never rechecks activity.
+    .where({ is_active: true, is_archived: false })
     .update({ groupable: true, group_family: FAMILY });
 };
 
