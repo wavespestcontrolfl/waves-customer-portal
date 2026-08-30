@@ -42,9 +42,13 @@ exports.up = async function up(knex) {
     .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr');
 
   const hasLedger = await knex.schema.hasTable('customer_plan_rates');
+  const hasPrepayTerms = await knex.schema.hasTable('annual_prepay_terms');
+  // ET calendar date for the prepay-coverage window (same rule as the visit
+  // guard below).
+  const [{ et_today: etToday }] = (await knex.raw("SELECT (now() AT TIME ZONE 'America/New_York')::date::text AS et_today")).rows;
 
   for (const customer of candidates) {
-    const [liveSeries, upcoming, inProgress] = await Promise.all([
+    const [liveSeries, upcoming, inProgress, coveredTerm] = await Promise.all([
       knex('scheduled_services')
         .where({ customer_id: customer.id, recurring_ongoing: true })
         .whereNot('status', 'cancelled')
@@ -64,8 +68,19 @@ exports.up = async function up(knex) {
             .orWhereIn('track_state', ['en_route', 'on_property']);
         })
         .first('id'),
+      // Live annual-prepay coverage (deliberately status-blind: ANY term
+      // whose window covers today keeps the account out of this wind-down —
+      // over-skipping is safe, the audit script keeps reporting it; the
+      // opposite mistake deactivates a customer with paid coverage).
+      hasPrepayTerms
+        ? knex('annual_prepay_terms')
+          .where({ customer_id: customer.id })
+          .where('term_start', '<=', etToday)
+          .where('term_end', '>=', etToday)
+          .first('id')
+        : Promise.resolve(null),
     ]);
-    if (liveSeries || upcoming || inProgress) continue; // possibly a mistaken stage-flip — leave for the audit script
+    if (liveSeries || upcoming || inProgress || coveredTerm) continue; // possibly a mistaken stage-flip — leave for the audit script
 
     const update = {
       active: false,

@@ -51,7 +51,16 @@ async function openCancellationCase({
       // reports the cancel as processed — never rewrite recorded facts.
       const repair = {};
       if (processed && existing.status === 'open') repair.status = 'committed';
-      if (!existing.reason_code && isReasonCode(reasonCode)) repair.reason_code = reasonCode;
+      if (!existing.reason_code && isReasonCode(reasonCode)) {
+        repair.reason_code = reasonCode;
+        // The taxonomy travels with the code: a repaired billing_issue must
+        // land in the office review lane like a first-write one would.
+        const repairMeta = reasonCodeMeta(reasonCode);
+        if (repairMeta && repairMeta.hardStop) {
+          repair.hard_stop = true;
+          repair.review_type = repairMeta.reviewType;
+        }
+      }
       const retryCard = resolution && resolution.kind === 'card' ? resolution.card : null;
       if (!existing.resolution_template_id && retryCard) {
         repair.resolution_template_id = retryCard.templateId;

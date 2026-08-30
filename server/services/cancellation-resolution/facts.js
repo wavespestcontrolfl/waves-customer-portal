@@ -91,11 +91,25 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
   if (!customer) return null;
 
   const memberSince = customer.member_since || customer.created_at;
-  const tenureDays = memberSince ? Math.max(0, Math.floor((now.getTime() - new Date(memberSince).getTime()) / DAY_MS)) : 0;
+  // Tenure in ET calendar days (AGENTS.md America/New_York rule): the
+  // 365-day money threshold must not shift around ET midnight or DST, so
+  // both endpoints become ET dates before the day arithmetic.
+  let tenureDays = 0;
+  if (memberSince) {
+    const startEt = dateOnly(memberSince);
+    const endEt = etDateString(now);
+    if (startEt && endEt) {
+      const toUtcMs = (str) => {
+        const [y, m, d] = str.split('-').map(Number);
+        return Date.UTC(y, m - 1, d);
+      };
+      tenureDays = Math.max(0, Math.round((toUtcMs(endEt) - toUtcMs(startEt)) / DAY_MS));
+    }
+  }
 
   const [
     visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
-    findings, complaintRequest, lastComplaint, priorOffer, shownCases, termite, properties, prefs, callbackLanes, families,
+    findings, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families,
   ] = await Promise.all([
     leg('visitCounts', () => db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -169,6 +183,15 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
       .first('granted_at'), 'error'),
+    // Latest manual/admin rate write: every non-estimate ledger source
+    // (scalar_write mirrors admin monthly_rate edits, admin_edit is the IB
+    // path). estimate_accept / legacy_scalar are system provenance, not a
+    // manual override.
+    leg('manualOverride', () => db('customer_plan_rates')
+      .where({ customer_id: customerId })
+      .whereNotIn('source', ['estimate_accept', 'legacy_scalar'])
+      .orderBy('updated_at', 'desc')
+      .first('updated_at'), 'error'),
     leg('shownCases', () => db('cancellation_cases')
       .where({ customer_id: customerId })
       .whereNotNull('resolution_template_id')
@@ -208,13 +231,16 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
   // eligibility. An errored leg resolves to the value that BLOCKS the offer
   // (not current / complaint open / callback open / offer just granted);
   // moneyFactsDegraded records that it happened.
-  const moneyFactsDegraded = [pastDue, failedPayment, complaintRequest, priorOffer, callbackLanes].includes('error');
+  const moneyFactsDegraded = [pastDue, failedPayment, complaintRequest, priorOffer, manualOverride, callbackLanes].includes('error');
   const accountCurrent = (pastDue === 'error' || failedPayment === 'error') ? false : (!pastDue && !failedPayment);
   const openComplaint = complaintRequest === 'error' ? true : !!complaintRequest;
   const openLanes = callbackLanes === 'error' ? ['unknown'] : (Array.isArray(callbackLanes) ? callbackLanes : []);
   const priorOfferAt = priorOffer === 'error'
     ? now.toISOString()
     : (priorOffer && priorOffer.granted_at ? new Date(priorOffer.granted_at).toISOString() : null);
+  const manualOverrideAt = manualOverride === 'error'
+    ? now.toISOString()
+    : (manualOverride && manualOverride.updated_at ? new Date(manualOverride.updated_at).toISOString() : null);
   const completedVisits = num(visitCounts, 'n');
   // Monthly membership: dues cover visits, so no per-visit paid invoice
   // exists — completed visits stand in, with accountCurrent as the money
@@ -243,7 +269,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       ? { date: dateOnly(complaintMsg.created_at), quote: String(complaintMsg.body).trim().slice(0, 140) }
       : null,
     priorRetentionOfferAt: priorOfferAt,
-    manualPriceOverrideAt: null,
+    manualPriceOverrideAt: manualOverrideAt,
     cardsShown12mo: (Array.isArray(shownCases) ? shownCases : []).map((r) => r.resolution_template_id).filter(Boolean),
     tier: customer.waveguard_tier || null,
     monthlyRate: Number(customer.monthly_rate) || 0,

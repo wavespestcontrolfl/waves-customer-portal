@@ -238,7 +238,7 @@ const TEMPLATES = Object.freeze([
     id: 'service_mix_configure',
     reason: 'service_mix',
     headline: 'Keep what you value',
-    body: 'Keep some services and drop the rest — we show the WaveGuard level and the new monthly total for each combination before anything changes.',
+    body: 'Keep some services and drop the rest — we show the WaveGuard level and your new price for each combination before anything changes.',
     slots: {},
     action: { type: 'configure_services' },
   },
