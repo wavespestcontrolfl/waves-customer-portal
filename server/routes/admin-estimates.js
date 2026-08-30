@@ -1566,18 +1566,18 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     // accepted-mid-publication sibling). Fail-soft.
     try {
       const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-      // Build from the PRE-ACCEPT row (freshForSnapshot): the accept
-      // handler rewrites estimate_data.result and the totals for the
-      // customer's chosen frequency, so a post-accept re-read would audit
-      // the accepted state, not the quote that was handed off — and THIS
-      // delivery's freshly built bundle outranks any stale sendSnapshot a
-      // prior send left behind (GH codex P1).
-      let preAcceptData = freshForSnapshot.estimate_data;
+      // Build from the PRE-DELIVERY claimed row (`estimate` — read before
+      // the provider handoff): the accept handler rewrites
+      // estimate_data.result/totals, and even freshForSnapshot is read
+      // after channels delivered, so it can already carry the accepted
+      // state (GH codex P1 x2). THIS delivery's freshly built bundle
+      // outranks any stale sendSnapshot a prior send left behind.
+      let preAcceptData = estimate.estimate_data;
       if (typeof preAcceptData === 'string') { try { preAcceptData = JSON.parse(preAcceptData); } catch { preAcceptData = {}; } }
       preAcceptData = preAcceptData || {};
       const auditRow = {
-        ...freshForSnapshot,
-        status: freshForSnapshot.viewed_at ? 'viewed' : 'sent',
+        ...estimate,
+        status: estimate.viewed_at ? 'viewed' : 'sent',
         estimate_data: builtSendSnapshot
           ? { ...preAcceptData, sendSnapshot: builtSendSnapshot }
           : preAcceptData,

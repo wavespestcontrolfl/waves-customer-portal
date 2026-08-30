@@ -253,9 +253,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     const proposal = {
       enabled: true,
       taxRate: 0.07,
-      buildings: [{ name: 'Warehouse A', lineItems: [{ name: 'Exterior pest program', frequency: 'monthly', amount: 200, annual: 2400, taxable: false }] }],
-      programs: [{ name: 'Turf Treatment Program', pricePerApplication: 300, frequencyPerYear: 6, annual: 1800, taxable: true }],
-      correctiveWork: [{ description: 'Door sweep install', amount: 450, taxable: true }],
+      buildings: [{ name: 'Warehouse A', lineItems: [{ description: 'Exterior pest program', frequency: 'quarterly', unitPrice: 200, quantity: 1, taxable: false }] }],
+      programs: [{ label: 'Turf Treatment Program', service: 'lawn', pricePerApplication: 300, frequencyPerYear: 6, taxable: true }],
+      correctiveWork: [{ label: 'Door sweep install', amount: 450, taxable: true }],
     };
     const audit = await buildEstimatePricingAudit({
       id: 'est-prop', status: 'sent', monthly_total: '350.00', annual_total: '4200.00', onetime_total: '450.00',
@@ -267,6 +267,8 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     // Proposal itemization is authoritative — the stale engine line is gone.
     expect(audit.lines.some((l) => /stale/i.test(l.label))).toBe(false);
     expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 1800, visitsPerYear: 6 });
+    // Quarterly building line annualizes by its FREQUENCY (200 × 4), not ×12.
+    expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800 });
     expect(audit.lines.find((l) => /door sweep/i.test(l.label))).toMatchObject({ cadence: 'one_time', price: 450 });
     expect(audit.quote.proposal).toEqual(proposal);
   });

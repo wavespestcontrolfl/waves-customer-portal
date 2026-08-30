@@ -676,8 +676,14 @@ function normalizeEngineLineItems(result) {
 
 // An AUTHORED proposal is the authoritative customer quote — its building
 // line items, service programs, and corrective work replace the engine
-// lines entirely (GH codex P1). Unmapped keys keep honest unmapped COGS.
-function normalizeProposalLines(proposal) {
+// lines entirely (GH codex P1). Operates on the CANONICAL normalized
+// proposal (estimate-proposal.js's normalizeProposal — the same shape the
+// PDF and billing read), so field names and annualization can never drift
+// from the persisted schema (GH codex P1: description/label fields,
+// frequency-aware annualization via annualizedAmount).
+function normalizeProposalLines(estimate) {
+  const { normalizeProposal, annualizedAmount } = require('./estimate-proposal');
+  const proposal = normalizeProposal(estimate);
   if (!proposal || proposal.enabled !== true) return [];
   const lines = [];
   const push = (name, cadence, amount, extra = {}) => {
@@ -698,24 +704,26 @@ function normalizeProposalLines(proposal) {
   };
   for (const building of proposal.buildings || []) {
     for (const item of building.lineItems || []) {
-      if (item.frequency === 'one_time') push(item.name || building.name, 'one_time', item.amount);
+      if (item.frequency === 'one_time') push(item.description || building.name, 'one_time', item.amount);
       else {
-        const annual = pickNum(item.annual) ?? (numOrNaN(item.amount) * (pickNum(item.frequencyPerYear) || 12));
-        push(item.name || building.name, 'recurring', annual);
+        push(item.description || building.name, 'recurring', annualizedAmount(item), {
+          quoted: { frequency: item.frequency, amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
+        });
       }
     }
   }
   for (const program of proposal.programs || []) {
-    push(program.name || program.serviceType, 'recurring', program.annual, {
+    push(program.label || program.service, 'recurring', program.annual, {
       quoted: {
+        service: program.service,
         pricePerApplication: program.pricePerApplication,
         visitsPerYear: program.frequencyPerYear,
       },
-      ...(pickNum(program.frequencyPerYear) ? { visitsPerYear: Number(program.frequencyPerYear) } : {}),
+      ...(Number(program.frequencyPerYear) > 0 ? { visitsPerYear: Number(program.frequencyPerYear) } : {}),
     });
   }
   for (const work of proposal.correctiveWork || []) {
-    push(work.name || work.description || 'Corrective work', 'one_time', work.amount);
+    push(work.label || 'Corrective work', 'one_time', work.amount);
   }
   return lines;
 }
@@ -724,7 +732,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
   let result = data.result || data.engineResult || {};
   let rawLines = data.proposal?.enabled === true
-    ? normalizeProposalLines(data.proposal)
+    ? normalizeProposalLines(estimate)
     : [
       ...normalizeRecurringLines(result),
       ...normalizeOneTimeLines(result),
