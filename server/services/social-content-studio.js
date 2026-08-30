@@ -756,20 +756,19 @@ function liveUrlForRow(row = {}) {
 
 // Liveness probe for a link about to ship to every network. The DB stamp says
 // the page WAS live; the hub can still retire/rename it (redirect rules,
-// content rebases). Only wavespestcontrol.com is probed, and the response must
-// be a 200 at the SAME canonical URL — a retired path that 301s to the
-// homepage or another post is "ok" to fetch but is not this page, and the
-// server-side request must never be redirected off-domain. Any failure = dead.
+// content rebases). Only wavespestcontrol.com is probed, and only a direct
+// 200 at the stamped URL counts: redirects are NOT followed, so a retired
+// path that 301s to the homepage/another post reads as dead, and the
+// server-side request can never be steered off-domain by a redirect. The
+// stamped astro_live_url is already the hub's canonical form (trailing
+// slash), so a live page never needs a hop. Any failure = dead.
 const HUB_HOST = /(^|\.)wavespestcontrol\.com$/i;
 async function linkIsLive(url, fetchImpl = globalThis.fetch) {
   try {
     const parsed = new URL(String(url || ''));
     if (!HUB_HOST.test(parsed.hostname)) return false;
-    const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(10000) });
-    if (!res?.ok) return false;
-    const finalUrl = new URL(String(res.url || parsed.href));
-    if (!HUB_HOST.test(finalUrl.hostname)) return false;
-    return normalizeUrl(finalUrl.href) === normalizeUrl(parsed.href);
+    const res = await fetchImpl(parsed.href, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10000) });
+    return !!res?.ok;
   } catch {
     return false;
   }

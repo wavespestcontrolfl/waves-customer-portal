@@ -643,18 +643,15 @@ describe('studio link gate (live-only, topic-matched, probed)', () => {
     expect(await Studio.linkIsLive('', ok)).toBe(false);
   });
 
-  test('linkIsLive requires the 200 to land on the SAME canonical URL — a redirect elsewhere is dead', async () => {
+  test('linkIsLive never follows redirects — a retired path that 301s elsewhere is dead', async () => {
     const page = 'https://www.wavespestcontrol.com/pest-control/garage-door-seal-roaches-parrish-fl/';
-    // Retired path 301 → homepage: fetch is "ok" but it is not this page.
-    const toHome = async () => ({ ok: true, url: 'https://www.wavespestcontrol.com/' });
-    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/retired-post/', toHome)).toBe(false);
-    // Redirected off-domain by the trusted host: dead.
-    const offDomain = async () => ({ ok: true, url: 'https://evil.example.com/' });
-    expect(await Studio.linkIsLive(page, offDomain)).toBe(false);
-    // Canonical-only hops (http→https, trailing slash) are the same page.
-    const slashHop = async () => ({ ok: true, url: page.replace(/\/$/, '') });
-    expect(await Studio.linkIsLive(page, slashHop)).toBe(true);
-    // A fetch impl without res.url (older mocks/runtimes) is judged on the request URL.
-    expect(await Studio.linkIsLive(page, async () => ({ ok: true }))).toBe(true);
+    const calls = [];
+    // With redirect:'manual' a 301 comes back as a non-ok response — the
+    // server never requests the Location target (homepage, another post, or
+    // an off-domain host).
+    const redirecting = async (url, opts) => { calls.push(opts.redirect); return { ok: false, status: 301, headers: new Map([['location', 'https://evil.example.com/']]) }; };
+    expect(await Studio.linkIsLive('https://www.wavespestcontrol.com/retired-post/', redirecting)).toBe(false);
+    expect(calls).toEqual(['manual']);
+    expect(await Studio.linkIsLive(page, async () => ({ ok: true, status: 200 }))).toBe(true);
   });
 });
