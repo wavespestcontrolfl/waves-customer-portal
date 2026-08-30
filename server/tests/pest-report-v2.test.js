@@ -73,6 +73,38 @@ describe('buildPestReportV2 — callback defense suppression (owner 2026-08-30)'
     expect(out).toBeNull();
   });
 
+  it('sparse callback keeps the shell when the concern card or receipt is the remaining content (codex P1 r1)', () => {
+    // Defense + receipt only — the deliberate schematic removal must not be
+    // what empties the dashboard on a complaint visit.
+    const receiptOnly = buildPestReportV2({
+      premiumExperience: premium({ primaryMove: null, bugFiles: [], weatherCall: null }),
+      suppressDefense: true,
+    });
+    expect(receiptOnly).not.toBeNull();
+    expect(receiptOnly.defense).toBeNull();
+    expect(receiptOnly.pressureReceipt).toBeTruthy();
+
+    const concernOnly = buildPestReportV2({
+      premiumExperience: premium({
+        primaryMove: null, bugFiles: [], pressureReceipt: null, weatherCall: null,
+      }),
+      suppressDefense: true,
+      customerConcern: 'Ants keep showing up around the kitchen window.',
+    });
+    expect(concernOnly).not.toBeNull();
+    expect(concernOnly.defense).toBeNull();
+    expect(concernOnly.customerConcern).toBeTruthy();
+
+    // A REGULAR visit with the same sparse content still composes no shell —
+    // the widened predicate is scoped to the suppression.
+    const regularSparse = buildPestReportV2({
+      premiumExperience: premium({
+        propertyDefenseStatus: null, primaryMove: null, bugFiles: [], weatherCall: null,
+      }),
+    });
+    expect(regularSparse).toBeNull();
+  });
+
   it('default (regular visits) keeps the defense rows', () => {
     const out = buildPestReportV2({ premiumExperience: premium() });
     expect(out.defense?.items?.length).toBeGreaterThan(0);

@@ -252,8 +252,19 @@ function buildPestReportV2({
   // guard) — an unscreenable concern drops the card rather than the report.
   const concernCard = buildCustomerConcernCard(customerConcern);
 
-  // Nothing meaningful to show → don't render an empty V2 shell.
-  if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
+  // Nothing meaningful to show → don't render an empty V2 shell. Under
+  // suppressDefense the DELIBERATE removal of the schematic must not be
+  // what empties the shell (codex P1 r1): a callback whose remaining
+  // content is the concern card, the tech-reviewed summary, the receipt,
+  // or the weather call keeps the dashboard — on a complaint visit those
+  // are exactly the customer-issue content. Regular visits keep the
+  // original predicate unchanged.
+  const emptyByOriginalPredicate = !defense && !primaryMove && !bugFiles.length
+    && !supportingMetric && !forecastCard;
+  const suppressedCallbackContent = suppressDefense && Boolean(
+    aiSummary || concernCard || premiumExperience.pressureReceipt || premiumExperience.weatherCall,
+  );
+  if (emptyByOriginalPredicate && !suppressedCallbackContent) {
     return null;
   }
 
