@@ -2,7 +2,7 @@
 // customer-ready price from an unsupported grass type or a low-confidence
 // turf basis without a review marker, and the lead automation gate must
 // consult estimate-level fieldVerify flags before auto-generating a draft.
-const { priceLawnCare, normalizeGrassType } = require('../services/pricing-engine/service-pricing');
+const { priceLawnCare, priceOneTimeLawn, normalizeGrassType } = require('../services/pricing-engine/service-pricing');
 const {
   buildAutomatedLeadDraftEstimate,
   evaluateLeadEstimateAutomationReadiness,
@@ -34,6 +34,18 @@ describe('lawn grass-type substitution is loud, never silent', () => {
       expect(result.requiresManualReview).toBe(false);
       expect(result.manualReviewReasons).toEqual([]);
     }
+  });
+
+  test('one-time lawn inherits the review contract from the underlying pricer', () => {
+    const result = priceOneTimeLawn(property, { track: 'paspalum' });
+    expect(result.grassTypeWasDefaulted).toBe(true);
+    expect(result.requestedGrassType).toBe('paspalum');
+    expect(result.requiresManualReview).toBe(true);
+    expect(result.manualReviewReasons).toContain('unknown_grass_type_priced_st_augustine');
+
+    const clean = priceOneTimeLawn(property, { track: 'st_augustine' });
+    expect(clean.requiresManualReview).toBe(false);
+    expect(clean.price).toBe(result.price);
   });
 
   test('normalizeGrassType keeps its historical default contract', () => {

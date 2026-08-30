@@ -5671,6 +5671,13 @@ function priceOneTimeLawn(property, options = {}) {
     baselinePricingBasis: lawnResult.pricingBasis,
     baselinePricingSource: lawnResult.pricingSource,
     customQuoteFlag: lawnResult.customQuoteFlag,
+    // Review contract rides through from the underlying lawn pricer —
+    // a one-time-only paspalum or low-confidence-turf quote must park for
+    // every consumer, not only classifyLane's track comparison (codex P1).
+    requestedGrassType: lawnResult.requestedGrassType,
+    grassTypeWasDefaulted: lawnResult.grassTypeWasDefaulted,
+    requiresManualReview: lawnResult.requiresManualReview,
+    manualReviewReasons: lawnResult.manualReviewReasons,
     notes: lawnResult.notes || [],
   };
 }

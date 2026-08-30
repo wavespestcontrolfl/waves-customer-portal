@@ -2694,7 +2694,19 @@ export function calculateEstimate(inputs) {
     else if (otLawnType === 'PEST') { tm = 1.30; tl = 'Lawn Pest'; }
     else if (otLawnType === 'FUNGICIDE') { tm = 1.38; tl = 'Fungicide'; }
     const fp = Math.max(115, otP(Math.max(115, Math.round(bl * tm))));
-    otItems.push({ name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl });
+    if (grassTypeWasDefaulted && !notes.some(n => n.type === 'LAWN_UNKNOWN_GRASS')) {
+      notes.push({
+        type: 'LAWN_UNKNOWN_GRASS',
+        text: `Grass type "${requestedGrassType}" is not a supported track — priced off the St. Augustine table pending review.`,
+        priority: 'HIGH',
+      });
+    }
+    otItems.push({
+      name: 'OT Lawn (' + tl + ')', price: fp, detail: 'Single visit', lawnType: tl,
+      // Same send-gate marker as the recurring lawnMeta — a one-time-only
+      // quote on an unsupported grass type must not be sendable unreviewed.
+      ...(grassTypeWasDefaulted ? { requiresCustomQuote: true, requestedGrassType } : {}),
+    });
   }
 
   /* ── One-Time Mosquito ───────────────────────────────────── */
