@@ -192,6 +192,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
             { service: 'flea_package', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
+            // Termite specialties keep their raw id (honest unmapped beats
+            // a bait-COGS mislabel), and adjustment rows skip COGS.
+            { service: 'termite_foam', name: 'Termite Foam Treatment', price: 300, monthly: null },
+            { service: 'rodent_bundle_discount', name: 'Rodent trap bundle', price: -50, monthly: null },
             // Manual discount lands ONLY in manualFinalAnnual — the audited
             // monthly must derive from it, not the stale monthlyAfterDiscount.
             { service: 'tree_shrub', name: 'Tree & Shrub', monthly: 40, monthlyAfterDiscount: 40, annual: 480, manualFinalAnnual: 420 },
@@ -201,7 +205,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
-    expect(audit.lines).toHaveLength(6);
+    expect(audit.lines).toHaveLength(8);
+    expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
+    const adj = audit.lines.find((l) => l.serviceKey === 'rodent_bundle_discount');
+    expect(adj.cogs.status).toBe('not_applicable'); // adjustment rows never mint missing-COGS risk
     const ts = audit.lines.find((l) => l.serviceKey === 'tree_shrub');
     expect(ts).toMatchObject({ price: 420, monthly: 35, priceBeforeDiscount: 480 });
     const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
@@ -219,10 +226,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     const pest = audit.lines.find((l) => l.serviceKey === 'pest_control');
     expect(pest).toMatchObject({ cadence: 'recurring', monthly: 55, price: 660, priceBeforeDiscount: 733.33, discount: 0.1, priceSource: 'saved_estimate.engineResult.lineItems' });
     expect(pest.quoted).toMatchObject({ pricingVersion: 'v2' });
-    // Unmapped engine id resolves through the label's SERVICE_MAP match.
+    // Verified engine-id alias resolves to its COGS family.
     const flea = audit.lines.find((l) => /flea/.test(l.serviceKey));
-    expect(flea).toMatchObject({ cadence: 'one_time', price: 150 });
-    expect(flea.serviceKey).not.toBe('flea_package');
+    expect(flea).toMatchObject({ serviceKey: 'flea', cadence: 'one_time', price: 150 });
   });
 
   test('a measured ZERO turf survives — never falls through to an estimate', async () => {

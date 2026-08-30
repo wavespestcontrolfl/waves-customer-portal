@@ -547,14 +547,20 @@ function normalizeEngineLineItems(result) {
   const items = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lines = [];
   for (const item of items) {
-    // Engine service IDs (flea_package, stinging_insect_v2, …) are not all
-    // SERVICE_MAP keys — when the raw id has no COGS mapping but the LABEL
-    // pattern-matches one, prefer the mapped key so the line doesn't
-    // record zero COGS + a false unmapped risk (codex pre-push P1).
-    const byName = keyFromName(item.name);
+    // Engine service IDs are not all SERVICE_MAP keys. VERIFIED aliases
+    // map to their COGS family; everything else keeps its RAW id — an
+    // honest unmapped warning beats keyFromName's broad label patterns,
+    // which would cost termite specialties (foam/bond/station rental) as
+    // bait treatments (codex pre-push P1 x2).
+    const ENGINE_ID_ALIASES = {
+      flea_package: 'flea',
+      flea_knockdown_single: 'flea',
+      stinging_insect: 'stinging',
+      stinging_insect_v2: 'stinging',
+    };
     const serviceKey = SERVICE_MAP[item.service]
       ? item.service
-      : (SERVICE_MAP[byName] ? byName : (item.service || byName));
+      : (ENGINE_ID_ALIASES[item.service] || item.service || keyFromName(item.name));
     const quoted = quotedFieldsFrom(item);
     // Number(null) is a finite 0 — nullish values must fall through, not
     // zero out revenue or cadence (codex pre-push P1 x2).
@@ -597,7 +603,14 @@ function normalizeEngineLineItems(result) {
     const mosquitoExtras = /mosquito/.test(String(serviceKey))
       ? mosquitoCogs(item.program ?? item.selectedProgram ?? item.tier, item.addOns || {})
       : null;
+    // Synthetic adjustment rows (bundle discounts, credits) are not
+    // services — costing them minted a false missing-COGS risk (codex
+    // pre-push P2).
+    const isAdjustment = price < 0
+      || /(_|^)(discount|credit)s?($|_)/.test(String(item.service || ''))
+      || /discount|credit/i.test(String(item.name || '')) && price <= 0;
     lines.push({
+      ...(isAdjustment ? { skipCogs: true } : {}),
       ...(mosquitoExtras ? {
         cogsServiceTypes: mosquitoExtras.serviceTypes,
         cogsServiceTypeFixedMultipliers: mosquitoExtras.serviceTypeFixedMultipliers,
