@@ -414,7 +414,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
         // step 2 dropped the legacy 2-column key: the probe is scoped to the row's
         // OWN location ('-' included), so a Venice row may move onto a page a
         // Sarasota row already holds.
-        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key, exactLocation: true });
+        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');

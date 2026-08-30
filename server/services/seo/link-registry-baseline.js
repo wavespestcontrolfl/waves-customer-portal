@@ -278,7 +278,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
       if (!dryRun) await lockProspectDomain(q, d.host);
       for (const g of d.groups.values()) {
         const rep = g.rows[0];
-        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true, columns: PLACEMENT_COLUMNS });
+        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, columns: PLACEMENT_COLUMNS });
         if (placement) { out.placementsExisting += 1; if (!dryRun) out.placementsReconciled += await reconcilePlacement(q, placement, rep, now); }
         else if (dryRun) out.placementsCreated += 1;
         else {
@@ -289,7 +289,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
             .onConflict().ignore()
             .returning(['id']);
           if (ins && ins.length) { placement = ins[0]; out.placementsCreated += 1; } else {
-            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true, columns: PLACEMENT_COLUMNS });
+            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, columns: PLACEMENT_COLUMNS });
             if (!placement) throw new Error(`link-registry-baseline: lost race creating placement ${d.host} → ${g.targetPage}`);
             out.placementsExisting += 1;
             out.placementsReconciled += await reconcilePlacement(q, placement, rep, now);

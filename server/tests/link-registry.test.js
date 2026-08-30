@@ -164,6 +164,11 @@ function fakeDb({ domains = [] } = {}) {
             }
             throw new Error(`unexpected insert into ${table}`);
           }
+          if (table === 'seo_link_domain_sources') {
+            let rows = store.sources;
+            if (st.where) rows = rows.filter((d) => Object.entries(st.where).every(([k, v]) => d[k] === v));
+            return rows;
+          }
           if (table === 'seo_link_intake_items') {
             let rows = store.items;
             if (st.where) rows = rows.filter((d) => Object.entries(st.where).every(([k, v]) => d[k] === v));
@@ -192,14 +197,14 @@ describe('ensureDomain (the one registry upsert)', () => {
   test('inserts the canonical host with first-touch source + a touch row; a repeat is a no-op touch; first-touch source never rewritten', async () => {
     const db = fakeDb();
     const a = await ensureBoth(db, { domain: 'HTTPS://WWW.Example.com/path', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
-    expect(a).toEqual({ id: 'd1', domain: 'example.com', created: true, touched: true });
+    expect(a).toEqual({ id: 'd1', domain: 'example.com', created: true, touched: true, touchId: 's1' });
     expect(db._store.domains[0]).toMatchObject({ domain: 'example.com', source: 'list_import', source_detail: 'paste:2026-08-28', discovery_priority: 'normal', agent_state: 'new' });
     expect(db._store.sources[0]).toMatchObject({ domain_id: 'd1', source: 'list_import', touch_key: 'list_import:paste:2026-08-28' });
     const b = await ensureBoth(db, { domain: 'example.com', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
-    expect(b).toEqual({ id: 'd1', domain: 'example.com', created: false, touched: false });
+    expect(b).toEqual({ id: 'd1', domain: 'example.com', created: false, touched: false, touchId: 's1' }); // the touch it landed on, even when already there
     // a different feeder touches the same host: new touch row, source untouched
     const c = await ensureBoth(db, { domain: 'example.com', source: 'competitor_gap', sourceRef: 'gap-1' });
-    expect(c).toEqual({ id: 'd1', domain: 'example.com', created: false, touched: true });
+    expect(c).toEqual({ id: 'd1', domain: 'example.com', created: false, touched: true, touchId: 's2' });
     expect(db._store.domains[0].source).toBe('list_import');
     expect(db._store.sources.map((s) => s.touch_key)).toEqual(['list_import:paste:2026-08-28', 'competitor_gap:gap-1']);
     expect(db._store.updates).toEqual([]);

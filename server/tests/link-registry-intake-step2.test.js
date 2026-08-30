@@ -47,7 +47,7 @@ function makeDb(answers = {}) {
 
 beforeEach(() => {
   registry.ensureDomain.mockReset();
-  registry.ensureDomain.mockImplementation(async (_q, { domain }) => ({ id: `id-${domain}`, domain, created: true, touched: true }));
+  registry.ensureDomain.mockImplementation(async (_q, { domain }) => ({ id: `id-${domain}`, domain, created: true, touched: true, touchId: `touch-${domain}` }));
 });
 
 describe('parseOpportunities (step 2 shape)', () => {
@@ -112,7 +112,7 @@ describe('intake — persists every reference as an intake item', () => {
     expect(registry.ensureDomain).toHaveBeenCalledTimes(1);
     expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'academia.edu', source: 'list_import', sourceDetail: 'paste:2026-08-30' }));
     expect(inserted).toEqual([
-      expect.objectContaining({ raw_url: 'academia.edu', state: 'resolved', resolved_host: 'academia.edu', domain_id: 'id-academia.edu', item_key: 'list_import:https://academia.edu' }),
+      expect.objectContaining({ raw_url: 'academia.edu', state: 'resolved', resolved_host: 'academia.edu', domain_id: 'id-academia.edu', source_row_id: 'touch-academia.edu', item_key: 'list_import:https://academia.edu' }),
       expect.objectContaining({ raw_url: 'bit.ly/abc', state: 'pending', domain_id: null }),
       expect.objectContaining({ raw_url: 'google.com', state: 'dropped', drop_reason: 'never_a_target' }),
     ]);
@@ -190,7 +190,7 @@ describe('resolveIntakeItems — sweep', () => {
     expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'example.org', source: 'list_import', sourceDetail: 'paste:x https://Example.org/page?a=1' }));
     // hold, then final resolved write
     expect(db.updates[0].set).toEqual({ next_retry_at: new Date(now.getTime() + _internals.CLAIM_HOLD_MS) });
-    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'resolved', resolved_host: 'example.org', domain_id: 'id-example.org', attempts: 1, next_retry_at: null }));
+    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'resolved', resolved_host: 'example.org', domain_id: 'id-example.org', source_row_id: 'touch-example.org', attempts: 1, next_retry_at: null }));
     expect(r).toEqual(expect.objectContaining({ claimed: 1, resolved: 1 }));
   });
 

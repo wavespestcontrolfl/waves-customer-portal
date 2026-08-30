@@ -39,7 +39,7 @@ exports.up = async function (knex) {
       t.text('last_error');
       t.text('resolved_url'); t.text('resolved_host');
       t.uuid('domain_id').references('id').inTable('seo_link_domains').onDelete('SET NULL');
-      t.uuid('source_row_id');
+      t.uuid('source_row_id').references('id').inTable('seo_link_domain_sources').onDelete('SET NULL'); // the provenance touch a resolution landed on
       t.string('drop_reason');
       t.timestamp('first_seen_at').notNullable().defaultTo(knex.fn.now());
       t.timestamp('last_seen_at').notNullable().defaultTo(knex.fn.now());
@@ -80,6 +80,14 @@ exports.up = async function (knex) {
   // constraintless ON CONFLICT DO NOTHING (pinned by
   // admin-backlink-agent-v2-step1.test.js), so the legacy key goes here:
   // per-location rows for the same (domain, page) become possible.
+  // Re-run step 1's location_key backfill FIRST: an old pod placing during
+  // the step-1 rolling deploy stamped only quality_signals.location and left
+  // location_key at '-' (signup-runner's temporary fallback). Guarded so a
+  // backfill never collides with a row already holding that (domain, page,
+  // location) under the wider key.
+  await knex.raw(`UPDATE seo_link_prospects p SET location_key = p.quality_signals->>'location'
+    WHERE p.location_key = '-' AND COALESCE(p.quality_signals->>'location', '') NOT IN ('', 'default')
+      AND NOT EXISTS (SELECT 1 FROM seo_link_prospects o WHERE o.target_domain = p.target_domain AND o.target_page = p.target_page AND o.location_key = p.quality_signals->>'location')`);
   await knex.raw(`ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS ${LEGACY_PLACEMENT_UNIQUE}`);
 };
 

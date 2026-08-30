@@ -85,6 +85,10 @@ describe('up()', () => {
     expect(hasMod(colOf(items, 'attempts'), 'defaultTo', [0])).toBe(true);
     expect(hasMod(colOf(items, 'first_seen_at'), 'defaultTo', ['now()'])).toBe(true);
     expect(hasMod(colOf(items, 'last_seen_at'), 'defaultTo', ['now()'])).toBe(true);
+    // source_row_id → the seo_link_domain_sources touch a resolution landed on, SET NULL
+    const sourceRow = colOf(items, 'source_row_id');
+    expect(hasMod(sourceRow, 'inTable', ['seo_link_domain_sources'])).toBe(true);
+    expect(hasMod(sourceRow, 'onDelete', ['SET NULL'])).toBe(true);
     // domain_id → seo_link_domains, SET NULL (a deleted registry row never deletes the audit of what was fed)
     const domainId = colOf(items, 'domain_id');
     expect(hasMod(domainId, 'inTable', ['seo_link_domains'])).toBe(true);
@@ -136,13 +140,18 @@ describe('up()', () => {
     await migration.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
-    expect(knex._raws).toEqual(['ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique']);
+    expect(knex._raws.filter((r) => !/^UPDATE seo_link_prospects p SET location_key/.test(r))).toEqual(['ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique']);
   });
 
   test('CONTRACT: drops the legacy UNIQUE (target_domain, target_page) that step 1 kept through its rolling deploy (IF EXISTS: re-runs are safe)', async () => {
     const knex = fakeKnex();
     await migration.up(knex);
     expect(knex._raws[knex._raws.length - 1]).toBe('ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique');
+    // step 1's location_key backfill is re-run right before the drop, guarded against the wider key
+    const backfill = knex._raws[knex._raws.length - 2];
+    expect(backfill).toMatch(/^UPDATE seo_link_prospects p SET location_key = p\.quality_signals->>'location'/);
+    expect(backfill).toMatch(/p\.location_key = '-' AND COALESCE\(p\.quality_signals->>'location', ''\) NOT IN \('', 'default'\)/);
+    expect(backfill).toMatch(/NOT EXISTS \(SELECT 1 FROM seo_link_prospects o WHERE o\.target_domain = p\.target_domain AND o\.target_page = p\.target_page AND o\.location_key = p\.quality_signals->>'location'\)/);
     // no prospect writer may name that constraint as an ON CONFLICT target
     const routes = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(routes).not.toMatch(/onConflict\(\[/);

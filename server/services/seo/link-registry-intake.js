@@ -165,6 +165,7 @@ async function upsertItem(q, item) {
     resolved_url: item.resolvedUrl || null,
     resolved_host: item.resolvedHost || null,
     domain_id: item.domainId || null,
+    source_row_id: item.sourceRowId || null,
     drop_reason: item.dropReason || null,
     last_error: null,
   };
@@ -216,7 +217,7 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
       for (const raw of c.raws) {
         const it = await upsertItem(trx, {
           source, sourceDetail, sourceRef, rawUrl: raw, state: 'resolved',
-          resolvedUrl: toUrl(raw), resolvedHost: c.domain, domainId: r.id,
+          resolvedUrl: toUrl(raw), resolvedHost: c.domain, domainId: r.id, sourceRowId: r.touchId,
         });
         base.items[it.created ? 'created' : 'seen'] += 1;
       }
@@ -397,7 +398,7 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
             const d = await registry.ensureDomain(trx, {
               domain: host, source: item.source, sourceDetail: touchDetail(item.source_detail, page.finalUrl, null), sourceRef: item.source_ref,
             });
-            await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, last_error: null, next_retry_at: null });
+            await finalize(trx, item, { state: 'resolved', attempts, resolved_url: page.finalUrl, resolved_host: host, domain_id: d.id, source_row_id: d.touchId || null, last_error: null, next_retry_at: null });
           });
           out.resolved += 1;
           continue;

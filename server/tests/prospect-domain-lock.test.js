@@ -64,7 +64,7 @@ describe('prospect-domain-lock helper', () => {
     const trx = jest.fn(() => q);
     const r = await findPlacementRow(trx, 'WWW.Blog.Example', 'http://www.wavespestcontrol.com/x/?utm=1', { excludeId: 'me' });
     expect(r).toEqual({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' });
-    expect(captured.loc).toBeUndefined(); // default '-' = location-AGNOSTIC (the legacy 2-col unique is live through the expand phase)
+    expect(captured.loc).toEqual(['location_key', '-']); // '-' is the unscoped identity, never a wildcard (legacy 2-col key gone since step 2)
     expect(captured.sql).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
     expect(captured.bind).toEqual(['blog.example']);
     expect(captured.pages[0]).toBe('target_page');
@@ -74,16 +74,11 @@ describe('prospect-domain-lock helper', () => {
     q.first.mockResolvedValueOnce(undefined);
     await expect(findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/')).resolves.toBeNull();
     await expect(findPlacementRow(trx, '', 'https://wavespestcontrol.com/')).resolves.toBeNull();
-    // an explicit location narrows (trim/lower); 'default' means unscoped → no filter
+    // an explicit location narrows (trim/lower); 'default' means the unscoped row
     await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: ' Sarasota ' });
     expect(captured.loc).toEqual(['location_key', 'sarasota']);
     await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'default' });
-    expect(captured.loc).toBeUndefined();
-    // exactLocation: the unscoped identity itself — never a GBP-scoped row
-    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: '-', exactLocation: true });
     expect(captured.loc).toEqual(['location_key', '-']);
-    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'Venice', exactLocation: true });
-    expect(captured.loc).toEqual(['location_key', 'venice']);
   });
 
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {
@@ -136,7 +131,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     // a target_page edit is a placement move: domain lock + canonical placement probe (self excluded) → 409, before the update
     const iMove = block.indexOf("'target_page' in patch && patch.target_page !== current.target_page");
     const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
-    const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key, exactLocation: true })'); // scoped to the row's own location since step 2
+    const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key })'); // scoped to the row's own location since step 2
     expect(iMove).toBeGreaterThan(iRead);
     expect(iMoveLock).toBeGreaterThan(iMove);
     expect(iMoveProbe).toBeGreaterThan(iMoveLock);

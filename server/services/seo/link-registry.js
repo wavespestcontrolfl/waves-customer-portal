@@ -333,8 +333,12 @@ async function ensureDomain(q, { domain, source, sourceDetail = null, sourceRef 
       ...(seenAt ? { seen_at: seenAt } : {}),
     })
     .onConflict(['domain_id', 'touch_key']).ignore().returning(['id']);
+  const touched = !!(touch && touch.length);
+  // The touch row this call landed on (new or already there): what a resolved
+  // intake item records as source_row_id.
+  const touchRow = touched ? touch[0] : await q('seo_link_domain_sources').where({ domain_id: row.id, touch_key: touchKey(source, sourceRef, sourceDetail) }).first('id');
 
-  return { id: row.id, domain: key, created, touched: !!(touch && touch.length) };
+  return { id: row.id, domain: key, created, touched, touchId: (touchRow && touchRow.id) || null };
 }
 
 module.exports = {
