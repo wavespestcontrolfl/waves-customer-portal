@@ -922,7 +922,19 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       lotSizeConfirmed,
     });
     const lotSizeMeasured = realLotSqFt != null;
-    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? sqft * 4));
+    // Engine fallback ladder (pre-push codex P0 r5): when NO server profile
+    // exists at all — the documented direct-API shape (public-mcp
+    // how_to_request_quote advertises top-level lotSqFt; those callers
+    // never ran the wizard's lookup step) — the posted lotSqFt keeps its
+    // documented engine-fallback role: never "measured", never persisted,
+    // commercial mosquito still manual. When a profile EXISTS, server
+    // values govern absolutely: a flagged or profile-less lot falls to the
+    // sqft×4 synthetic (a request-controlled number must not select
+    // rodent-bait brackets past the server's own record — codex P0 r3).
+    const engineFallbackLot = !trustedProfileFound && Number(lotSqFt) > 0
+      ? Number(lotSqFt)
+      : sqft * 4;
+    const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
     // density, landscape complexity, near-water) flow into the
@@ -1258,10 +1270,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // measures the shared development's grounds (condo records deliberately
     // skip the parcel turf cap) and grades MEDIUM, so a lawn-only request
     // would otherwise price the association's turf for one door (P1 r7).
+    // Explicitly scoped add-on areas are independent of both the parcel lot
+    // and satellite turf — the engine prices them directly and exempts them
+    // from turf review (GH codex P2: a valid plugging patch measurement
+    // keeps its exact quote; same contract for top dressing / dethatching).
     const lotFlagForcesSiteQuote = lotVerifyFlagged && !lotSizeMeasured
       && !!(services.mosquito || services.rodentBait || services.treeShrub
         || services.lawn || services.oneTimeLawn || services.lawnPestControl
-        || services.topDressing || services.dethatching || services.plugging);
+        || (services.topDressing && !(Number(services.topDressing?.lawnSqFt) > 0))
+        || (services.dethatching && !(Number(services.dethatching?.lawnSqFt) > 0))
+        || (services.plugging && !(Number(services.plugging?.area) > 0)));
     // If ANY line still needs a manual quote (e.g. commercial pest, which is not
     // auto-priced), the whole public quote stays manual. The customer flow has
     // no partial-quote contract — setup fees, booking links, and delivery gates
