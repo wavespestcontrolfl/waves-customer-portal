@@ -756,6 +756,15 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(out.warnings.filter((w) => /overlaps another job on the destination technician/.test(w)).length).toBeGreaterThanOrEqual(2);
     expect(assignDispatchJob).toHaveBeenCalledTimes(2);
     expect(db.__rawCalls.filter((c) => c[1] && c[1][0] === 'slot-reserve' && c[1][1] === 't9:2026-09-02').length).toBe(2);
+    // a FAILED member is real occupancy again: it is NOT hidden from the assignment probes (local audit r32)
+    clashQueries.length = 0; jest.clearAllMocks(); db.__calls.length = 0;
+    const three = [member('a'), member('b', { window_start: '10:00', window_end: '11:00' }), member('c', { window_start: '11:00', window_end: '12:00' })];
+    db.__script = { ...script({ members: three, landed: [...onTech('t9'), { id: 'c', scheduled_date: '2026-09-02', window_start: '11:00', window_end: '12:00', technician_id: 't9' }] }) };
+    const { findConflictingVisits } = require('../services/scheduling/occupancy');
+    await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
+    const excl = findConflictingVisits.mock.calls.filter((c) => c[0] && c[0].excludeServiceIds).map((c) => c[0].excludeServiceIds);
+    expect(excl[0]).toEqual(['a', 'b', 'c']);   // a aligned first: every participant still represented
+    expect(excl[excl.length - 1]).toEqual(['a', 'c']); // c aligned after b FAILED ⇒ b is real occupancy again, not hidden
     // hard clash discovered only at assignment (a booking landed after the plan): the row stays moved on its old tech, reported — never double-booked
     clashQueries.length = 0; jest.clearAllMocks(); db.__calls.length = 0;
     let probes = 0;

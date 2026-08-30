@@ -30,6 +30,18 @@ function calendarUrlFor(row, now = new Date()) {
   return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
 }
 
+// Grouped stop states the public ICS route refuses (a member awaiting rebook,
+// a member underway) — read from the visit's open members; an unreadable
+// membership blocks (fail closed, the route's own posture).
+async function groupedCalendarBlocked(visitId) {
+  try {
+    const members = await require('../services/visit-groups').openMembers(db, visitId);
+    return members.some((m) => ['rescheduled', 'en_route', 'on_site'].includes(String(m.status || '').toLowerCase()));
+  } catch {
+    return true;
+  }
+}
+
 // The instant the link stops being servable, straight from the same owner, so
 // the client never reconstructs the deadline (no second date parser, no
 // duplicated window constant — codex r6 P1).
@@ -116,10 +128,16 @@ router.get('/', async (req, res, next) => {
     // grouped row only; an unreadable membership fails closed (no link).
     const { groupedVisit } = require('./reschedule-public');
     const groupedById = new Map();
+    // Calendar links are group-aware too (local audit r32): the ICS route
+    // 404s a grouped stop whose membership cannot be read, that has a member
+    // awaiting rebook, or that is underway — a row-only calendarUrlFor would
+    // hand out a link that deterministically 404s.
+    const calendarBlockedById = new Map();
     for (const s of upcoming) {
       if (!s.visit_id) continue;
       const g = await groupedVisit(s);
       groupedById.set(String(s.id), g === true || g === 'unknown');
+      calendarBlockedById.set(String(s.id), g === 'unknown' || (g === true && await groupedCalendarBlocked(s.visit_id)));
     }
 
     res.json({
@@ -165,8 +183,8 @@ router.get('/', async (req, res, next) => {
         // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
         // window). Same-customer token, same posture as rescheduleUrl above;
         // calendarUrlFor nulls every case that route would 404.
-        calendarUrl: calendarUrlFor(s),
-        calendarExpiresAt: calendarExpiresAtFor(s),
+        calendarUrl: calendarBlockedById.get(String(s.id)) ? null : calendarUrlFor(s),
+        calendarExpiresAt: calendarBlockedById.get(String(s.id)) ? null : calendarExpiresAtFor(s),
       })),
     });
   } catch (err) {
@@ -461,9 +479,10 @@ router.get('/next', async (req, res, next) => {
       return res.json({ next: null });
     }
     // Same group-aware posture as the list payload (codex #3609 r25 P2).
-    const nextGrouped = nextService.visit_id
-      ? (await require('./reschedule-public').groupedVisit(nextService)) !== false
-      : false;
+    const nextGroupedVerdict = nextService.visit_id ? await require('./reschedule-public').groupedVisit(nextService) : false;
+    const nextGrouped = nextGroupedVerdict !== false;
+    const nextCalendarBlocked = nextGroupedVerdict === 'unknown'
+      || (nextGroupedVerdict === true && await groupedCalendarBlocked(nextService.visit_id));
 
     res.json({
       next: {
@@ -482,8 +501,8 @@ router.get('/next', async (req, res, next) => {
         // Self-serve deep link — see the list route's note above.
         rescheduleUrl: nextService.reschedule_token && !nextGrouped ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
-        calendarUrl: calendarUrlFor(nextService),
-        calendarExpiresAt: calendarExpiresAtFor(nextService),
+        calendarUrl: nextCalendarBlocked ? null : calendarUrlFor(nextService),
+        calendarExpiresAt: nextCalendarBlocked ? null : calendarExpiresAtFor(nextService),
       },
     });
   } catch (err) {

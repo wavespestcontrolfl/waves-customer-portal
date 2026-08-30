@@ -2029,13 +2029,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
+              // Only members this move still REPRESENTS are hidden from the
+              // probes (local audit r32): a member reported failed (or one
+              // that diverged) is real occupancy again and may have moved
+              // into this target since — hiding it would allow a
+              // double-booking. Failed ids are removed from the exclusion.
+              const failedIds = new Set(failed.map((f) => String(f.id)));
+              const probeExclude = plan.memberIds.map(String).filter((mid) => !failedIds.has(mid));
               const globalClash = windowStart && probeEnd ? await findConflictingVisits({
                 db: t, date: newDateStr, windowStart: String(windowStart).slice(0, 5), windowEnd: probeEnd,
-                excludeServiceIds: plan.memberIds, excludeStatuses: ['cancelled', 'completed'],
+                excludeServiceIds: probeExclude, excludeStatuses: ['cancelled', 'completed'],
               }) : [];
               const clashId = (globalClash && globalClash.length ? globalClash[0].id : null) || await destinationTechClash(t, {
                 technicianId: options.technicianId, date: newDateStr, windowStart, windowEnd,
-                durationMinutes: row ? row.estimated_duration_minutes : null, excludeIds: plan.memberIds,
+                durationMinutes: row ? row.estimated_duration_minutes : null, excludeIds: probeExclude,
               });
               if (clashId && options.overlapAdvisory !== true) {
                 throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', conflictId: clashId });

@@ -102,13 +102,26 @@ test('a GROUPED upcoming visit carries no rescheduleUrl (the self-serve page wou
   ];
   const listChainRows = listChain(rows);
   const countChain = { where: jest.fn(() => countChain), whereNotIn: jest.fn(() => countChain), count: jest.fn(() => countChain), first: jest.fn(async () => ({ n: 2 })) };
+  // openMembers (groupedCalendarBlocked): a sibling awaiting rebook ⇒ the ICS route would 404 ⇒ no calendar link either
+  const membersChain = { where: jest.fn(() => membersChain), whereNotIn: jest.fn(() => membersChain), select: jest.fn(async () => [{ id: 'svc-g', status: 'confirmed' }, { id: 'svc-s', status: 'rescheduled' }]) };
   let calls = 0;
-  db.mockImplementation(() => (calls++ === 0 ? listChainRows : countChain));
-  await withServer(async (base) => {
-    const res = await fetch(`${base}/schedule`);
-    const body = await res.json();
-    expect(res.status).toBe(200);
-    expect(body.upcoming.find((v) => v.id === 'svc-g').rescheduleUrl).toBe(null);
-    expect(body.upcoming.find((v) => v.id === 'svc-u').rescheduleUrl).toBe('/reschedule/tok-u');
-  });
+  db.mockImplementation(() => { calls += 1; return calls === 1 ? listChainRows : calls === 2 ? countChain : membersChain; });
+  const prevGate = process.env.GATE_APPOINTMENT_PAGE;
+  process.env.GATE_APPOINTMENT_PAGE = 'true';
+  try {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/schedule`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      const g = body.upcoming.find((v) => v.id === 'svc-g');
+      const u = body.upcoming.find((v) => v.id === 'svc-u');
+      expect(g.rescheduleUrl).toBe(null);
+      expect(g.calendarUrl).toBe(null);
+      expect(g.calendarExpiresAt).toBe(null);
+      expect(u.rescheduleUrl).toBe('/reschedule/tok-u');
+      expect(u.calendarUrl).toBe('/api/public/appointment/tok-u/calendar.ics');
+    });
+  } finally {
+    if (prevGate === undefined) delete process.env.GATE_APPOINTMENT_PAGE; else process.env.GATE_APPOINTMENT_PAGE = prevGate;
+  }
 });
