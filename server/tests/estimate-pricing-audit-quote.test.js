@@ -163,6 +163,11 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
+    // The normalized priced input outranks the raw shapes for property
+    // dimensions AND the verbatim freeze.
+    expect(audit.quote.property.homeSqFt).toBe(2100);
+    expect(audit.quote.property.inputs).toEqual({ homeSqFt: 2100, measuredTurfSf: 5200, services: { lawn: { track: 'B' } } });
+    expect(audit.dimensions.homeSqFt).toBe(2100);
     expect(audit.quote.setupFee.waived).toBe(true);
     expect(audit.quote.setupFee.setupFeeQuote).toEqual({ amount: 0, waived: true, reason: 'existing_member' });
     expect(audit.quote.discount).toMatchObject({ waveguardTier: 'silver', rate: 0.1, savingsAnnual: 114 });

@@ -150,7 +150,9 @@ function money(value) {
 }
 
 function dimensionsFrom(data) {
-  const inputs = data?.inputs || data?.engineInputs || {};
+  // engineInput (singular) is the quote wizard's NORMALIZED, actually-
+  // priced input — clamped/trusted values that outrank the raw shapes.
+  const inputs = data?.engineInput || data?.inputs || data?.engineInputs || {};
   const result = data?.result || data?.engineResult || {};
   const property = result.property || {};
   const homeSqFt = Number(inputs.homeSqFt || property.homeSqFt || property.squareFootage || 0);
@@ -214,12 +216,14 @@ function quotedFieldsFrom(item) {
 
 function quoteProvenanceFrom(estimate, data, result) {
   const { profileFromEstimateData } = require('./estimate-winloss');
-  // profileFromEstimateData is a LOOKUP classifier — it rejects markerless
-  // engineInputs on purpose (no provenance to classify). For freezing the
-  // price-bearing inputs that concern doesn't apply: click-mints and v1
-  // rows store their exact facts in engineInputs/inputs without markers,
-  // so those are the fallback (codex pre-push P1).
-  const profile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || {};
+  // TWO distinct sources (codex pre-push P1): the PRICED input — the
+  // wizard's normalized engineInput when present, whose clamped/trusted
+  // values outrank the raw lookup payload — feeds the dimensions and the
+  // verbatim inputs freeze; the LOOKUP profile (enriched/marker-bearing
+  // shapes via the win/loss classifier, markerless engineInputs as
+  // fallback for click-mints/v1) supplies the provenance flags.
+  const lookupProfile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || {};
+  const profile = data?.engineInput ?? lookupProfile;
   const recurring = result?.recurring || {};
   const bundle = data?.sendSnapshot?.pricingBundle || null;
   // Missing is null, never 0 — Number(null) is 0 and would fabricate a
@@ -270,9 +274,11 @@ function quoteProvenanceFrom(estimate, data, result) {
       measuredTurfSf: number(profile.measuredTurfSf),
       estimatedTurfSf: number(profile.estimatedTurfSf),
       stories: number(profile.stories),
-      propertyDataQuality: profile.propertyDataQuality ?? null,
-      dataSources: profile.dataSources ?? null,
-      fieldVerifyFlags: Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null,
+      propertyDataQuality: lookupProfile.propertyDataQuality ?? profile.propertyDataQuality ?? null,
+      dataSources: lookupProfile.dataSources ?? profile.dataSources ?? null,
+      fieldVerifyFlags: Array.isArray(lookupProfile.fieldVerifyFlags)
+        ? lookupProfile.fieldVerifyFlags
+        : (Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null),
     },
     marginWarnings: result?.marginWarnings || recurring.marginWarnings || null,
     // The price-bearing REQUEST choices, verbatim (codex pre-push P1):
