@@ -712,7 +712,7 @@ function normalizeEngineLineItems(result) {
 // from the persisted schema (GH codex P1: description/label fields,
 // frequency-aware annualization via annualizedAmount).
 function normalizeProposalLines(estimate) {
-  const { normalizeProposal, annualizedAmount } = require('./estimate-proposal');
+  const { normalizeProposal, annualizedAmount, OCCURRENCES_PER_YEAR } = require('./estimate-proposal');
   const proposal = normalizeProposal(estimate);
   if (!proposal || proposal.enabled !== true) return [];
   const lines = [];
@@ -736,8 +736,14 @@ function normalizeProposalLines(estimate) {
     for (const item of building.lineItems || []) {
       if (item.frequency === 'one_time') push(item.description || building.name, 'one_time', item.amount);
       else {
+        // COGS visits must match the annualized revenue occurrences —
+        // visitsFor reads TOP-LEVEL visitsPerYear (codex pre-push P1).
+        const occurrences = item.frequency === 'per_application'
+          ? Number(item.visitsPerYear) || 0
+          : OCCURRENCES_PER_YEAR[item.frequency] || 0;
         push(item.description || building.name, 'recurring', annualizedAmount(item), {
           quoted: { frequency: item.frequency, amountPerOccurrence: item.amount, ...(item.visitsPerYear ? { visitsPerYear: item.visitsPerYear } : {}) },
+          ...(occurrences > 0 ? { visitsPerYear: occurrences } : {}),
         });
       }
     }
@@ -793,11 +799,11 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // dedupe by service+cadence so no priced line is silently omitted
     // (codex pre-push P1). When the alternate container is the only one
     // with lines, it becomes THE result for the whole audit.
-    // Duplicate = the SAME priced charge represented in two containers:
-    // same service, cadence, AND net price. Distinct buildings or
-    // installations that share a key but carry different prices are
-    // separate legitimate charges and all survive (codex pre-push P1 —
-    // the earlier key-only dedupe dropped them).
+    // Duplicate = the SAME priced charge represented in TWO CONTAINERS:
+    // same service, cadence, and net price — and each remembered charge is
+    // CONSUMED by at most one match, so two equal-priced buildings in one
+    // container both survive, and one mapped counterpart absorbs exactly
+    // one equal-priced engine row (codex pre-push P1 x2).
     const covered = new Map();
     const priceKey = (l) => `${l.serviceKey}|${l.cadence}`;
     const remember = (l) => {
@@ -807,12 +813,20 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     };
     rawLines.forEach(remember);
     const merge = (extra) => {
+      const survivors = [];
       for (const line of extra) {
         const prices = covered.get(priceKey(line)) || [];
-        if (prices.some((prev) => Math.abs(prev - (Number(line.price) || 0)) < 0.01)) continue;
-        remember(line);
+        const matchIdx = prices.findIndex((prev) => Math.abs(prev - (Number(line.price) || 0)) < 0.01);
+        if (matchIdx >= 0) {
+          prices.splice(matchIdx, 1); // consumed — a second equal row is a distinct charge
+          continue;
+        }
+        survivors.push(line);
         rawLines.push(line);
       }
+      // Intra-container siblings never dedupe against each other — they
+      // join the covered set only for LATER containers.
+      survivors.forEach(remember);
     };
     const hadMappedLines = rawLines.length > 0;
     const fromResult = normalizeEngineLineItems(result);

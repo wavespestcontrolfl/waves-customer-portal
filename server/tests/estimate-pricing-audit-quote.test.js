@@ -272,8 +272,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.some((l) => /stale/i.test(l.label))).toBe(false);
     // Program family decides the COGS key — never the marketing label.
     expect(audit.lines.find((l) => /turf/i.test(l.label))).toMatchObject({ serviceKey: 'lawn_care', cadence: 'recurring', price: 1800, visitsPerYear: 6 });
-    // Quarterly building line annualizes by its FREQUENCY (200 × 4), not ×12.
-    expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800 });
+    // Quarterly building line annualizes by its FREQUENCY (200 × 4), not ×12
+    // — and its COGS visit count matches the same occurrences.
+    expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800, visitsPerYear: 4 });
     expect(audit.lines.find((l) => /door sweep/i.test(l.label))).toMatchObject({ cadence: 'one_time', price: 450 });
     expect(audit.quote.proposal).toEqual(proposal);
   });
@@ -339,6 +340,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
           lineItems: [
             { service: 'exclusion', name: 'Exclusion — Building A', price: 500, monthly: null },
             { service: 'exclusion', name: 'Exclusion — Building B', price: 300, monthly: null },
+          ],
+        },
+      },
+    });
+    expect(audit.lines.filter((l) => l.serviceKey === 'exclusion')).toHaveLength(2);
+  });
+
+  test('one mapped counterpart consumes exactly one equal-priced engine row', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-consume', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '1000.00',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'exclusion', name: 'Exclusion', price: 500 }] } },
+        engineResult: {
+          lineItems: [
+            { service: 'exclusion', name: 'Exclusion — Building A', price: 500, monthly: null }, // absorbed by the mapped row
+            { service: 'exclusion', name: 'Exclusion — Building B', price: 500, monthly: null }, // distinct charge — survives
           ],
         },
       },
