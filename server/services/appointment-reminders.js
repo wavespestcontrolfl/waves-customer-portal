@@ -624,7 +624,15 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     resolvedApptTime = await scheduledServiceApptTime(scheduledServiceId);
   }
   if (!(await visitStillLive())) return false;
-  return deliverAppointmentNotice({
+  // Own outcome object so a MOVE_HOLD is visible here (uncapped codex
+  // audit P1): without it, the hold returned a bare false and the
+  // booking-time callers — who own the confirmation and registered it
+  // sendConfirmation:false — never retried; the only confirmation was
+  // permanently dropped. Held ⇒ re-arm the reminder row so the
+  // stranded-confirmation sweep delivers (through this same channel
+  // logic) once the move completes.
+  const holdOutcome = {};
+  const reached = await deliverAppointmentNotice({
     channel,
     kind: 'confirmation',
     customerId,
@@ -632,7 +640,19 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     apptTime: resolvedApptTime,
     serviceLabel,
     smsAttempt,
+    smsOutcome: holdOutcome,
   });
+  if (!reached && holdOutcome.blockedCode === 'MOVE_HOLD' && scheduledServiceId) {
+    try {
+      await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+        .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+      logger.info(`[appt-remind] confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
+    } catch (rearmErr) {
+      logger.error(`[appt-remind] held confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+    }
+  }
+  return reached;
 }
 
 function lastTenDigits(value) {
@@ -3164,17 +3184,40 @@ const AppointmentReminders = {
           const cohort = await db('appointment_reminders as ar')
             .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
             .where({ 'ar.move_hold_until': record.move_hold_until, 'ar.customer_id': record.customer_id })
-            .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id');
+            .select('ss.status', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.technician_id', 'ss.visit_id');
           // A 'rescheduled' cohort member is UNRESOLVED, not ignorable
           // (local gate P1): it is a failed sibling awaiting its
           // replacement slot — the stop is not repaired while one exists.
           const pendingRebook = cohort.some((r) => String(r.status || '').toLowerCase() === 'rescheduled');
           const liveRows = cohort.filter((r) => !['completed', 'cancelled', 'skipped', 'no_show'].includes(String(r.status || '').toLowerCase()));
-          const oneStop = !pendingRebook && (liveRows.length < 2 || (
+          let oneStop = !pendingRebook && (liveRows.length < 2 || (
             new Set(liveRows.map((r) => dayOf(r.scheduled_date))).size === 1
             && new Set(liveRows.map((r) => String(r.technician_id || ''))).size === 1
             && require('./visit-groups').windowedMembersConnected(liveRows)
           ));
+          // Parent-tuple verification (uncapped codex audit P1): after a
+          // parentRetargetFailed partial, every CHILD can already sit at
+          // the new stop while service_visits still describes the old one
+          // — the children-only test passes and the unconditional primary
+          // sync would release. Any live grouped member's parent must be
+          // OPEN and agree with the children's date and earliest start
+          // before the hold may clear; a stale or finalizing parent keeps
+          // it (staff re-save the stop, which retargets and releases).
+          if (oneStop) {
+            const parentIds = [...new Set(liveRows.filter((r) => r.visit_id).map((r) => String(r.visit_id)))];
+            for (const vid of parentIds) {
+              const parent = await db('service_visits').where({ id: vid }).first('status', 'scheduled_date', 'window_start');
+              const childDate = dayOf(liveRows[0].scheduled_date);
+              const childStarts = liveRows.filter((r) => String(r.visit_id || '') === vid).map((r) => (r.window_start ? String(r.window_start).slice(0, 5) : null)).filter(Boolean).sort();
+              const parentStart = parent && parent.window_start ? String(parent.window_start).slice(0, 5) : null;
+              if (!parent || String(parent.status) !== 'open'
+                || dayOf(parent.scheduled_date) !== childDate
+                || (childStarts.length && parentStart !== childStarts[0])) {
+                oneStop = false;
+                break;
+              }
+            }
+          }
           if (oneStop) {
             const released = await db('appointment_reminders')
               .where({ move_hold_until: record.move_hold_until, customer_id: record.customer_id })
