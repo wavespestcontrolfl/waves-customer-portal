@@ -300,8 +300,12 @@ function membershipKeyFor(members) {
 // the page and the stop disagree, and the tap must reload (CHANGED) rather
 // than confirm services nobody saw. Returns the live members.
 async function membersMatchShown(trx, svc, shown) {
+  // FOR UPDATE on the whole live set (codex r18): a sibling terminalized
+  // between this read and the fan-out's pending-only lock would otherwise be
+  // re-evaluated away silently and the tap would succeed on a set the page
+  // never showed.
   const { openMembers } = require('../services/visit-groups');
-  const members = svc.visit_id ? await openMembers(trx, svc.visit_id) : [];
+  const members = svc.visit_id ? await openMembers(trx, svc.visit_id, { forUpdate: true }) : [];
   const shownKey = typeof shown?.membershipKey === 'string' && /^[0-9a-f]{16}$/.test(shown.membershipKey) ? shown.membershipKey : null;
   if (membershipKeyFor(members) !== shownKey) {
     throw Object.assign(new Error('visit membership differs from the page'), { code: 'VISIT_STOP_MOVED' });

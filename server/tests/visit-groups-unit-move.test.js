@@ -691,8 +691,26 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
     const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
     expect(rb[2]).toEqual({ start: '09:00', end: null });
+    // the rebooker keeps the destination end for an open-ended window: cleared explicitly, fenced on the restored slot (codex r18)
+    const clear = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.window_end === null);
+    expect(clear.ops).toEqual([['where', { id: 'a', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00' }]]);
+    expect(db.__calls.indexOf(clear)).toBeLessThan(db.__calls.indexOf(db.__calls.find((c) => c.op === 'update' && c.values.status === 'pending')));
     const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
     expect(restore.ops).toEqual([['where', { id: 'a', status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: null }]]);
+  });
+
+  test('a member that diverged before the retarget on a FROZEN visit rolls the rest back and refuses (codex r18)', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+      // b moved again (another window) after it landed
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
+    ] });
+    const rebooker = fakeRebooker();
+    const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
+    expect(err).toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_MOVE_FAILED', diverged: ['b'], rolledBack: ['a'], rollbackFailed: [] });
+    // only the member that still holds this move's landed state is compensated
+    expect(rebooker.reschedule.mock.calls.filter((c) => c[3] === 'visit_move_rollback').map((c) => c[0])).toEqual(['a']);
+    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
   });
 
   test('a rollback that itself fails is named in the error (office escalation); a splittable visit keeps the partial contract', async () => {

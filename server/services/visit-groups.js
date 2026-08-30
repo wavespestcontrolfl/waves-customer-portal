@@ -215,10 +215,11 @@ async function lockStopForRow(trx, serviceId) {
 }
 
 /** Non-terminal members of a visit with the fields join/chain checks need. */
-async function openMembers(t, visitId) {
-  return t('scheduled_services').where({ visit_id: visitId })
-    .whereNotIn('status', TERMINAL_ROW_STATUSES)
-    .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
+async function openMembers(t, visitId, { forUpdate = false } = {}) {
+  const q = t('scheduled_services').where({ visit_id: visitId })
+    .whereNotIn('status', TERMINAL_ROW_STATUSES);
+  if (forUpdate) q.forUpdate();
+  return q.select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
 }
 
 /**
@@ -1837,6 +1838,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           excludeServiceIds: plan.memberIds.map(String),
           expect: { ...(landedState[id] || {}), visit_id: plan.visitId },
         });
+        // The rebooker keeps a destination end when the restored window has
+        // none (windowEnd = win.end || row.window_end) — clear it explicitly,
+        // fenced on the restored slot; a miss is a rollback failure (codex r18).
+        if (t.original.start && !t.original.end) {
+          const cleared = await db('scheduled_services')
+            .where({ id, visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start })
+            .update({ window_end: null, updated_at: db.fn.now() });
+          if (Number(cleared) !== 1) throw new Error('original open-ended window could not be restored (row changed)');
+        }
         // Technician restore for EVERY member incl. the primary (the caller's
         // technicianId rode the primary's own move) through the canonical
         // writer, fenced on the tech this move set; a compensation failure
@@ -2057,6 +2067,13 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${id} ${reason}`);
           }
         }
+        // Frozen visit: a divergent member cannot be detached later (the seam
+        // preserves membership), so the visit must not be retargeted around
+        // it — abort here; the catch below rolls back the members that still
+        // hold this move's landed state (codex r18).
+        if (plan.frozen && failed.some((f) => f.code === 'VISIT_MEMBER_DIVERGED')) {
+          throw Object.assign(new Error(`a grouped service changed after it moved (${failed.filter((f) => f.code === 'VISIT_MEMBER_DIVERGED').map((f) => f.id).join(', ')})`), { code: 'VISIT_MEMBER_DIVERGED' });
+        }
       }
       // A row that joined the visit AFTER the plan snapshot (the old stop
       // lock was released between plan and move — codex r2) is not part of
@@ -2126,9 +2143,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // that still names the old stop, so a failed retarget is not
       // recoverable later — roll the members back and refuse (local audit).
       const stuck = await rollbackMoved();
+      const diverged = err && err.code === 'VISIT_MEMBER_DIVERGED';
       throw Object.assign(
-        new Error(`Cannot move this stop: the visit record could not be retargeted (${err.message}) — the visit has an issued link or records, so the move was undone${stuck.length ? `; ${stuck.length} service(s) could NOT be moved back (${stuck.join(', ')}) — check the schedule` : ''}`),
-        { statusCode: 409, code: 'VISIT_PARENT_RETARGET_FAILED', isOperational: true, rolledBack: moved.filter((id) => !stuck.includes(id)), rollbackFailed: stuck },
+        new Error(`Cannot move this stop: ${diverged ? err.message : `the visit record could not be retargeted (${err.message})`} — the visit has an issued link or records, so the move was undone${stuck.length ? `; ${stuck.length} service(s) could NOT be moved back (${stuck.join(', ')}) — check the schedule` : ''}`),
+        { statusCode: 409, code: diverged ? 'VISIT_MEMBER_MOVE_FAILED' : 'VISIT_PARENT_RETARGET_FAILED', isOperational: true, rolledBack: moved.filter((id) => !stuck.includes(id)), rollbackFailed: stuck, ...(diverged ? { diverged: failed.filter((f) => f.code === 'VISIT_MEMBER_DIVERGED').map((f) => f.id) } : {}) },
       );
     }
     // Staff surface: the members moved; the office is told the visit

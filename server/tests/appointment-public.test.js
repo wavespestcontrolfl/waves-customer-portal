@@ -513,14 +513,16 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     await expect(confirmGroupedOrSolo(trx, svc, shown)).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     expect(trx.__log).toEqual([]);
     // direct calls: the member read is the FIRST scheduled_services query
-    const membersTrx = (members) => { const api = { where: () => api, whereNotIn: () => api, select: async () => members }; return jest.fn(() => api); };
+    const membersTrx = (members) => { const api = { where: () => api, whereNotIn: () => api, forUpdate: jest.fn(() => api), select: async () => members }; const t = jest.fn(() => api); t.__api = api; return t; };
     // same COUNT, different member (A+B shown, A+C live) ⇒ CHANGED
     await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'c' }]), svc, { membershipKey: AB })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     // page showed two but a sibling was cancelled since ⇒ CHANGED; garbage key ⇒ CHANGED
     await expect(membersMatchShown(membersTrx([{ id: 'a' }]), svc, { membershipKey: AB })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     await expect(membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { membershipKey: 'nope' })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
     // matches ⇒ the live members come back; an ungrouped row never queries
-    expect((await membersMatchShown(membersTrx([{ id: 'a' }, { id: 'b' }]), svc, { membershipKey: AB })).map((m) => m.id)).toEqual(['a', 'b']);
+    const okTrx = membersTrx([{ id: 'a' }, { id: 'b' }]);
+    expect((await membersMatchShown(okTrx, svc, { membershipKey: AB })).map((m) => m.id)).toEqual(['a', 'b']);
+    expect(okTrx.__api.forUpdate).toHaveBeenCalled(); // the whole live set is locked while the key is proven (codex r18)
     trx = membersTrx([]);
     expect(await membersMatchShown(trx, { id: 'a', visit_id: null }, { membershipKey: null })).toEqual([]);
     expect(trx).not.toHaveBeenCalled();
