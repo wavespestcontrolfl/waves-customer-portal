@@ -2333,10 +2333,49 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
-  // Phone identity is strong — the newest match wins outright.
+  // Phone identity is strong, but a shared line is not a shared PERSON:
+  // overlapping callers from one number (office line, spouse, property
+  // manager) previously collapsed onto the newest lead and the second
+  // caller's extraction overwrote the first's (estimator-engine audit
+  // 2026-08-30 #1). The newest candidate whose name does not CONFLICT with
+  // the extraction wins — the corroboration lives IN the query, bounded
+  // LIMIT-1, like the email arm (GH codex P2: a long-lived shared number
+  // holds many leads, and loading every row to scan in Node grew with the
+  // number's whole history; nickname variants are a finite in-memory list,
+  // so the predicate is SQL-expressible). Same contract as
+  // extractedNameMatchesCustomer (the lock-time recheck): names normalize
+  // via the REGEXP_REPLACE equivalent of normalizeNamePart; a missing name
+  // on either side is compatible, so shells stay reusable and name-less
+  // extractions keep today's newest-wins behavior. All-conflict → fresh
+  // mint (the newest row's id rides back for the shared-phone note).
   if (phone) {
-    const row = await query.orderBy('created_at', 'desc').first();
-    return { lead: row || null, matchedVia: row ? 'phone' : null };
+    const extractedFirst = normalizeNamePart(firstName);
+    if (!extractedFirst) {
+      const row = await query.orderBy('created_at', 'desc').first();
+      return { lead: row || null, matchedVia: row ? 'phone' : null };
+    }
+    const variants = firstNameVariants(extractedFirst);
+    const FIRST_NORM = "LOWER(REGEXP_REPLACE(first_name, '[^a-zA-Z0-9]', '', 'g'))";
+    const LAST_NORM = "LOWER(REGEXP_REPLACE(last_name, '[^a-zA-Z0-9]', '', 'g'))";
+    const compatQuery = query.clone().whereRaw(
+      `(first_name IS NULL OR TRIM(first_name) = '' OR ${FIRST_NORM} IN (${variants.map(() => '?').join(', ')}))`,
+      variants,
+    );
+    const extractedLast = normalizeNamePart(lastName);
+    if (extractedLast) {
+      // AND-able formulation of "matched firsts require non-conflicting
+      // lasts": a blank first already passed above, and a blank last (or a
+      // name-less extraction) never conflicts.
+      compatQuery.whereRaw(
+        `(first_name IS NULL OR TRIM(first_name) = '' OR last_name IS NULL OR TRIM(last_name) = '' OR ${LAST_NORM} = ?)`,
+        [extractedLast],
+      );
+    }
+    const compatible = await compatQuery.orderBy('created_at', 'desc').first();
+    if (compatible) return { lead: compatible, matchedVia: 'phone' };
+    const conflicting = await query.clone().orderBy('created_at', 'desc').first('id');
+    if (conflicting) return { lead: null, matchedVia: null, phoneNameConflictLeadId: conflicting.id };
+    return { lead: null, matchedVia: null };
   }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
@@ -2435,7 +2474,7 @@ function shouldStampCallLeadLinkage({ existingLead, raceRecovered, callTwilioSid
 // an obsolete row. Mirrors the phone branch's own predicate set exactly:
 // phone equality, deleted_at, the workableUnnamedLead lifecycle trio, and
 // the ownership arm.
-function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead }) {
+function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclaimedOnly, workableUnnamedLead, firstName, lastName }) {
   if (!lockedLead) return false;
   if (lockedLead.deleted_at) return false;
   if (String(lockedLead.phone || '') !== String(phone)) return false;
@@ -2446,6 +2485,12 @@ function phoneReuseStillValidOnLockedRow(lockedLead, { phone, customerId, unclai
   if (unclaimedOnly && lockedLead.customer_id != null) return false;
   if (customerId && lockedLead.customer_id != null
     && String(lockedLead.customer_id) !== String(customerId)) return false;
+  // The lookup's name corroboration must still hold on the LOCKED state
+  // (codex P1): a concurrent call or admin edit can name the row between
+  // selection and lock, and writing past it re-creates the cross-caller
+  // merge the phone-arm check exists to stop. Same contract as the lookup:
+  // missing names on either side stay compatible.
+  if (!extractedNameMatchesCustomer({ first_name: firstName, last_name: lastName }, lockedLead)) return false;
   return true;
 }
 
@@ -9395,6 +9440,13 @@ const CallRecordingProcessor = {
           let contact;
           let enriched = 0;
           let raceRecovered = false;
+          // Declared at loop scope (like raceRecovered): set inside the
+          // locked enrichment write, consumed by the recovery mint below it.
+          let phoneNameConflictUnderLock = false;
+          // The former-lead id THIS pass's pre-stamp settle persisted as a
+          // breadcrumb — arms the maintenance reconcile gate even when the
+          // pass exits through a recovery mint without restamping.
+          let thisPassSettledFormerLeadId = null;
           for (;;) {
             leadUpdates = {};
             // A retry can RECOVER a callback number and still reuse the
@@ -9725,6 +9777,15 @@ const CallRecordingProcessor = {
               let preSettleStampedLeadId = null;
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
                 preSettleStampedLeadId = currentStampedLeadId;
+                // Loop-scope copy (GH codex P1 on 6a91e83f3): the settle
+                // below persists the breadcrumb into call metadata AFTER
+                // claim time, so the maintenance reconcile's cheap
+                // claim-time pre-check cannot see it. If this pass then
+                // exits through a recovery mint (name conflict / claim
+                // race) without restamping, the gate must still open —
+                // the reconcile re-reads the authoritative breadcrumb
+                // under its own lock, so arming it is idempotent.
+                thisPassSettledFormerLeadId = preSettleStampedLeadId;
                 let priorSettled;
                 try {
                   // preserveFormerLeadId: the settle's clear persists the
@@ -9764,6 +9825,7 @@ const CallRecordingProcessor = {
                 } catch { /* unparseable metadata — no breadcrumb */ }
               }
               let phoneReuseRevokedUnderLock = false;
+              phoneNameConflictUnderLock = false;
               enriched = await db.transaction(async (trx) => {
                 // Snapshot under a ROW LOCK inside the same transaction that
                 // stamps and updates (codex P2 r16): two concurrent
@@ -9791,10 +9853,27 @@ const CallRecordingProcessor = {
                 // Same-call arms keep their own eligibility (the guarded
                 // write repeats it) and the email arm's write enforces its
                 // full predicate set in SQL already.
-                if (existingLeadVia === 'phone'
-                  && !phoneReuseStillValidOnLockedRow(lockedLead, { phone, ...sameCallEligibility })) {
-                  phoneReuseRevokedUnderLock = true;
-                  return 0;
+                if (existingLeadVia === 'phone') {
+                  const lockBaseValid = phoneReuseStillValidOnLockedRow(lockedLead, { phone, ...sameCallEligibility });
+                  if (!lockBaseValid) {
+                    phoneReuseRevokedUnderLock = true;
+                    return 0;
+                  }
+                  // A name landing between selection and lock is not an
+                  // obsolete row — it is the OTHER caller on a shared line
+                  // winning the race for the nameless shell. Dropping to
+                  // Needs Review lost the second caller from the pipeline
+                  // (GH codex P1 on #3627); route to the recovery mint
+                  // below instead, analogous to the email claim race.
+                  if (!phoneReuseStillValidOnLockedRow(lockedLead, {
+                    phone,
+                    ...sameCallEligibility,
+                    firstName: extracted.first_name || null,
+                    lastName: extracted.last_name || null,
+                  })) {
+                    phoneNameConflictUnderLock = true;
+                    return 0;
+                  }
                 }
                 // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
                 // older call after a DIFFERENT call enriched the same reused
@@ -10088,6 +10167,10 @@ const CallRecordingProcessor = {
                 logger.warn(`[call-proc] phone-reused lead ${leadId} no longer matches the selecting predicates under lock — dropping the association for ${maskSid(callSid)}`);
                 leadId = null;
                 sameCallOwnershipRejected = true;
+              } else if (phoneNameConflictUnderLock) {
+                // Second caller on a shared line — nothing stamped; the
+                // recovery mint below gives them their own lead.
+                logger.warn(`[call-proc] phone-reused lead ${leadId} was named by a concurrent call under lock — minting a fresh lead for ${maskSid(callSid)}`);
               } else {
                 currentStampedLeadId = String(leadId);
               }
@@ -10168,6 +10251,46 @@ const CallRecordingProcessor = {
                 logger.warn(`[call-proc] phone-reused lead ${leadId} ${verified ? 'was claimed by another customer' : 'ownership unverifiable'} — dropping the association for ${maskSid(callSid)}`);
                 leadId = null;
                 sameCallOwnershipRejected = true;
+              }
+            }
+            if (!enriched && phoneNameConflictUnderLock && !raceRecovered) {
+              // Shared-line name conflict observed under the row lock: the
+              // other caller won the nameless shell, so THIS caller mints
+              // the fresh phone-bearing lead they would have gotten had the
+              // conflict been visible at lookup time (GH codex P1 on
+              // #3627) — same loop-back contract as the email claim-race
+              // recovery below: the fresh row re-runs the enrichment pass
+              // so qualification rides this call's extraction alone.
+              try {
+                const [conflictFresh] = await db('leads').insert({
+                  lead_source_id: leadSourceId,
+                  customer_id: customerId || null,
+                  phone,
+                  first_name: capitalizeName(extracted.first_name) || null,
+                  last_name: capitalizeName(extracted.last_name) || null,
+                  email: extracted.email || null,
+                  address: composedLeadAddress || null,
+                  city: extracted.city || null,
+                  zip: extracted.zip || null,
+                  lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
+                  first_contact_at: new Date(),
+                  first_contact_channel: 'call',
+                  twilio_call_sid: call.twilio_call_sid,
+                  call_duration_seconds: call.duration_seconds,
+                  call_recording_url: call.recording_url,
+                  status: 'new',
+                }).returning('*');
+                logger.warn(`[call-proc] shared-line name conflict on lead ${leadId} — minted fresh lead ${conflictFresh.id}`);
+                leadId = conflictFresh.id;
+                current = conflictFresh;
+                raceRecovered = true;
+                await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
+                continue;
+              } catch (raceErr) {
+                // Sanitized code only — the insert carries the caller's
+                // name/email/address (same rule as the email mint below).
+                logger.warn(`[call-proc] fresh-lead mint after shared-line name conflict failed for ${maskSid(callSid)}: ${raceErr.code || raceErr.name || 'db_error'}`);
+                leadId = null;
               }
             }
             if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
@@ -10387,7 +10510,7 @@ const CallRecordingProcessor = {
               return cmd.attribution_former_lead_id ? String(cmd.attribution_former_lead_id) : null;
             } catch { return null; }
           })();
-          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb)) {
+          if (leadId && (maintenanceFormerLeadId || claimTimeBreadcrumb || thisPassSettledFormerLeadId)) {
             try {
               const recon = await reconcileFormerLeadLinkage({
                 call,
