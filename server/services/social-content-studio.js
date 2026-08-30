@@ -8,6 +8,7 @@ const {
   normalizeUrl,
 } = require('./social-media');
 const SocialCardRenderer = require('./social-card-renderer');
+const { blogPostShareability } = require('./content/blog-share-gate');
 const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
 const logger = require('./logger');
@@ -653,11 +654,14 @@ async function getCampaignContext({ topic, city, service }) {
         // 'published' alone is NOT enough: legacy rows keep a planned-era
         // slug (e.g. parrish-garage-door-seal-roach-entry) that never became
         // a path — that row shipped a 404 to every network on 2026-08-29.
-        // Same strict semantics as content/blog-share-gate.js
-        // (blogPostShareability): astro_status must be 'live' — 'merged'
-        // already carries status='published' + astro_live_url before the
-        // pages-poll worker has seen production serve the page. The live
-        // URL is then used verbatim, never rebuilt from slug.
+        // The ONE share policy is content/blog-share-gate.js
+        // (blogPostShareability) — every fetched row passes through it below.
+        // The SQL mirrors it only to keep the recency window useful; the
+        // predicate is authoritative and cannot drift from the admin share
+        // button. Legacy status='published' rows that never had astro_status
+        // stamped stay OUT: 'merged' already carries astro_live_url before
+        // production serves the page. The live URL is then used verbatim,
+        // never rebuilt from slug.
         .where('status', 'published')
         .where('astro_status', 'live')
         .whereNotNull('astro_live_url')
@@ -675,6 +679,7 @@ async function getCampaignContext({ topic, city, service }) {
       const intentKeywords = serviceIntentKeywords({ topic, service });
       const matchesIntent = (row) => rowMatchesIntentKeywords(row, intentKeywords);
       const ranked = rows
+        .filter((row) => blogPostShareability(row).ok)
         .filter((row) => contentRowMatchesCity(row, location.city))
         .map((row, index) => ({ row, index, relevant: matchesIntent(row) }))
         .sort((a, b) => (b.relevant - a.relevant) || (a.index - b.index));
