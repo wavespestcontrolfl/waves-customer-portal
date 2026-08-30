@@ -225,13 +225,17 @@ exports.up = async function up(knex) {
 
   if (await knex.schema.hasTable('pricing_changelog')) {
     const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
+    // Ownership marker (codex #3591 r57 P2): down() deletes the changelog
+    // row ONLY when this up() inserted it — a pre-existing identity row is
+    // someone else's history.
+
     if (!existing) {
       await knex('pricing_changelog').insert({
         ...CHANGELOG_IDENTITY,
         affected_services: JSON.stringify(['rodent_bait', 'commercial_rodent_bait', 'rodent_bait_setup']),
         before_value: JSON.stringify({ bait_monthly: { small: 49, medium: 59, large: 69 }, setup_fee: 199, post_exclusion: { multiplier: 0.72, floor_monthly: 39 }, waveguard: { tier_qualifier: false, exclude_from_pct_discount: true } }),
         after_value: JSON.stringify({ ...BRACKETS_DATA, setup_fee_non_members: 99, waveguard: { tier_qualifier: true, exclude_from_pct_discount: false } }),
-        rationale: 'Owner directive 2026-08-29: rodent bait moves to footprint-bracket per-quarterly-visit pricing ($79–$129 with station allowances, ladder extends above 6,750 sf, commercial identical), joins WaveGuard (tier-counted + tier-discounted), post-exclusion modifier retired, setup fee $99 for non-members only. Existing plan rates are snapshotted and unaffected.',
+        rationale: `Owner directive 2026-08-29: rodent bait moves to footprint-bracket per-quarterly-visit pricing ($79–$129 with station allowances, ladder extends above 6,750 sf, commercial identical), joins WaveGuard (tier-counted + tier-discounted), post-exclusion modifier retired, setup fee $99 for non-members only. Existing plan rates are snapshotted and unaffected. [${MIGRATION_TAG}]`,
       });
     }
   }
@@ -409,6 +413,14 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('pricing_changelog')) {
-    await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
+    // Delete only a row THIS migration inserted (codex #3591 r57 P2): the
+    // up() audit trail is the ownership evidence — with no up-audit for the
+    // changelog insert we can't distinguish, so require the migration's own
+    // pricing_config_audit up-entry to still be the latest activity AND the
+    // changelog row to match the migration's exact identity + note.
+    const changelogRow = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first();
+    if (changelogRow && String(changelogRow.rationale || '').includes(MIGRATION_TAG)) {
+      await knex('pricing_changelog').where({ id: changelogRow.id }).del();
+    }
   }
 };

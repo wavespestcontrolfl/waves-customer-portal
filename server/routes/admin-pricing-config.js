@@ -885,7 +885,41 @@ router.put('/discount-rules/:serviceKey', requireAdmin, async (req, res, next) =
       const waveguardRow = mirrorsWaveguard
         ? await trx('pricing_config').where({ config_key: 'rodent_waveguard' }).forUpdate().first()
         : null;
-      await trx('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+      const ruleUpdated = await trx('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+      // UPSERT the missing side (codex #3591 r57 P1): a zero-row rule
+      // update — or an absent rodent_waveguard config row — silently split
+      // the two policy surfaces while the endpoint reported success.
+      if (!ruleUpdated && req.params.serviceKey === 'rodent_bait') {
+        await trx('service_discount_rules').insert({
+          service_key: 'rodent_bait',
+          tier_qualifier: typeof updates.tier_qualifier === 'boolean' ? updates.tier_qualifier : true,
+          exclude_from_pct_discount: typeof updates.exclude_from_pct_discount === 'boolean' ? updates.exclude_from_pct_discount : false,
+          updated_at: new Date(),
+        });
+      }
+      if (mirrorsWaveguard && !waveguardRow) {
+        const seeded = {
+          tier_qualifier: typeof updates.tier_qualifier === 'boolean' ? updates.tier_qualifier : true,
+          exclude_from_pct_discount: typeof updates.exclude_from_pct_discount === 'boolean' ? updates.exclude_from_pct_discount : false,
+        };
+        await trx('pricing_config').insert({
+          config_key: 'rodent_waveguard',
+          name: 'Rodent Bait WaveGuard Policy',
+          category: 'rodent',
+          sort_order: 2,
+          data: JSON.stringify(seeded),
+        });
+        await insertPricingAudit({
+          configKey: 'rodent_waveguard',
+          oldValue: null,
+          newValue: seeded,
+          changedBy: req.technician?.name,
+          reason: 'Seeded by the discount-rules mirror (row was absent — policy surfaces must move together)',
+          conn: trx,
+        });
+        mirroredWaveguard = seeded;
+        return;
+      }
       if (!mirrorsWaveguard || !waveguardRow) return;
       let waveguardData = {};
       try {

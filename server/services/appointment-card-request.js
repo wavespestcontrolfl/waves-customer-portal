@@ -273,6 +273,22 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
     const { customerOnAutopay } = require('./autopay-eligibility');
     const customer = await db('customers').where({ id: customerId }).first();
     if (customer && await customerOnAutopay(customer)) {
+      // Auto Pay covers the CHARGES, not the DISCLOSURE (codex #3591 r57
+      // P1): a direct rodent series that owes its setup must still take the
+      // /secure rail (the fee is disclosed/frozen there) — an exemption
+      // here would let the first completion bill only the application and
+      // the $99 silently vanish. A failed probe keeps the exemption (never
+      // send an ask the fee may not justify).
+      try {
+        const { resolveDirectRodentSetupObligation } = require('./secure-appointment-plans');
+        const owed = await resolveDirectRodentSetupObligation(db, { id: scheduledServiceId });
+        if (owed > 0) {
+          logger.info(`[appt-card-request] autopay exemption deferred for visit ${scheduledServiceId} — direct rodent series owes its bait-station setup (disclosure required)`);
+          return { exempt: false };
+        }
+      } catch (probeErr) {
+        logger.warn(`[appt-card-request] rodent setup probe failed under the autopay exemption for visit ${scheduledServiceId}: ${probeErr.message}`);
+      }
       return { exempt: true, reason: 'autopay_already_active' };
     }
   } catch (err) {
