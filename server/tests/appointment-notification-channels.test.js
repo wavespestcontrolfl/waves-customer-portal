@@ -603,3 +603,14 @@ describe('alertNoReachableChannel — text-reachable false-positive guard', () =
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });
+
+describe('deliverConfirmation marks sent only for the appointment time it formatted (local codex audit)', () => {
+  test('both post-send marks are fenced on appointment_time so a silent grouped-sibling move under the send never suppresses the corrected confirmation', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async function deliverConfirmation('), src.indexOf('// A reminder-registration failure used to be logger.error-only'));
+    const fenced = fn.match(/\.where\(\{ id: record\.id, appointment_time: apptTime \}\)\s*\.update\(\{ confirmation_sent: true/g) || [];
+    expect(fenced.length).toBe(2); // success path + catch path
+    // the pre-send skips (past appointment / preference off) legitimately mark by id — nothing was sent for a stale time there
+    expect(fn.indexOf('.where({ id: record.id, appointment_time: apptTime })')).toBeGreaterThan(fn.indexOf('recheckBeforeSend'));
+  });
+});

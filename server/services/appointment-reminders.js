@@ -1614,10 +1614,19 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       }
 
       // Mark sent whether or not delivery succeeded (landline / block) so
-      // reminders can proceed and we don't retry the confirmation.
-      await db('appointment_reminders')
-        .where({ id: record.id })
+      // reminders can proceed and we don't retry the confirmation — fenced
+      // on the appointment time this send formatted (local codex audit): a
+      // silent grouped-sibling move (keepPendingConfirmation) that changed
+      // appointment_time between the freshness re-read and the send must
+      // NOT be stamped as sent, or the corrected time is suppressed forever.
+      // A miss leaves the row pending and the stranded-confirmation sweep
+      // resends with the new time (one extra, correct text beats none).
+      const marked = await db('appointment_reminders')
+        .where({ id: record.id, appointment_time: apptTime })
         .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
+      if (Number(marked) === 0) {
+        logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} went out for a time that changed under the send — row left pending so the sweep resends the new time`);
+      }
       if (sent) {
         logger.info(`[appt-remind] Confirmation sent for customer ${customerId} for ${serviceLabel}`);
       }
@@ -1626,9 +1635,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
     return false;
   } catch (err) {
     logger.error(`[appt-remind] Confirmation SMS failed: ${err.message}`);
-    // Still mark confirmation_sent so reminders can proceed
+    // Still mark confirmation_sent so reminders can proceed — same
+    // appointment-time fence as the success path.
     await db('appointment_reminders')
-      .where({ id: record.id })
+      .where({ id: record.id, appointment_time: apptTime })
       .update({ confirmation_sent: true, confirmation_sent_at: new Date() });
     return false;
   }

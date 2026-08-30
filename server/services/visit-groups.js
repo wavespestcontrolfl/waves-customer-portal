@@ -1652,7 +1652,16 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             throw Object.assign(new Error('Cannot move this stop: a grouped service is no longer at this stop — separate it first'), { statusCode: 409, code: 'VISIT_MEMBER_DETACHED', memberId: m.id });
           }
         }
-        const delta = win.start && primary.window_start ? (toMinutes(win.start) - toMinutes(primary.window_start)) : 0;
+        // Sibling offset anchor: the tapped row's own start, else the VISIT's
+        // canonical start (a windowless tapped row is still a member of a
+        // windowed stop — local codex audit). No anchor at all with windowed
+        // siblings is ambiguous: refuse rather than leave siblings at the old
+        // time behind a moved anchor.
+        const anchorStart = primary.window_start || visit.window_start || null;
+        if (win.start && !anchorStart && members.some((m) => m.id !== primary.id && m.window_start)) {
+          throw Object.assign(new Error('Cannot move this stop to a new time from a service without a time window — move it from a grouped service that has one, or set this service\'s window first'), { statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED', isOperational: true });
+        }
+        const delta = win.start && anchorStart ? (toMinutes(win.start) - toMinutes(anchorStart)) : 0;
         const validateSibling = (m, start, end) => {
           try {
             require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: start, windowEnd: end, durationMinutes: m.estimated_duration_minutes });

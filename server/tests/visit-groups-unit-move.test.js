@@ -212,6 +212,21 @@ describe('moveVisitAsUnit', () => {
     expect(rebooker.reschedule.mock.calls[1][2]).toBe(null);
   });
 
+  test('a windowless tapped row anchors the sibling offset on the VISIT start; no anchor at all with windowed siblings is refused (local audit)', async () => {
+    // visit start 09:00 (VISIT), tapped row windowless, sibling 10:00-11:00, request 13:00 ⇒ +4h ⇒ sibling 14:00-15:00
+    db.__script = script({ members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    let rebooker = fakeRebooker();
+    await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
+    expect(rebooker.reschedule.mock.calls[0][2]).toBe('13:00-14:00');
+    expect(rebooker.reschedule.mock.calls[1][2]).toBe('14:00-15:00');
+    // no visit start either ⇒ ambiguous ⇒ refused before any write
+    db.__script = script({ visit: { ...VISIT, window_start: null, window_end: null }, members: [member('a', { window_start: null, window_end: null }), member('b', { window_start: '10:00', window_end: '11:00' })] });
+    rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_WINDOWLESS_ANCHOR_MOVE_UNSUPPORTED' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
   test('a caller without a scheduling fence gets the locked plan fence on the primary; a fenced caller keeps its own', async () => {
     db.__script = script({ members: [member('a'), member('b')] });
     let rebooker = fakeRebooker();
