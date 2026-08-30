@@ -590,7 +590,11 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
 
-  const intervals = { daily: 1, weekly: 7, biweekly: 14 };
+  // every_6_weeks MUST be here (series-move incident 2026-08-30): the seeder's
+  // copy has it, this one didn't, so a collective series move projected
+  // siblings on the generic 91-day fallback (09-02 -> 12-02 instead of
+  // 10-14). The parity test pins all three copies together.
+  const intervals = { daily: 1, weekly: 7, biweekly: 14, every_6_weeks: 42 };
   let gap;
   if (pattern === 'custom' && intNum) gap = Math.max(1, intNum);
   else gap = intervals[pattern] || 91;
@@ -2941,3 +2945,6 @@ module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;
+// Parity-test surface (series-move incident): the three nextRecurringDate copies
+// must agree — see tests/recurring-date-parity.test.js.
+module.exports.nextRecurringDate = nextRecurringDate;
