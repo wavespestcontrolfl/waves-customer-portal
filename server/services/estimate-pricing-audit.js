@@ -194,7 +194,8 @@ function mosquitoCogs(program, addOns = {}) {
 // from today's constants after a price change silently rewrites history,
 // which is exactly what this snapshot exists to prevent.
 const QUOTED_LINE_KEYS = [
-  'service', 'tier', 'program', 'visitsPerYear', 'visits', 'perTreatment',
+  'service', 'tier', 'program', 'cadence', 'frequency', 'frequencyKey',
+  'visitsPerYear', 'visits', 'perTreatment',
   'annualAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime',
   'priceAfterDiscount', 'recurringCustomerDiscountRate', 'setupCharge',
   'taxable', 'taxCategory', 'quoteRequired',
@@ -237,13 +238,22 @@ function quoteProvenanceFrom(estimate, data, result) {
     pricingBundle: bundle,
     discount: {
       waveguardTier: estimate.waveguard_tier || recurring.tier || recurring.waveGuardTier || result?.waveGuard?.tier || null,
-      rate: number(recurring.discount) ?? 0,
-      savingsAnnual: number(recurring.savings),
+      // Raw-engine shapes (quote wizard / agent drafts persist
+      // generateEstimate output with NO recurring block) keep the discount
+      // at waveGuard.discount and savings at summary.waveGuardSavings —
+      // fall back there instead of recording a phantom zero (GH codex P1).
+      rate: number(recurring.discount) ?? number(result?.waveGuard?.discount) ?? 0,
+      savingsAnnual: number(recurring.savings) ?? number(result?.summary?.waveGuardSavings),
       manualDiscount: bundle?.manualDiscount ?? null,
     },
     setupFee: {
       membershipFee: number(result?.oneTime?.membershipFee),
-      waived: !!data?.operatorPriceAdjustment?.waiveSetupFee,
+      // A waiver can be frozen by the QUOTE itself (public-quote's
+      // setupFeeQuote: existing member, already queued, undeterminable),
+      // not only by an operator adjustment (GH codex P1) — and the frozen
+      // record rides along verbatim so the REASON survives.
+      waived: !!(data?.operatorPriceAdjustment?.waiveSetupFee || data?.setupFeeQuote?.waived),
+      setupFeeQuote: data?.setupFeeQuote ?? null,
       // The frozen first-visit fee rows (waveguard_setup et al.) as the
       // customer saw them — already snapshot-priced by buildPricingBundle.
       firstVisitFees: Array.isArray(bundle?.firstVisitFees) ? bundle.firstVisitFees : null,
@@ -273,6 +283,9 @@ function quoteProvenanceFrom(estimate, data, result) {
       options: data?.engineRequest?.options ?? null,
       selectedServices: data?.engineRequest?.selectedServices ?? null,
       inputs: data?.inputs ?? data?.engineInputs ?? null,
+      // Quote-wizard rows keep their price-bearing selection at top-level
+      // estimate_data.services with none of the above (GH codex P2).
+      services: data?.services ?? null,
     },
   };
 }

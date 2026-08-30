@@ -76,7 +76,7 @@ function fixtureEstimate() {
           services: [
             {
               service: 'lawn_care', name: 'Lawn Care', mo: 48, monthly: 48,
-              tier: 'enhanced', visitsPerYear: 9, perTreatment: 64,
+              tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64,
               floorPa: 55, floorAnn: 495, floorMo: 41.25,
               waveGuardDiscountEligible: true, countsTowardWaveGuardTier: true,
             },
@@ -130,6 +130,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       options: { cadence: 'quarterly', termiteOwnership: 'owner' },
       selectedServices: ['pest_control', 'lawn_care'],
       inputs: null,
+      services: null,
     });
   });
 
@@ -137,7 +138,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     const audit = await buildEstimatePricingAudit(fixtureEstimate());
     const lawn = audit.lines.find((l) => l.serviceKey === 'lawn_care');
     expect(lawn.quoted).toMatchObject({
-      tier: 'enhanced', visitsPerYear: 9, perTreatment: 64,
+      tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64,
       floorPa: 55, floorAnn: 495, floorMo: 41.25,
       waveGuardDiscountEligible: true, countsTowardWaveGuardTier: true,
     });
@@ -145,6 +146,26 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(flea.quoted).toMatchObject({ setupCharge: 25, taxable: true });
     const wdo = audit.lines.find((l) => l.serviceKey === 'wdo_inspection');
     expect(wdo.quoted).toMatchObject({ quoteRequired: false });
+  });
+
+  test('quote-wizard raw-engine shape: waiver, discount, and services still freeze', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-wiz', status: 'sent', source: 'quote_wizard',
+      monthly_total: '95.00', annual_total: '1140.00', onetime_total: null,
+      waveguard_tier: null,
+      estimate_data: {
+        setupFeeQuote: { amount: 0, waived: true, reason: 'existing_member' },
+        services: { pestControl: { frequencyKey: 'quarterly' }, mosquito: true },
+        engineResult: {
+          waveGuard: { tier: 'silver', discount: 0.1 },
+          summary: { waveGuardSavings: 114 },
+        },
+      },
+    });
+    expect(audit.quote.setupFee.waived).toBe(true);
+    expect(audit.quote.setupFee.setupFeeQuote).toEqual({ amount: 0, waived: true, reason: 'existing_member' });
+    expect(audit.quote.discount).toMatchObject({ waveguardTier: 'silver', rate: 0.1, savingsAnnual: 114 });
+    expect(audit.quote.request.services).toEqual({ pestControl: { frequencyKey: 'quarterly' }, mosquito: true });
   });
 
   test('markerless engineInputs (click-mint / v1 shape) still freeze the price-bearing property facts', async () => {

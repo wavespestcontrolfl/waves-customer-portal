@@ -1643,7 +1643,10 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
               // stale send metadata (codex pre-push P1).
               const publishedSibling = await db('estimates').where({ id: sibling.id }).first();
               if (publishedSibling) {
-                await saveEstimatePricingAuditSnapshot(publishedSibling, { trigger: 'group_send' });
+                // The sibling's own send_method is deliberately cleared at
+                // publication — the ANCHOR's channel is how it was
+                // delivered (GH codex P2).
+                await saveEstimatePricingAuditSnapshot(publishedSibling, { trigger: 'group_send', sendMethod });
               }
             } catch (auditErr) {
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
