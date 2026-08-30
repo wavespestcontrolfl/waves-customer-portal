@@ -9192,7 +9192,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Termite V2 renders the current reading in its hero/metrics AND
             carries the cross-visit trend line itself (activityTrend), so the
             standalone gauge would print the reading twice (codex P2 #3600 r5). */}
-        {!termiteV2Primary && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
+        {/* A reconciled cockroach reading (live evidence beside a "None
+            observed" select) must not sit above a gauge that still shows the
+            stale zero — the dashboard is the reading (local codex P1). */}
+        {!termiteV2Primary && !(cockroachV2Primary && data.cockroachReportV2?.statusReconciled) && ((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : (
             <PestPressureCard

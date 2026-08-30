@@ -317,7 +317,11 @@ function buildWhatsNext({ program, species, nextVisit = null, scheduleResolved =
     // the program moved on (nothing "missing"), and a treatment still on
     // the calendar is still referenced (local codex P1).
     lines.push({ label: 'Since this visit', text: `${laterCompleted === 1 ? 'A later treatment in this program has' : `${laterCompleted} later treatments in this program have`} since been completed — each has its own report.` });
-    if (scheduleResolved && nextVisit) lines.push({ label: 'Next treatment', kind: 'next_visit' });
+    if (scheduleResolved && nextVisit) {
+      lines.push({ label: 'Next treatment', kind: 'next_visit' });
+      lines.push({ label: 'What we will do', text: nextVisitPlan(rw) });
+      lines.push({ label: 'Between now and then', text: betweenVisitsCopy({ german, large, rw }) });
+    }
   } else if (!program.complete) {
     if (scheduleResolved) {
       if (nextVisit) {
