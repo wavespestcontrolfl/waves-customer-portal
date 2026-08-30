@@ -214,11 +214,11 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
     const adj = audit.lines.find((l) => l.serviceKey === 'rodent_bundle_discount');
     expect(adj.cogs.status).toBe('not_applicable'); // adjustment rows never mint missing-COGS risk
-    const ts = audit.lines.find((l) => l.serviceKey === 'tree_shrub');
+    const ts = audit.lines.find((l) => l.serviceKey === 'tree_shrub' && l.quoted?.manualFinalAnnual === 420);
     expect(ts).toMatchObject({ price: 420, monthly: 35, priceBeforeDiscount: 480 });
     const cl = audit.lines.find((l) => l.serviceKey === 'commercial_lawn');
     expect(cl.cogs.estimatedCost).toBe(1900); // persisted commercial COGS, not unmapped-zero
-    const tsRow = audit.lines.find((l) => l.serviceKey === 'tree_shrub');
+    const tsRow = audit.lines.find((l) => /Program/.test(l.label) && l.serviceKey === 'tree_shrub');
     expect(tsRow.cogs.status).not.toBe('explicit'); // mapped services keep live inventory COGS
     const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
     // Net wins the price; gross survives as priceBeforeDiscount.
