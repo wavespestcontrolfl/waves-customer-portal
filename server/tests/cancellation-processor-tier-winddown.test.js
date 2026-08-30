@@ -73,10 +73,20 @@ jest.mock('../models/db', () => {
   }
   const db = (table) => makeQuery(table);
   db.transaction = async (fn) => {
+    // Real rollback semantics: snapshot every table, restore on throw —
+    // without this a fail-closed test would pass against writes that a real
+    // Postgres transaction would have rolled back.
+    const snapshot = JSON.parse(JSON.stringify(tables));
     const trx = (table) => makeQuery(table);
     trx.isTransaction = true;
     trx.raw = async () => {};
-    return fn(trx);
+    try {
+      return await fn(trx);
+    } catch (err) {
+      for (const key of Object.keys(tables)) delete tables[key];
+      Object.assign(tables, snapshot);
+      throw err;
+    }
   };
   db.__tables = tables;
   return db;
@@ -145,6 +155,13 @@ test('gate ON + ledger AUTHORITATIVE: a ledger failure FAILS CLOSED — churn er
   // — the whole churn write reports as an error instead of leaving it stale.
   expect(result.churned).toBe(false);
   expect(result.errors).toContain('churn');
+  // The transaction rolled back AND the processor ABORTED: account still
+  // active/billable, so no visit or series may have been touched.
+  expect(result.ok).toBe(false);
+  expect(result.cancelledCount).toBe(0);
+  expect(result.recurrenceStopped).toBe(0);
+  expect(db.__tables.customers[0].active).toBe(true);
+  expect(db.__tables.customers[0].waveguard_tier).toBe('Gold');
 });
 
 test('gate ON + ledger ADVISORY: a ledger failure never blocks the billing wind-down', async () => {

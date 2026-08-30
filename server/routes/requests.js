@@ -192,13 +192,20 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           logger.error(`Deduped cancellation re-processing failed for ${dupe.id}: ${retryErr.message}`);
         }
         // Promote the original request's case to committed if this retry
-        // completed the cancel. The pre-processor write on the ORIGINAL
-        // submit holds the snapshot/resolution; retry input is deliberately
-        // not attached to the original request's record.
+        // completed the cancel. When the original writes BOTH failed and no
+        // case row exists at all, the retry's structured inputs are the only
+        // reconstruction available — openCancellationCase only fills MISSING
+        // fields, so an intact original record is never overwritten by retry
+        // input, and the taxonomy re-derives the hard-stop/review verdict.
+        // The post-churn snapshot is marked degraded (tier/rate already
+        // cleared, no card can be reconstructed).
         await recordCancellationCase({
           customerId: req.customer.id,
           requestId: dupe.id,
+          value,
+          families: Array.isArray(value.families) ? value.families : [],
           reasonText: dupe.description || null,
+          snapshot: { written_on_retry: true, degraded: true },
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
         });
       }
@@ -254,11 +261,15 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (retryErr) {
         logger.error(`Inactive-account cancellation re-processing failed for ${priorCancellation.id}: ${retryErr.message}`);
       }
-      // Same promotion-only semantics as the dedupe branch above.
+      // Same semantics as the dedupe branch above: promote when a row
+      // exists, reconstruct what little can be reconstructed when none does.
       await recordCancellationCase({
         customerId: req.customer.id,
         requestId: priorCancellation.id,
+        value,
+        families: Array.isArray(value.families) ? value.families : [],
         reasonText: priorCancellation.description || null,
+        snapshot: { written_on_retry: true, degraded: true },
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
       });
       return res.status(200).json({

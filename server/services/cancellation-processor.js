@@ -216,6 +216,13 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   } catch (err) {
     errors.push('churn');
     logger.error(`[cancellation-processor] failed to churn customer ${customerId}: ${err.message}`);
+    // ABORT: the churn/billing wind-down did not persist, so the account is
+    // still active and chargeable. Continuing into the recurrence stop and
+    // visit sweep would cancel SERVICE on a live billing account — the exact
+    // inversion this processor exists to prevent. Return partial (ok=false):
+    // the request row + admin review alert carry it, and both retry paths
+    // (60s dedupe, inactive-account) re-run this processor idempotently.
+    return { cancelledCount: 0, recurrenceStopped: 0, churned: false, ok: false, errors };
   }
 
   // 2. Stop any recurring series BEFORE reading the visit list, so a
