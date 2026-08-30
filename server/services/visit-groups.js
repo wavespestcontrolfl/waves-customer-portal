@@ -1869,8 +1869,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       technician_id: target.expect.technician_id,
       ...(options.expect || {}),
     };
+    // technicianId never rides ANY member's rebooker call (local codex audit):
+    // the primary too is re-pointed after its move through the canonical
+    // assignment writer (tech-day fences, unassigned_overdue resolution,
+    // dispatch broadcast). The rebooker's occupancy probe therefore runs on
+    // the row's CURRENT technician; staff surfaces are advisory anyway.
+    const { technicianId: _primaryTech, ...primaryBase } = options;
     const memberOpts = target.isPrimary
-      ? { ...options, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
@@ -1881,14 +1887,14 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // visit's one reminder text is the primary's. A sibling's own series
     // move (seriesMoveId) is finished by the series-effects reconciler like
     // any other committed series_moves row.
-    // Re-point a moved SIBLING at the requested technician through the
+    // Re-point a moved MEMBER (primary included) at the requested technician through the
     // canonical writer (codex r15 P1). Its own transaction after the move
     // committed; 40P01 (tech-day fence vs a scheduling writer waiting on
     // our stop lock) retries. A failure leaves the row moved but on its old
     // technician — reported as a failed member (the detach seam separates
     // it from the re-pointed parent), never silently split-tech.
-    const alignSibling = async () => {
-      if (target.isPrimary || options.technicianId === undefined) return;
+    const alignMember = async () => {
+      if (options.technicianId === undefined) return;
       if (String(target.expect.technician_id || '') === String(options.technicianId || '')) return;
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -1938,7 +1944,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
-      else { await alignSibling(); await syncSiblingReminder(); }
+      await alignMember();
+      if (!target.isPrimary) await syncSiblingReminder();
     } catch (err) {
       // The rebooker COMMITS its move transaction and then runs post-commit
       // work (tech_status clear, follow-up shift, escalation, legacy
@@ -1953,7 +1960,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
         logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: member ${target.id} landed but the rebooker rejected post-commit: ${err.message}`);
         if (target.isPrimary) primaryResult = { success: true, newDate };
-        else { await alignSibling(); await syncSiblingReminder(); }
+        await alignMember();
+        if (!target.isPrimary) await syncSiblingReminder();
         continue;
       }
       if (target.isPrimary) throw err; // the tapped row itself could not move — nothing has moved

@@ -383,7 +383,7 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     // each member carries its OWN pristine label (codex r15 P2) — the
     // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, livePhase: null } });
+      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false, state: 'upcoming', phase: null } });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
@@ -576,18 +576,49 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
       const api = {
         where: () => api, whereNotIn: () => api, orderBy: () => api,
         select: async () => [
-          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2026-08-05', window_start: '09:00:00', window_end: '11:00:00' },
-          { id: 'b', service_type: 'Lawn Fertilization', status: 'on_site', source_action: null, customer_confirmed: false, scheduled_date: '2026-08-05', window_start: '10:00:00', window_end: '12:00:00' },
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true, scheduled_date: '2099-08-05', window_start: '09:00:00', window_end: '11:00:00' },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'on_site', source_action: null, customer_confirmed: false, scheduled_date: '2099-08-05', window_start: '10:00:00', window_end: '12:00:00' },
         ],
         first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
       };
       return api;
     });
     const out = await visitServicesFor({ id: 'a', visit_id: 'v1' });
-    expect(out.visit.livePhase).toBe('on_site');
-    const live = [{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: 'en_route', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00' }];
+    expect(out.visit).toMatchObject({ state: 'in_progress', phase: 'on_site' });
+    const live = [{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: 'en_route', scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }];
     const api = { where: () => api, whereNotIn: () => api, forUpdate: () => api, select: async () => live };
     await expect(membersMatchShown(jest.fn(() => api), { id: 'a', visit_id: 'v1' }, { membershipKey: membershipKeyFor(live) })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+    // positive control (fixture dated 2099 so the stop is not merely PAST): the same stop with nobody underway confirms as a whole
+    const idle = live.map((m) => ({ ...m, status: 'confirmed' }));
+    const idleApi = { where: () => idleApi, whereNotIn: () => idleApi, forUpdate: () => idleApi, select: async () => idle };
+    expect((await membersMatchShown(jest.fn(() => idleApi), { id: 'a', visit_id: 'v1' }, { membershipKey: membershipKeyFor(idle) })).map((m) => m.id)).toEqual(['a', 'b']);
+    // a stop whose window has elapsed is not confirmable either, whichever member's link
+    const gone = idle.map((m) => ({ ...m, scheduled_date: '2026-08-05' }));
+    const goneApi = { where: () => goneApi, whereNotIn: () => goneApi, forUpdate: () => goneApi, select: async () => gone };
+    await expect(membersMatchShown(jest.fn(() => goneApi), { id: 'a', visit_id: 'v1' }, { membershipKey: membershipKeyFor(gone) })).rejects.toMatchObject({ code: 'VISIT_STOP_MOVED' });
+  });
+
+  test('groupedState derives the STOP\'s state from every member and the stop window; pageStateForGroup lets terminal row states win (local audit)', () => {
+    const { groupedState, pageStateForGroup, membersOneStop } = appointmentRouter._test;
+    const now = new Date('2026-08-05T15:30:00.000Z'); // 11:30 ET
+    const a = { id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '08:00', window_end: '10:00', technician_id: 't1' };
+    const b = { id: 'b', status: 'pending', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00', technician_id: 't1' };
+    // the earlier member's own window (08–10) elapsed at 11:30 ET, but the STOP runs to 12:00 ⇒ still upcoming from a's link
+    expect(groupedState([a, b], now)).toEqual({ state: 'upcoming', phase: null });
+    expect(groupedState([a, b], new Date('2026-08-05T16:30:00.000Z'))).toEqual({ state: 'past', phase: null }); // 12:30 ET
+    expect(groupedState([a, { ...b, status: 'en_route' }], now)).toEqual({ state: 'in_progress', phase: 'en_route' });
+    expect(groupedState([a, { ...b, status: 'rescheduled' }], now)).toEqual({ state: 'pending_rebook', phase: null });
+    // no ends ⇒ arrival promise from the earliest start
+    expect(groupedState([{ ...a, window_end: null }, { ...b, window_end: null }], new Date('2026-08-05T13:30:00.000Z'))).toEqual({ state: 'upcoming', phase: null }); // 09:30 ET < 10:00
+    expect(groupedState([{ ...a, window_end: null }, { ...b, window_end: null }], new Date('2026-08-05T14:30:00.000Z'))).toEqual({ state: 'past', phase: null });     // 10:30 ET
+    // the group's state wins over the token row's own two-hour window; a terminal token row keeps its own state
+    const info = { visit: { state: 'upcoming', phase: null } };
+    expect(pageStateForGroup({ ...a, status: 'confirmed', window_start: '08:00:00' }, info, now)).toEqual({ state: 'upcoming', phase: null });
+    expect(pageStateForGroup({ ...a, status: 'cancelled' }, info, now)).toEqual({ state: 'cancelled' });
+    expect(pageStateForGroup(a, {}, now).state).toBe('past'); // ungrouped: the row's own window
+    // technician consistency is part of the stop invariant (codex r21)
+    expect(membersOneStop([a, b])).toBe(true);
+    expect(membersOneStop([a, { ...b, technician_id: 't2' }])).toBe(false);
   });
 
   test('an unreadable member lookup fails closed: visitUnknown, never an ungrouped payload', async () => {
@@ -598,7 +629,8 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
 
   test('a lost-race grouped confirm re-proves the membership key and reports the aggregate under the stop lock (local audit)', async () => {
     const { groupedAggregateUnderLock, membershipKeyFor } = appointmentRouter._test;
-    const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: bStatus, scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00' }];
+    // far-future stop: the locked proof also checks the STOP's window against real now
+    const members = (bStatus) => [{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'b', status: bStatus, scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }];
     const wire = (live) => {
       const api = {
         where: () => api, whereNotIn: () => api, forUpdate: () => api,
@@ -617,7 +649,7 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     trx = wire(members('confirmed'));
     expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: membershipKeyFor(members('confirmed')) })).toEqual({ ok: true, confirmed: true });
     // membership changed (that is what made the CAS miss) ⇒ not ok ⇒ CHANGED
-    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'c', status: 'pending', scheduled_date: '2026-08-05', window_start: '10:00', window_end: '12:00' }]);
+    wire([{ id: 'a', status: 'confirmed', scheduled_date: '2099-08-05', window_start: '09:00', window_end: '11:00' }, { id: 'c', status: 'pending', scheduled_date: '2099-08-05', window_start: '10:00', window_end: '12:00' }]);
     expect(await groupedAggregateUnderLock(svc, { ...shown, membershipKey: key })).toEqual({ ok: false, confirmed: null });
   });
 

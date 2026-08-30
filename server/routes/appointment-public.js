@@ -241,7 +241,7 @@ async function visitServicesFor(svc) {
       .where({ visit_id: svc.visit_id })
       .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
       .orderBy('window_start', 'asc')
-      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end');
+      .select('id', 'service_type', 'status', 'source_action', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
     if (members.length < 2) return {};
     // The members must still form ONE stop (local codex audit): the unit
     // mover commits members in separate transactions and a failed detach
@@ -283,11 +283,12 @@ async function visitServicesFor(svc) {
         // the whole stop pending-rebook: its stored slot is stale, so the
         // group must not render as booked (local codex audit).
         pendingRebook: members.some((m) => String(m.status || '').toLowerCase() === 'rescheduled'),
-        // A member already underway makes the whole stop underway (local
-        // codex audit): the technician is at / heading to this stop, so no
-        // member's link may still offer a confirm or read as upcoming.
-        livePhase: members.some((m) => String(m.status || '').toLowerCase() === 'on_site') ? 'on_site'
-          : members.some((m) => String(m.status || '').toLowerCase() === 'en_route') ? 'en_route' : null,
+        // Visit-level state from ALL live members and the stop's own window
+        // (local codex audit): underway if any member is, pending-rebook if
+        // any awaits a slot, past once the STOP's window has elapsed — never
+        // the token row's own two-hour window, which can expire while a later
+        // chained sibling is still ahead.
+        ...groupedState(members),
       },
     };
   } catch (err) {
@@ -300,12 +301,48 @@ async function visitServicesFor(svc) {
   }
 }
 
-// Do these live members still form one stop — one date, windows forming a
-// single connected chain (visit-groups' own connectivity rule)?
+// Do these live members still form one stop — one date, one technician,
+// windows forming a single connected chain (visit-groups' own connectivity
+// rule)? Technician consistency too (codex r21): a per-row reassignment
+// whose seam failed leaves rows under different technicians that must not
+// be presented — or confirmed — as one appointment.
 function membersOneStop(members) {
-  const dates = new Set((members || []).map((m) => apptDateStr(m.scheduled_date) || ''));
-  if (dates.size > 1) return false;
-  return require('../services/visit-groups').windowedMembersConnected(members || []);
+  const rows = members || [];
+  if (new Set(rows.map((m) => apptDateStr(m.scheduled_date) || '')).size > 1) return false;
+  if (new Set(rows.map((m) => String(m.technician_id || ''))).size > 1) return false;
+  return require('../services/visit-groups').windowedMembersConnected(rows);
+}
+
+// The grouped stop's state from its live members: { state, phase } with the
+// same vocabulary as pageState, derived from every member and the STOP's
+// window (latest member end, else the arrival promise from the earliest
+// start). Shared by the page, the confirm's pre-check and the locked
+// membership proof so all three agree.
+function groupedState(members, now = new Date()) {
+  const rows = members || [];
+  const status = (m) => String(m.status || '').toLowerCase();
+  if (rows.some((m) => status(m) === 'on_site')) return { state: 'in_progress', phase: 'on_site' };
+  if (rows.some((m) => status(m) === 'en_route')) return { state: 'in_progress', phase: 'en_route' };
+  if (rows.some((m) => status(m) === 'rescheduled')) return { state: 'pending_rebook', phase: null };
+  const date = apptDateStr(rows[0]?.scheduled_date);
+  if (date) {
+    const ends = rows.map((m) => hhmm(m.window_end)).filter(Boolean).sort();
+    const starts = rows.map((m) => hhmm(m.window_start)).filter(Boolean).sort();
+    const endsAt = ends.length ? parseETDateTime(`${date}T${ends[ends.length - 1]}`)
+      : starts.length ? new Date(parseETDateTime(`${date}T${starts[0]}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000)
+        : parseETDateTime(`${date}T23:59`);
+    if (endsAt && endsAt < now) return { state: 'past', phase: null };
+  }
+  return { state: 'upcoming', phase: null };
+}
+
+// Row-level states that outrank the group's (the token row itself is
+// terminal or unknown): keep pageState; otherwise the grouped state wins.
+function pageStateForGroup(svc, visitInfo, now = new Date()) {
+  const row = pageState(svc, now);
+  if (!visitInfo?.visit) return row;
+  if (!['upcoming', 'past', 'pending_rebook', 'in_progress'].includes(row.state)) return row;
+  return { state: visitInfo.visit.state, phase: visitInfo.visit.phase };
 }
 
 // Opaque identity of a member SET (sorted ids, hashed): the page carries it
@@ -343,10 +380,11 @@ async function membersMatchShown(trx, svc, shown) {
   if (members.length >= 2 && !membersOneStop(members)) {
     throw Object.assign(new Error('visit members no longer share one stop'), { code: 'VISIT_STOP_MOVED' });
   }
-  // A stop already underway (any member en_route / on_site) takes no
-  // customer confirm — the page renders in_progress; a stale tap reloads.
-  if (members.some((m) => ['en_route', 'on_site'].includes(String(m.status || '').toLowerCase()))) {
-    throw Object.assign(new Error('visit already underway'), { code: 'VISIT_STOP_MOVED' });
+  // The stop must still be confirmable as a whole under the locks — the
+  // same grouped state the page rendered (underway / pending-rebook / past
+  // ⇒ reload, never a fan-out).
+  if (members.length >= 2 && groupedState(members).state !== 'upcoming') {
+    throw Object.assign(new Error('visit is no longer confirmable as a stop'), { code: 'VISIT_STOP_MOVED' });
   }
   return members;
 }
@@ -558,18 +596,13 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const { state: liveState, phase } = pageState(svc);
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online
     // until the lookup works (never a solo page over a possibly grouped stop).
     const { visitUnknown, ...visitInfo } = visitInfoRaw;
-    // Grouped state aggregates the members: any member awaiting a rebook
-    // makes the stop pending-rebook, whichever member's link this is.
-    const state = visitUnknown ? 'not_available'
-      : (visitInfo.visit?.livePhase && liveState === 'upcoming') ? 'in_progress'
-        : (visitInfo.visit?.pendingRebook && liveState === 'upcoming') ? 'pending_rebook'
-          : liveState;
-    const livePhase = state === 'in_progress' ? (phase || visitInfo.visit?.livePhase) : phase;
+    // Grouped: the state is the STOP's (all members + the stop's window),
+    // whichever member's link this is; ungrouped: the row's own.
+    const { state, phase: livePhase } = visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, visitInfo);
     const base = {
       state,
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
@@ -759,7 +792,10 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const { state } = pageState(svc);
+    // Grouped: the STOP's state (all members + the stop's window), same
+    // derivation as the page; an unreadable membership is not confirmable.
+    const preInfo = svc.visit_id ? await visitServicesFor(svc) : {};
+    const { state } = preInfo.visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, preInfo);
     if (state !== 'upcoming') {
       return res.status(409).json({
         error: "This visit can't be confirmed online anymore.",
@@ -1008,6 +1044,8 @@ router._test = {
   membersMatchShown,
   membershipKeyFor,
   membersOneStop,
+  groupedState,
+  pageStateForGroup,
   memberServiceLabel,
   confirmedRowStillShown,
 };

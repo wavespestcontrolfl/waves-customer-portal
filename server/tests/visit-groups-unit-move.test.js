@@ -574,12 +574,11 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     const rebooker = fakeRebooker();
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
     expect(out.visitMove).toMatchObject({ moved: ['a', 'b', 'c'], failed: [] });
-    // the primary keeps the caller's technicianId (the caller's own contract); siblings get NO technicianId
-    expect(rebooker.reschedule.mock.calls[0][5].technicianId).toBe('t9');
-    expect(rebooker.reschedule.mock.calls[1][5]).not.toHaveProperty('technicianId');
-    expect(rebooker.reschedule.mock.calls[2][5]).not.toHaveProperty('technicianId');
-    // b (t1 → t9) re-pointed through the canonical writer on a transaction; c already on t9 is not touched
-    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    // NO member's rebooker call carries technicianId — the primary too goes through the canonical writer (local audit)
+    for (const c of rebooker.reschedule.mock.calls) expect(c[5]).not.toHaveProperty('technicianId');
+    // a and b (t1 → t9) re-pointed through the canonical writer on a transaction; c already on t9 is not touched
+    expect(assignDispatchJob).toHaveBeenCalledTimes(2);
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'a', technicianId: 't9', expectTechnicianId: 't1', skipVisitSeam: true }));
     // skipVisitSeam: the per-row seam must not run on a half-reassigned visit (codex r16 P1) — step 4 runs it per member after the retarget
     // expectTechnicianId = the PLANNED pre-move tech (local audit): a newer operator reassignment is never overwritten
     expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1' });
@@ -594,15 +593,18 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     const onT9 = (ids) => ids.map((id) => ({ id, scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' }));
     db.__script = script({ members: [member('a'), member('b')], landed: onT9(['a', 'b']) });
     assignDispatchJob
-      .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: '40P01' }))
-      .mockResolvedValueOnce({ changed: true });
+      .mockResolvedValueOnce({ changed: true })                                               // a
+      .mockRejectedValueOnce(Object.assign(new Error('deadlock'), { code: '40P01' }))         // b
+      .mockResolvedValueOnce({ changed: true });                                              // b retry
     let out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(out.visitMove.failed).toEqual([]);
-    expect(assignDispatchJob).toHaveBeenCalledTimes(2);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(3); // a, then b (deadlock) + b retry
     jest.clearAllMocks(); db.__calls.length = 0;
     // b stays on t1 (its re-point failed): the retarget sees it diverged from the planned tech too
     db.__script = script({ members: [member('a'), member('b')], landed: [...onT9(['a']), { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' }] });
-    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Technician is inactive'), { statusCode: 400 }));
+    assignDispatchJob
+      .mockResolvedValueOnce({ changed: true })                                                             // a
+      .mockRejectedValueOnce(Object.assign(new Error('Technician is inactive'), { statusCode: 400 }));    // b
     out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(out.visitMove.moved).toEqual(['a', 'b']);
     expect(out.visitMove.failed).toEqual([{ id: 'b', reason: 'moved but its technician reassignment failed: Technician is inactive', code: 'ASSIGNMENT_FAILED' }]);
@@ -610,13 +612,16 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     // a concurrent operator reassignment (ASSIGNMENT_STALE) is a failed member, not retried, not overwritten
     jest.clearAllMocks(); db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landed: [...onT9(['a']), { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' }] });
-    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('Job was reassigned concurrently - the planned technician is stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    assignDispatchJob
+      .mockResolvedValueOnce({ changed: true })                                                                                                   // a
+      .mockRejectedValueOnce(Object.assign(new Error('Job was reassigned concurrently - the planned technician is stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' })); // b
     out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
-    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob).toHaveBeenCalledTimes(2);
     expect(out.visitMove.failed).toEqual([expect.objectContaining({ id: 'b', code: 'ASSIGNMENT_STALE' })]);
     // unassign (null) goes through the same writer
     jest.clearAllMocks(); db.__script = script({ members: [member('a'), member('b')] });
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: null } });
+    expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'a', technicianId: null }));
     expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'b', technicianId: null }));
   });
 
