@@ -50,6 +50,7 @@
  *   GATE_REPORT_CROSS_SELL=true (live service-report cross-sell offer card with estimator pricing)
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
+ *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
  *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
  *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
@@ -1837,6 +1838,17 @@ const gates = {
   // While dark: extraction still captures the new fields (capture-only);
   // nothing fills, parks, or renders. Kill switch: unset the var.
   callPropertyRole: gateEnvValue('GATE_CALL_PROPERTY_ROLE'),
+
+  // Re-service (callback) report copy (2026-08-30): the customer report for
+  // a callback visit keys off `service_records.is_callback` instead of the
+  // editable display name, drops below the honest V2 status branches, splits
+  // lawn vs pest wording, and prints the "$0 — included with WaveGuard" line
+  // the tech completion panel already promises — on the web hero AND the PDF.
+  // OFF everywhere until Adam flips it (exact 'true'); reservice-report.js
+  // reads the env at call time so a flip needs no redeploy — cached PDFs
+  // re-render via the -rs1 key component. This entry is the status/log
+  // listing. Kill switch: unset the var (payload keeps `isCallback` as data).
+  reserviceReportCopy: process.env.GATE_RESERVICE_REPORT_COPY === 'true',
 
 };
 

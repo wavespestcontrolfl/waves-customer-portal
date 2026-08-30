@@ -1037,3 +1037,97 @@ describe('fungicide vocabulary covers the oomycete catalog prefills', () => {
     );
   });
 });
+
+describe('smartStatusSummary — re-service (callback) branch', () => {
+  const reservicePest = {
+    serviceLine: 'pest',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: true,
+    billingLine: 'This re-service was included with your WaveGuard Gold membership — $0.00 billed.',
+  };
+
+  it('legacy (no reserviceReport block): the name regex still names the visit', () => {
+    const status = smartStatusSummary({ serviceType: 'Pest Control Re-Service', applications: [] }, 'static');
+    expect(status.heading).toBe('we came back and took care of it!');
+    expect(status.detail).not.toMatch(/\$0\.00/);
+  });
+
+  it('server block present: keys off is_callback, not the display name, and prints the $0 WaveGuard line', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Pest Control Service',
+      reserviceReport: reservicePest,
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we came back and took care of it!');
+    expect(status.result).toMatch(/re-treated the affected areas/);
+    expect(status.completedLine).toBe('Reported activity areas were re-treated today.');
+    expect(status.detail).toContain('WaveGuard Gold membership — $0.00 billed');
+  });
+
+  it('lawn block carries the turf wording', () => {
+    const status = smartStatusSummary({
+      reserviceReport: {
+        ...reservicePest,
+        serviceLine: 'lawn',
+        result: 'Lawn re-service completed — we returned between your regular applications to re-treat the problem areas you reported.',
+        completedFallback: 'Reported problem areas were re-treated today.',
+        expectation: 'Lawn treatments take time to show — weeds and disease can take two to three weeks to respond after an application. Contact us if the problem areas are not improving after three weeks.',
+        includedWithWaveGuard: false,
+        billingLine: null,
+      },
+      applications: [],
+    }, 'static');
+    expect(status.result).toMatch(/^Lawn re-service completed/);
+    expect(status.detail).toMatch(/weeds and disease/);
+    expect(status.detail).not.toMatch(/\$0\.00/);
+  });
+
+  it('an honest needs-attention V2 snapshot outranks the re-service headline', () => {
+    const status = smartStatusSummary({
+      serviceType: 'Lawn Care Re-Service',
+      reserviceReport: { ...reservicePest, serviceLine: 'lawn' },
+      reportV2: { snapshot: { status: 'needs_attention', peaceOfMind: 'We noted fungus in the back lawn — details below.' } },
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('We noted fungus in the back lawn — details below.');
+  });
+
+  it('a cockroach V2 status headline outranks the re-service headline', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      cockroachReportV2: { status: { label: 'German cockroach activity still moderate after treatment 2 of 3.' } },
+      applications: [],
+    }, 'static');
+    expect(status.result).toBe('German cockroach activity still moderate after treatment 2 of 3.');
+  });
+
+  it('a Pest V2 attention status outranks the re-service headline but keeps the $0 line', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      pestReportV2: { status: { key: 'action', label: 'Action needed', tone: 'attention' } },
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('your service is complete!');
+    expect(status.result).toBe('Action needed');
+    expect(status.detail).toContain('$0.00 billed');
+    const watching = smartStatusSummary({
+      reserviceReport: reservicePest,
+      pestReportV2: { status: { key: 'watching', label: 'We’re watching', tone: 'watch' } },
+      applications: [],
+    }, 'static');
+    expect(watching.heading).toBe('we came back and took care of it!');
+  });
+
+  it('high-priority findings still win over the re-service block', () => {
+    const status = smartStatusSummary({
+      reserviceReport: reservicePest,
+      findings: [{ severity: 'high', title: 'Ant activity near front entry' }],
+      applications: [],
+    }, 'static');
+    expect(status.heading).toBe('we found activity that needs attention!');
+  });
+});

@@ -841,7 +841,12 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   // Re-service visits are follow-ups on reported activity — "routine
   // service completed" undersells the entire point of the visit (owner
   // dry-run review 2026-07-21). Name what the visit was.
-  if (/re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
+  // LEGACY position + name regex: only while the server sends no
+  // `reserviceReport` block (GATE_RESERVICE_REPORT_COPY dark, or an older
+  // cached payload). With the block present the callback branch moves
+  // BELOW the honest V2 status branches — see `reservice` further down.
+  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
+  if (!reservice && /re-?service/i.test(String(data.serviceType || data.serviceDisplayName || ''))) {
     return {
       heading: 'we came back and took care of it!',
       status: allReady ? 'Ready now' : 'Service complete',
@@ -913,6 +918,46 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
       detail: data.techVisitCard
         ? ''
         : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+    };
+  }
+
+  // Callback (re-service) record, keyed on the server's is_callback-derived
+  // block rather than the editable service name (audit 2026-08-30 G3/G4):
+  // sits BELOW every honest-status branch above so a needs-attention gauge
+  // or a program dashboard headline is never overwritten by "took care of
+  // it", and carries the lawn-vs-pest wording plus the "$0 — included with
+  // WaveGuard" line the tech completion panel promises the customer.
+  if (reservice) {
+    // Pest V2 carries its own honest status ("One step recommended" /
+    // "Action needed") — same rule as the cockroach/termite/snapshot
+    // branches above: it must not be overwritten by "took care of it!".
+    const pestStatus = data.pestReportV2?.status;
+    if (pestStatus?.label && ['recommended', 'action'].includes(String(pestStatus.key || ''))) {
+      return {
+        heading: 'your service is complete!',
+        status: allReady ? 'Ready now' : 'Service complete',
+        statusTone: 'neutral',
+        result: pestStatus.label,
+        completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : (reservice.completedFallback || 'Reported areas were re-treated today.'),
+        detail: [
+          data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+          reservice.billingLine || null,
+        ].filter(Boolean).join(' '),
+      };
+    }
+    return {
+      heading: reservice.heading || 'we came back and took care of it!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: reservice.result || 'Re-service completed.',
+      completedLine: completedAreas
+        ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}`
+        : (reservice.completedFallback || 'Reported areas were re-treated today.'),
+      detail: [
+        data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
+        reservice.expectation || null,
+        reservice.billingLine || null,
+      ].filter(Boolean).join(' '),
     };
   }
 

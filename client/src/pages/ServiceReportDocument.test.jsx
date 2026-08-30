@@ -1345,3 +1345,34 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/Where we treated/);
   });
 });
+
+describe('ServiceReportDocument — re-service (callback) block', () => {
+  const reservice = {
+    serviceLine: 'pest',
+    heading: 'we came back and took care of it!',
+    result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
+    completedFallback: 'Reported activity areas were re-treated today.',
+    expectation: 'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
+    includedWithWaveGuard: true,
+    billingLine: 'This re-service was included with your WaveGuard Gold membership — $0.00 billed.',
+  };
+
+  it('prints the Billing row and leads the summary with the re-service framing', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service', reserviceReport: reservice }} token="tok123" />);
+    expect(screen.getByText('Included with WaveGuard — $0.00 billed')).toBeInTheDocument();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+    expect(screen.getByText(reservice.expectation)).toBeInTheDocument();
+  });
+
+  it('non-member callback: no Billing row, no money claim', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, reserviceReport: { ...reservice, includedWithWaveGuard: false, billingLine: null } }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.getByText(reservice.result)).toBeInTheDocument();
+  });
+
+  it('no block (gate dark): the document is unchanged', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceDisplayName: 'Pest Control Re-Service' }} token="tok123" />);
+    expect(screen.queryByText(/\$0\.00 billed/)).toBeNull();
+    expect(screen.queryByText(reservice.result)).toBeNull();
+  });
+});

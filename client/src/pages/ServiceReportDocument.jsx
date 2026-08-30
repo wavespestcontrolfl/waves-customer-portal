@@ -522,6 +522,10 @@ export default function ServiceReportDocument({ data, token }) {
   // headline + body + reviewed narrative are the document's summary, and
   // the program position prints as its own line.
   const cockroachV2 = data.cockroachReportV2?.status?.label ? data.cockroachReportV2 : null;
+  // Callback (re-service) block from reservice-report.js — the same copy the
+  // web hero prints, so the archived document keeps the re-service framing
+  // (audit 2026-08-30 G5). Null while GATE_RESERVICE_REPORT_COPY is dark.
+  const reservice = data.reserviceReport && typeof data.reserviceReport === 'object' ? data.reserviceReport : null;
   const summaryParagraphs = [];
   if (cockroachV2) {
     summaryParagraphs.push(String(cockroachV2.status.label).replace(/\.$/, '') + '.');
@@ -545,6 +549,15 @@ export default function ServiceReportDocument({ data, token }) {
   const summaryBody = (termiteV2Summary || cockroachV2) ? '' : (reconciledResult
     || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '');
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
+  if (reservice) {
+    // Same precedence as the web hero: a program dashboard's honest status
+    // (cockroach/termite V2) leads; the re-service framing follows it.
+    // Otherwise the re-service sentence leads the summary.
+    const lines = [reservice.result, reservice.expectation].filter((line) => typeof line === 'string' && line.trim());
+    const fresh = lines.filter((line) => !summaryParagraphs.includes(line));
+    if (cockroachV2 || termiteV2Summary) summaryParagraphs.push(...fresh);
+    else summaryParagraphs.unshift(...fresh);
+  }
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
   // status/insights the live report leads with. Reading only typedReport
@@ -860,6 +873,12 @@ export default function ServiceReportDocument({ data, token }) {
           <div>
             <SectionHeader>Service</SectionHeader>
             <InfoRow label="Service">{data.serviceDisplayName || data.serviceType}</InfoRow>
+            {/* Member callbacks: the completion panel tells the tech this
+                visit "will be noted as included with WaveGuard membership on
+                the customer's report" — this row is where that promise is
+                kept on the document. Non-member callbacks print nothing
+                (they may bill; no money claim without a member tier). */}
+            {reservice?.includedWithWaveGuard ? <InfoRow label="Billing">Included with WaveGuard — $0.00 billed</InfoRow> : null}
             <InfoRow label="Technician">{data.technicianName}</InfoRow>
             <InfoRow label="Time in">{fmtTime(data.visitTiming?.arrivedAt)}</InfoRow>
             <InfoRow label="Time out">{fmtTime(data.visitTiming?.exitedAt)}</InfoRow>
