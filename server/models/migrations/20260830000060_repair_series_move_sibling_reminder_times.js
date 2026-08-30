@@ -12,14 +12,21 @@
  * (their 08:00 is deliberate). timestamptz derivation: naive (date + time)
  * interpreted as America/New_York — the ET-safe direction.
  *
+ * Suppressed-by-sibling rows are excluded from BOTH passes: their sent
+ * flags are deliberate placeholders and their appointment_time is the
+ * cohort identity shared with the slot owner — re-pointing or re-arming
+ * one would detach it from its cohort or duplicate the owner's texts.
+ *
  * Second pass: the erroneous 08:00 time may have sat inside the 72h/24h
  * cutoff when the move re-armed the row, stamping a SYNTHETIC coverage flag
  * with no text ever sent — repairing only the time would then silence the
  * reminder forever. For repaired rows whose corrected time is still beyond
- * the cutoff, re-arm the flag unless a genuine reminder SMS exists in
- * sms_log (same delivered-evidence correlation appointment-reminders.js
- * uses: outbound, real Twilio SID, reminder message_type, inside the
- * reminder window).
+ * the cutoff, re-arm the flag unless THAT reminder was genuinely delivered:
+ * per-purpose, per-appointment via messaging_audit_log
+ * (appointment_reminder_72h vs _24h, sent, real provider id or email
+ * channel). No legacy sms_log fallback — the bug postdates audit-log
+ * linkage, so every genuine send for an affected row has a linked audit
+ * row.
  */
 exports.up = async function up(knex) {
   const repaired = await knex.raw(`
@@ -30,6 +37,7 @@ exports.up = async function up(knex) {
     WHERE ss.id = ar.scheduled_service_id
       AND ar.cancelled = false
       AND COALESCE(ar.windows_preclosed, false) = false
+      AND COALESCE(ar.suppressed_by_sibling, false) = false
       AND ss.window_start IS NOT NULL
       AND ss.window_start <> time '08:00'
       AND ss.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show')
@@ -41,30 +49,29 @@ exports.up = async function up(knex) {
   console.log(`[migration] repaired ${ids.length} reminder row(s) mis-armed at the 08:00 fallback`);
   if (!ids.length) return;
 
-  const rearm = async (flag, flagAt, cutoff) => {
+  const rearm = async (flag, flagAt, cutoff, purpose) => {
     const res = await knex.raw(
       `
       UPDATE appointment_reminders ar
       SET ${flag} = false, ${flagAt} = NULL, updated_at = now()
       WHERE ar.id = ANY(?)
         AND ar.${flag} = true
+        AND COALESCE(ar.suppressed_by_sibling, false) = false
         AND ar.appointment_time > NOW() + interval '${cutoff} hours'
         AND NOT EXISTS (
-          SELECT 1 FROM sms_log lsl
-          WHERE lsl.customer_id = ar.customer_id
-            AND lsl.direction = 'outbound'
-            AND lsl.twilio_sid ~ '^(SM|MM)'
-            AND lsl.message_type IN ('reminder_72h', 'appointment_reminder')
-            AND lsl.created_at >= ar.appointment_time - interval '80 hours'
-            AND lsl.created_at <= NOW()
+          SELECT 1 FROM messaging_audit_log mal
+          WHERE mal.appointment_id = ar.scheduled_service_id::text
+            AND mal.purpose = ?
+            AND mal.sent_at IS NOT NULL
+            AND (mal.provider_message_id ~ '^(SM|MM)' OR mal.channel = 'email')
         )
     `,
-      [ids]
+      [ids, purpose]
     );
     console.log(`[migration] re-armed ${res.rowCount ?? 0} synthetic ${flag} flag(s)`);
   };
-  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72);
-  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24);
+  await rearm('reminder_72h_sent', 'reminder_72h_sent_at', 72, 'appointment_reminder_72h');
+  await rearm('reminder_24h_sent', 'reminder_24h_sent_at', 24, 'appointment_reminder_24h');
 };
 
 exports.down = async function down() {
