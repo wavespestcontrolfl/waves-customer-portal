@@ -31,35 +31,42 @@ function pinKey() {
   return crypto.createHmac('sha256', String(base)).update(PIN_KEY_INFO).digest();
 }
 
-function computeSignature(key, token, assessmentId, expiresAt) {
-  return crypto.createHmac('sha256', key)
-    .update(`${token}:${assessmentId}:${expiresAt}`)
-    .digest('hex');
+// `plan` = the week-plan snapshot identity the render is pinned to (ISO
+// sent_at, or 'none'); '' when the render is unpinned for the plan. It is
+// part of the signed payload so the browser's /data fetch renders exactly the
+// plan the cache signature saw (codex #3565 r6).
+// Without a plan pin the payload is the ORIGINAL format, so pins minted by
+// the previous version keep verifying on new pods during a rolling deploy
+// (in-flight report renders must not 409); a plan pin uses the extended
+// format. New→old only fails for the deploy window and the render retries.
+function computeSignature(key, token, assessmentId, expiresAt, plan = '') {
+  const payload = plan ? `${token}:${assessmentId}:${expiresAt}:${plan}` : `${token}:${assessmentId}:${expiresAt}`;
+  return crypto.createHmac('sha256', key).update(payload).digest('hex');
 }
 
 // Returns { signature, expiresAt } or null when this server cannot sign.
 // A null return is NOT an error the caller should surface — see the renderer:
 // unable to sign means render UNPINNED rather than emit a pin that will be
 // refused, which would fail every lawn delivery until retry exhaustion.
-function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.now() / 1000), plan = '' } = {}) {
   const key = pinKey();
   if (!key || !token || !assessmentId) return null;
   const expiresAt = nowSeconds + PIN_TTL_SECONDS;
-  return { signature: computeSignature(key, token, assessmentId, expiresAt), expiresAt };
+  return { signature: computeSignature(key, token, assessmentId, expiresAt, plan), expiresAt };
 }
 
 // Constant-time verification. Returns false rather than throwing so a caller
 // can answer with the same fixed refusal it uses for an unauthorized pin — a
 // timing-distinguishable or differently-worded rejection would leak whether a
 // given assessment exists.
-function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSeconds = Math.floor(Date.now() / 1000), plan = '' } = {}) {
   const key = pinKey();
   if (!key || typeof signature !== 'string') return false;
 
   const exp = Number(expiresAt);
   if (!Number.isFinite(exp) || exp <= nowSeconds) return false;
 
-  const expected = computeSignature(key, token, assessmentId, String(expiresAt));
+  const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan);
   if (signature.length !== expected.length) return false;
   try {
     return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));

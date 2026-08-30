@@ -207,6 +207,71 @@ describe('helpers', () => {
   test('atRoundLimit respects MAX_ROUNDS', () => { expect(atRoundLimit(MAX_ROUNDS)).toBe(true); expect(atRoundLimit(MAX_ROUNDS - 1)).toBe(false); });
 });
 
+describe('scheduler-lane body-image revalidation (GH r19 P1)', () => {
+  const { revalidateBodyImagesForMarkdown } = require('../services/content/codex-remediation');
+  const internals = require('../services/content-astro/astro-publisher')._internals;
+  test('gate off → ok; gate on → a hero-only fixed body fails, a body with two committed distinct pictures passes', async () => {
+    const md = (body) => `---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n${body}`;
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation(() => false);
+    try {
+      expect(await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, {})).toEqual({ ok: true });
+      spy.mockImplementation((k) => k === 'blogBodyImages');
+      const gh = { getFile: jest.fn(async () => null) };
+      const r = await revalidateBodyImagesForMarkdown(md('## A\n\nProse.'), { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/0 distinct in-article image/);
+      expect((await revalidateBodyImagesForMarkdown(md('## A'), {}, { gh, astroPublisherInternals: internals })).reason).toMatch(/PR head ref unavailable/);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('a fix introducing ANOTHER post\'s managed body image parks at the pre-push check, not first at the merge gate (GH r29)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'blogBodyImages');
+    try {
+      const md = `---\ntitle: T\nslug: /pest-control/my-post/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n## A\n\n![Borrowed](/images/blog/other-post/body-1.webp)\n\n![Two](/images/blog/pest-control/my-post/body-2.webp)`;
+      const gh = { getFile: jest.fn(async () => ({ sha: 'x' })) };
+      const r = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/another post's generated image/);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('a flat .md fix is validated as .md renders: images inside a raw HTML block are literal text and do not count; the same body counts as .mdx (GH r25)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((k) => k === 'blogBodyImages');
+    try {
+      const md = `---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\n## A\n\n<div>![a](/images/blog/x/body-1.webp)</div>\n\n## B\n\n<div>![b](/images/blog/x/body-2.webp)</div>\n`;
+      const gh = { getFile: jest.fn(async () => null) };
+      const asMd = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x', mdx: false }, { gh, astroPublisherInternals: internals });
+      expect(asMd.ok).toBe(false);
+      expect(asMd.reason).toMatch(/0 distinct in-article image/);
+      // .mdx parses the JSX children as Markdown — both images are seen (and then fail on the missing files, not on the count).
+      const asMdx = await revalidateBodyImagesForMarkdown(md, { prHeadRef: 'content/blog-x' }, { gh, astroPublisherInternals: internals });
+      expect(asMdx.reason).not.toMatch(/0 distinct/);
+      expect(asMdx.reason).toMatch(/not committed|missing|body-1/);
+    } finally { spy.mockRestore(); }
+  });
+
+  test('maybeRemediateBlogPost mirrors the fixed body WITHOUT publisher-managed body-N references (GH r22)', async () => {
+    const { maybeRemediateBlogPost } = require('../services/content/codex-remediation');
+    const pub = require('../services/content-astro/astro-publisher');
+    expect(pub.stripManagedBodyImages('Prose.\n\n![g](/images/blog/roaches/body-1.webp)\n\nMore.', 'roaches')).toBe('Prose.\n\nMore.');
+    // Contract check only — the full scheduler remediation flow is exercised elsewhere; the mirror goes through stripManagedBodyImages (see codex-remediation.js onRemediated).
+    expect(typeof maybeRemediateBlogPost).toBe('function');
+  });
+
+  test('runRemediationForPr parks when the revalidateBodyImages hook fails', async () => {
+    const db = makeDb();
+    const gh = makeGh();
+    let parked = false;
+    const r = await runRemediationForPr({ ...CTX, revalidateBodyImages: async () => ({ ok: false, reason: 'body images: fix leaves 1 distinct' }), onPark: async () => { parked = true; } }, { db, gh, callAnthropic: makeCall('FIXED BODY'), validateFixedBlogFile: PASS });
+    expect(r.remediated).not.toBe(true);
+    expect(parked).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+});
+
 describe('runRemediationForPr', () => {
   test('fresh findings under limit → push fix, persist state, re-request review', async () => {
     const db = makeDb();
@@ -1240,6 +1305,45 @@ describe('validateAutonomousRunGates', () => {
   });
 
   test('all gates pass -> ok', async () => {
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
+  });
+
+  test('body-image minimum (GATE_BLOG_BODY_IMAGES on): a fix that drops a generated in-article image is rejected; two distinct images pass (GH r1)', async () => {
+    const fg = require('../config/feature-gates');
+    const spy = jest.spyOn(fg, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
+    try {
+      const seen = [];
+      // Distinct bytes per path (body-1 ≠ body-2) so the picture-level check passes where intended.
+      const sharp = require('sharp');
+      const png = async (seed) => { const w = 32; const h = 32; const raw = Buffer.alloc(w * h * 3); for (let i = 0; i < raw.length; i++) raw[i] = ((i * (seed * 7 + 3)) + (Math.floor(i / 3) % w) * seed * 9) % 256; return (await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer()).toString('base64'); };
+      const bytes = { 'public/images/blog/x/body-1.webp': await png(1), 'public/images/blog/x/body-2.webp': await png(2) };
+      const gh = { getFile: async (path, ref) => { seen.push([path, ref]); return bytes[path] ? { sha: 'ok', raw: { content: bytes[path] } } : null; } };
+      const deps = { ...goodDeps(), gh, prHeadRef: 'content/autonomous-x' };
+      const one = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![a again](/images/blog/x/body-1.webp)';
+      const res = await rem.validateAutonomousRunGates(one, RUN_REF, deps);
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/body images: fix leaves 1 distinct/);
+      const two = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n## B\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, deps)).ok).toBe(true);
+      // Assets are verified on the PR BRANCH, not main.
+      expect(seen).toContainEqual(['public/images/blog/x/body-2.webp', 'content/autonomous-x']);
+      // Hero in the body / an unverifiable ref / a remote URL are rejected (hook r5).
+      const hero = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\nFixed.\n\n![h](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(hero, RUN_REF, deps)).reason).toMatch(/embeds the hero/);
+      const ghost = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![z](https://example.com/z.jpg)';
+      expect((await rem.validateAutonomousRunGates(ghost, RUN_REF, deps)).reason).toMatch(/not committed/);
+      // No PR head ref → fail closed.
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, { ...deps, prHeadRef: null })).reason).toMatch(/PR head ref unavailable/);
+      // Two distinct PATHS holding the same PICTURE are rejected (GH r3) — hashed on the PR branch.
+      const samePic = { ...deps, gh: { getFile: async (path) => (bytes[path] ? { sha: 'ok', raw: { content: bytes['public/images/blog/x/body-1.webp'] } } : null) } };
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, samePic)).reason).toMatch(/near-duplicate of \/images\/blog\/x\/body-1\.webp/);
+      // A stamped hero whose branch bytes cannot be read fails closed (GH r4).
+      const twoWithHero = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n## B\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(twoWithHero, RUN_REF, deps)).reason).toMatch(/hero bytes unavailable/);
+      const withHeroBytes = { ...deps, gh: { getFile: async (path) => (path === 'public/images/blog/x/hero.webp' ? { sha: 'h', raw: { content: await png(3) } } : (bytes[path] ? { sha: 'ok', raw: { content: bytes[path] } } : null)) } };
+      expect((await rem.validateAutonomousRunGates(twoWithHero, RUN_REF, withHeroBytes)).ok).toBe(true);
+    } finally { spy.mockRestore(); }
+    // Gate off: no recount.
     expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
   });
 

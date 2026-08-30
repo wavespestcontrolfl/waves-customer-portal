@@ -45,7 +45,8 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     purpose,
     customerId: customer.id,
     entryPoint,
-    metadata: { original_message_type: messageType },
+    // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5) — see autopay-sms-digest.js.
+    metadata: { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode },
   });
   if (sendResult.blocked || sendResult.sent === false) {
     throw new Error(`billing SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
@@ -130,14 +131,15 @@ const BillingCron = {
     // Get active customers with a monthly rate — include autopay + pause state.
     // service_paused_at is set when the 3-retry ladder exhausts; skip those so
     // we don't keep burning charges against a dead card until billing is fixed.
-    // billing_mode ships in migration 20260709000010 — selecting it
-    // unconditionally would abort the WHOLE monthly run on a pre-migration
-    // database (Codex round-9); absent column leaves customer.billing_mode
-    // undefined and GUARD 3b inert, exactly the legacy behavior.
-    let billingModeColumnExists = false;
-    try {
-      billingModeColumnExists = await db.schema.hasColumn('customers', 'billing_mode');
-    } catch { /* keep false — legacy select shape */ }
+    // billing_mode (migration 20260709000010) is selected UNCONDITIONALLY.
+    // FAIL CLOSED (2026-08-29 incident): the column used to sit behind a
+    // `db.schema.hasColumn` probe wrapped in try/catch; a probe failure
+    // (deploy swap / pool timeout at the 08:00 tick) silently dropped the
+    // column from the select, GUARD 3b went inert, and GUARD 3c would have
+    // INFERRED per_application / prepay customers with a real tier into the
+    // monthly lane and charged them. If the column were ever missing the
+    // select throws and the whole run aborts — no charge is safer than a
+    // wrong one.
     const customers = await db('customers')
       .where({ active: true })
       .where('monthly_rate', '>', 0)
@@ -146,7 +148,7 @@ const BillingCron = {
       .select(
         'id', 'first_name', 'last_name', 'phone', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id',
-        'billing_day', ...(billingModeColumnExists ? ['billing_mode'] : []),
+        'billing_day', 'billing_mode',
       );
 
     // Annual-prepay customers paid for the whole period up front. The paid

@@ -74,6 +74,8 @@ jest.mock('../models/db', () => {
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
+        if (/^COALESCE\(star_rating, 0\) < 4$/.test(sql)) filters.push((r) => (Number(r.star_rating) || 0) < 4);
+        if (/auto_reply_reason IN \('low_rating', 'unrated'\) OR/.test(sql)) filters.push((r) => ['low_rating', 'unrated'].includes(r.auto_reply_reason) || (['provider_down', 'verifier_reject', 'runner_error', 'location_disabled'].includes(r.auto_reply_reason) && (Number(r.star_rating) || 0) < 4));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
         if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
@@ -206,13 +208,20 @@ describe('computeDueAt — jitter anchored on review creation, clamped when over
 });
 
 describe('autoReplyInsertFields (merged into the sync INSERT)', () => {
-  const base = { location_id: 'sarasota', reviewer_name: 'Dana W.', owner_reply: null, review_created_at: '2026-08-27T14:50:00Z' };
+  const base = { location_id: 'sarasota', reviewer_name: 'Dana W.', owner_reply: null, review_created_at: '2026-08-27T14:50:00Z', star_rating: 5 };
   test('gate off → nothing; shadow/auto → queued with a due time', () => {
     expect(Runner.autoReplyInsertFields(base, { now: NOW })).toEqual({});
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const f = Runner.autoReplyInsertFields(base, { now: NOW });
     expect(f.auto_reply_status).toBe('queued');
     expect(new Date(f.auto_reply_due_at).getTime()).toBeGreaterThan(NOW.getTime());
+  });
+  test('never queues a review under 4★ or unrated (owner ruling 2026-08-29)', () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    for (const star_rating of [0, 1, 2, 3, null, undefined, 'x']) expect(Runner.autoReplyInsertFields({ ...base, star_rating }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, star_rating: 4 }, { now: NOW }).auto_reply_status).toBe('queued');
+    expect(Runner.autoReplyInsertFields({ ...base, star_rating: '5' }, { now: NOW }).auto_reply_status).toBe('queued');
+    expect(Runner.ratingEligible(3.9)).toBe(false);
   });
   test('never queues a review older than the max queue age (fresh-sync rebuilds re-import history)', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
@@ -316,16 +325,169 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_claimed_until: null, auto_reply_draft: GOOD_DRAFT.text });
   });
 
-  test('1-3★ and unrated always park with a draft + action bell, even in auto', async () => {
+  test('under 4★ and unrated are left alone: queued rows leave via the tick sweep before any claim; no draft, no bell (owner ruling 2026-08-29)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row({ star_rating: 2 }), row({ id: 'rev-0', star_rating: 0 })];
+    state.rows = [row({ star_rating: 2, auto_reply_attempts: 2 }), row({ id: 'rev-0', star_rating: 0 })];
     const stats = await Runner.processDueAutoReplies();
-    expect(stats).toMatchObject({ claimed: 2, parked: 2, posted: 0 });
+    expect(stats).toMatchObject({ lowRatingReleased: 2, claimed: 0, skipped: 0, parked: 0, posted: 0 });
+    expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish).not.toHaveBeenCalled();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
-    expect(state.rows[0].review_reply.startsWith('[DRAFT]')).toBe(true);
-    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'unrated' });
-    expect(mockNotify.mock.calls.every((c) => c[3].metadata.needsAction === true)).toBe(true);
+    expect(mockNotify).not.toHaveBeenCalled();
+    // NULL state with the reason stamped (not skipped): re-eligible if the reviewer later raises it.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0 });
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.rows[0].auto_reply_draft).toBeFalsy();
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
+  });
+
+  test('a row edited under 4★ AFTER it was claimed is released at the claim (NULL state, reason stamped) — and before the location check (codex #3587 r4)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'venice';
+    try {
+      state.rows = [row({ star_rating: 2, auto_reply_attempts: 2, location_id: 'sarasota', auto_reply_claimed_until: '2099-01-01T00:00:00Z' })];
+      const r = await Runner.processClaimedRow({ ...state.rows[0], _claimToken: '2099-01-01T00:00:00Z' });
+      expect(r).toEqual({ outcome: 'skipped', reason: 'low_rating' });
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_claimed_until: null, auto_reply_attempts: 0 });
+      expect(mockDraft).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    } finally { delete process.env.REVIEW_AUTO_REPLY_LOCATIONS; }
+  });
+
+  test('Post now on an under-4★ review with the providers down never enters the cron retry lane (codex #3587 r4)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
+    // Earlier failures on the row (a legacy provider_down park, say) do not carry into a later re-entry (r5).
+    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: null, auto_reply_reason: null, auto_reply_attempts: 2 })];
+    const r = await Runner.postNow('pn', { type: 'admin' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'provider_unavailable' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0, auto_reply_draft: null, auto_reply_error: 'all providers down' });
+    expect(mockNotify).not.toHaveBeenCalled();
+    // Nothing for the tick to pick up or release.
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
+  });
+
+  test('Post now on an under-4★ review whose drafts all fail the verifier leaves the lane the same way — never a verifier_reject park the legacy sweep would release (codex #3587 r5)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url', 'banned_phrase'], mode: 'service_quality', version: 'reply-v1' });
+    state.rows = [row({ id: 'pn', star_rating: 0, auto_reply_status: null, auto_reply_reason: null, auto_reply_attempts: 1 })];
+    const r = await Runner.postNow('pn', { type: 'admin' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'verifier_reject' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated_requested', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_attempts: 0, auto_reply_draft: null, auto_reply_error: 'verifier_reject: url, banned_phrase' });
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
+  });
+
+  test('Post now that discards a stale under-4★ pipeline draft and then cannot redraft also clears the mirrored "[DRAFT]" text — it never becomes a human draft; an edited slot stays (codex #3587 r6)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    // Stored draft whose grounding fingerprint no longer matches ⇒ discarded ⇒ redraft ⇒ providers down.
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
+    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Old machine words.', review_reply: '[DRAFT] Old machine words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+    const r = await Runner.postNow('pn', { type: 'admin' }, { expectedDraft: 'Old machine words.' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'provider_unavailable' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_draft: null, review_reply: null, reply_updated_at: null, auto_reply_claimed_until: null });
+    expect(Runner.humanDraftOn(state.rows[0])).toBeNull();
+    // A slot a person edited meanwhile is theirs: the release keeps it.
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url'], mode: 'service_quality', version: 'reply-v1' });
+    state.rows = [row({ id: 'pn2', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Old machine words.', review_reply: '[DRAFT] My own words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+    // humanDraftOn() sees a human draft here, so Post now publishes it instead of drafting — assert the classifier only.
+    expect(Runner.humanDraftOn(state.rows[0])).toBe('My own words.');
+  });
+
+  test('gate OFF: the scheduler entry runModeIndependentSweeps still releases legacy under-4★ parks and re-rings failed bells; processDueAutoReplies(off) reports the same and claims nothing (codex #3587 r3)', async () => {
+    delete process.env.GATE_REVIEW_AUTO_REPLY;
+    expect(Runner.mode()).toBe('off');
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    state.rows = [
+      row({ id: 'old-park', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana, sorry.', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_version: 'reply-v1' }),
+      row({ id: 'bell', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', review_reply: 'Our reply', auto_reply_error: 'bell_failed:review_edited_after_post:edit' }),
+      row({ id: 'due', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: new Date(Date.now() - 60000).toISOString() }),
+    ];
+    expect(await Runner.runModeIndependentSweeps()).toEqual({ bellsRetried: 1, lowRatingReleased: 1 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: null });
+    expect(state.rows[1].auto_reply_error).toBeNull();
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
+    // Idempotent; the cron entry (mode off) runs the same sweeps and never claims the due row.
+    state.rows[0] = row({ id: 'old-park-2', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'unrated', auto_reply_draft: 'x', review_reply: null, auto_reply_version: 'reply-v1' });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ mode: 'off', bellsRetried: 0, lowRatingReleased: 1, claimed: 0, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated' });
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'queued' });
+    mockNotify.mockReset().mockResolvedValue({});
+  });
+
+  test('pre-rule low-rating parks are swept back to NULL state; human drafts and reconciliation parks stay (codex #3587 r1)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [
+      row({ id: 'old-park', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana, sorry.', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_version: 'reply-v1', auto_reply_drafted_at: '2026-08-28T00:00:00Z' }),
+      row({ id: 'old-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'unrated', auto_reply_draft: 'Thanks.', review_reply: null, auto_reply_version: 'reply-v1' }),
+      row({ id: 'human', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Human words.', review_reply: '[DRAFT] Human words.', auto_reply_version: 'human' }),
+      row({ id: 'recon', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'x', auto_reply_version: 'reply-v1' }),
+      // A draft a person asked for via Post now (hook): its own reason, never swept.
+      row({ id: 'asked', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Asked for.', review_reply: '[DRAFT] Asked for.', auto_reply_version: 'reply-v1' }),
+      // Under a live publish claim: a publisher is mid-flight, untouched.
+      row({ id: 'claimed', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'y', review_reply: '[DRAFT] y', auto_reply_version: 'reply-v1', publish_claimed_until: '2099-01-01T00:00:00Z' }),
+      // Under a live AUTO-REPLY claim: Post now holds it while it verifies, untouched (hook r3).
+      row({ id: 'postnow', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'z', review_reply: '[DRAFT] z', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
+      // An EXPIRED auto-reply claim is not a claim.
+      row({ id: 'expired', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'w', review_reply: '[DRAFT] w', auto_reply_version: 'reply-v1', auto_reply_claimed_until: '2000-01-01T00:00:00Z' }),
+      // Legacy PENDING rows under 4★ (gate off at deploy ⇒ claimDueRows never runs): queued + failed leave too (r4).
+      row({ id: 'q-low', star_rating: 3, auto_reply_status: 'queued', auto_reply_reason: null, auto_reply_due_at: '2099-01-01T00:00:00Z' }),
+      row({ id: 'f-unrated', star_rating: 0, auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: 2, auto_reply_due_at: '2099-01-01T00:00:00Z', auto_reply_error: 'down' }),
+      row({ id: 'q-ok', star_rating: 5, auto_reply_status: 'queued', auto_reply_due_at: '2099-01-01T00:00:00Z' }),
+      // Pre-rule under-4★ claims that parked as a terminal FAILURE before the old code stamped
+      // low_rating / unrated leave too; the same reasons on a 4-5★ row are live parks (r5).
+      row({ id: 'pd-low', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_attempts: 3, auto_reply_error: 'down', auto_reply_version: 'reply-v1' }),
+      row({ id: 'vr-unrated', star_rating: 0, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_grounding: { review: { rating: 0 } }, auto_reply_version: 'reply-v1' }),
+      row({ id: 'vr-ok', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_version: 'reply-v1' }),
+      // …including runner_error (exception before any publish attempt — publish failures park under
+      // their own reasons) and location_disabled (allowlist narrowed while pre-rule rows were queued) (r7/r8).
+      row({ id: 're-low', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'runner_error', auto_reply_attempts: 3, auto_reply_error: 'boom', auto_reply_version: 'reply-v1' }),
+      row({ id: 'ld-low', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'location_disabled', auto_reply_version: null }),
+      row({ id: 'ld-ok', star_rating: 4, auto_reply_status: 'parked', auto_reply_reason: 'location_disabled' }),
+    ];
+    expect(await Runner.sweepLowRatingParks()).toBe(9);
+    expect(state.rows[14]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_attempts: 0, auto_reply_error: null });
+    expect(state.rows[15]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
+    expect(state.rows[16]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'location_disabled' });
+    expect(state.rows[11]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_attempts: 0, auto_reply_error: null, auto_reply_version: null });
+    expect(state.rows[12]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_grounding: null });
+    expect(state.rows[13]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject' });
+    expect(state.rows[4]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', review_reply: '[DRAFT] Asked for.' });
+    expect(state.rows[5]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] y' });
+    expect(state.rows[6]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] z', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
+    expect(state.rows[7]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] w', auto_reply_draft: null, auto_reply_claimed_until: null });
+    expect(state.rows[8]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null });
+    expect(state.rows[9]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_due_at: null, auto_reply_attempts: 0, auto_reply_error: null });
+    expect(state.rows[10]).toMatchObject({ auto_reply_status: 'queued', star_rating: 5 });
+    // Released rows keep their TEXT in the reply slot as an ordinary person's draft (a pre-rule Post-now draft
+    // is indistinguishable from an automatic one — no data loss); the pipeline's own draft fields go, so the
+    // list API emits no draftToken and Use Draft / Post now take the human path (r4).
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Hi Dana, sorry.', auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_version: null, auto_reply_grounding: null, auto_reply_due_at: null, auto_reply_error: null, auto_reply_attempts: 0 });
+    expect(Runner.humanDraftOn(state.rows[0])).toBe('Hi Dana, sorry.');
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'unrated', auto_reply_draft: null });
+    expect(state.rows[2]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating', review_reply: '[DRAFT] Human words.' });
+    expect(state.rows[3]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    // Idempotent, and it runs on every tick.
+    expect(await Runner.sweepLowRatingParks()).toBe(0);
+    // A swept / released row that the reviewer later raises to 4-5★ re-enters via the catch-up enqueue.
+    state.rows = [row({ id: 'up', star_rating: 5, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued' });
+    // A released row that KEPT its "[DRAFT]" text is a person's draft from then on: the upgrade edit (sync)
+    // parks it human_draft_stale like any human draft — old under-4★ wording is never auto-posted to the
+    // now 4-5★ review, nor posted verbatim until a person edits it (hook on #3587 r6).
+    const kept = row({ id: 'kept', star_rating: 2, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_draft: null, auto_reply_version: null, review_reply: '[DRAFT] Hi Dana, sorry.' });
+    expect(Runner.humanDraftOn(kept)).toBe('Hi Dana, sorry.');
+    expect(Runner.reviewEditFields(kept, { star_rating: 5, review_text: kept.review_text, reviewer_name: kept.reviewer_name })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null });
+    state.rows = [{ ...kept, star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() }];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(0);
+    await expect(Runner.postNow('kept', { type: 'admin' }, { expectedDraft: 'Hi Dana, sorry.' })).rejects.toMatchObject({ code: 'stale_claim' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', review_reply: '[DRAFT] Hi Dana, sorry.' });
+    // …but not while it is still under 4★.
+    state.rows = [row({ id: 'still-low', star_rating: 3, auto_reply_status: null, auto_reply_reason: 'low_rating', auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    expect(await Runner.enqueueMissedReviews({ rollout: new Date(Date.now() - 86400000).toISOString() })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBeNull();
   });
 
   test('MIN_STARS can only raise the bar; 1-3★ stay human-only even if configured lower', async () => {
@@ -338,7 +500,7 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.config().minStars).toBe(4);
     state.rows = [row({ id: 'r3', star_rating: 3 })];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
     expect(mockPublish).not.toHaveBeenCalled();
   });
 
@@ -636,10 +798,10 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats).toMatchObject({ retry: 1, posted: 0 });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_claimed_until: null });
     expect(state.rows[0].review_reply).toBeNull();
-    // Next tick sees the 2★ and parks it for a human.
-    mockDraft.mockResolvedValueOnce({ ...GOOD_DRAFT, mode: 'low_rating' });
+    // Next tick sees the 2★ and leaves it alone (NULL state, no draft — owner ruling 2026-08-29).
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
+    expect(state.rows[0].auto_reply_draft).toBeFalsy();
     expect(mockPublish).toHaveBeenCalledTimes(1);
   });
 
@@ -738,7 +900,7 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected', auto_reply_attempts: 0 });
   });
 
-  test('GBP access is required only to publish: shadow drafts and 1-3★ human parks happen at a Places-fallback location; the retry keeps the draft (codex r26)', async () => {
+  test('GBP access is required only to publish: shadow drafts happen at a Places-fallback location, under-4★ is skipped; the retry keeps the draft (codex r26)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     mockGbp.isLocationConfigured.mockResolvedValue(false);
     state.rows = [row({ id: 's', location_id: 'venice' })];
@@ -746,8 +908,8 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text });
     state.rows = [row({ id: 'low', location_id: 'venice', star_rating: 2 })];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
-    expect(state.rows[0].auto_reply_draft).toBeTruthy();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
+    expect(state.rows[0].auto_reply_draft).toBeFalsy();
     // auto mode: the draft is produced, then the missing credentials retry with the draft kept for reuse.
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [row({ id: 'a', location_id: 'venice' })];
@@ -1364,12 +1526,24 @@ describe('admin actions', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'posted', review_reply: draft, auto_reply_claimed_until: null });
     expect(state.rows[0].auto_reply_reason).not.toBe('already_replied');
   });
+  test('postNow on a reconciliation park whose stored draft no longer applies refuses (409) and leaves the park intact — never a fresh draft over a reply that may be live (codex #3587 r7)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    for (const [reason, star_rating] of [['google_uncertain', 2], ['persist_failed', 5]]) {
+      mockDraft.mockClear(); mockPublish.mockClear();
+      state.rows = [row({ id: 'rc', star_rating, auto_reply_status: 'parked', auto_reply_reason: reason, auto_reply_draft: 'Old words.', review_reply: '[DRAFT] Old words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+      await expect(Runner.postNow('rc', { type: 'admin' }, { expectedDraft: 'Old words.' })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: reason, auto_reply_draft: 'Old words.', review_reply: '[DRAFT] Old words.', auto_reply_claimed_until: null });
+      expect(mockDraft).not.toHaveBeenCalled();
+      expect(mockPublish).not.toHaveBeenCalled();
+    }
+  });
   test('postNow on a 1-3★ / unrated row with NO surfaced draft never posts an unseen reply: it drafts + parks; the next Post now publishes it (hook P1)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     for (const star_rating of [2, 0]) {
       state.rows = [row({ id: 'lo', star_rating, auto_reply_status: 'queued' })];
       const r = await Runner.postNow('lo', { type: 'admin', adminUserId: 'u1' });
-      expect(r).toMatchObject({ outcome: 'parked', reason: star_rating === 0 ? 'unrated' : 'low_rating', drafted: true });
+      // A person asked for this draft: its own reason, never swept (hook on #3587).
+      expect(r).toMatchObject({ outcome: 'parked', reason: star_rating === 0 ? 'unrated_requested' : 'low_rating_requested', drafted: true });
       expect(mockPublish).not.toHaveBeenCalled();
       expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text, auto_reply_claimed_until: null });
       // Second Post now: the surfaced draft is published as the admin.
@@ -1466,9 +1640,12 @@ describe('admin actions', () => {
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'below_threshold' });
     expect(mockNotify.mock.calls.at(-1)[1]).toMatch(/below the auto-post threshold/);
+    // …while a 2★ is not the pipeline's business at all (owner ruling 2026-08-29).
     state.rows = [row({ id: 't2', star_rating: 2 })];
+    mockNotify.mockClear();
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating' });
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('postNow of a stored AUTO draft carries its grounding snapshot + expected account fingerprint through the publisher (codex r42)', async () => {
@@ -1556,7 +1733,9 @@ describe('admin actions', () => {
 
   test('posted bells deep-link to the responded view and the review; parked bells to the review', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row(), row({ id: 'low', star_rating: 2 })];
+    // The parked bell comes from a verifier rejection (under-4★ rows no longer park).
+    state.rows = [row(), row({ id: 'low' })];
+    mockDraft.mockResolvedValueOnce(GOOD_DRAFT).mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url'], mode: 'service_quality', version: 'reply-v1' });
     await Runner.processDueAutoReplies();
     const links = mockNotify.mock.calls.map((c) => c[3].link);
     expect(links).toContain('/admin/reviews?responded=responded&review=rev-1');

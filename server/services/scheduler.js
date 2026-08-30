@@ -1301,6 +1301,36 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Autopay texts that actually went out (kill: AUTOPAY_SMS_DIGEST_DISABLED=1)
+  // — 9:41am + 10:41am ET, after the 8:00 charge, 9:00 pre-charge, 9:17
+  // card-expiry and 10:07 retry jobs. Marker-based window, so the second
+  // tick is a no-op unless new texts landed. FIX: when any recipient is not
+  // a monthly member (the 2026-08-29 incident shape), FYI: otherwise.
+  for (const expr of ['30 41 9 * * *', '30 41 10 * * *']) {
+    cron.schedule(expr, async () => {
+      try {
+        const lockRes = await runExclusive('autopay-sms-digest', async () => {
+          const { runAutopaySmsDigest } = require('./autopay-sms-digest');
+          const result = await runAutopaySmsDigest();
+          logger.info(`[autopay-sms-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, mismatches: result.mismatches || 0 })}`);
+          if (result?.skipped === 'query_failed' || result?.error
+              || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+            throw new Error(`autopay SMS digest did not complete (${result.skipped || 'send_failed'})`);
+          }
+        });
+        if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+          const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+          const t0 = Date.now();
+          await recordJobStart('autopay-sms-digest').catch(() => {});
+          await recordJobEnd('autopay-sms-digest', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+          throw new Error(`autopay SMS digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+        }
+      } catch (err) {
+        logger.error(`Autopay SMS digest failed: ${err.message}`);
+      }
+    }, { timezone: 'America/New_York' });
+  }
+
   // Stripe webhook events the app failed to apply (ledger rows with error /
   // abandoned claims in the last 48h — the lookback deliberately exceeds
   // the daily interval + in-flight grace windows) plus Stripe-side delivery
@@ -1904,6 +1934,27 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Consents sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Terminal-stamp property-lookup attempts orphaned by a
+  // process exit. A deploy landing mid-lookup kills the pipeline after the
+  // 'pending' attempt stamp but before any terminal stamp (the in-process
+  // throw-wrapper can't fire across a process boundary), leaving the row
+  // 'pending' forever — indistinguishable from a running lookup. The sweep
+  // converts anything pending past the in-flight ceiling to 'interrupted';
+  // the next lookup for that address re-stamps the row like any failure.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { sweepStalePendingAttempts } = require('./property-lookup/lookup-cache');
+      const stamped = await sweepStalePendingAttempts();
+      if (stamped > 0) {
+        logger.info(`[lookup-pending-sweep] stamped ${stamped} orphaned pending attempt(s) as interrupted`);
+      }
+    } catch (err) {
+      logger.error(`Lookup pending sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3400,6 +3451,15 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              // Enqueue provenance survives the replay (codex #3607 r4): the
+              // audit row is written under this worker's own entry point, so
+              // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
+              // and the lane stamped at enqueue ride along in metadata for
+              // the owner autopay digest to classify the send.
+              ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
+                ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
+                : {}),
               // resolve_from_by_customer: customer-linked requeues (deferred
               // completion/prep/follow-up texts) stamped a placeholder
               // from_phone at enqueue only because the column is NOT NULL —
@@ -4154,14 +4214,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
+  // EVERY 30 MIN (:04/:34 — own minutes, off the :00/:30 pool pile-up) — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the
   // ~1h first-touch SMS responsive. Suppression is enforced in
   // the service + the messaging validator. Ships LIVE; kill switch is
   // GATE_BOOKING_ABANDON_RECOVERY=false (then it only shadow-logs counts).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('4,34 * * * *', async () => {
     try {
       await runExclusive('booking-abandon-recovery', async () => {
         const BookingAbandonRecovery = require('./booking-abandon-recovery');
@@ -4174,7 +4234,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Click-followup action queue (clicked-but-didn't-book)
+  // EVERY 30 MIN (:09/:39 — own minutes) — Click-followup action queue (clicked-but-didn't-book)
   //
   // Turns human short-link clicks on estimate/booking links (4h–72h old, not
   // converted, fully suppression-guarded) into PENDING message_drafts for
@@ -4182,7 +4242,7 @@ function initScheduledJobs() {
   // the owner's approval in /admin/drafts is the only send path. Gated by
   // GATE_CLICK_FOLLOWUP (off → shadow-logs candidate counts, writes nothing).
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('9,39 * * * *', async () => {
     try {
       await runExclusive('click-followup', async () => {
         const ClickFollowup = require('./click-followup');
@@ -4610,9 +4670,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Verify CSR follow-up tasks
+  // HOURLY (:33 — own minute, also clear of the daily 10:26 pre-visit card
+  // sweep; was :30, which shared the pool with ~25 other ticks and starved
+  // the Twilio voice webhooks on 2026-08-29) — Verify CSR follow-up tasks
   // =========================================================================
-  cron.schedule('30 * * * *', async () => {
+  cron.schedule('33 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
       // runExclusive: verifyFollowUps expires past-deadline tasks — a
@@ -5298,7 +5360,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // HOURLY — Sync Google review content from Places API
+  // HOURLY (:56 — own minute, off the :00 pile-up) — Sync Google review content from Places API
   // GBP performance sync (above) handles impressions / views, NOT review
   // text. Without this hourly sync, the google_reviews table only ever
   // contained the aggregate `_stats` rows seeded by syncAllReviews on
@@ -5308,7 +5370,7 @@ function initScheduledJobs() {
   // re-pulls — this just makes "Sync Reviews" no longer the only way
   // for reviews to appear in the portal.
   // =========================================================================
-  cron.schedule('0 * * * *', async () => {
+  cron.schedule('56 * * * *', async () => {
     logger.info('Running: Google review content sync');
     try {
       const GoogleBusiness = require('./google-business');
@@ -5473,13 +5535,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
+  // EVERY 30 MIN (:14/:44 — own minutes) — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
   // Suppression and per-customer prefs still apply at the send site.
   // =========================================================================
-  cron.schedule('*/30 * * * *', async () => {
+  cron.schedule('14,44 * * * *', async () => {
     if (!isEnabled('reviewSequences')) return;
     try {
       await runExclusive('review-sequences', async () => {
@@ -5503,15 +5565,17 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     if (!isEnabled('reviewAutoReply')) {
-      // Gate off: only the failed-bell sweep runs (a bell_failed stamp left
-      // while the lane was on must still be re-rung) — codex r54.
+      // Gate off: only the mode-independent sweeps run — the failed-bell
+      // retry (codex r54) and the legacy under-4★ park release (codex #3587
+      // r3); no row is claimed, drafted or posted.
       try {
         await runExclusive('review-auto-reply', async () => {
-          const { retryFailedEditedBells } = require('./review-reply/runner');
-          const n = await retryFailedEditedBells();
-          if (n > 0) logger.info(`Review auto-reply (off): re-rang ${n} failed bell(s)`);
+          const { runModeIndependentSweeps } = require('./review-reply/runner');
+          const { bellsRetried, lowRatingReleased } = await runModeIndependentSweeps();
+          if (bellsRetried > 0) logger.info(`Review auto-reply (off): re-rang ${bellsRetried} failed bell(s)`);
+          if (lowRatingReleased > 0) logger.info(`Review auto-reply (off): released ${lowRatingReleased} legacy under-4★ park(s)`);
         });
-      } catch (err) { logger.warn(`Review auto-reply bell sweep (gate off) failed: ${err.message}`); }
+      } catch (err) { logger.warn(`Review auto-reply sweeps (gate off) failed: ${err.message}`); }
       return;
     }
     try {

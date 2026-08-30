@@ -164,6 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -334,6 +335,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   pestPressureConfig,
   staffViewer = false,
   pinnedLawnAssessmentId = null,
+  // The week-plan snapshot the cache signature saw (ISO sent_at | null);
+  // undefined leaves the render unpinned (live snapshot).
+  pinnedWeekPlanSentAt,
   // OPT-IN, and only the /data render path opts in (codex #3367 PR r15).
   // Composing the offer runs the whole ownership → property → estimate →
   // pricing pipeline plus a referral-settings read. The Q&A endpoint calls
@@ -352,7 +356,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
-    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId,
+    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanSentAt,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -534,6 +538,11 @@ async function buildServiceReportV1ResponseData(service, token, {
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
   }
+
+  // Termite Report V2 — station-protection dashboard for termite BAIT
+  // STATION visits (flag-gated). ONE composer shared with the queued PDF
+  // renderer (pdf-queue.js) — see attachTermiteReportV2.
+  attachTermiteReportV2(data, service);
 
   // Product TARGETS are free text from the tech's picker, so a chip can carry
   // a compliance claim the permanent PDF would print verbatim (codex P1
@@ -1656,6 +1665,10 @@ router.post('/:token/ask', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1787,6 +1800,10 @@ router.get('/:token', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1822,6 +1839,9 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // TERMITE_REPORT_V2 — same contract as the mosquito component: a gate
+      // flip must re-render cached termite bait-station PDFs.
+      const termiteV2Signature = termiteReportV2PdfSignature(service);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1839,7 +1859,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1877,7 +1897,7 @@ router.get('/:token', async (req, res, next) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
-            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           renderedData = data;
@@ -1893,6 +1913,7 @@ router.get('/:token', async (req, res, next) => {
             // page's freedom to choose; the key already carries assessment
             // identity, so this render stays cacheable.
             pinnedLawnAssessmentId: canonicalPin,
+            pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;
@@ -1957,7 +1978,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -2018,6 +2039,10 @@ router.get('/:token/map.svg', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -2075,6 +2100,10 @@ router.get('/:token/data', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -2130,16 +2159,20 @@ router.get('/:token/data', async (req, res, next) => {
       // official, share-able portal report with an unfavourable assessment
       // removed. Only the renderer can sign, so only the renderer can pin.
       // Refused exactly like an unauthorized pin: same status, same fixed copy.
+      // The week-plan pin (ISO sent_at | 'none') is part of the signed
+      // payload — a tampered or missing value fails the same verification.
+      const requestedPlan = typeof req.query.plan === 'string' && req.query.plan.trim() ? req.query.plan.trim() : '';
       if (requestedAssessment
-        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp)) {
+        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp, { plan: requestedPlan })) {
         logger.warn(`[reports-public] unsigned assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
         return res.status(409).json({ error: 'Requested assessment is not available for this report' });
       }
       const pinnedLawnAssessmentId = requestedAssessment;
+      const pinnedWeekPlanSentAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanSentAt, composeOffers: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
@@ -2204,12 +2237,12 @@ router.get('/:token/data', async (req, res, next) => {
     // different assessment would produce exactly the divergence it prevents,
     // and the caller could not tell. 409 so the render errors and the delivery
     // defers retryably. The message names no ids — the caller supplied it.
-    if (err?.code === 'pinned_assessment_unavailable') {
+    if (err?.code === 'pinned_assessment_unavailable' || err?.code === 'pinned_week_plan_unavailable') {
       // NEVER log the report token — it is a bearer credential for a
       // customer-facing report carrying their address, so plain-text logs
       // would become a credential store. The service-record id identifies the
       // visit for debugging and grants nothing.
-      logger.warn(`[reports-public] pinned assessment refused for service_record ${serviceRecordId || 'unknown'}`);
+      logger.warn(`[reports-public] ${err.code === 'pinned_week_plan_unavailable' ? 'pinned week plan' : 'pinned assessment'} refused for service_record ${serviceRecordId || 'unknown'}`);
       return res.status(409).json({ error: 'Requested assessment is not available for this report' });
     }
     return next(err);

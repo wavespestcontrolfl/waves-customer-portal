@@ -113,6 +113,7 @@ function grassTypeToPersist(recurringServices, estimateData) {
 }
 
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
+const VisitGroups = require('./visit-groups');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -2623,6 +2624,39 @@ function shouldSuppressRecurringConversion({
     && !services.some(recurringRowRequiresQuote);
 }
 
+// True when the estimate carries a PRICED commercial scoped one-time line
+// (GATE_COMMERCIAL_ONETIME_SCOPED marking: isCommercial + auto_estimate).
+// Drives the commercial property_type stamp for one-time-only accepts — the
+// recurring stamp never sees these rows (codex #3594 P1). A manual commercial
+// QUOTE row does not count: nothing commercial was priced or accepted.
+function estimateHasCommercialOneTime(estimateData = {}) {
+  const isPricedCommercialRow = (item) => item
+    && typeof item === 'object'
+    && item.isCommercial === true
+    && item.commercialPricingMode === 'auto_estimate'
+    // NOT requiresManualReview: pre-slab is priced AND review-flagged by
+    // design; only quoteRequired marks an unpriced manual-quote row — and a
+    // requiresMeasurement row (trenching with no perimeter) carries no price.
+    && item.quoteRequired !== true
+    && item.requiresMeasurement !== true;
+  if (estimateOneTimeItemsFromData(estimateData).some(isPricedCommercialRow)) return true;
+  // Quote-wizard drafts (POST /public/quote/calculate) persist the commercial
+  // markers ONLY under engineResult.lineItems — no mapped oneTime container
+  // (codex #3594 r3 P1). Recurring commercial auto-pricers carry the SAME
+  // markers, so a row counts here only when it is one-time: no annual amount
+  // (recurringLinesFromEngineResult's own recurring signal) and not
+  // estimatedPricing (the recurring commercial annual-row flag).
+  const data = normalizeEstimateData(estimateData);
+  const engineRows = [
+    ...(Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(data.result?.lineItems) ? data.result.lineItems : []),
+  ];
+  return engineRows.some((li) => isPricedCommercialRow(li)
+    && !(Number(li.annual) > 0)
+    && li.estimatedPricing !== true
+    && (Number(li.price) > 0 || Number(li.total) > 0));
+}
+
 function firstPositiveNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -3666,6 +3700,12 @@ const EstimateConverter = {
     const hasCommercialRecurring = recurringServicesForConversion.some(
       (svc) => String(recurringServiceKey(svc) || '').startsWith('commercial_')
     );
+    // Scoped one-time commercial lines (GATE_COMMERCIAL_ONETIME_SCOPED) carry
+    // commercial identity on ONE-TIME rows only — a commercial estimate with
+    // no recurring line (the motivating pre-slab case) must still stamp the
+    // customer commercial, or InvoiceService reads the customer as residential
+    // and zeroes the FL tax on a taxable accepted line (codex #3594 P1).
+    const hasCommercialOneTime = estimateHasCommercialOneTime(estimateData);
     // A plan is commercial-only (non-member) when it has a commercial recurring
     // line and NO WaveGuard-qualifying recurring service. Commercial keys are
     // never qualifying, so serviceCount===0 means there is no qualifying
@@ -3766,6 +3806,15 @@ const EstimateConverter = {
     // persist to the end of the caller's transaction.
     let effectiveCustomer = customer;
     if (!suppressRecurringConversion && database.isTransaction) {
+      // Property-preferences advisory lock BEFORE the customer row lock
+      // (global order — codex #3565 gh-r39): the grass-type persist below
+      // runs under withTurfProfileFence, which takes this advisory lock;
+      // row-then-advisory inside the same acceptance transaction deadlocks
+      // against executeMerge / address saves.
+      await database.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
       const lockedCustomerRow = await database('customers')
         .where({ id: customerId })
         .forUpdate()
@@ -3966,12 +4015,13 @@ const EstimateConverter = {
           // tier with a positive monthly_rate falls through those predicates'
           // legacy rate>0 fallback and would be treated/rendered as Bronze.
           waveguard_tier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
-          // A commercial recurring plan means the property is commercial — mark
-          // it so InvoiceService applies FL sales tax to taxable commercial
-          // services (e.g. commercial pest = nonresidential_pest_control 7%).
-          // Without this the customer reads residential and tax is forced to $0.
+          // A commercial recurring plan OR a priced commercial scoped one-time
+          // means the property is commercial — mark it so InvoiceService
+          // applies FL sales tax to taxable commercial services (e.g.
+          // commercial pest = nonresidential_pest_control 7%). Without this
+          // the customer reads residential and tax is forced to $0.
           // Only SET it for commercial; never downgrade a residential customer.
-          ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
+          ...(hasCommercialRecurring || hasCommercialOneTime ? { property_type: 'commercial' } : {}),
           // Ledger authority (gate on + seeded): the scalar is the ledger
           // SUM — a same-family re-quote touches only its own family's
           // slice (the customer row lock above serializes concurrent
@@ -4101,6 +4151,22 @@ const EstimateConverter = {
     if (suppressRecurringConversion === true) {
       await require('./plan-rate-ledger')
         .syncScalarWriteToLedger(database, customerId, null, { source: 'one_time_accept' });
+    }
+
+    // Commercial identity persistence for one-time-only accepts (codex #3594
+    // P1): the recurring customer-update block below only runs when recurring
+    // conversion happens, so a commercial estimate whose only lines are priced
+    // scoped one-times (the motivating pre-slab case) would leave the customer
+    // residential and InvoiceService would zero the FL tax on the accepted
+    // taxable line. Same one-way rule as the recurring stamp: only ever SET
+    // commercial — the WHERE makes this a no-op when the customer already
+    // reads commercial (including a stamp from the recurring block on mixed
+    // estimates), and a residential customer is never downgraded elsewhere.
+    if (hasCommercialOneTime) {
+      await database('customers')
+        .where({ id: customerId })
+        .whereRaw("coalesce(property_type, '') <> 'commercial'")
+        .update({ property_type: 'commercial' });
     }
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
@@ -4591,6 +4657,10 @@ const EstimateConverter = {
               : (unit.service.frequency || 'recurring');
             const standaloneRow = {
               customer_id: customerId,
+              // Property identity must match the reserved start or the
+              // same-trip rows can never group (visit-group join keys on
+              // property_id; codex #3590 r4).
+              ...(reservedStart.property_id ? { property_id: reservedStart.property_id } : {}),
               scheduled_date: unitDate,
               ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
               ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
@@ -4664,6 +4734,16 @@ const EstimateConverter = {
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
+              // Visit groups (visit-group-scope.md §2): a same-trip row and
+              // the reserved start share one physical stop — stamp them at
+              // scheduling. Gate-checked + best-effort inside maybeGroupRow.
+              // Only when the property identity is already on the row —
+              // null-property reservations group at post-commit property
+              // linkage instead (codex #3590 r10), so a customer-keyed
+              // stop can never absorb a legacy row at another address.
+              if (sameTrip && inserted[0] && inserted[0].property_id) {
+                await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
+              }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
@@ -6264,6 +6344,7 @@ module.exports.PREPAY_COVERAGE_INVALID = PREPAY_COVERAGE_INVALID;
 module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
 module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
 module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
+module.exports.estimateHasCommercialOneTime = estimateHasCommercialOneTime;
 // The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
 // (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
 // invoices on standard accepts. Never hardcode 99 elsewhere.

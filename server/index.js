@@ -99,6 +99,7 @@ const propertyLookupV2Routes = require('./routes/property-lookup-v2');
 const adminReferralRoutes = require('./routes/admin-referrals-v2');
 const reviewsPublicRoutes = require('./routes/reviews-public');
 const adminDispatchRoutes = require('./routes/admin-dispatch');
+const adminVisitsRoutes = require('./routes/admin-visits');
 const adminCommsRoutes = require('./routes/admin-communications');
 const adminCommsAttachRoutes = require('./routes/admin-communications-attach');
 const twilioWebhookRoutes = require('./routes/twilio-webhook');
@@ -452,7 +453,9 @@ for (const publicAnalyzePrefix of ['/api/public/lawn-assessment/analyze', '/api/
 // parser so those uploads don't 413 under the 1 MB default, without widening
 // the ceiling for everything else. Authenticated + per-customer throttled.
 app.use('/api/requests', express.json({ limit: '30mb' }));
-app.use(express.json({ limit: '1mb' }));
+// Worker-route HMAC signing (link-worker-auth) hashes the RAW request bytes;
+// the verify hook stores them for /api/integrations/*-worker paths only.
+app.use(express.json({ limit: '1mb', verify: require('./middleware/link-worker-auth').rawBodyVerify }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // Public assets used by server-rendered customer pages. In production Vite
@@ -519,6 +522,7 @@ app.use('/api/push', require('./routes/push'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
+app.use('/api/admin/visits', adminVisitsRoutes);
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
 app.use('/api/admin/agent-estimate', adminAgentEstimateRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);

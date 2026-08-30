@@ -103,6 +103,8 @@ const {
 const {
   isCommercialProperty,
   buildCommercialManualQuoteResult,
+  COMMERCIAL_SCOPED_ONETIME_SERVICES,
+  markCommercialOneTimeLine,
 } = require('./commercial-helpers');
 const { resolveCommercialCadence, resolveCommercialPestCadenceOverride, resolveCommercialLawnCadenceOverride } = require('./commercial-risk-type');
 
@@ -713,9 +715,20 @@ function generateEstimate(input) {
       lineItems.push(result);
     }
   };
-  const useCommercialManualQuote = (selected, service = 'pest_control') => {
+  // GATE_COMMERCIAL_ONETIME_SCOPED (read at call time, like
+  // GATE_BERMUDA_SUPPRESSION): unit-scoped one-time services price identically
+  // on commercial properties instead of collapsing to the generic manual line.
+  // Call sites opt out with { scopedOneTime: true } and their priced lines are
+  // re-marked commercial (tax family, flat/no-discount) by the post-pass below
+  // — only services in COMMERCIAL_SCOPED_ONETIME_SERVICES are marked, so an
+  // opted-out pricer emitting an unlisted key is a test failure, not a silent
+  // residential line. Gate off → exactly today's manual-quote behavior.
+  const commercialScopedOneTimeArmed = propertyIsCommercial
+    && require('../../config/feature-gates').gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED');
+  const useCommercialManualQuote = (selected, service = 'pest_control', opts = {}) => {
     if (!selected) return false;
     if (!propertyIsCommercial) return false;
+    if (opts.scopedOneTime === true && commercialScopedOneTimeArmed) return false;
     addCommercialManualQuote(service);
     return true;
   };
@@ -938,6 +951,10 @@ function generateEstimate(input) {
 
   // Palm Injection
   const palmService = services.palmInjection || services.palm;
+  // Palm stays commercial-manual: it is an annual recurring program, and the
+  // v1 legacy mapper rebuilds it as a plain residential palm_injection row
+  // (commercial identity dropped), which can seed the residential semiannual
+  // auto-schedule on accept (codex #3594 P1).
   if (palmService && !useCommercialManualQuote(palmService, 'lawn_care')) {
     const palmOptions = serviceOptions(palmService);
     const palmCountResolution = resolvePalmCount(property, palmOptions);
@@ -1281,7 +1298,7 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control')) {
+  if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control', { scopedOneTime: true })) {
     const result = priceTrenching(property, serviceOptions(services.trenching));
     lineItems.push(result);
   }
@@ -1349,7 +1366,7 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   const boraCareService = services.boraCare || services.bora_care;
-  if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control')) {
+  if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control', { scopedOneTime: true })) {
     const boraCareOptions = serviceOptions(boraCareService);
     // Surface-treatment measurements may arrive via service options (route path)
     // or at the top level of the estimate input (direct generateEstimate
@@ -1367,15 +1384,25 @@ function generateEstimate(input) {
   const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;
   const legacyPreSlabService = services.preSlabTermidor || services.pre_slab_termidor;
   const preSlabService = canonicalPreSlabService || legacyPreSlabService;
-  if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control')) {
+  if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control', { scopedOneTime: true })) {
     const preSlabOptions = serviceOptions(preSlabService);
     const result = legacyPreSlabService && !canonicalPreSlabService
       ? pricePreSlabTermidor(property, preSlabOptions)
       : pricePreSlabTermiticide(property, preSlabOptions);
     lineItems.push(result);
   }
-  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control')) {
-    const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
+  // Commercial bed bug bypasses the manual lane only with EXPLICIT commercial
+  // scope (codex #3594 r4 P1): a positive room count, a non-single-family
+  // occupancy (the public quote defaults occupancy to singleFamily → 1.00×
+  // instead of e.g. hotel 1.30×), and a real measured building — the public
+  // route substitutes a synthetic 2,000 sqft (buildingSizeMeasured=false)
+  // that the pricer would otherwise treat as a valid footprint.
+  const bedBugScopeOpts = typeof services.bedBug === 'object' ? services.bedBug : {};
+  const bedBugScoped = Number(bedBugScopeOpts.rooms) > 0
+    && ['apartment', 'hotel', 'studentHousing'].includes(String(bedBugScopeOpts.occupancyType || ''))
+    && input.buildingSizeMeasured !== false;
+  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: bedBugScoped })) {
+    const bedBugOptions = bedBugScopeOpts;
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
     const result = priceBedBugTreatment(property, {
       ...bedBugOptions,
@@ -1386,6 +1413,10 @@ function generateEstimate(input) {
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
+  // WDO stays commercial-manual: priceWDO brackets off resolvePestFootprint
+  // (residential home-size brackets), and the public quote route can supply a
+  // synthetic 2,000 sqft homeSqFt for an unmeasured commercial building —
+  // an unmeasured warehouse would get a firm residential price (codex #3594 P1).
   if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
     const result = priceWDO(property);
     lineItems.push(result);
@@ -1468,10 +1499,15 @@ function generateEstimate(input) {
     );
     lineItems.push(result);
   }
-  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control')) {
-    const foamOptions = typeof services.foam === 'object' && services.foam !== null
-      ? services.foam
-      : {};
+  // Commercial bypass only with a POSITIVE explicit point count (pre-audit of
+  // the codex #3594 r4 pattern): priceFoamDrill defaults to 5 points when the
+  // count is absent, so an unscoped commercial request would get a firm
+  // 5-point price. Residential keeps the default.
+  const foamOptions = typeof services.foam === 'object' && services.foam !== null
+    ? services.foam
+    : {};
+  const foamScoped = Number(foamOptions.points) > 0;
+  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control', { scopedOneTime: foamScoped })) {
     const result = priceFoamDrill(Object.prototype.hasOwnProperty.call(foamOptions, 'points') ? foamOptions.points : undefined, {
       urgency: foamOptions.urgency || 'ROUTINE',
       afterHours: foamOptions.afterHours || false,
@@ -1495,7 +1531,7 @@ function generateEstimate(input) {
     lineItems.push(result);
     // foam_recurring does NOT add to activeServiceKeys for tier determination
   }
-  if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control')) {
+  if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control', { scopedOneTime: true })) {
     const result = priceStingingInsect({
       species: services.stinging.species || 'PAPER_WASP',
       tier: services.stinging.tier || 2,
@@ -1513,7 +1549,20 @@ function generateEstimate(input) {
   // (equivalent points, mesh LF) even though the estimate now carries the
   // V2 exclusion as per-section line items rather than one combined row.
   let rodentExclusionV2Summary = null;
-  if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control')) {
+  if (services.exclusion && !useCommercialManualQuote(services.exclusion, 'pest_control', {
+    // Only the V2 shape is unit-scoped (per point + per LF, no home-sqft
+    // floors) — this is the LIVE producer shape (property-lookup-v2 sends
+    // services.exclusion with pricingVersion:'v2'; codex #3594 P1). V1 keeps
+    // the manual quote: its minimum floors key off HOME sqft.
+    // V2 is per-point/per-LF scoped — but only when at least one section has
+    // a positive count; an all-zero V2 request still prices the point-only
+    // floor + inspection fee as a firm line (pre-audit of the codex #3594 r4
+    // pattern). Unscoped → manual quote.
+    scopedOneTime: services.exclusion.pricingVersion === 'v2'
+      && ['standardWireMeshPoints', 'advancedWireMeshPoints', 'standardBirdBoxes', 'tileHighBirdBoxes',
+        'customBirdBoxes', 'meshSoftLF', 'meshConcreteLF']
+        .some((k) => Number(services.exclusion[k]) > 0),
+  })) {
     const hasRodentServiceOptIn = !!(
       services.rodentTrapping || services.sanitation
     );
@@ -1569,8 +1618,14 @@ function generateEstimate(input) {
   // exclusion is active (V2 folds these into the unified calculation).
   const exclusionIsV2 = services.exclusion?.pricingVersion === 'v2';
 
-  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control')) {
-    const opts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
+  // Commercial bypass only with a POSITIVE measured length (codex #3594 r3
+  // P1): the admin V2 adapter permits RODENT_WIRE_MESH with meshLinearFeet
+  // absent, and priceRodentWireMesh would still return the substrate minimum
+  // as a firm "0 LF" line. Unmeasured → manual quote.
+  const wireMeshOpts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
+  const wireMeshScoped = Number(wireMeshOpts.meshLinearFeet) > 0;
+  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control', { scopedOneTime: wireMeshScoped })) {
+    const opts = wireMeshOpts;
     lineItems.push(priceRodentWireMesh({
       meshLinearFeet: opts.meshLinearFeet,
       meshSubstrate: opts.meshSubstrate,
@@ -1581,8 +1636,14 @@ function generateEstimate(input) {
     }));
   }
 
-  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control')) {
-    const opts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
+  // Commercial bypass only with a POSITIVE quantity (codex #3594 r4 P1): the
+  // admin V2 adapter emits birdBoxQuantity: 0 when cleared, and
+  // priceRodentBirdBoxes returns null for it — the selected service would
+  // silently vanish instead of surfacing as a manual quote.
+  const birdBoxOpts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
+  const birdBoxScoped = Number(birdBoxOpts.birdBoxQuantity) > 0;
+  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control', { scopedOneTime: birdBoxScoped })) {
+    const opts = birdBoxOpts;
     const result = priceRodentBirdBoxes({
       birdBoxType: opts.birdBoxType,
       birdBoxQuantity: opts.birdBoxQuantity,
@@ -1592,11 +1653,17 @@ function generateEstimate(input) {
 
   // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
   // Legacy 'medium' resolves to 'standard' inside priceSanitation.
-  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control')) {
+  // Commercial bypass only with an EXPLICIT positive affected area (codex
+  // #3594 r3 P1): the admin V2 adapter persists affectedSqFt: 0 when the
+  // sanitation area is omitted, and the residential footprint fallback below
+  // would then price a warehouse's whole building as the cleanup area.
+  // Unscoped → manual quote; residential keeps the footprint fallback.
+  const sanitationScopeSqFt = Number(services.sanitation?.affectedSqFt)
+    || Number(services.sanitation?.atticSqFt) || 0;
+  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control', { scopedOneTime: sanitationScopeSqFt > 0 })) {
     const result = priceSanitation({
       tier: services.sanitation.tier || 'standard',
-      affectedSqFt: services.sanitation.affectedSqFt
-        || services.sanitation.atticSqFt
+      affectedSqFt: sanitationScopeSqFt
         || property.footprint || 0,
       insulationRemovalCuFt: services.sanitation.insulationRemovalCuFt || 0,
       accessType: services.sanitation.accessType || 'normal',
@@ -1617,7 +1684,7 @@ function generateEstimate(input) {
   }
 
   // Standalone rodent inspection (paid diagnostic, creditable)
-  if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control')) {
+  if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control', { scopedOneTime: true })) {
     lineItems.push(priceRodentInspection());
   }
 
@@ -1709,14 +1776,26 @@ function generateEstimate(input) {
     const result = calculatePluggingPrice(services.rodentPlugging);
     lineItems.push(result);
   }
-  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control')) {
+  // Same rule: calculateFoamPrice bills ≥1 can even at 0 application points.
+  const termiteFoamScoped = Number(services.termiteFoam?.applicationPoints) > 0;
+  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control', { scopedOneTime: termiteFoamScoped })) {
     const result = calculateFoamPrice(services.termiteFoam);
     lineItems.push(result);
   }
-  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control')) {
+  // calculateStingingPrice defaults nestCount to 1 and scales material +
+  // labor by it — a commercial multi-nest job with no count would be
+  // underquoted as one nest (codex #3594 r5 P1). Positive explicit count only.
+  const stingingV2Scoped = Number(services.stingingV2?.nestCount) > 0;
+  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control', { scopedOneTime: stingingV2Scoped })) {
     const result = calculateStingingPrice(services.stingingV2);
     lineItems.push(result);
   }
+  // services.exclusionV2 is NOT a scoped one-time (codex #3594 r2 P1):
+  // calculateExclusionPrice is sqft-tiered (entry points inferred from sqft,
+  // residential size-tier minimums, property.footprint fallback), so an
+  // unmeasured commercial building would get a firm footprint-derived price.
+  // Only the live per-point/per-LF services.exclusion{pricingVersion:'v2'}
+  // shape (priceRodentExclusionV2, above) bypasses the manual quote.
   if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control')) {
     const result = calculateExclusionPrice({
       sqft: services.exclusionV2.sqft || property.footprint,
@@ -1741,6 +1820,23 @@ function generateEstimate(input) {
       guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
     });
     lineItems.push(result);
+  }
+
+  // Commercial re-marking for scoped one-time lines (GATE_COMMERCIAL_ONETIME_
+  // SCOPED): lines priced by the { scopedOneTime: true } bypasses above carry
+  // residential line identity — re-mark them with the commercial tax family and
+  // the flat-commercial discount rules BEFORE the WaveGuard/discount passes so
+  // discountable:false / excludeFromPctDiscount are in force when discounts
+  // apply. Keyed by the allowlist (not by "was bypassed") so a pricer emitting
+  // an unlisted service key is left untouched and visible in review, and
+  // manual-quote lines (quoteRequired) are never re-marked.
+  if (commercialScopedOneTimeArmed) {
+    for (let i = 0; i < lineItems.length; i += 1) {
+      const line = lineItems[i];
+      if (line && line.quoteRequired !== true && COMMERCIAL_SCOPED_ONETIME_SERVICES.has(line.service)) {
+        lineItems[i] = markCommercialOneTimeLine(line, property, { commercialSubtype });
+      }
+    }
   }
 
   // ── 4. Determine WaveGuard tier ────────────────────────────
@@ -1789,6 +1885,34 @@ function generateEstimate(input) {
       if (item.total) {
         item.totalBeforeDiscount = item.subtotalBeforeRecurringCustomerDiscount ?? item.total;
         item.totalAfterDiscount = item.total;
+      }
+      continue;
+    }
+
+    // Flat-commercial guard (codex #3594 P1): getEffectiveDiscount resolves by
+    // service key + customer status and cannot see per-line flags, so a
+    // commercial-marked line whose KEY is discount-allowlisted (e.g. a scoped
+    // one-time re-marked by the commercial post-pass) would still receive the
+    // 15% recurring-customer perk. Guard on discountable:false ONLY — the
+    // weaker excludeFromPctDiscount flag also rides on residential palm and
+    // rodent-bait lines that still earn their FLAT credits (Gold+ $10/palm,
+    // rodent setup credit) through getEffectiveDiscount.
+    if (item.discountable === false) {
+      item.discount = {
+        serviceKey,
+        waveGuardTier: waveGuardTier.tier,
+        appliedDiscounts: [],
+        effectiveDiscount: 0,
+        totalDiscount: 0,
+        discountable: false,
+      };
+      if (item.annual) {
+        item.annualBeforeDiscount = item.annual;
+        item.annualAfterDiscount = item.annual;
+      }
+      if (item.price) {
+        item.priceBeforeDiscount = item.price;
+        item.priceAfterDiscount = item.price;
       }
       continue;
     }

@@ -231,8 +231,10 @@ async function resolveAlert({ id, resolvedBy, trx } = {}) {
   if (trx) {
     const row = await doWrite(trx);
     if (!row) return null;
-    if (trx.executionPromise) {
-      trx.executionPromise.then(() => emitResolved(row)).catch(() => {
+    // Outermost commit, not a savepoint release (codex #3590 r14).
+    const commitPromise = require('../utils/trx-commit-promise').commitPromiseOf(trx);
+    if (commitPromise) {
+      commitPromise.then(() => emitResolved(row)).catch(() => {
         // Outer rollback. Suppress emit so cards don't disappear from
         // dispatcher screens on a write that didn't actually commit.
       });

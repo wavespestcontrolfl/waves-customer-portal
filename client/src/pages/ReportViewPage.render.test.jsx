@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
+import termiteReportV2 from './__fixtures__/termite-report-v2.json';
 import pestReportV2 from './__fixtures__/pest-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
@@ -118,6 +119,289 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     // Shared sections still render exactly once in the V2 lead layout.
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
+  it('renders the station dashboard and suppresses the generic summary, hero-owned tiles, products, and standalone map', async () => {
+    const { container } = renderReport(termiteReportV2);
+    // Headline from the termiteReportV2 payload — in the header status cell
+    // AND the dashboard hero (the header prints the short label, never the
+    // full body).
+    const headlines = await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(headlines).toHaveLength(2);
+    expect(container.querySelector('.smart-status-result').textContent).toBe('Termite activity observed at 2 stations');
+    // Station checks are monitoring, not application — the work cell never
+    // says "product applied".
+    expect(screen.getByText('12 of 14 stations inspected · 3 stations serviced')).toBeInTheDocument();
+    expect(screen.queryByText(/product applied/)).toBeNull();
+
+    // The dashboard owns the summary slot — no legacy Visit Summary, no
+    // typed Today's Result card (its required next step moves into the
+    // dashboard below).
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    expect(container.querySelector('#todays-result')).toBeNull();
+    // Station checks are monitoring, not application (owner 2026-08-29).
+    expect(container.querySelector('#products-applied')).toBeNull();
+    expect(screen.queryByText('Products Applied')).toBeNull();
+    // Exceptions first: the activity + inaccessible stations, nothing else,
+    // and no per-station "serviced" claim (servicing is a visit-level fact).
+    const needsAttention = (await screen.findByText('Needs attention')).closest('section');
+    // (the map legend also says "Termite activity observed" once — scope to the card)
+    expect(within(needsAttention).getAllByText('Termite activity observed')).toHaveLength(2);
+    expect(within(needsAttention).getAllByText('Could not be accessed this visit')).toHaveLength(2);
+    expect(within(needsAttention).queryByText(/serviced today/i)).toBeNull();
+    // 7 clean pins + 3 serviced pins: only the clean ones support "no activity"
+    expect(within(needsAttention).getByText('7 other stations checked — no activity observed · 3 stations serviced this visit')).toBeInTheDocument();
+    // Station map rides inside the dashboard exactly once.
+    expect(container.querySelectorAll('#station-map')).toHaveLength(1);
+    // The tech's required next-step commitment survives the typed card swap.
+    const whatsNext = (await screen.findByText('What happens next')).closest('section');
+    expect(within(whatsNext).getByText(/Recheck active stations sooner/)).toBeInTheDocument();
+    // Typed findings the dashboard does not render still print; the
+    // hero-owned count/status tiles do not.
+    const typed = container.querySelector('#typed-findings');
+    expect(typed).not.toBeNull();
+    expect(within(typed).getByText('Station condition issues')).toBeInTheDocument();
+    expect(within(typed).getByText('Activity signs observed')).toBeInTheDocument();
+    expect(within(typed).queryByText('Stations checked')).toBeNull();
+    expect(within(typed).queryByText('Bait consumption')).toBeNull();
+    // Program card: SAME-LINE next monitoring visit + warranty line; ACTIVE
+    // badge rides the bond; CTA lands on My Plan (where the bond card lives).
+    const nextVisit = (await screen.findByText('Next monitoring visit')).closest('section');
+    expect(within(nextVisit).getByText(/Termite Bait Station Service · Mon, Nov 16/)).toBeInTheDocument();
+    expect(within(nextVisit).getByText(/Renews Mar 14, 2027/)).toBeInTheDocument();
+    expect(within(nextVisit).getByText('ACTIVE')).toBeInTheDocument();
+    // TermiteBondCard is mounted by the portal's DocumentsTab
+    expect(within(nextVisit).getByRole('link', { name: /View termite protection plan/ })).toHaveAttribute('href', '/?tab=documents');
+    // Tech's top recommendation is highlighted in "Your one move" and still
+    // listed in full (as a chip) in the typed record.
+    const oneMove = (await screen.findByText('Your one move')).closest('section');
+    expect(within(oneMove).getByText('Pull mulch back from foundation')).toBeInTheDocument();
+    expect(within(typed).getByText('Pull mulch back from foundation')).toBeInTheDocument();
+  });
+
+  it('keeps Products Applied for a real termiticide recorded on the bait visit, never for the cartridge check', async () => {
+    const withFoam = JSON.parse(JSON.stringify(termiteReportV2));
+    // The completion panel defaults methodless termite products to
+    // station_check and persists it — identity decides, not the method.
+    withFoam.applications.push({
+      id: 'app-foam', method: 'station_check', methodInferred: false, totalAmount: '2', amountUnit: 'fl_oz',
+      product: { name: 'Termidor Foam', category: 'termiticide', epa_reg: '7969-XXX', active_ingredient: 'Fipronil' },
+    });
+    const { container } = renderReport(withFoam);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const products = container.querySelector('#products-applied');
+    expect(products).not.toBeNull();
+    expect(within(products).getAllByText(/Termidor Foam/).length).toBeGreaterThan(0);
+    expect(within(products).queryByText(/Trelona/)).toBeNull();
+    // the work cell names the supplemental treatment beside the station work
+    expect(screen.getByText('12 of 14 stations inspected · 3 stations serviced · 1 product applied')).toBeInTheDocument();
+  });
+
+  it('carries the tech-reviewed narrative in the hero (the one summary surface)', async () => {
+    const narrated = JSON.parse(JSON.stringify(termiteReportV2));
+    narrated.termiteReportV2.aiSummary = { headline: null, body: 'Stations 6 and 10 showed fresh feeding; both cartridges were replaced.' };
+    const { container } = renderReport(narrated);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).getByText(/both cartridges were replaced/)).toBeInTheDocument();
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelector('#todays-result')).toBeNull();
+  });
+
+  it('suppresses the standalone activity gauge and prints the cross-visit trend in the hero', async () => {
+    const trending = JSON.parse(JSON.stringify(termiteReportV2));
+    // production trendWord (trendWordForScores) already carries the interval
+    trending.activity = { score: 4, label: 'Termite Activity', levelWord: 'high', trend: 'up', trendWord: 'increased since the last visit', isBaseline: false };
+    const { container } = renderReport(trending);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(container.querySelector('#activity')).toBeNull();
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).getByText('Termite activity has increased since the last visit.')).toBeInTheDocument();
+    // bait condition rides the hero metrics (the typed card drops it)
+    expect(within(hero).getByText('Bait condition')).toBeInTheDocument();
+    expect(within(hero).getByText('Moderate feeding')).toBeInTheDocument();
+  });
+
+  it('suppresses the gauge trend when the status was reconciled away from the frozen activity select', async () => {
+    const escalated = JSON.parse(JSON.stringify(termiteReportV2));
+    escalated.activity = { score: 0, label: 'Termite Activity', levelWord: 'none', trend: 'stable', trendWord: 'about the same as the last visit', isBaseline: false };
+    escalated.termiteReportV2.statusReconciled = true;
+    const { container } = renderReport(escalated);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).queryByText(/about the same as the last visit/)).toBeNull();
+  });
+
+  it('the visit-history current row restates the reconciled V2 headline, not the frozen snapshot headline', async () => {
+    const history = JSON.parse(JSON.stringify(termiteReportV2));
+    history.typedVisitTimeline = { visits: [
+      { serviceRecordId: 'prev', serviceDate: '2026-05-27', headline: 'No termite activity observed', isCurrent: false },
+      { serviceRecordId: 'cur', serviceDate: '2026-08-27', headline: 'No termite activity observed', isCurrent: true },
+    ] };
+    const { container } = renderReport(history);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const card = container.querySelector('#typed-visit-timeline');
+    expect(card).not.toBeNull();
+    expect(within(card).getAllByText('Termite activity observed at 2 stations')).toHaveLength(1);
+    expect(within(card).getAllByText('No termite activity observed')).toHaveLength(1);
+  });
+
+  it('companion source (combined pest + termite visit): the primary keeps its cards, the bait companion block is owned by the dashboard', async () => {
+    const combined = JSON.parse(JSON.stringify(termiteReportV2));
+    combined.serviceLine = 'pest';
+    combined.termiteReportV2.source = 'companion';
+    combined.typedReport = {
+      type: 'cockroach', reportTypeLabel: 'Cockroach Service', visitSequence: 1,
+      todaysResult: { headline: 'Roach activity was light today.', body: 'We treated the kitchen and baths.', nextStep: 'Keep counters dry overnight.' },
+      findings: [{ fieldKey: 'rooms_treated', customerLabel: 'Rooms treated', customerValueLabel: 'Kitchen, baths' }],
+    };
+    combined.companionReports = [{
+      type: 'termite_bait_station', reportTypeLabel: 'Termite Bait Station Inspection', visitSequence: 3, internalOnly: false,
+      todaysResult: { headline: 'Termite activity was high today.', body: 'Companion typed body.', nextStep: 'Recheck active stations sooner.' },
+      findings: [
+        { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
+        { fieldKey: 'station_issues', customerLabel: 'Station condition issues', customerValueLabel: 'Station obstructed' },
+      ],
+    }];
+    // the PRIMARY (roach) gauge trends up; the bait companion's gauge is
+    // baseline — the termite hero must read the companion's, never the roach's
+    combined.activity = { score: 4, label: 'Roach Activity', levelWord: 'high', trend: 'up', trendWord: 'increased since the last visit', isBaseline: false };
+    combined.companionReports[0].activity = { score: 1, label: 'Termite Activity', levelWord: 'low', trend: null, trendWord: null, isBaseline: true };
+    // one real perimeter product + the Trelona cartridge check: the header
+    // counts the product only (the section below lists the product only)
+    combined.applications.push({ id: 'app-perim', method: 'perimeter_spray', totalAmount: '1', amountUnit: 'gal', product: { name: 'Demand CS', category: 'insecticide', epa_reg: '100-1066', active_ingredient: 'Lambda-cyhalothrin' } });
+    const { container } = renderReport(combined);
+    // dashboard mounts once, under its OWN anchor (the pest block owns #visit-summary)
+    await screen.findByText('Termite activity observed at 2 stations', { selector: 'h2' });
+    expect(screen.getByText(/^1 product applied/)).toBeInTheDocument();
+    expect(screen.queryByText(/2 products applied/)).toBeNull();
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    const hero = container.querySelector('#termite-visit-summary');
+    expect(hero).not.toBeNull();
+    expect(within(hero).getByText('Baseline recorded today — trend starts next visit.')).toBeInTheDocument();
+    expect(within(hero).queryByText(/increased since the last visit/)).toBeNull();
+    // the primary's own gauge still renders; the companion's does not
+    expect(container.querySelector('#activity')).not.toBeNull();
+    expect(container.querySelector('#companion-termite_bait_station-activity')).toBeNull();
+    // the PRIMARY (roach) Today's Result and header status stay
+    expect(container.querySelector('#todays-result')).not.toBeNull();
+    expect(screen.getByText('Roach activity was light today')).toBeInTheDocument();
+    expect(container.querySelector('.smart-status-result').textContent).not.toMatch(/Termite activity observed/);
+    // the bait companion's typed Today's Result is replaced; its
+    // non-dashboard fields still print, the hero-owned count tile does not
+    expect(container.querySelector('#companion-termite_bait_station-todays-result')).toBeNull();
+    expect(screen.queryByText('Termite activity was high today')).toBeNull();
+    const companionFindings = container.querySelector('#companion-termite_bait_station-findings');
+    expect(within(companionFindings).getByText('Station condition issues')).toBeInTheDocument();
+    expect(within(companionFindings).queryByText('Stations checked')).toBeNull();
+  });
+
+  it('a next monitoring visit without a bond shows the card but no protection-plan link (nothing to view)', async () => {
+    const noBond = JSON.parse(JSON.stringify(termiteReportV2));
+    noBond.termiteBonds = [];
+    renderReport(noBond);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const card = (await screen.findByText('Next monitoring visit')).closest('section');
+    expect(within(card).queryByText('ACTIVE')).toBeNull();
+    expect(within(card).queryByRole('link', { name: /View termite protection plan/ })).toBeNull();
+  });
+
+  it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
+    const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
+    // Builder scoped nextVisit to null (next appointment was another line);
+    // the top-level fallback still carries the pest visit.
+    crossLine.termiteReportV2.nextVisit = null;
+    crossLine.nextAppointment = { scheduledDate: '2026-09-02', windowStart: '09:00', serviceType: 'Pest Control (Quarterly)' };
+    crossLine.termiteBonds = [];
+    renderReport(crossLine);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.queryByText('Next monitoring visit')).toBeNull();
+    expect(screen.queryByText('Your termite protection')).toBeNull();
+    expect(screen.queryByText('ACTIVE')).toBeNull();
+  });
+
+  it('on-file pins (no status) read as not checked, never as "checked — no activity"', async () => {
+    const onFile = JSON.parse(JSON.stringify(termiteReportV2));
+    onFile.stationMap.stations = onFile.stationMap.stations.map((st) => ({ ...st, status: null }));
+    renderReport(onFile);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('14 stations on file — not checked this visit')).toBeInTheDocument();
+    expect(screen.queryByText(/checked — no activity observed/)).toBeNull();
+  });
+
+  it('a checked SUBSET of the network (12 clean rows, total 14) never says "All 12 checked"', async () => {
+    const subset = JSON.parse(JSON.stringify(termiteReportV2));
+    subset.stationMap.stations = subset.stationMap.stations.slice(0, 12).map((st) => ({ ...st, status: 'ok' }));
+    subset.stationMap.summary = { total: 14, checked: 12, activity: 0, serviced: 0, inaccessible: 0 };
+    renderReport(subset);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('12 stations checked — no activity observed')).toBeInTheDocument();
+    expect(screen.queryByText(/All 12/)).toBeNull();
+  });
+
+  it('a partial sync (checked + on-file, no exceptions) never says "All N checked"', async () => {
+    const mixed = JSON.parse(JSON.stringify(termiteReportV2));
+    mixed.stationMap.stations = mixed.stationMap.stations.map((st, i) => ({ ...st, status: i < 4 ? 'ok' : null }));
+    renderReport(mixed);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('4 stations checked — no activity observed · 10 stations on file — not checked this visit')).toBeInTheDocument();
+    expect(screen.queryByText(/All 4/)).toBeNull();
+  });
+
+  it('a non-termite program map (rodent pins) is never drawn inside the termite dashboard — but the primary rodent map still mounts on its own', async () => {
+    const rodentMap = JSON.parse(JSON.stringify(termiteReportV2));
+    rodentMap.stationMap.program = 'rodent';
+    const { container } = renderReport(rodentMap);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const maps = container.querySelectorAll('#station-map');
+    expect(maps).toHaveLength(1);
+    expect(container.querySelector('#visit-summary #station-map')).toBeNull();
+    expect(screen.queryByText('Needs attention')).toBeNull();
+  });
+
+  it('a partial station sync suppresses the map and per-station rows behind an honest note', async () => {
+    const partial = JSON.parse(JSON.stringify(termiteReportV2));
+    partial.termiteReportV2.stationSyncPartial = true;
+    const { container } = renderReport(partial);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(container.querySelector('#station-map')).toBeNull();
+    expect(screen.queryByText('Needs attention')).toBeNull();
+    expect(screen.queryByText(/View all stations/)).toBeNull();
+    expect(screen.getByText(/did not match your technician/)).toBeInTheDocument();
+  });
+
+  it('the work cell keeps a non-numeric "Performed" serviced metric as count-neutral wording', async () => {
+    const performed = JSON.parse(JSON.stringify(termiteReportV2));
+    performed.termiteReportV2.metrics = performed.termiteReportV2.metrics.map((m) => (m.label === 'Stations serviced' ? { ...m, value: 'Performed' } : m));
+    renderReport(performed);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(screen.getByText('12 of 14 stations inspected · bait service performed')).toBeInTheDocument();
+  });
+
+  it('hides Needs attention on a clean visit', async () => {
+    const clean = JSON.parse(JSON.stringify(termiteReportV2));
+    clean.stationMap.stations = clean.stationMap.stations.map((st) => ({ ...st, status: 'ok' }));
+    clean.termiteReportV2.status = { key: 'protected', tone: 'good', label: 'No termite activity observed' };
+    renderReport(clean);
+    await screen.findAllByText('No termite activity observed');
+    expect(screen.queryByText('Needs attention')).toBeNull();
+  });
+
+  it('termite visit without the payload keeps the legacy layout', async () => {
+    const { termiteReportV2: _omit, ...gatedOff } = termiteReportV2;
+    renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
+  });
+
+  it('gated-off (legacy layout): a cartridge-only visit lists no Products Applied and counts none — same rule as the header', async () => {
+    const { termiteReportV2: _omit, ...gatedOff } = JSON.parse(JSON.stringify(termiteReportV2));
+    const { container } = renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
+    expect(container.querySelector('#products-applied')).toBeNull();
+    expect(screen.queryByText(/product applied/)).toBeNull();
   });
 });
 

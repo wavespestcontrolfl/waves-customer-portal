@@ -365,6 +365,15 @@ router.post('/:id/apply-property-roles', async (req, res) => {
       const prePayload = typeof item.payload === 'string' ? JSON.parse(item.payload) : (item.payload || {});
       const preCustomerId = prePayload.customer_id || null;
       if (preCustomerId) {
+        // Property-preferences advisory lock FIRST (global order: prefs
+        // advisory → comms → customers row) — the primary-property flip
+        // reaches markSprinklerSettingsMoved's advisory lock, and taking
+        // the row first deadlocked against executeMerge / address saves
+        // (codex #3565 gh-r39).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(preCustomerId)],
+        );
         // Comms lock BEFORE the customers row (its documented order —
         // codex #3418 r11): every scheduled_services INSERT holds it, so
         // the flip's visit pin serializes with appointment creators and

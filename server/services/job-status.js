@@ -889,6 +889,17 @@ async function transitionJobStatus({
       void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
         logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
       });
+      // Visit-group seam (visit-group-scope.md §2): a cancelled/skipped
+      // child leaves its group; the last remaining row dissolves it.
+      // Guarded HERE — the one shared status writer — so no transition
+      // surface can forget it. Gate-independent by design: existing visits
+      // keep their lifecycle even if the creation gate is later unset.
+      // Idempotent + best-effort inside the helper.
+      if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
+        void require('./visit-groups').handleChildTerminal(jobId).catch((e) => {
+          logger.warn(`[job-status] visit-group terminal seam failed for ${jobId}: ${e.message}`);
+        });
+      }
     } else {
       // Reverse direction: a compensated cancellation (offboarding /
       // cancellation-processor revert a cancel when tracker state raced) or
@@ -899,6 +910,22 @@ async function transitionJobStatus({
       void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
       });
+      // Visit-group seam, reverse direction (codex #3590 r6, narrowed
+      // r7): ONLY a compensated terminal reversal regroups — the terminal
+      // hook may have detached the row (and dissolved its visit), so
+      // rebuild the stop from scratch under the same join rules. Ordinary
+      // forward transitions (pending→confirmed, →en_route, →on_site)
+      // never regroup here; stamping happens at scheduling only.
+      // Regroup on a terminal reversal AND on pending → confirmed: an
+      // office-review booking is join-ineligible until confirmed
+      // (visit-groups.canJoin office_review), so its confirmation is its
+      // grouping moment (codex #3603 r2).
+      const pendingConfirmed = String(fromStatus || '') === 'pending' && String(toStatus || '') === 'confirmed';
+      if (['cancelled', 'skipped', 'no_show'].includes(String(fromStatus || '')) || pendingConfirmed) {
+        void require('./visit-groups').maybeGroupRow(jobId, { createdBy: 'dispatch' }).catch((e) => {
+          logger.warn(`[job-status] visit-group revival seam failed for ${jobId}: ${e.message}`);
+        });
+      }
     }
   }
 

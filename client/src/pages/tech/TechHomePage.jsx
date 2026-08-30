@@ -188,6 +188,8 @@ function serviceTechnicianId(service) {
 // these states is guaranteed to 409, so disable the button rather
 // than letting it look tappable. Re-tap on en_route is also locked
 // (server treats it idempotently, but no point looking enabled).
+import { groupServicesIntoStops, nextStopOf, stopSummaryLabel, stopWindow, stopPropertyAlerts, TERMINAL_STATUSES as TERMINAL_STATUSES_VISIT } from './routeStops';
+
 const EN_ROUTE_ELIGIBLE = new Set(['pending', 'confirmed', 'rescheduled']);
 const ON_SITE_ELIGIBLE = new Set(['en_route']);
 
@@ -374,8 +376,43 @@ export default function TechHomePage() {
   // pending one, not the dead row. on_site / en_route still show — they
   // ARE the current focus, the En Route CTA is disabled there because the
   // server's PRE_EN_ROUTE gate rejects those.
-  const TERMINAL_STATUSES = new Set(['completed', 'skipped', 'cancelled', 'no_show']);
-  const nextStop = myServices.find((s) => !TERMINAL_STATUSES.has(s.status));
+  // Visit groups (visit-group-scope.md §3): rows sharing a visit are ONE
+  // stop — one card, one En Route / On Site tap (the server fans out to the
+  // siblings). Ungrouped rows are their own stop, exactly as before.
+  const stops = groupServicesIntoStops(myServices);
+  const nextVisitStop = nextStopOf(stops);
+  const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
+  const nextStopSummary = stopSummaryLabel(nextVisitStop);
+  // Grouped stop: window = union of members; alerts = every member's, deduped.
+  const nextStopWindowLabel = nextVisitStop && nextVisitStop.isVisit
+    ? serviceWindowLabel(stopWindow(nextVisitStop))
+    : serviceWindowLabel(nextStop);
+  const nextStopAlerts = nextVisitStop ? stopPropertyAlerts(nextVisitStop) : [];
+  // A grouped stop whose live members are not all at the primary's status
+  // (a fan-out that did not finish — codex #3603 r2): offer Sync Stop,
+  // which re-runs the primary's own transition; the server's fan-out is
+  // idempotent, so the lagging siblings catch up. Divergence-driven, so it
+  // survives reloads and does not depend on having seen the 409.
+  const stopOutOfSync = Boolean(
+    nextVisitStop && nextVisitStop.isVisit && nextStop
+      && nextVisitStop.services.some((s) => ['en_route', 'on_site'].includes(s.status))
+      && nextVisitStop.services.some((s) => !TERMINAL_STATUSES_VISIT.has(s.status)
+        && (s.status !== nextStop.status
+          // Status matches but the customer-visible tracker lags (a sibling
+          // tracker write failed after the status commit — codex r3).
+          || (s.trackState && nextStop.trackState && s.trackState !== nextStop.trackState))),
+  );
+  // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
+  // that an admin/GPS signal already put on site pulls the whole stop to
+  // on_site; the server's on-site path accepts an en_route primary.
+  const handleSyncStop = () => {
+    if (!nextStop || !nextVisitStop) return;
+    const live = nextVisitStop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
+    const target = live.some((s) => s.status === 'on_site') ? 'on_site'
+      : live.some((s) => s.status === 'en_route') ? 'en_route' : null;
+    if (target === 'on_site') handleOnSite(nextStop.id);
+    else if (target === 'en_route') handleEnRoute(nextStop.id);
+  };
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -583,12 +620,23 @@ export default function TechHomePage() {
               <p style={{ fontSize: 12, color: DARK.muted, margin: '4px 0 0' }}>
                 {nextStop.address || nextStop.service_type || 'Service'}
               </p>
+              {nextStopSummary && (
+                <div data-testid="visit-stop-summary" style={{ marginTop: 6 }}>
+                  <p style={{ fontSize: 12, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
+                  {nextVisitStop.services.map((s) => (
+                    <p key={s.id} style={{ fontSize: 12, color: DARK.text, margin: '2px 0 0' }}>
+                      • {s.serviceType || s.service_type || 'Service'}
+                      {TERMINAL_STATUSES_VISIT.has(s.status) ? <span style={{ color: DARK.muted }}> · {String(s.status).replace(/_/g, ' ')}</span> : null}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
             <span style={{
               fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
               background: '#0ea5e920', color: DARK.teal,
             }}>
-              {serviceWindowLabel(nextStop) || 'Pending'}
+              {nextStopWindowLabel || 'Pending'}
             </span>
           </div>
           {/* Property alerts — the server compiles gate codes, pets, chemical
@@ -597,9 +645,9 @@ export default function TechHomePage() {
               dispatch board chips show; without this the tech had to ask the
               Intelligence Bar for the gate code. Objects here ({type, text});
               tolerate plain strings for the dispatch-shaped payload. */}
-          {Array.isArray(nextStop.propertyAlerts) && nextStop.propertyAlerts.length > 0 && (
+          {nextStopAlerts.length > 0 && (
             <div style={{ marginBottom: 12 }}>
-              {nextStop.propertyAlerts.map((a, i) => {
+              {nextStopAlerts.map((a, i) => {
                 const text = typeof a === 'string' ? a : a?.text;
                 if (!text) return null;
                 const isChemical = a?.type === 'chemical';
@@ -643,6 +691,15 @@ export default function TechHomePage() {
                 primary
                 disabled={onSiteState.pendingId === nextStop.id}
                 onClick={() => handleOnSite(nextStop.id)}
+              />
+            )}
+            {stopOutOfSync && (
+              <ActionBtn
+                label={(onSiteState.pendingId || enRouteState.pendingId) === nextStop.id ? 'Syncing…' : 'Sync Stop'}
+                icon="🔁"
+                primary
+                disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
+                onClick={handleSyncStop}
               />
             )}
           </div>
@@ -1132,6 +1189,9 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
         <p style={{ margin: '2px 0 0', fontSize: 11, color: statusColor, textTransform: 'capitalize' }}>
           {status.replace(/_/g, ' ')}
           {serviceWindowLabel(service) && <span style={{ color: DARK.muted }}> · {serviceWindowLabel(service)}</span>}
+          {service.visit && service.visit.serviceCount > 1 && (
+            <span style={{ color: DARK.muted, textTransform: 'none' }}> · visit of {service.visit.serviceCount}</span>
+          )}
         </p>
       </div>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

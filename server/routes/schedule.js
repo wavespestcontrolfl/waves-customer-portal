@@ -291,6 +291,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
         };
       }
 
+
       // Keep the customer intent in the staff request queue as the durable,
       // append-only receipt. Appointment editors have independent write paths,
       // so status/notes alone cannot be the sole record of this request.
@@ -356,6 +357,15 @@ router.post('/:id/reschedule', async (req, res, next) => {
         await CardHolds.handleCardHoldCancellation({ scheduledServiceId: req.params.id, intent: 'reschedule_request' });
       } catch (holdErr) {
         require('../services/logger').warn(`[schedule] reschedule-request hold park failed for ${req.params.id}: ${holdErr.message}`);
+      }
+      // Visit-group seam (codex #3590 r6): the legacy-mode flip to
+      // 'rescheduled' (awaiting re-placement, stale stop) must leave its
+      // grouped visit like every other stop change. Post-commit +
+      // best-effort inside the helper; no-op for ungrouped rows.
+      try {
+        await require('../services/visit-groups').handleChildStopChanged(req.params.id);
+      } catch (vgErr) {
+        require('../services/logger').warn(`[schedule] visit-group seam failed for ${req.params.id}: ${vgErr.message}`);
       }
     }
 

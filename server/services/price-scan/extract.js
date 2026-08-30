@@ -34,9 +34,10 @@ function mapAvailability(value) {
   return 'unknown';
 }
 
-// Parse a price string into a positive number, or null. Strict: rejects ranges,
-// "call for price", empty, non-positive, and percentages. "$1,234.50" -> 1234.5.
-function parsePriceText(text) {
+// Match the single price token in a string, or null. Holds ALL the strictness
+// rules (ranges, percentages, promo badges, unit prices, pack sizes, empties)
+// shared by parsePriceText and parsePriceTextCents below.
+function matchPriceToken(text) {
   if (text == null) return null;
   const s = String(text).trim();
   if (!s) return null;
@@ -62,9 +63,33 @@ function parsePriceText(text) {
   // Numbers, allowing thousands separators: "1,234.50" is one token.
   const numbers = s.match(/\d[\d,]*(?:\.\d+)?/g);
   if (!numbers || numbers.length !== 1) return null; // 0 = no price, >1 = range/ambiguous
-  const n = Number(numbers[0].replace(/,/g, ''));
+  return numbers[0];
+}
+
+// Parse a price string into a positive number, or null. Strict: rejects ranges,
+// "call for price", empty, non-positive, and percentages. "$1,234.50" -> 1234.5.
+function parsePriceText(text) {
+  const token = matchPriceToken(text);
+  if (token == null) return null;
+  const n = Number(token.replace(/,/g, ''));
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.round(n * 100) / 100;
+}
+
+// Money-path variant (backlink manager plan §5): integer cents derived from the
+// MATCHED DECIMAL TOKEN as a string, never via binary floats — Math.round(n*100)
+// mis-rounds values like 10.075 because the original digits are already lost.
+// Same rejection rules as parsePriceText; additionally, a token with more than
+// two fractional digits returns null BEFORE any Number conversion (the caller
+// parks a price-entry card instead of guessing). "USD 95" -> 9500.
+function parsePriceTextCents(text) {
+  const token = matchPriceToken(text);
+  if (token == null) return null;
+  const [dollars, fraction = ''] = token.replace(/,/g, '').split('.');
+  if (fraction.length > 2) return null;
+  const cents = Number(dollars) * 100 + Number(fraction.padEnd(2, '0') || '0');
+  if (!Number.isSafeInteger(cents) || cents <= 0) return null;
+  return cents;
 }
 
 // Pull a usable price out of one JSON-LD Offer/AggregateOffer node.
@@ -677,6 +702,7 @@ module.exports = {
   AVAILABILITY,
   mapAvailability,
   parsePriceText,
+  parsePriceTextCents,
   offerPrice,
   extractJsonLdOffer,
   extractDomPrice,

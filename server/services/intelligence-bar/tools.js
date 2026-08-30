@@ -1050,6 +1050,15 @@ async function updateCustomer(customerId, updates) {
       // either commits before the sweep's in-lock recheck reads or waits
       // until after the send. Comms lock BEFORE the customers row lock
       // (customer-comms-lock.js contract).
+      // Prefs advisory lock FIRST (global order: prefs advisory → comms →
+      // customers row, same as the Customers route and the bulk branch) —
+      // comms-then-prefs here was the AB-BA half of a deadlock with any
+      // path holding prefs and waiting on comms/rows (codex #3565
+      // gh-r38/r42).
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
       if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
         await lockCustomerComms(trx, customerId);
       }
@@ -1088,6 +1097,11 @@ async function updateCustomer(customerId, updates) {
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      // Coords cleared atomically with the address/move-stamp write — never
+      // the former home's lat/lng beside the new address (codex #3565 gh-r46).
+      if (addressSubmitted) {
+        await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      }
       if (clean.monthly_rate !== undefined
         && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
           !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -1158,9 +1172,9 @@ async function updateCustomer(customerId, updates) {
       .catch((err) => logger.error(`[ib] deferred DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
   }
   if (addressSubmitted) {
-    // Coords may point at the old address — clear + re-geocode, then re-mirror the
-    // fresh coords onto the primary property (syncPrimaryAddress nulled them).
-    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+    // lat/lng were cleared inside the update transaction (gh-r46) —
+    // re-geocode, then re-mirror the fresh coords onto the primary property
+    // (syncPrimaryAddress nulled them).
     void require('../geocoder').ensureCustomerGeocoded(customerId)
       .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
       .catch(() => {});
@@ -1366,6 +1380,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
         // (codex #3426 r6 P2) — same rule as the single-edit path: comms
         // lock BEFORE this row's lock. Per-row transactions each hold one
         // key, so no cross-row ordering concern on this branch.
+        // Prefs advisory lock FIRST (global order: prefs advisory → comms →
+        // customers row) — an address row in the bulk update reaches the
+        // fan-out's move stamp (codex #3565 gh-r39).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(customerId)],
+        );
         if (clean.waveguard_tier !== undefined || clean.monthly_rate !== undefined) {
           await lockCustomerComms(trx, customerId);
         }
@@ -1399,6 +1420,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
             .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
         if (addressSubmitted) {
+          // Coords cleared atomically with the address/move-stamp write (gh-r46).
+          await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
           await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
           await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
         }
@@ -1430,7 +1453,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
-      await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      // lat/lng cleared in-transaction (gh-r46) — re-geocode only.
       void require('../geocoder').ensureCustomerGeocoded(customerId)
         .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
         .catch(() => {});
@@ -2023,6 +2046,16 @@ async function rescheduleAppointment(input) {
   }
 
   logger.info(`[intelligence-bar] Rescheduled appointment ${appointment_id} from ${oldDate} to ${dateStr}`);
+
+  // Visit-group seam (visit-group-scope.md §2; codex #3590 r11): this
+  // writer moves the date/window directly (not via the rebooker), so it
+  // repairs grouped membership itself. Runs LAST, after every query this
+  // tool issues for its own result. Best-effort, no-op for ungrouped rows.
+  try {
+    await require('../visit-groups').handleChildStopChanged(appointment_id);
+  } catch (vgErr) {
+    logger.warn(`[intelligence-bar] visit-group seam failed for ${appointment_id}: ${vgErr.message}`);
+  }
 
   return {
     success: true,

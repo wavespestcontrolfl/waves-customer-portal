@@ -56,12 +56,17 @@ const MODEL_MAP = {
 
 const MODE_SIZES = {
   'blog-hero':     { openai: '1536x1024', gemini: '1536x1024' },
+  // In-article illustration (owner rule 2026-08-27: ≥3 images per post).
+  // Same 3:2 frame as the hero — the prose column renders body images at
+  // their intrinsic ratio, and 3:2 is what the reference posts already use.
+  'blog-body':     { openai: '1536x1024', gemini: '1536x1024' },
   'social-square': { openai: '1024x1024', gemini: '1024x1024' },
 };
 
 // aspectRatio for image-native Gemini models, per mode (must match MODE_SIZES).
 const MODE_ASPECTS = {
   'blog-hero': '3:2',
+  'blog-body': '3:2',
   'social-square': '1:1',
 };
 
@@ -89,9 +94,24 @@ function sizeFor(mode, api) {
   return (MODE_SIZES[mode] || MODE_SIZES['blog-hero'])[api];
 }
 
-function buildPrompt({ title, topic, keyword, city, mode }) {
-  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
-  const focus = `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
+// Body images must not read as three of the same picture: each slot gets a
+// distinct FRAMING (the hero is the wide establishing shot), and body prompts
+// name the hero subject they must differ from.
+const BODY_IMAGE_FRAMING = {
+  'close-up': 'Framing: a close-up, detail-level view of the subject — the specific thing this section describes filling the frame, shallow depth of field.',
+  action: 'Framing: a person (a technician or homeowner) actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
+  environment: 'Framing: a wide environmental view of where this happens around the home, with the subject clearly placed in it.',
+};
+
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
+  const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
+  const base = `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
+  // Body images name the SECTION (keyword) and carry its opening prose as
+  // context (topic) — a generic heading ("What to expect") alone would
+  // illustrate nothing in particular.
+  const focus = (mode === 'blog-body' && keyword && topic && topic !== keyword)
+    ? `Subject: ${keyword}. Context from the article: ${topic}`
+    : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
   const local = city
     ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
     : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;
@@ -104,7 +124,11 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
   const style = `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, watermarks, or logos in the image.`;
-  return [base, focus, local, composition, style].join(' ');
+  const framing = mode === 'blog-body' ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
+  const distinct = (mode === 'blog-body' && avoid)
+    ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
+    : '';
+  return [base, focus, local, framing, composition, style, distinct].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -113,7 +137,14 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
 // alt BEFORE the hero exists; publishers overwrite it with this at
 // generation time (astro-publisher stamps it alongside the hero src).
 function buildAltText({ title, topic, keyword, city, mode = 'blog-hero' } = {}) {
-  const subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  let subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  // Body images are generated from heading + section lead; the alt describes
+  // the same context (a generic heading alone tells a screen reader nothing).
+  if (mode === 'blog-body' && keyword && topic && topic !== keyword) {
+    const lead = String(topic).trim().replace(/\s+/g, ' ');
+    const clipped = lead.length > 140 ? `${lead.slice(0, 140).replace(/\s+\S*$/, '')}…` : lead;
+    subject = `${String(keyword).trim()} — ${clipped}`.replace(/[.!?]+$/, '');
+  }
   const setting = city
     ? `a sunny ${city}-area Southwest Florida home with palm trees and sandy soil`
     : 'a sunny Southwest Florida home with palm trees and tropical landscaping';
@@ -229,8 +260,8 @@ class ImageGenerator {
    *   generated image (null when a customPrompt made the fields unreliable).
    * Throws if every provider in the chain failed.
    */
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', prompt: customPrompt } = {}) {
-    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode });
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, prompt: customPrompt } = {}) {
+    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode });
     const attempts = [];
 
@@ -330,6 +361,7 @@ module.exports._internals = {
   MODEL_MAP,
   MODE_SIZES,
   MODE_ASPECTS,
+  BODY_IMAGE_FRAMING,
   parseChain,
   isFatalOpenAIError,
   sizeFor,

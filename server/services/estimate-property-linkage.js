@@ -610,6 +610,34 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
 
     const hasMultiHome = await refreshHasMultiHome(customerId, database);
     logger.info(`[estimate-property-linkage] estimate ${estimateId} linked to property ${propertyId} (customer ${customerId}${hasMultiHome ? ', multi-home' : ''})`);
+    // Visit-group seam (visit-group-scope.md §2; codex #3590 r10): rows
+    // stamped with their property here may now share a stop with existing
+    // rows at that property — the converter deliberately defers grouping
+    // for null-property reservations to THIS point. Gate-checked +
+    // best-effort + idempotent inside maybeGroupRow (already-attached
+    // rows no-op; a caller trx gets a savepoint).
+    try {
+      const { maybeGroupRow } = require('./visit-groups');
+      const regroup = database('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNotNull('property_id')
+        .whereNull('visit_id')
+        .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'])
+        // A windowless row is an UNPLACED placeholder (the booking wizard's
+        // occupancy sweep demotes a conflicting occurrence by clearing its
+        // window + tech for the office to place); windowless overlaps
+        // anything, so it must never be auto-grouped (codex #3590 r15).
+        .whereNotNull('window_start')
+        .select('id');
+      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) regroup.whereIn('id', onlyServiceIds);
+      // Every linked row, in id order — a cap left rows beyond it with no
+      // later regroup pass (codex #3590 r13 P2).
+      for (const r of await regroup.orderBy('id', 'asc')) {
+        await maybeGroupRow(r.id, { database, createdBy: 'converter' });
+      }
+    } catch (vgErr) {
+      logger.warn(`[estimate-property-linkage] visit-group regroup skipped for estimate ${estimateId}: ${vgErr.message}`);
+    }
     return { propertyId, hasMultiHome };
   } catch (e) {
     logger.warn(`[estimate-property-linkage] link skipped for estimate ${estimateId}: ${e.message}`);

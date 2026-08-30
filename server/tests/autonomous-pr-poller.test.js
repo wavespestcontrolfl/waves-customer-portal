@@ -22,6 +22,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   mergePr: jest.fn(),
   listPrFiles: jest.fn(),
   getFile: jest.fn(),
+  getBranchSha: jest.fn(),
+  env: jest.fn(() => ({ defaultBranch: 'main' })),
   closePr: jest.fn().mockResolvedValue({}),
   deleteRef: jest.fn().mockResolvedValue({}),
   retireBranch: jest.fn().mockResolvedValue(true),
@@ -37,6 +39,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
+  assertBodyImagesAtHead: jest.fn().mockResolvedValue({ ok: true, reason: 'gate_off' }),
   planInternalLinksForTarget: jest.fn(),
   resolveExistingAstroFileForTarget: jest.fn(),
   internalLinkPlanningDisabled: jest.fn(() => false),
@@ -699,6 +702,120 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('body-image contract at HEAD: a miss WITHHOLDS the merge (PR opened before the gate flipped); a pass merges (GH r7)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '0 distinct in-article image(s) on content/autonomous-test, minimum 2' });
+
+    let res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required: 0 distinct/) });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ branch: openPr().head.ref, actionType: 'new_supporting_blog', brief: expect.any(Object), frontmatter: expect.objectContaining({ title: 'Test Post' }) }));
+
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null });
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('body-image contract at HEAD for a REFRESH run: target URL comes from the brief when the draft carries none (hook r16)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const refreshRun = makeRun({
+      action_type: 'refresh_existing_page',
+      brief_id: 'brief-r',
+      draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Refresh' }, body: 'x' }),
+    });
+    setupDb({ pending: [refreshRun], briefs: [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '1 distinct in-article image(s), minimum 2' });
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/legacy-post/' }));
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('body-image contract at HEAD for a REFRESH run: the brief target wins over a draft canonical/page_url, exactly like publishRefresh (GH r8)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const briefUrl = 'https://www.wavespestcontrol.com/blog/legacy-post-a/';
+    const draftUrl = 'https://www.wavespestcontrol.com/blog/other-post-b/';
+    const refreshRun = makeRun({
+      action_type: 'refresh_existing_page',
+      brief_id: 'brief-r',
+      // The emitted draft still names blog B in every draft-derived slot resolveTargetForRun reads first.
+      draft_payload: JSON.stringify({ type: 'draft', page_url: draftUrl, target_url: draftUrl, frontmatter: { title: 'Refresh', canonical: draftUrl }, body: 'x' }),
+    });
+    setupDb({ pending: [refreshRun], briefs: [{ id: 'brief-r', target_url: briefUrl, target_keyword: 'k', city: 'Venice' }] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '1 distinct in-article image(s), minimum 2' });
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ actionType: 'refresh_existing_page', targetUrl: briefUrl }));
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    // The same precedence, unit-level: brief target → draft.page_url → null (draft.target_url / canonical are NOT publishRefresh inputs).
+    const { refreshTargetUrlForRun } = poller._internals;
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'brief-r', draft_payload: JSON.stringify({ page_url: draftUrl }) })).toBe(briefUrl);
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: null, draft_payload: JSON.stringify({ page_url: draftUrl, frontmatter: { canonical: briefUrl } }) })).toBe(draftUrl);
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'missing', draft_payload: JSON.stringify({ target_url: draftUrl, frontmatter: { canonical: draftUrl } }) })).toBeNull();
+  });
+
+  test('body-image check reports the base tip it validated against; a base push before the merge call defers the merge to the next tick (GH r14)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    gh.getBranchSha.mockResolvedValueOnce('main-tip-2');
+
+    let res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'base_moved_during_gating' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-2' });
+    gh.getBranchSha.mockResolvedValue('main-tip-2');
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    // The new_supporting_blog lane re-reads the tip inside the merge lock, right before the merge call (GH r24).
+    expect(gh.getBranchSha).toHaveBeenCalledTimes(3);
+  });
+
+  test('base tip re-checked inside the merge lock immediately before the merge call: a push landing during the topic recheck defers the merge (GH r24)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null, baseSha: 'main-tip-1' });
+    // Step 3.7 sees the validated tip; the in-lock recheck sees a newer one.
+    gh.getBranchSha.mockResolvedValueOnce('main-tip-1').mockResolvedValueOnce('main-tip-2');
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'base_moved_during_gating' });
+    expect(gh.getBranchSha).toHaveBeenCalledTimes(2);
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7) and PARKS the run (r12)', async () => {

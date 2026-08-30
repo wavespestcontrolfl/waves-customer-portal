@@ -441,7 +441,47 @@ function answerServiceReportQuestion({
 } = {}) {
   const q = String(question || '').toLowerCase();
 
-  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside|irrigation)\b/.test(q)) {
+  // This week's watering plan, when the report carries one, answers any
+  // watering question first — never re-entry or generic copy under the
+  // plan shown on the same page (codex #3565 gh-r29). Without a plan the
+  // existing routing (irrigation → re-entry) stands.
+  // Safety first: re-entry / pets / kids questions answer with the once-dry
+  // rule even when they mention minutes or water (codex gh-r30).
+  if (/\b(re-?enter|ready|pet|dog|cat|kid|child|outside|inside)\b/.test(q)) {
+    return answerReentry({ data });
+  }
+
+  const weekPlan = data?.reportV2?.water?.weekPlan;
+  const aftercare = data?.reportV2?.aftercare;
+  // Controller phrasing without the word "water" — "How long should I run
+  // each zone?", "how many minutes per zone" — is a watering question too
+  // (codex gh-r38); the safety-intent guard above still wins.
+  // Controller-shaped phrasing only — "what time zone is my appointment"
+  // must fall through to the appointment router (codex gh-r46).
+  const zoneRuntimeIntent = !/\btime\s*zones?\b/.test(q)
+    && /\bzones?\b/.test(q) && /\b(run|runs|running|minutes?|duration|how long)\b/.test(q);
+  const wateringIntent = /\b(water|watering|irrigat\w*|sprinklers?|run ?time)\b/.test(q) || zoneRuntimeIntent;
+  // Aftercare: "should I water after today's treatment?" answers with the
+  // label instruction, plus the reduced plan when a watering-in is credited.
+  if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {
+    // Same guards as the rendered card: a credited watering-in only for a
+    // REQUIRED watering-in, on a visit inside the plan week, on a plan that
+    // prescribes a run (codex gh-r31).
+    const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+    const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
+    // A HOLD plan beside a required watering-in: the answer must carry the
+    // plan's no-extra-runs guidance too — the label instruction alone reads
+    // as permission to resume the normal schedule (codex gh-r45).
+    const holdBeside = !reduced && aftercare.waterInRequired === true
+      && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+      ? weekPlan : null;
+    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+  }
+  if (weekPlan?.title && wateringIntent) {
+    return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');
+  }
+
+  if (/\b(irrigation)\b/.test(q)) {
     return answerReentry({ data });
   }
 

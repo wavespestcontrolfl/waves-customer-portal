@@ -613,6 +613,7 @@ const CONFIRM_REASON_TEXT = {
   secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
+  address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -2563,7 +2564,11 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
 // restores the field to its old baseline — often null — erasing a value
 // an ACCEPTED later call independently stated. A supplied value that
 // DIFFERS from the lead's is not a reaffirmation and claims nothing.
-// Phone compares on the last 10 digits; other fields case-insensitively.
+// Phone compares on the last 10 digits; address on the canonical
+// street + unit key (so "Apt 4" / "#4" / "Unit 4" restate the same door —
+// the same canonicalization composeLeadAddress dedupes with, codex r2 P1);
+// other fields case-insensitively. A reaffirmation claims the lead's
+// CURRENT value, never the supplied spelling.
 function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
   const out = {};
   if (!lockedLead || !suppliedValues) return out;
@@ -2580,9 +2585,177 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     const lockedVal = lockedLead[f];
     if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
     const supplied = norm(f, suppliedValues[f]);
-    if (supplied && supplied === norm(f, lockedVal)) out[f] = lockedVal;
+    if (!supplied) continue;
+    const literal = supplied === norm(f, lockedVal);
+    // EVERY address comparison requires the place check — an exact
+    // street/unit string in another city/ZIP is a different property just
+    // as much as a canonical-key match is (codex r5 P1).
+    const same = f === 'address'
+      ? (literal || leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal))
+        && leadAddressPlaceCorroborates(suppliedValues, lockedLead)
+      : literal;
+    if (same) out[f] = lockedVal;
   }
   return out;
+}
+
+// A same street+unit key is NOT the same property when the call names a
+// different place (two "100 Main St, Apt 4" in different cities/ZIPs — the
+// same rule addressKey identity and the fan-out's snapshot match apply,
+// codex r4 P1). Reuses the fan-out's placeCorroborates against BOTH place
+// sources the locked lead carries: its city/zip columns and any city/ZIP
+// tail inside its address string. ZIP wins when both sides have one; city
+// only when no ZIP compare is possible; a call that names no place cannot
+// corroborate a lead that does (no claim, so the predecessor's rollback
+// stays authoritative — conservative by design).
+function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
+  const { placeCorroborates, snapshotTailPlace } = require('./customer-address-fanout');
+  // A full-address line1 with empty city/zip fields (the customer-create
+  // fallback shape) carries its place in the composed address tail — read
+  // it from there so a restated full address can still reaffirm (codex r7).
+  const suppliedTail = leadAddressTailPlace(suppliedValues.address) || {};
+  const contact = {
+    city: String(suppliedValues.city || '').trim() || suppliedTail.city || null,
+    zip: String(suppliedValues.zip || '').trim() || suppliedTail.zip || null,
+  };
+  if (!placeCorroborates(contact, { city: lockedLead.city, zip: lockedLead.zip })) return false;
+  const tail = leadAddressTailPlace(lockedLead.address);
+  return !tail || placeCorroborates(contact, tail);
+}
+
+// Place evidence in a leads.address value, read through the UNIT-AWARE
+// parser: the unit segments ("Apt 4", and "Fl 2" — the fan-out's own tail
+// reader must skip 'fl' to tell a floor from Florida, so it would read a
+// floor unit as the city) are consumed first, and only the remaining place
+// tail is handed to snapshotTailPlace. null for a bare street (codex r9 P1).
+function leadAddressTailPlace(address) {
+  const raw = String(address == null ? '' : address).trim();
+  if (!raw) return null;
+  const { snapshotTailPlace } = require('./customer-address-fanout');
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  // The UNBOUNDED tail: LEAD_PLACE_TAIL_MAX_LENGTH is a write-time clamp for
+  // values being composed; a stored legacy value with a long tail must
+  // still surrender its trailing state/ZIP as evidence (#3608 codex r5).
+  const parts = splitStreetLineUnitParts(raw);
+  const tail = String(parts.tail || '').trim();
+  // A comma-free WHOLE line ("100 Main St Apt 4 Bradenton FL 34205") has no
+  // parsed tail and offers NO place evidence — deliberately. Inferring the
+  // locality from the text after the inline unit was tried and misread
+  // every trailing subpremise qualifier ("Apt 4 Rear" → city "Rear"),
+  // which blocked an exact restatement with the real city from recording
+  // ownership. Ownership on that legacy shape rests on the exact string,
+  // which already carries whatever place the caller gave.
+  return tail ? snapshotTailPlace(`street, ${tail}`) : null;
+}
+
+// Canonical street|unit key for a leads.address value, tolerant of every
+// notation the composer accepts and of the fan-out's city/state tail:
+// "100 Main St, Apt 4" / "100 Main St #4" / "100 Main St, Unit 4, Sarasota,
+// FL 34236" all key to "100 main st|4". Empty when there is no street.
+function leadAddressCompareKey(v) {
+  const raw = String(v == null ? '' : v).trim();
+  if (!raw) return '';
+  const { normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  // Through the lead-shape splitter, not the raw parser: a LEGACY comma-free
+  // stored value ("100 Main St Apt 4 Sarasota FL 34236") must key the same
+  // as its composed restatement ("100 Main St, Apt 4, Sarasota FL 34236"),
+  // or a restated address never records successor ownership (codex r10 P1).
+  const { street, unit } = splitLeadStreetParts(raw);
+  const rawStreetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!rawStreetKey) return '';
+  // Every inline unit run inside the street is rewritten to its canonical
+  // unit key ("apt 4" / "#4" / "apt # 4" / "unit 4" → "{u:4}", "bldg 2 apt
+  // 4" → "{u:bldg 2 unit 4}"), so a comma-free legacy value keys the same
+  // as any equivalent spelling of itself (#3608 codex r6 P1).
+  const { streetKey, unitKeys } = canonicalizeInlineUnits(rawStreetKey);
+  const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
+  // A comma-free full address is stored WHOLE (its inline unit stays inside
+  // the street); a later restatement of that same line carries the unit
+  // again as a dedicated segment ("…Apt 4 Sarasota FL 34236, Apt 4"). When
+  // the street already embeds the same door, the appended unit adds no
+  // identity — collapse to the street key so the two compare equal and
+  // successor ownership is recorded (#3608 codex r4 P1).
+  if (unitK && unitKeys.includes(unitK)) return streetKey;
+  return unitK ? `${streetKey}|${unitK}` : streetKey;
+}
+
+// Ownership compares keys for EXACT equality. A comma-free legacy whole line
+// ("100 Main St Apt 4 Sarasota FL 34236") and the composed comma form
+// ("100 Main St, Apt 4, …") therefore key differently and a restatement in
+// the other shape records no successor ownership — the ratified #3608 r3
+// scope-out. A prefix/equivalence rule bridging the two shapes was tried
+// (pre-push audit → codex r7/r8) and every round found a new class it got
+// wrong (spelled vs abbreviated directionals, Road/Rd before a route
+// number, open-ended Rear/Front/Upper qualifiers): the comma-free shape has
+// no delimiter that makes "same door" lexically decidable, so it is not
+// guessed. The writer has composed the comma form since #3602; the
+// whole-line shape only exists in pre-#3602 rows.
+
+// Rewrite each MAXIMAL inline-unit run in a (lower-cased, punctuation-free)
+// street key to "{u:<canonical unit key>}" and list the keys found. A run
+// is consecutive "<designator> <value>" pairs — a designator may be followed
+// by a separated hash then the value ("apt # 4") — or a lone "#4" / "# 4";
+// compared whole through the shared normalizeUnitLine / unitLineValueKey,
+// so "Apt 4" never equals "Bldg 2 Apt 4" (different door, same rule as the
+// composer's dedupe) while Apt / Unit / Suite / hash spellings do
+// (#3608 codex r5 + r6).
+// A hash is ALWAYS a unit here, exactly as the shared parser and the
+// customer-properties path treat it. A route-number exception ("State Road
+// #64") was tried and produced five successive wrong classes (terminal,
+// leading, named highway, spacing…); SWFL numbered routes are written
+// "State Road 64" without a hash, so the rare hashed spelling is accepted
+// as a unit conflict held for read-back (Adam ruling 2026-08-29).
+function canonicalizeInlineUnits(streetKey) {
+  const {
+    normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair,
+  } = require('../utils/address-normalizer');
+  const tokens = String(streetKey || '').split(' ').filter(Boolean);
+  // Same grammar as the shared peel: a designator counts only when the
+  // value that follows is unit-shaped ("apt 4", "unit ph1", "ste 200-a") —
+  // never a street word ("Space Coast Blvd", "Apartment Road", "Unit Road");
+  // 'fl' is also the floor designator — "fl 34236" is the state tail.
+  const isValue = (t) => !!t && UNIT_VALUE.test(t);
+  const isDesignator = (t, next, after) => UNIT_DESIGNATORS.has(t)
+    && !isStateZipPair(t, next || '')
+    && (isValue(next) || (next === '#' && isValue(after)));
+  // Attached hash takes ANY value, same as the shared parser's `/^#\S+$/`
+  // branch — "#A" / "#PH" are units there, so they must be units here too or
+  // the whole-line key drifts from the comma form's (#3608 pre-push audit).
+  const isHashValue = (t) => /^#\S+$/.test(t);
+  const hashAt = (idx) => isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1]));
+  const out = [];
+  const unitKeys = [];
+  const runs = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (!(isDesignator(t, tokens[i + 1], tokens[i + 2]) || hashAt(i))) { out.push(t); i += 1; continue; }
+    const run = [];
+    let j = i;
+    while (j < tokens.length) {
+      const c = tokens[j];
+      if (hashAt(j) && isHashValue(c)) { run.push(c); j += 1; continue; }
+      if (hashAt(j) && c === '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] === '#') { run.push(c, '#', tokens[j + 2]); j += 3; continue; }
+      if (isDesignator(c, tokens[j + 1], tokens[j + 2]) && tokens[j + 1] !== '#') { run.push(c, tokens[j + 1]); j += 2; continue; }
+      break;
+    }
+    if (!run.length) { out.push(t); i += 1; continue; }
+    // A unit boundary must be defensible: the run comes after the house
+    // number and at least one street-name token — "123 Lot 5 Road" is a
+    // street NAME, not a lot, and reading it as a unit made a real
+    // dedicated "Apt 2" a conflict that was dropped (pre-push audit P1 on
+    // f65b5046d). Deliberately NOT "and not followed by a street-suffix
+    // word": cities begin with suffix words ("Apt 4 Lake Wales", "Apt 4 St
+    // Petersburg") and that rule silently persisted two doors (codex r11).
+    if (i < 2) { out.push(t); i += 1; continue; }
+    const key = unitLineValueKey(normalizeUnitLine(run.join(' ')));
+    unitKeys.push(key);
+    runs.push({ start: i, end: j });
+    out.push(`{u:${key}}`);
+    i = j;
+  }
+  return { streetKey: out.join(' '), unitKeys, runs };
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
@@ -9192,6 +9365,26 @@ const CallRecordingProcessor = {
         if (leadId) {
           let current = existingLead || (await db('leads').where({ id: leadId }).first());
           const isEmpty = (v) => v === null || v === undefined || v === '';
+          // leads.address is ONE free-text varchar(255) (migration
+          // 20260401000095): compose the unit in, or the lead card / pipeline
+          // card / estimate prefill all lose it even though the extractor
+          // captured it in address_line2 (2026-08-29: a prod lead rendered
+          // without the caller's unit while the customer row had it).
+          // Composed ONCE and reused by every ledger path below (fill,
+          // chronological-restamp resupply, stamp-ownership identity) so the
+          // stored value and the supplied identity always compare equal —
+          // a restated street+unit must record successor ownership, or a
+          // later rollback of the earlier call erases the accepted address.
+          // extracted.address_line2 ONLY, no V2 fallback — same reasoning as
+          // the customer insert: adoptV2PrimaryFields already copies a SAFE
+          // paired unit under primary mode, and reading V2 directly here
+          // would glue a V2 unit onto an unrelated V1 street in shadow /
+          // kill-switch mode.
+          const leadAddressShape = analyzeLeadAddress(extracted.address_line1, extracted.address_line2);
+          const composedLeadAddress = leadAddressShape.address;
+          if (leadAddressShape.unitConflict && !bridgeNeedsConfirmation.includes('address_unit_conflict')) {
+            bridgeNeedsConfirmation.push('address_unit_conflict');
+          }
 
           // The enrichment below runs as a PASS over `current` so the
           // claim-race recovery can re-run the SAME pass against a freshly
@@ -9213,7 +9406,7 @@ const CallRecordingProcessor = {
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-            if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+            if (composedLeadAddress && isEmpty(current?.address)) leadUpdates.address = composedLeadAddress;
             if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
             if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
             // Multi-service calls: matched_service is single-slot, so append the
@@ -9658,7 +9851,7 @@ const CallRecordingProcessor = {
                     resupply('first_name', extracted.first_name ? capitalizeName(extracted.first_name) : null);
                     resupply('last_name', extracted.last_name ? capitalizeName(extracted.last_name) : null);
                     resupply('email', extracted.email);
-                    resupply('address', extracted.address_line1);
+                    resupply('address', composedLeadAddress);
                     resupply('city', extracted.city);
                     resupply('zip', extracted.zip);
                     if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
@@ -9717,7 +9910,7 @@ const CallRecordingProcessor = {
                   first_name: extracted.first_name,
                   last_name: extracted.last_name,
                   email: extracted.email,
-                  address: extracted.address_line1,
+                  address: composedLeadAddress,
                   city: extracted.city,
                   zip: extracted.zip,
                 };
@@ -10014,7 +10207,11 @@ const CallRecordingProcessor = {
                   first_name: capitalizeName(extracted.first_name) || null,
                   last_name: capitalizeName(extracted.last_name) || null,
                   email: extracted.email || null,
-                  address: extracted.address_line1 || null,
+                  // Composed (street + unit) — this row loops back as
+                  // `current`, and the fill-only pass above skips a
+                  // non-empty address, so a bare street here would strand
+                  // the replacement lead unit-less (codex r2 P2).
+                  address: composedLeadAddress || null,
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
@@ -11590,6 +11787,17 @@ const CallRecordingProcessor = {
                       .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
                       .returning('*');
                     primaryRow = updatedExisting || existing;
+                    // Visit-group seam (visit-group-scope.md §2; codex #3590
+                    // r12): this direct assignment bypasses assignDispatchJob,
+                    // so a manually grouped row would go assigned while its
+                    // parent/siblings stayed unassigned. Same after-commit
+                    // pattern as dispatch-assignment's own seam; best-effort.
+                    if (trx?.executionPromise) {
+                      const seamRowId = existing.id;
+                      trx.executionPromise
+                        .then(() => require('./visit-groups').handleChildStopChanged(seamRowId))
+                        .catch((vgErr) => logger.warn(`[call-proc] visit-group seam failed for ${seamRowId}: ${vgErr.message}`));
+                    }
                   }
                   // A reused appointment still closed the deal: reprocessing a
                   // call (or recovering from an earlier savepoint-contained
@@ -14310,16 +14518,34 @@ const CallRecordingProcessor = {
     } catch { /* unparseable metadata -> treat as unstamped */ }
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
-    let recordings;
+    // A <Dial record> recording attaches to the CHILD dial leg (the
+    // recording-status webhook lands it on the parent row via
+    // ParentCallSid); the parent's own list is where voicemail/<Record>
+    // audio lives. Ask Twilio for both — the accepted leg's SID is
+    // persisted at /inbound-forward-accept as metadata.forward_acceptance
+    // .dial_call_sid — so a lost child-leg callback is recovered here and
+    // never misreported downstream as "Twilio has no recording".
+    let childSid = null;
     try {
-      recordings = await client.recordings.list({ callSid, limit: 10 });
-    } catch (err) {
-      logger.warn(`[call-proc] Recording recovery lookup failed for ${maskSid(callSid)}: ${err.message}`);
-      return { success: false, reason: 'twilio_lookup_failed', error: err.message };
-    }
+      const rawMeta = call.metadata;
+      const callMeta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      childSid = callMeta?.forward_acceptance?.dial_call_sid || null;
+    } catch { childSid = null; }
+    const lookupSids = childSid && childSid !== callSid ? [callSid, childSid] : [callSid];
 
-    const recording = newestCompletedRecording(recordings);
-    if (!recording) return { success: true, skipped: true, reason: 'no_completed_recording' };
+    let recording = null;
+    for (const sid of lookupSids) {
+      let recordings;
+      try {
+        recordings = await client.recordings.list({ callSid: sid, limit: 10 });
+      } catch (err) {
+        logger.warn(`[call-proc] Recording recovery lookup failed for ${maskSid(sid)}: ${err.message}`);
+        return { success: false, reason: 'twilio_lookup_failed', error: err.message };
+      }
+      recording = newestCompletedRecording(recordings);
+      if (recording) break;
+    }
+    if (!recording) return { success: true, skipped: true, reason: 'no_completed_recording', checkedSids: lookupSids };
 
     const url = recordingMediaUrl(recording);
     if (!url) return { success: false, reason: 'recording_url_missing' };
@@ -14349,8 +14575,28 @@ const CallRecordingProcessor = {
   },
 
   async recoverMissingRecentRecordings() {
-    const rows = await db('call_log')
-      .select('twilio_call_sid')
+    // The extra columns feed the unrecorded-call alert below (the row's
+    // identity + timing; nothing the recovery itself needs). Rows that can
+    // still ring an unrecorded-call bell — alert-eligible by the alert's
+    // own constants (long enough, not voicemail / AI relay) AND not yet
+    // settled (no per-call dedupeKey bell, no membership in an aggregate
+    // bell's unrecorded_call_sids) — sort FIRST, so the 25-row cap is spent
+    // on rows that still need a Twilio look + a bell. Under an outage with
+    // >25 permanent misses the newest rows would otherwise pin the window
+    // (settled ones, or short/voicemail ones that can never settle) and
+    // older answered calls never ring. Everything else keeps its recovery
+    // retries in the remaining capacity, newest first.
+    // Gate-aware: with GATE_UNRECORDED_CALL_WATCHDOG off nothing ever
+    // settles, so the priority would pin >=25 long unrecorded calls at
+    // the front forever and starve shorter/voicemail rows of recovery —
+    // off means the original newest-first recovery order, byte-identical.
+    const { isEnabled } = require('../config/feature-gates');
+    const alertPriority = isEnabled('unrecordedCallWatchdog');
+    const { MIN_DURATION_SECONDS: ALERT_MIN_SECONDS, GRACE_MINUTES: ALERT_GRACE_MINUTES, EXEMPT_ANSWERED_BY: ALERT_EXEMPT } = require('./unrecorded-call-watchdog');
+    const exemptList = [...ALERT_EXEMPT].map((v) => `'${String(v).replace(/'/g, "''")}'`).join(', ');
+    let candidates = db('call_log')
+      .select('twilio_call_sid', 'direction', 'duration_seconds', 'recording_sid', 'recording_url',
+        'answered_by', 'call_outcome', 'from_phone', 'to_phone', 'customer_id', 'created_at')
       .where({ direction: 'inbound', status: 'completed' })
       .where(function () {
         this.whereNull('recording_url').orWhere('recording_url', '');
@@ -14358,7 +14604,28 @@ const CallRecordingProcessor = {
       .whereNotNull('twilio_call_sid')
       .where('created_at', '>=', db.raw("NOW() - INTERVAL '7 days'"))
       .where('created_at', '<=', db.raw("NOW() - INTERVAL '2 minutes'"))
-      .where('duration_seconds', '>', 10)
+      .where('duration_seconds', '>', 10);
+    if (alertPriority) {
+      // Mirrors isUnrecordedCall exactly — incl. the post-call grace (calls
+      // still inside it can't ring yet), recording_sid (a PAN quarantine
+      // clears recording_url but keeps the SID, and recovery returns
+      // pan_quarantined for those rows, so they could otherwise sit in
+      // tier 0 forever) and the pan_detected stamp itself — so nothing
+      // that can never ring consumes the window ahead of calls that can.
+      candidates = candidates.orderByRaw(`CASE WHEN call_log.duration_seconds >= ?
+          AND call_log.recording_sid IS NULL
+          AND COALESCE(call_log.transcription_metadata::jsonb ->> 'pan_detected', '') <> 'true'
+          AND COALESCE(call_log.answered_by, '') NOT IN (${exemptList})
+          AND COALESCE(call_log.call_outcome, '') <> 'voicemail'
+          AND call_log.created_at + (call_log.duration_seconds * INTERVAL '1 second') + (? * INTERVAL '1 minute') <= NOW()
+          AND NOT EXISTS (
+            SELECT 1 FROM notifications n
+            WHERE n.recipient_type = 'admin'
+              AND (n.metadata->>'dedupeKey' = 'unrecorded-call:' || call_log.twilio_call_sid
+                   OR (n.metadata->'unrecorded_call_sids') @> to_jsonb(call_log.twilio_call_sid))
+          ) THEN 0 ELSE 1 END`, [ALERT_MIN_SECONDS, ALERT_GRACE_MINUTES]);
+    }
+    const rows = await candidates
       .orderBy('created_at', 'desc')
       .limit(25);
 
@@ -14400,6 +14667,26 @@ const CallRecordingProcessor = {
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
+
+    // Twilio has no recording either (2026-08-29: a 4:17 call bridged by
+    // the number's static voice-fallback TwiML after a webhook 502 sat in
+    // this sweep as `no_completed_recording` on every pass, silently).
+    // Ring the admin bell for answered calls past their recording grace —
+    // AFTER the lookups, on this pass's own results, so a recording
+    // recovered above can never race the alert. Best-effort: the alert
+    // must never break the recovery sweep.
+    const noRecordingSids = new Set(results.filter((r) => r.reason === 'no_completed_recording').map((r) => r.callSid));
+    if (noRecordingSids.size) {
+      try {
+        const { alertUnrecordedCalls } = require('./unrecorded-call-watchdog');
+        const alert = await alertUnrecordedCalls(rows.filter((r) => noRecordingSids.has(r.twilio_call_sid)));
+        if (!alert.skipped && (alert.missed > 0 || alert.alerted > 0)) {
+          logger.warn(`[unrecorded-call] scanned=${alert.scanned} missed=${alert.missed} alerted=${alert.alerted}${alert.aggregate ? ' (aggregate)' : ''}${alert.failed ? ` failed=${alert.failed}` : ''}`);
+        }
+      } catch (alertErr) {
+        logger.error(`[unrecorded-call] alert step failed: ${alertErr.message}`);
+      }
+    }
     return { checked: sweepRows.length, recovered, results };
   },
 
@@ -14468,7 +14755,181 @@ CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustome
 CallRecordingProcessor.CONTACT_MATCH_PHONE_COLS = CONTACT_MATCH_PHONE_COLS;
 CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
 
+/**
+ * leads.address is ONE free-text varchar(255), so the unit/suite from
+ * address_line2 has to be composed into it ("100 Main St" + "Apt 4" →
+ * "100 Main St, Apt 4"). A street that already embeds the same unit
+ * ("100 Main St Apt 4", "100 Main St Bldg 2 Apt 4") is re-emitted from its
+ * parsed street + unit ("100 Main St, Apt 4") so a legacy inline-unit street
+ * + a separately captured unit never renders the unit twice — duplicate detection goes through the shared address-normalizer
+ * parser (splitStreetLineUnit / normalizeUnitLine / unitLineValueKey) so
+ * multipart and structural designators (Bldg, Floor, Lot, Space) compare the
+ * same way everywhere. Bounded to the column via formatAddressBounded, which
+ * trims the STREET and keeps the unit tail (the same mechanism the customer
+ * address fan-out uses for leads.address). Pure.
+ */
+function composeLeadAddress(line1, line2) {
+  return analyzeLeadAddress(line1, line2).address;
+}
+
+/**
+ * Street / inline unit / place tail of a lead street line, through the
+ * shared unit-aware parser (splitStreetLineUnitParts). Comma-separated lines
+ * ("100 Main St, Apt 4, Sarasota, FL 34236") and comma-free lines whose unit
+ * is the trailing token pair ("100 Main St Apt 4") are fully understood; a
+ * comma-free FULL address ("100 Main St Apt 4 Sarasota FL 34236") is kept
+ * whole as the street — deliberately NOT locality-split. Directional-vs-city
+ * is not lexically decidable here ("100 Main St North, Sarasota" vs
+ * "100 Main St North Port"), and five review rounds of heuristics each
+ * produced a new wrong-street or wrong-place case; storing that rare shape
+ * whole (unit appended after it) can never misidentify the property, at
+ * the cost of inline-unit dedupe / conflict detection for that shape only.
+ * The place tail is clamped so a runaway locality can never crowd the
+ * street out of the 255 bound — the tail is the protected part of
+ * formatAddressBounded.
+ */
+function splitLeadStreetParts(street) {
+  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
+  const parts = splitStreetLineUnitParts(street);
+  return {
+    street: parts.street,
+    unit: parts.unit,
+    tail: String(parts.tail || '').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
+  };
+}
+
+/**
+ * composeLeadAddress plus the shape verdict: `unitConflict` is true when the
+ * inline unit in line1 and the dedicated line2 name DIFFERENT doors ("…Apt 4"
+ * + "Apt 5"). A contradictory address is never stored as two doors — the
+ * caller's inline street wins and the dedicated unit is dropped, exactly as
+ * normalizeLeadAddress resolves the same input for the public intake — and
+ * the call is flagged address_unit_conflict for read-back (codex r7 P1).
+ */
+function analyzeLeadAddress(line1, line2) {
+  const street = String(line1 || '').trim();
+  if (!street) return { address: null, unitConflict: false };
+  const { formatAddressBounded } = require('./customer-address-fanout');
+  const { normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS } = require('../utils/address-normalizer');
+  const clampUnit = (u) => String(u || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
+  // Same 100-char unit clamp as the customer insert / booking linkage —
+  // the extraction schema bounds street_line_2 by type only, and an
+  // overlong unit would otherwise consume the whole 255 budget as the
+  // protected tail and drop the street (codex r4 P2).
+  let unit = clampUnit(line2);
+  // Rebuild from the PARSED parts — street, its inline unit, and the place
+  // tail a full-address line1 may carry ("100 Main St, Apt 4, Sarasota, FL
+  // 34236") — so the unit and the place are the protected tail of the
+  // bound, never the first thing a long street's truncation eats, and a
+  // full-address line1 never loses its city/ZIP (codex r3 + r6 P2). The
+  // no-line2 shape takes the same path: an inline-only unit is a supported
+  // legacy shape and must survive the bound too (codex r8 P2).
+  const parts = splitLeadStreetParts(street);
+  const embedded = clampUnit(parts.unit);
+  if (!unit) {
+    // An overlong comma-free whole line with its door only inline gets the
+    // same protected split as the dedicated-unit branches — the inline unit
+    // and the place must survive the bound here too (codex r11 P1).
+    const protectedParts = !embedded && parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street, line2: embedded || null };
+    return {
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict: false,
+    };
+  }
+  // A BARE unit ("4B", "102") gains its designator ("Unit 4B") before it is
+  // stored: the shared parser and the ownership key only recognize a
+  // comma-separated unit that leads with a designator or '#', so a bare
+  // segment would key the address as unitless and read as a city in the
+  // place tail — a later call restating the exact address could never
+  // reaffirm it (codex r6 P1). Designator-bearing spellings are kept as
+  // the caller said them.
+  const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
+  if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
+  const key = (u) => unitLineValueKey(normalizeUnitLine(u));
+  // A comma-free FULL address is kept whole, so its inline unit is not the
+  // trailing pair — find it anywhere in the street through the same
+  // canonicalizer the ownership key uses, so a repeated dedicated unit is
+  // not appended and a DIFFERENT one is a conflict held for read-back
+  // rather than a second door persisted silently (pre-push audit P1).
+  const inlineKeys = embedded ? [] : canonicalizeInlineUnits(parts.street.replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()).unitKeys;
+  const duplicate = embedded ? key(embedded) === key(unit) : inlineKeys.includes(key(unit));
+  const unitConflict = embedded ? !duplicate : (inlineKeys.length > 0 && !duplicate);
+  if (!embedded && (duplicate || unitConflict)) {
+    // Whole-line street already names the door: never append a second one.
+    // Kept verbatim when it fits; an overlong line is bounded with its last
+    // inline unit run and the place after it as the protected tail, so the
+    // slice eats street text, never the door or the locality (codex r8 P1).
+    const protectedParts = parts.street.length > LEAD_ADDRESS_MAX_LENGTH
+      ? wholeLineProtectedParts(parts.street)
+      : { line1: parts.street };
+    return {
+      address: formatAddressBounded({ ...protectedParts, city: protectedParts.city || parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
+  if (unitConflict) {
+    // The retained inline unit is the protected tail here too — an overlong
+    // street must not truncate the one door this policy chose to keep
+    // (codex r10 P2).
+    return {
+      address: formatAddressBounded({ line1: parts.street, line2: embedded, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      unitConflict,
+    };
+  }
+  return {
+    address: formatAddressBounded({
+      line1: parts.street,
+      line2: duplicate ? embedded : unit,
+      city: parts.tail || null,
+    }, LEAD_ADDRESS_MAX_LENGTH),
+    unitConflict,
+  };
+}
+// Split a comma-free whole line at its LAST inline unit run, in the raw
+// text: { line1: street before the run, line2: the run as written, city:
+// everything after }. Token positions come from canonicalizeInlineUnits over
+// the same tokens lower-cased and punctuation-stripped (empties dropped
+// with an index map), so the raw spelling is preserved. No run → line1 only.
+function wholeLineProtectedParts(street) {
+  const rawTokens = String(street || '').trim().split(/\s+/).filter(Boolean);
+  const normTokens = [];
+  const rawIndex = [];
+  rawTokens.forEach((t, idx) => {
+    const n = t.replace(/[.,]/g, '').toLowerCase();
+    if (n) { normTokens.push(n); rawIndex.push(idx); }
+  });
+  const { runs } = canonicalizeInlineUnits(normTokens.join(' '));
+  if (!runs.length) return { line1: rawTokens.join(' ') };
+  const last = runs[runs.length - 1];
+  const startRaw = rawIndex[last.start];
+  const endRaw = last.end < rawIndex.length ? rawIndex[last.end] : rawTokens.length;
+  return {
+    line1: rawTokens.slice(0, startRaw).join(' '),
+    // Same 100-char unit clamp as the dedicated / terminal unit paths — an
+    // oversized inline run must not take the whole budget either (codex r10).
+    line2: rawTokens.slice(startRaw, endRaw).join(' ').slice(0, LEAD_UNIT_MAX_LENGTH).trim() || null,
+    // Same write-time clamp as splitLeadStreetParts' tail: a runaway
+    // locality must never take the whole budget and drop the street
+    // (codex r9 P2).
+    city: rawTokens.slice(endRaw).join(' ').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim() || null,
+  };
+}
+
+// leads.address column width (migration 20260401000095: default string →
+// varchar(255)); a longer composed value makes Postgres reject the whole
+// enrichment update and fails the call-processing attempt.
+const LEAD_ADDRESS_MAX_LENGTH = 255;
+const LEAD_UNIT_MAX_LENGTH = 100;
+// Place tail budget: leaves ≥ 255 − 100 (unit) − 80 − separators ≈ 70 chars of street.
+const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
+
 CallRecordingProcessor._test = {
+  composeLeadAddress,
+  analyzeLeadAddress,
+  leadAddressCompareKey,
+  leadAddressTailPlace,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,

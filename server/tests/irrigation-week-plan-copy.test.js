@@ -1,0 +1,614 @@
+/**
+ * irrigation-week-plan renderers — the WORDING rules (owner 2026-08-28):
+ * "each turf zone" never "each zone"; "skip your turf watering" / "leave the
+ * turf irrigation off" never "turn your controller off"; "your permitted
+ * watering day" never a weekday; measured rate → exact minutes, assumed
+ * rate → "about"; conditional forecast copy; restriction note.
+ */
+jest.mock('../models/db', () => { const m = jest.fn(); m.fn = { now: () => 'now()' }; return m; });
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const { buildWeekPlan } = require('../../packages/irrigation-runtime');
+const { renderWeekPlanEmail, renderWeekPlanReport, decideWeekPlan, _private } = require('../services/irrigation-week-plan');
+const { buildIrrigationAdvice } = require('../services/service-report/irrigation-advice');
+
+const ONE_DAY = { maxDaysPerWeek: 1, label: 'SWFWMD Modified Phase III water shortage order', expiresOn: '2026-10-01', hoursNote: 'on your assigned day, during your area\'s allowed hours' };
+const SPRAY = { runMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], systemType: ['spray'] };
+const CTX = { firstName: 'Jordan', grassLabel: 'St. Augustine', runMinutes: 20, restriction: ONE_DAY };
+const WEEKDAY = /\b(Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day\b|\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/;
+
+function allText(copy) { return Object.values(copy).join(' '); }
+
+describe('renderWeekPlanEmail', () => {
+  test('run: minutes per TURF zone on the permitted day, comparison to what they run, UF/IFAS depth', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.plan_subject).toBe('This week: about 30 minutes per turf zone, Jordan');
+    expect(copy.week_plan).toContain("run each turf zone about 30 minutes on your permitted watering day (on your assigned day, during your area's allowed hours) — 10 minutes more than you run now");
+    expect(copy.week_plan).toContain('about ¾" of water per run');
+    expect(copy.plan_note).toContain('limited to one watering day a week');
+    expect(copy.plan_note).toContain('Minutes assume typical spray heads rates');
+    expect(copy.restriction_note).toContain('one day a week');
+    expect(copy.restriction_note).toContain('through 2026-10-01');
+    expect(copy.restriction_note).toContain('Water on your assigned day only.');
+    expect(_private.restrictionNote({ ...ONE_DAY, maxDaysPerWeek: 2 })).toContain('2 days a week');
+    expect(_private.restrictionNote({ ...ONE_DAY, maxDaysPerWeek: 2 })).toContain('Water on your assigned days only.');
+    const text = allText(copy);
+    expect(text).not.toMatch(/each zone\b/);
+    expect(text).not.toMatch(/controller/i);
+    expect(text).not.toMatch(WEEKDAY);
+  });
+
+  test('measured rate → exact minutes, no "about", no assumed-rate note', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.5, season: 'peak', restriction: ONE_DAY, explicitInchesPerWeek: 2, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.plan_subject).toBe('This week: 20 minutes per turf zone, Jordan');
+    expect(copy.week_plan).toMatch(/run each turf zone 20 minutes on your permitted watering day \(on your assigned day, during your area's allowed hours\) — about what you run now/);
+    expect(copy.plan_note).not.toContain('Minutes assume');
+  });
+
+  test('hold: skip your turf watering + wilt cues + a fallback cycle; overwatered reason named', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 2, season: 'cool', restriction: ONE_DAY, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.plan_subject).toBe('Skip your turf watering this week, Jordan');
+    expect(copy.week_plan).toMatch(/^This week: skip your turf watering\. Last week's rain and irrigation left more in the soil/);
+    expect(copy.week_plan).toContain('dull blue-gray tint, or footprints that stay pressed in');
+    expect(copy.week_plan).toContain("run one cycle of about 20 minutes per turf zone on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    expect(allText(copy)).not.toMatch(/turn .*off|controller/i);
+  });
+
+  test('hold from a rain-only surplus (sensor customer) says rain alone did it', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 2.5, lastWeekRainInches: 1.75, season: 'cool', restriction: ONE_DAY, rainSensor: true, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.week_plan).toContain("Last week's rain alone left more in the soil");
+    expect(copy.plan_note).toContain('rain sensor');
+  });
+
+  test('conditional: leave the turf irrigation off, run only if < ½" falls', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.plan_subject).toBe('Check the rain before you water this week, Jordan');
+    expect(copy.plan_subject).not.toMatch(/rain first/i);
+    expect(copy.week_plan).toContain('About 1.4" of rain is in this week\'s forecast');
+    expect(copy.week_plan).toContain("leave the turf irrigation off for now. When your permitted watering day (on your assigned day, during your area's allowed hours) comes around: if ½\" or more has fallen so far this week, skip that run; if less than ½\" has, run one cycle of about 30 minutes per turf zone");
+    // A 7-day total can't establish that rain comes BEFORE the assigned day.
+    expect(copy.week_plan).not.toMatch(/before your watering day/);
+  });
+
+  test('conditional copy under a 2-day policy names every planned run', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(plan.events).toBe(2);
+    const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
+    // Each run judged on rain since the previous run — one early soaking
+    // cancels one run, not the whole week's water.
+    expect(copy.week_plan).toContain("On each of your 2 permitted watering days (on your assigned day, during your area's allowed hours): if ½\" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½\" has, run one cycle of about 25 minutes per turf zone");
+    const report = renderWeekPlanReport(plan);
+    expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous permitted watering day (skipped or not');
+  });
+
+  test('fewer prescribed runs than the law allows → "two of your permitted watering days", never "each of your 2" (codex gh-r18)', () => {
+    const wide = { ...ONE_DAY, maxDaysPerWeek: 7 };
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 7 }, ...SPRAY });
+    expect(plan.events).toBe(2);
+    expect(plan.legalMaxEvents).toBe(7);
+    expect(renderWeekPlanEmail(plan, { ...CTX, restriction: wide }).week_plan).toContain('on two of your permitted watering days (on your assigned day');
+    expect(renderWeekPlanReport(plan, { restriction: wide }).detail).toContain('On two of your permitted watering days (on your assigned day');
+    const cond = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 7 }, ...SPRAY });
+    expect(renderWeekPlanEmail(cond, { ...CTX, restriction: wide }).week_plan).toContain('On two of your permitted watering days');
+    expect(renderWeekPlanReport(cond, { restriction: wide }).detail).toContain('on two of your permitted watering days');
+    // Equal counts keep "each of your N".
+    expect(_private.multiDayPhrase({ events: 2, legalMaxEvents: 2 })).toBe('each of your 2 permitted watering days');
+    // The report's unconditional multi-run rain note defines the first run's interval like the email.
+    expect(renderWeekPlanReport(plan).detail).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
+  });
+
+  test('cool-season cadence hold says WHY (you watered last week); an unconfirmed schedule after a move gets the reconfirm note, not the head-type ask (codex gh-r19)', () => {
+    const cadence = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: ONE_DAY, priorWeekEvents: 1, ...SPRAY });
+    expect(cadence.reasons).toContain('cool_season_cadence');
+    // Conditional on what the customer did — never "you watered last week" (a sent plan is not proof).
+    const cadenceCopy = renderWeekPlanEmail(cadence, CTX).week_plan;
+    expect(cadenceCopy).toContain("if you ran last week's watering, skip your turf watering — December through March your St. Augustine is barely growing, and every 10–14 days if needed is plenty. If you didn't, run");
+    expect(cadenceCopy).not.toMatch(/You watered last week/);
+    const cadenceReport = renderWeekPlanReport(cadence, { restriction: ONE_DAY });
+    expect(cadenceReport.title).toBe('This week: skip if you watered last week');
+    expect(cadenceReport.detail).toContain("If you ran last week's watering, skip this week; if you didn't, run");
+    const eventsOnly = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY });
+    expect(eventsOnly.minutesPerEvent).toBe(null);
+    const moved = renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null, scheduleUnconfirmed: true });
+    expect(moved.plan_note).toContain('Your address changed after your sprinkler settings were saved, so this plan leaves them out.');
+    expect(moved.plan_note).not.toContain('Add your sprinkler head type');
+    expect(renderWeekPlanEmail(eventsOnly, { ...CTX, runMinutes: null }).plan_note).toContain('Add your sprinkler head type');
+  });
+
+  test('renderWeekPlanAfterTreatment reduces the plan by the credited watering-in (codex gh-r24)', () => {
+    const { renderWeekPlanAfterTreatment } = require('../services/irrigation-week-plan');
+    const one = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(one.events).toBe(1);
+    expect(renderWeekPlanAfterTreatment(one, { restriction: ONE_DAY })).toEqual({
+      title: 'This week: covered by today\'s treatment watering-in',
+      detail: 'Water in today\'s application as the after-visit note says — that is this week\'s run. No further turf runs this week.',
+    });
+    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(two.events).toBe(2);
+    const after = renderWeekPlanAfterTreatment(two, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
+    expect(after.title).toBe('This week: 1 more run after today\'s watering-in');
+    expect(after.detail).toContain('counts as one of your 2 runs. Run one more cycle of about 25 minutes per turf zone on one of your other permitted watering days (on your assigned day');
+    // gh-r30: the unconditional soaking-rain safeguard rides the reduced plan too; conditional plans keep their clause.
+    expect(after.detail).toContain('and if ½" or more of rain falls before a run, skip it.');
+    const condTwo = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(renderWeekPlanAfterTreatment(condTwo).detail).toContain('only if less than ½" has fallen since your previous run.');
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(hold.action).toBe('hold');
+    expect(renderWeekPlanAfterTreatment(hold)).toBe(null);
+  });
+
+  test('a single run under a multi-day policy says "one of your permitted watering days" everywhere', () => {
+    const two = { maxDaysPerWeek: 2 };
+    const run = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'peak', restriction: two, ...SPRAY });
+    expect(run.events).toBe(1);
+    expect(renderWeekPlanEmail(run, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } }).week_plan).toContain('on one of your permitted watering days');
+    expect(renderWeekPlanReport(run).detail).toContain('On one of your permitted watering days');
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: two, ...SPRAY });
+    expect(renderWeekPlanEmail(hold, CTX).week_plan).toContain('on one of your permitted watering days');
+    expect(renderWeekPlanReport(hold).detail).toContain('on one of your permitted watering days');
+    const cond = buildWeekPlan({ targetInchesPerWeek: 0.6, forecastRainInches: 0.9, season: 'peak', restriction: two, ...SPRAY });
+    expect(renderWeekPlanEmail(cond, CTX).week_plan).toMatch(/When one of your permitted watering days( \([^)]*\))? comes around/);
+    expect(renderWeekPlanReport(cond).detail).toContain('on one of your permitted watering days');
+    // One-day policy keeps the singular.
+    expect(_private.permittedDayPhrase({ legalMaxEvents: 1, events: 1 })).toBe('your permitted watering day');
+  });
+
+  test('the report carries the policy\'s hour restriction in every instruction when given the snapshot restriction', () => {
+    const run = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(run, { restriction: ONE_DAY }).detail).toContain("On your permitted watering day (on your assigned day, during your area's allowed hours)");
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(hold, { restriction: ONE_DAY }).detail).toContain("on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    const cond = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(cond, { restriction: ONE_DAY }).detail).toContain("on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    // No hoursNote → plain day phrase.
+    expect(renderWeekPlanReport(run, { restriction: { ...ONE_DAY, hoursNote: null } }).detail).toContain('On your permitted watering day,');
+    expect(_private.withHours('your permitted watering day', { hoursNote: 'before 10 a.m. or after 4 p.m.' })).toBe('your permitted watering day (before 10 a.m. or after 4 p.m.)');
+  });
+
+  test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'cool', restriction: ONE_DAY, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.week_plan).toContain('every 10–14 days if needed is plenty');
+  });
+
+  test('no head type → events-only cycle + ask for the head type; rain sensor line; forecast-unavailable caveat', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, runMinutes: 20, wateringDays: ['Mon'], systemType: [], rainSensor: true, forecastRainInches: null });
+    const copy = renderWeekPlanEmail(plan, { ...CTX, runMinutes: 20 });
+    expect(copy.week_plan).toContain("run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    expect(copy.plan_note).toContain('Add your sprinkler head type');
+    expect(copy.plan_note).toContain('rain sensor will skip a run');
+    expect(copy.plan_note).toContain("couldn't get a rain forecast");
+    expect(copy.plan_note).toContain('if we get ½" or more of rain before your run, skip it');
+    const twoNoForecast = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanEmail(twoNoForecast, CTX).plan_note).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
+  });
+
+  test('watering prohibited (0-day policy) → skip, no override cycle, no "permitted day"', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: { maxDaysPerWeek: 0 }, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 0 } });
+    expect(copy.week_plan).toContain("Lawn irrigation isn't permitted in your area right now");
+    expect(copy.week_plan).not.toMatch(/permitted watering day|run one cycle|blue-gray/);
+    expect(copy.restriction_note).toBe('SWFWMD Modified Phase III water shortage order: lawn irrigation is not permitted, through 2026-10-01.');
+    expect(copy.restriction_note).not.toMatch(/assigned day/);
+    const report = renderWeekPlanReport(plan);
+    expect(report.title).toBe('This week: no lawn watering');
+    expect(report.detail).not.toMatch(/permitted watering day|run one cycle/);
+  });
+
+  test('every unconditional run plan carries the soaking-rain override (email + report); the no-forecast case says why', () => {
+    const one = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanReport(one).detail).toContain('No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.');
+    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanReport(two).detail).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
+    // A dry forecast still gets the override — an under-predicted storm is still ½" in the ground.
+    const withForecast = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: 0.1, ...SPRAY });
+    expect(renderWeekPlanReport(withForecast).detail).toContain('If the forecast is wrong: if ½" or more of rain falls before your run, skip it.');
+    expect(renderWeekPlanReport(withForecast).detail).not.toContain('No rain forecast');
+    expect(renderWeekPlanEmail(withForecast, CTX).plan_note).toContain('And if the forecast is wrong: if we get ½" or more of rain before your run, skip it.');
+    // Conditional plans carry the check in the action line instead, and an events-only conditional names the turf-zone fallback cycle.
+    const condNoRate = buildWeekPlan({ targetInchesPerWeek: 1, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, runMinutes: 20, wateringDays: ['Mon'], systemType: [] });
+    expect(renderWeekPlanReport(condNoRate).detail).toContain('run one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones) only if');
+  });
+
+  test('unavailable plan → null (the sender keeps its pre-plan template)', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: null, ...SPRAY });
+    expect(renderWeekPlanEmail(plan, CTX)).toBeNull();
+    expect(renderWeekPlanReport(plan)).toBeNull();
+  });
+});
+
+describe('renderWeekPlanReport', () => {
+  test('run / hold / conditional each render a title + detail with the same wording rules', () => {
+    const run = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY }), { runMinutes: 20 });
+    expect(run.title).toBe('This week: about 30 minutes per turf zone');
+    expect(run.detail).toContain('On your permitted watering day, about ¾" of water per run — 10 minutes more than you run now');
+    const hold = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: ONE_DAY, ...SPRAY }));
+    expect(hold.title).toBe('This week: skip your turf watering');
+    // The report's override cycle carries the same fallback minutes the email names.
+    expect(hold.detail).toContain('run one cycle of about 20 minutes per turf zone on your permitted watering day');
+    const cond = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY }));
+    expect(cond.title).toBe('This week: check the rain before you water');
+    expect(`${cond.title} ${cond.detail}`).not.toMatch(/rain (go|comes) first/i);
+    expect(cond.detail).toContain('only if less than ½" has fallen so far this week');
+    for (const c of [run, hold, cond]) expect(`${c.title} ${c.detail}`).not.toMatch(WEEKDAY);
+  });
+});
+
+describe('decideWeekPlan (server glue)', () => {
+  test('feeds the advice engine\'s target/applied into the runtime and pins the policy by `now`', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6, referenceEt0InchesWeek: 1.6 });
+    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, forecastRainInches: 0.3, ...SPRAY, county: 'Manatee', now: new Date('2026-08-28T12:00:00Z') });
+    expect(restriction.maxDaysPerWeek).toBe(1);
+    expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek); // same month, same ET₀ → same target
+    expect(decisionInputs.targetBasis).toBe('forecast_et0');
+    const withHome = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, ...SPRAY, county: 'Manatee', home: { addressLine1: '123 Sample Ln', addressLine2: 'Unit 4', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 }, now: new Date('2026-08-28T12:00:00Z') });
+    expect(withHome.decisionInputs.home).toEqual({ addressLine1: '123 Sample Ln', addressLine2: 'Unit 4', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 });
+    expect(decisionInputs.planMonth).toBe(8);
+    expect(plan.carryoverInches).toBe(0.5);
+    expect(plan.action).toBe('run');
+    expect(decisionInputs.county).toBe('Manatee');
+  });
+
+  test('county unknown → no policy → unavailable (fail closed)', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6 });
+    const { plan } = decideWeekPlan({ advice, grassType: 'st_augustine', ...SPRAY, county: null, now: new Date('2026-08-28T12:00:00Z') });
+    expect(plan.action).toBe('unavailable');
+  });
+
+  test('a plan week that straddles the order\'s expiry → unavailable (policy must cover the whole week)', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 9, irrigationInchesPerWeek: 1, rainfallInches7d: 0.2 });
+    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', planWeekEnd: '2026-10-04', now: new Date('2026-09-28T12:00:00Z') });
+    expect(restriction).toBeNull();
+    expect(plan.action).toBe('unavailable');
+    expect(decisionInputs.planWeekEnd).toBe('2026-10-04');
+  });
+
+  test('after the order expires with nothing configured → unavailable', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 10, irrigationInchesPerWeek: 1, rainfallInches7d: 0.2 });
+    const { plan, restriction } = decideWeekPlan({ advice, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-10-05T12:00:00Z') });
+    expect(restriction).toBeNull();
+    expect(plan.action).toBe('unavailable');
+  });
+
+  test('the plan\'s season and target come from the ET month of NOW, not the completed week', () => {
+    // Completed week ended in March (cool); the plan is for early April (shoulder).
+    const lastWeek = buildIrrigationAdvice({ grassType: 'st_augustine', month: 3, irrigationInchesPerWeek: 0.5, rainfallInches7d: 0.1, referenceEt0InchesWeek: 1.0 });
+    const { plan, decisionInputs } = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', forecastEt0Inches: 1.0, ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    expect(decisionInputs.planMonth).toBe(4);
+    expect(plan.season).toBe('shoulder');
+    expect(plan.reasons).not.toContain('cool_season');
+    expect(plan.targetInches).toBe(0.75); // 1.0 × 0.8 × 0.9 shoulder Kc, quarter-rounded
+    expect(decisionInputs.lastWeekTargetInches).toBe(lastWeek.recommendedInchesPerWeek);
+    // No forecast ET₀ → the seasonal target for the plan month, never last week's ET₀.
+    const seasonal = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    expect(seasonal.decisionInputs.targetBasis).toBe('seasonal');
+    expect(seasonal.plan.targetInches).toBe(1); // 1.25 × 0.75 shoulder multiplier
+    // A hot week ahead after a cool completed week sizes from the hot week.
+    const hot = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', forecastEt0Inches: 1.8, ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    expect(hot.plan.targetInches).toBe(1.25);
+    // Late March NOW → cool season, "every 10–14 days" copy allowed.
+    expect(decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-03-30T12:00:00Z') }).plan.season).toBe('cool');
+  });
+
+  test('fmtInches renders the UF fractions', () => {
+    expect(_private.fmtInches(0.5)).toBe('½"');
+    expect(_private.fmtInches(0.75)).toBe('¾"');
+    expect(_private.fmtInches(1.4)).toBe('1.4"');
+  });
+});
+
+describe('snapshot lifecycle — exactness contract', () => {
+  const db = require('../models/db');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, _private } = require('../services/irrigation-week-plan');
+  const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
+  // The full identity the sweep persists (what currentRestrictionPolicy returns).
+  const POLICY = { maxDaysPerWeek: 1, effectiveFrom: '2026-08-27', expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', hoursNote: "on your assigned day, during your area's allowed hours", county: 'Manatee' };
+  const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
+
+  function stubSelect(returned, capture = {}) {
+    db.mockImplementation(() => ({
+      where(w) { capture.where = w; return this; },
+      whereNotNull(c) { capture.notNull = c; return this; },
+      first: async () => returned,
+    }));
+    return capture;
+  }
+
+  test('load: current week, SENT rows only, policy must still be in force; exposes the decision inputs', async () => {
+    const cap = stubSelect(row(POLICY));
+    const hit = await loadCurrentWeekPlan('c1', { now: NOW });
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
+    expect(hit.plan.action).toBe('run');
+    expect(hit.decisionInputs.runMinutes).toBe(20);
+    stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    // Any instruction-shaping field change retires the snapshot — hours included.
+    stubSelect(row({ ...POLICY, hoursNote: 'before 10 a.m. only' }));
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    expect(_private.samePolicy({ ...POLICY, hoursNote: 'x' }, { ...POLICY, hoursNote: 'y' })).toBe(false);
+    expect(_private.samePolicy({ ...POLICY, effectiveFrom: '2026-08-27' }, { ...POLICY, effectiveFrom: '2026-09-01' })).toBe(false);
+    stubSelect(row(POLICY));
+    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
+    // A snapshot whose plan week straddles the expiry (recorded planWeekEnd) is no longer covered → null.
+    stubSelect(row(POLICY, { week_ending: '2026-09-27', weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee', planWeekEnd: '2026-10-04' }) }));
+    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-01T12:00:00Z') })).toBeNull();
+  });
+
+  test('a render pinned to the signature\'s snapshot accepts only that sent_at; pinned-none renders no plan', async () => {
+    stubSelect(row(POLICY));
+    expect((await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString() })).plan.action).toBe('run');
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: new Date('2026-08-24T12:00:00Z').toISOString() })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null })).toBeNull();
+    expect((await loadCurrentWeekPlan('c1', { now: NOW })).plan.action).toBe('run'); // unpinned = live
+    // Strict (pinned render): a failed lookup refuses instead of rendering plan-less.
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('db down'); } }));
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toThrow('db down');
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+  });
+
+  test('strict + pinned to a real send: missing row, policy change and a different send REFUSE (code pinned_week_plan_unavailable), never render plan-less (codex gh-r16)', async () => {
+    const strictPin = { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true };
+    stubSelect(null);
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'missing' });
+    stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'policy_changed' });
+    stubSelect(row(POLICY, { sent_at: new Date('2026-08-24T12:00:00Z') }));
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'sent_at_mismatch' });
+    // The same states are plain absence when not pinned to a send.
+    stubSelect(null);
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, strict: true })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null, strict: true })).toBeNull();
+    stubSelect(row(POLICY));
+    expect((await loadCurrentWeekPlan('c1', strictPin)).plan.action).toBe('run');
+  });
+
+  test('load: an UNSTAMPED row whose delivery record names its decision is stamped on load and served; undelivered stays absent (codex gh-r26)', async () => {
+    const planRow = { ...row(POLICY, { sent_at: null, decision_hash: 'h1' }) };
+    const calls = [];
+    const rig = (messages) => db.mockImplementation((table) => (table === 'email_messages'
+      ? { where() { return this; }, select: async () => messages }
+      : {
+        where(w) { calls.push(['where', w]); return this; },
+        whereNull() { return this; },
+        first: async () => ({ ...planRow }),
+        update: async (patch) => { calls.push(['update', patch]); if (patch.sent_at) planRow.sent_at = patch.sent_at; return 1; },
+      }));
+    db.fn = { now: () => 'now()' };
+    rig([{ status: 'sent', categories: JSON.stringify(['plan:h1']), provider_message_id: 'sg', queued_at: NOW, updated_at: NOW }]);
+    const hit = await loadCurrentWeekPlan('c1', { now: NOW });
+    expect(hit.plan.action).toBe('run');
+    expect(calls.some(([k, p]) => k === 'update' && p.sent_at)).toBe(true);
+    // Undelivered (or another decision) → absent; strict pin → refusal.
+    planRow.sent_at = null;
+    rig([{ status: 'sent', categories: JSON.stringify(['plan:other']), provider_message_id: 'sg', queued_at: NOW, updated_at: NOW }]);
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'unstamped' });
+  });
+
+  test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlan reads last week\'s delivered plan (codex gh-r19/r31)', async () => {
+    const { renewWeekPlanClaim, loadPriorWeekPlan } = require('../services/irrigation-week-plan');
+    const cap = {};
+    db.mockImplementation(() => ({
+      where(w) { cap.where = w; return this; },
+      whereNull(c) { cap.whereNull = c; return this; },
+      whereNotNull(c) { cap.whereNotNull = c; return this; },
+      update(p) { cap.update = p; return Promise.resolve(1); },
+      first: async (col) => { cap.first = col; return { week_plan: JSON.stringify({ action: 'run', events: 1 }) }; },
+    }));
+    db.fn = { now: () => 'now()' };
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(true);
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', claim_token: 'tok' });
+    expect(cap.whereNull).toBe('sent_at');
+    expect(Object.keys(cap.update)).toEqual(['claimed_at', 'updated_at']);
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: null })).toBe(false);
+    // 0 rows = the claim is LOST (false); an unreadable renewal is ambiguous (null).
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => 0 }));
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(false);
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { throw new Error('db down'); } }));
+    expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(null);
+    // Retry wrapper (hook P1 on 45beb0731): null retries with backoff; a decisive answer stops the retries.
+    const { renewWeekPlanClaimWithRetry } = require('../services/irrigation-week-plan');
+    const slept = [];
+    const sleep = async (ms) => { slept.push(ms); };
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(null);
+    expect(slept).toEqual([250, 750]);
+    let calls = 0;
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { calls += 1; if (calls === 1) throw new Error('blip'); return 1; } }));
+    slept.length = 0;
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(true);
+    expect(slept).toEqual([250]);
+    calls = 0;
+    db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { calls += 1; return 0; } }));
+    slept.length = 0;
+    expect(await renewWeekPlanClaimWithRetry({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' }, { sleep })).toBe(false); // LOST is decisive
+    expect(slept).toEqual([]);
+    expect(calls).toBe(1);
+    // Prior week: a STAMPED row counts directly — events for the cadence, prescribed inches (events × depth) as last week's irrigation.
+    const rig = (planRow, messages = []) => db.mockImplementation((table) => (table === 'email_messages'
+      ? { where(w) { cap.msgWhere = w; return this; }, select: async () => messages }
+      : { where(w) { cap.where = w; return this; }, first: async (...cols) => { cap.first = cols; return planRow; } }));
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-16' });
+    // gh-r31: a HOLD prescribed nothing; a two-run plan prescribes events × depth.
+    rig({ week_plan: JSON.stringify({ action: 'hold', events: 0 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 0, prescribedInches: 0 });
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 2, depthInches: 0.5 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 2, prescribedInches: 1 });
+    // UNSTAMPED but provider-accepted (delivery record names its hash) counts too (gh-r20)…
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
+    expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
+    // gh-r36: a CONDITIONAL prior plan keeps its events + depth — its instruction IS the rain-skip rule, and the
+    // consumers gate on observed rain (≥ ½" withholds the cadence hold and the run credit; < ½" = told to run).
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75, conditionalOnForecast: true }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
+    {
+      const { decideWeekPlan } = require('../services/irrigation-week-plan');
+      const common = { advice: { rainKnown: true, appliedInchesPerWeek: null, recommendedInchesPerWeek: 0.75 }, grassType: 'st_augustine', forecastEt0Inches: 0.6, priorWeekEvents: 1, priorWeekPrescribedInches: 0.75, county: 'Manatee', planWeekEnd: '2027-01-10', now: new Date('2027-01-04T12:00:00Z'), restriction: undefined };
+      const dry = decideWeekPlan({ ...common, lastWeekRainInches: 0.2 });
+      expect(dry.decisionInputs.priorWeekCreditedInches).toBe(0.75);
+      const wet = decideWeekPlan({ ...common, lastWeekRainInches: 0.6 });
+      expect(wet.decisionInputs.priorWeekCreditedInches).toBe(0);
+    }
+    // gh-r39: the prior plan binds to the HOME on its snapshot — a moved customer's new-home sweep must not credit it.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1', weather_inputs: JSON.stringify({ home: { addressLine1: '100 Main St', city: 'Bradenton', zip: '34205' } }) });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', home: { addressLine1: '9 Beach Rd', city: 'Venice', zip: '34285' } })).toBe(null);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1', weather_inputs: JSON.stringify({ home: { addressLine1: '100 Main St', city: 'Bradenton', zip: '34205' } }) });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', home: { addressLine1: '100 Main Street', city: 'Bradenton', zip: '34205' } })).toEqual({ events: 1, prescribedInches: 0.75 });
+    // gh-r40: a cleared current address (explicit move) never credits a home-stamped prior plan.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1', weather_inputs: JSON.stringify({ home: { addressLine1: '100 Main St', city: 'Bradenton', zip: '34205' } }) });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', home: { addressLine1: null, city: null, zip: null } })).toBe(null);
+    // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['irrigation']) }]);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    // gh-r23: an attempt aborted at the queue transition is immediately retryable, never 'pending'.
+    const { weekPlanDeliveryState } = require('../services/irrigation-week-plan');
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: NOW, error_message: 'aborted_by_caller_before_dispatch' }] }));
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).state).toBe('failed');
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: new Date(), error_message: 'sendgrid 500' }] }));
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).state).toBe('pending');
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'failed', categories: JSON.stringify(['plan:h1']) }]);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    rig(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+  });
+
+  test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {
+    const calls = {};
+    let returned = [{ decision_hash: 'x' }];
+    db.mockImplementation(() => ({
+      insert(r) { calls.insert = r; return this; },
+      onConflict(cols) { calls.conflict = cols; return this; },
+      merge(r) { calls.merged = r; return this; },
+      whereRaw(sql, b) { calls.whereRaw = sql; calls.bindings = b; return this; },
+      returning: async () => returned,
+      where(w) { calls.where = w; return this; },
+      whereNull(c) { calls.whereNull = c; return this; },
+      update: async (patch) => { calls.update = patch; return 1; },
+      del: async () => { calls.deleted = true; return 1; },
+    }));
+    const plan = { action: 'hold', reasons: [] };
+    const claim = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-1' });
+    expect(claim.claimed).toBe(true);
+    // Hash covers plan + ALL decision inputs + restriction.
+    expect(claim.hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, decisionInputs: { runMinutes: 20 }, restriction: POLICY })).digest('hex'));
+    expect(_private.decisionHash(plan, { runMinutes: 20, home: { addressLine1: 'elsewhere' } }, POLICY)).not.toBe(claim.hash);
+    expect(_private.decisionHash(plan, { runMinutes: 20 }, { ...POLICY, maxDaysPerWeek: 2 })).not.toBe(claim.hash);
+    expect(_private.decisionHash(plan, { runMinutes: 25 }, POLICY)).not.toBe(claim.hash);
+    expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
+    expect(calls.merged.decision_hash).toBe(claim.hash);
+    expect(calls.merged.claim_token).toBe('tok-1');
+    expect(calls.whereRaw).toMatch(/sent_at IS NULL/);
+    expect(calls.whereRaw).toMatch(/claim_token = \?/);
+    // Lease = the email library's queued-row lease (2 minutes), never a longer private clock.
+    expect(_private.CLAIM_LEASE_SECONDS).toBe(120);
+    expect(calls.whereRaw).toMatch(/claimed_at < now\(\) - interval '120 seconds'/);
+    expect(calls.bindings).toEqual(['tok-1']);
+    expect(calls.insert.sent_at).toBeNull();
+    // Another worker's live lease → nothing returned → not claimed, no hash.
+    returned = [];
+    const lost = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-2' });
+    expect(lost.claimed).toBe(false);
+    expect(lost.hash).toBeNull();
+    expect(lost.error).toBeUndefined(); // contention, not an error
+    // mark-sent: keyed on the hash, unsent rows only; no hash → no-op.
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash });
+    // With a claim token the stamp is scoped to the claimant's own row too.
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash, claimToken: 'tok-1' })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash, claim_token: 'tok-1' });
+    expect(calls.whereNull).toBe('sent_at');
+    expect(calls.update.sent_at).toBeInstanceOf(Date);
+    // Discard is scoped to the claimant's own lease — no token, no delete.
+    calls.deleted = undefined;
+    await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
+    expect(calls.deleted).toBeUndefined();
+    await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok-1' });
+    expect(calls.deleted).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', claim_token: 'tok-1' });
+    expect(calls.whereNull).toBe('sent_at');
+    // A DB error is reported distinctly so the sweep can fall back to the pre-plan email.
+    db.mockImplementation(() => ({ insert() { throw new Error('db down'); } }));
+    const errored = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-3' });
+    expect(errored).toMatchObject({ claimed: false, hash: null, error: true });
+  });
+});
+
+describe('hasSentWeekPlan', () => {
+  const db = require('../models/db');
+  const { hasSentWeekPlan } = require('../services/irrigation-week-plan');
+  test('true / false / null(unknown) — an unreadable table is never proof of a sent row', async () => {
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => ({ id: 'x' }) }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => undefined }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('relation missing'); } }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBeNull();
+  });
+});
+
+describe('weekPlanDeliveryState — the durable record decides, at customer/week scope, and names the snapshot', () => {
+  const db = require('../models/db');
+  const { weekPlanDeliveryState, planCategory, _private } = require('../services/irrigation-week-plan');
+  const cap = {};
+  const withRows = (rows) => db.mockImplementation(() => ({ where(w) { cap.where = w; return this; }, select: async () => rows }));
+
+  test.each([
+    ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
+    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
+  ])('status %s → %s', async (status, expected) => {
+    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null, queued_at: new Date().toISOString(), updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
+    const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });
+    expect(r.state).toBe(expected);
+    expect(r.decisionHash).toBe('abc123');
+    expect(cap.where).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-23' });
+  });
+
+  test('no record → null; a delivered record wins across recipient keys (email changed mid-week)', async () => {
+    withRows([]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: null, decisionHash: null });
+    withRows([{ status: 'sent', categories: JSON.stringify(['plan:first']) }, { status: 'queued', categories: JSON.stringify(['plan:second']) }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: 'first' });
+  });
+
+  test('a queued row is pending only inside the library\'s 2-minute lease; past it, stale (claimable)', async () => {
+    withRows([{ status: 'queued', categories: JSON.stringify(['plan:h']), queued_at: new Date(Date.now() - 30 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' });
+    withRows([{ status: 'queued', categories: JSON.stringify(['plan:h']), queued_at: new Date(Date.now() - 10 * 60 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'stale', decisionHash: 'h' });
+  });
+
+  test('a failed row is ambiguous (pending) when the provider may have accepted it — an id, or recent enough that bookkeeping may have failed after acceptance; an OLD id-less failure is retryable', async () => {
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: 'sg-123', updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' });
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null, updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' }); // inside the webhook-repair window
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null, updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'failed', decisionHash: 'h' });
+  });
+
+  test('a record without a plan category names no snapshot (report stays absent)', async () => {
+    withRows([{ status: 'sent', categories: JSON.stringify(['irrigation', 'irrigation_weekly', 'cut_back']) }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: null });
+    withRows([{ status: 'sent', categories: ['irrigation', planCategory('deadbeef')] }]); // array form
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).decisionHash).toBe('deadbeef');
+    expect(_private.hashFromCategories('not json')).toBeNull();
+  });
+
+  test('lookup failure → pending (never replace, never delete); no key → null', async () => {
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => { throw new Error('db down'); } }));
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: null });
+    expect(await weekPlanDeliveryState({})).toEqual({ state: null, decisionHash: null });
+  });
+});

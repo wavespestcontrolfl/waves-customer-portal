@@ -1091,3 +1091,395 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
     expect(commercialDethatchConfirmation).toBeNull();
   });
 });
+
+describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pricing', () => {
+  const GATE = 'GATE_COMMERCIAL_ONETIME_SCOPED';
+  const priorGate = process.env[GATE];
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = priorGate;
+  });
+
+  const scopedRequests = [
+    { services: { preSlab: true }, input: { slabSqFt: 1500 }, service: 'pre_slab_termiticide' },
+    { services: { trenching: { perimeterLF: 200 } }, service: 'trenching' },
+    { services: { boraCare: { surfaceLinearFt: 120, surfaceHeightFt: 8 } }, service: 'bora_care' },
+    // Live V2 exclusion shape (property-lookup-v2 sends services.exclusion
+    // with pricingVersion:'v2') — emits per-section 'rodent_exclusion' rows.
+    { services: { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 4 } }, service: 'rodent_exclusion' },
+    { services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }, service: 'bed_bug' },
+    { services: { stinging: { species: 'PAPER_WASP' } }, service: 'stinging_insect' },
+    { services: { stingingV2: { nestType: 'wasp', nestCount: 2 } }, service: 'stinging_insect_v2' },
+    { services: { rodentWireMesh: { meshLinearFeet: 20 } }, service: 'rodent_wire_mesh' },
+    { services: { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 2 } }, service: 'rodent_bird_box' },
+    { services: { sanitation: { tier: 'standard', affectedSqFt: 400 } }, service: 'rodent_sanitation' },
+    { services: { rodentInspection: true }, service: 'rodent_inspection' },
+    { services: { foam: { points: 6 } }, service: 'foam_drill' },
+    { services: { termiteFoam: { applicationPoints: 6 } }, service: 'termite_foam' },
+  ];
+
+  test('gate OFF: every scoped one-time still collapses to the commercial manual quote', () => {
+    delete process.env[GATE];
+    for (const req of scopedRequests) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      }));
+      const manualFamily = req.service === 'palm_injection' ? 'commercial_lawn' : 'commercial_pest';
+      expect(estimate.lineItems).toEqual([
+        expect.objectContaining({
+          service: manualFamily,
+          quoteRequired: true,
+          requiresManualReview: true,
+        }),
+      ]);
+    }
+  });
+
+  test('gate ON: scoped one-times price with commercial marking instead of a manual quote', () => {
+    process.env[GATE] = 'true';
+    for (const req of scopedRequests) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      }));
+      const line = estimate.lineItems.find((l) => l.service === req.service);
+      expect(line).toBeDefined();
+      expect(line.quoteRequired).not.toBe(true);
+      expect(line.isCommercial).toBe(true);
+      expect(line.propertyType).toBe('commercial');
+      expect(line.commercialPricingMode).toBe('auto_estimate');
+      expect(line.discountable).toBe(false);
+      expect(line.excludeFromPctDiscount).toBe(true);
+      const amount = line.price ?? line.total ?? line.annual;
+      expect(Number.isFinite(amount)).toBe(true);
+      expect(amount).toBeGreaterThan(0);
+    }
+  });
+
+  test('gate ON: commercial price equals the residential price for the same scoped inputs', () => {
+    process.env[GATE] = 'true';
+    for (const req of scopedRequests) {
+      const commercial = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      })).lineItems.find((l) => l.service === req.service);
+      const residential = generateEstimate(baseInput({
+        services: req.services,
+        ...(req.input || {}),
+      })).lineItems.find((l) => l.service === req.service);
+      expect(residential).toBeDefined();
+      expect(commercial.price ?? commercial.total ?? commercial.annual)
+        .toBe(residential.price ?? residential.total ?? residential.annual);
+    }
+  });
+
+  test('gate ON: FL tax family — every scoped one-time taxed, rodent_inspection included', () => {
+    process.env[GATE] = 'true';
+    const taxed = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    })).lineItems.find((l) => l.service === 'pre_slab_termiticide');
+    expect(taxed.taxable).toBe(true);
+    expect(taxed.taxCategory).toBe('nonresidential_pest_control');
+
+    const inspection = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { rodentInspection: true },
+    })).lineItems.find((l) => l.service === 'rodent_inspection');
+    // Canonical service_taxability exempts only wdo/termite inspections;
+    // rodent_inspection falls to the commercial-taxable default in both
+    // TaxCalculator and estimate-proposal-generate — the estimate must agree
+    // with the invoice (codex #3594 r2 P1).
+    expect(inspection.taxable).toBe(true);
+    expect(inspection.taxCategory).toBe('nonresidential_pest_control');
+  });
+
+  test('gate ON: WaveGuard/recurring-customer discounts never touch commercial-marked lines', () => {
+    process.env[GATE] = 'true';
+    // Trenching's key is NOT in the excludedFromPercentDiscount list, so a
+    // residential recurring customer earns the 15% one-time perk on it —
+    // the commercial-marked line must not (codex #3594 P1: getEffectiveDiscount
+    // resolves by key + customer status and cannot see line flags).
+    const commercial = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isRecurringCustomer: true,
+      services: { trenching: { perimeterLF: 200 } },
+    })).lineItems.find((l) => l.service === 'trenching');
+    expect(commercial.discount.effectiveDiscount).toBe(0);
+    expect(commercial.discount.appliedDiscounts).toEqual([]);
+    expect(commercial.priceAfterDiscount).toBe(commercial.price);
+
+    const residential = generateEstimate(baseInput({
+      isRecurringCustomer: true,
+      services: { trenching: { perimeterLF: 200 } },
+    })).lineItems.find((l) => l.service === 'trenching');
+    expect(residential.discount.effectiveDiscount).toBeGreaterThan(0);
+  });
+
+  test('gate ON: home-size-bracket, WDO, and palm one-times STAY manual', () => {
+    process.env[GATE] = 'true';
+    const stillManual = [
+      { oneTimePest: true },
+      { germanRoach: true },
+      { pestInitialRoach: { roachType: 'regular' } },
+      { flea: true },
+      // V1 exclusion shapes (bare flag and object WITHOUT pricingVersion v2)
+      // keep the manual quote — home-sqft minimum floors.
+      { exclusion: true },
+      { exclusion: { simple: 2, moderate: 1 } },
+      // Alternate services.exclusionV2 spelling: calculateExclusionPrice is
+      // sqft-tiered off property.footprint — stays manual (codex #3594 r2 P1).
+      { exclusionV2: { meshPoints: 4 } },
+      // Unit-scoped services WITHOUT their unit (codex #3594 r3 P1): the admin
+      // V2 adapter permits an absent mesh length / a 0 affected area — a
+      // footprint-derived or "0 LF" minimum must not become a firm quote.
+      { rodentWireMesh: {} },
+      { rodentWireMesh: { meshLinearFeet: 0, meshSubstrate: 'stucco' } },
+      { sanitation: { tier: 'standard' } },
+      { sanitation: { tier: 'heavy', affectedSqFt: 0 } },
+      // Bird boxes with no/zero quantity (V2 adapter emits 0 when cleared) —
+      // the pricer returns null for 0, so the bypass would DROP the line
+      // (codex #3594 r4 P1).
+      { rodentBirdBoxes: { birdBoxType: 'standard_bird_box' } },
+      { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 0 } },
+      // Bed bug without explicit commercial scope: single-family occupancy
+      // (the public-quote default → 1.00× instead of hotel 1.30×) or no rooms
+      // (codex #3594 r4 P1).
+      { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'singleFamily' } },
+      { bedBug: { method: 'CHEMICAL', rooms: 0, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+      // Foam defaults to 5 points when absent; termite foam bills ≥1 can at 0
+      // points; an all-zero exclusion V2 still prices floor + inspection —
+      // each needs a positive explicit unit to bypass.
+      { foam: {} },
+      { foam: { points: 0 } },
+      { termiteFoam: {} },
+      { termiteFoam: { applicationPoints: 0 } },
+      { exclusion: { pricingVersion: 'v2' } },
+      { exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 0, meshSoftLF: 0 } },
+      // stingingV2 defaults nestCount to 1 and scales by it (codex #3594 r5 P1).
+      { stingingV2: { nestType: 'wasp' } },
+      { stingingV2: { nestType: 'hornet', nestCount: 0 } },
+      { rodentTrapping: true },
+      { rodentGuarantee: true },
+      { oneTimeMosquito: true },
+      // WDO: footprint-bracketed + synthetic-footprint hazard (codex #3594 P1).
+      { wdo: true },
+      // Palm: legacy mapper drops commercial identity → residential recurring
+      // seeding hazard (codex #3594 P1).
+      { palmInjection: { palmCount: 4, treatmentType: 'nutrition' } },
+      { dethatching: true },
+      { topDressing: true },
+      { plugging: true },
+    ];
+    for (const services of stillManual) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services,
+      }));
+      const family = ('dethatching' in services || 'topDressing' in services
+        || 'plugging' in services || 'palmInjection' in services)
+        ? 'commercial_lawn' : 'commercial_pest';
+      expect(estimate.lineItems).toEqual([
+        expect.objectContaining({
+          service: family,
+          quoteRequired: true,
+          requiresManualReview: true,
+        }),
+      ]);
+    }
+  });
+
+  test('gate ON: commercial bed bug stays manual when the building size is the public synthetic default', () => {
+    process.env[GATE] = 'true';
+    const unmeasured = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSizeMeasured: false,
+      services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+    }));
+    expect(unmeasured.lineItems).toEqual([
+      expect.objectContaining({ service: 'commercial_pest', quoteRequired: true, requiresManualReview: true }),
+    ]);
+    const measured = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      buildingSizeMeasured: true,
+      services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } },
+    }));
+    expect(measured.lineItems.find((l) => l.service === 'bed_bug')).toMatchObject({ isCommercial: true, commercialPricingMode: 'auto_estimate' });
+  });
+
+  test('gate ON: residential estimates are untouched (no commercial marking)', () => {
+    process.env[GATE] = 'true';
+    const estimate = generateEstimate(baseInput({
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    }));
+    const line = estimate.lineItems.find((l) => l.service === 'pre_slab_termiticide');
+    expect(line).toBeDefined();
+    expect(line.isCommercial).not.toBe(true);
+    expect(line.propertyType).not.toBe('commercial');
+  });
+});
+
+describe('estimateHasCommercialOneTime — commercial stamp signal for one-time-only accepts', () => {
+  const { estimateHasCommercialOneTime } = require('../services/estimate-converter');
+  const GATE = 'GATE_COMMERCIAL_ONETIME_SCOPED';
+  const priorGate = process.env[GATE];
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = priorGate;
+  });
+
+  test('true only for a PRICED commercial auto_estimate one-time row', () => {
+    expect(estimateHasCommercialOneTime({
+      result: { oneTime: { items: [{ service: 'pre_slab_termiticide', price: 705, isCommercial: true, commercialPricingMode: 'auto_estimate' }] } },
+    })).toBe(true);
+    // Manual commercial QUOTE row — nothing priced, must NOT stamp.
+    expect(estimateHasCommercialOneTime({
+      result: { oneTime: { specItems: [{ service: 'commercial_pest', price: null, isCommercial: true, commercialPricingMode: 'manual_quote', quoteRequired: true }] } },
+    })).toBe(false);
+    // Residential one-time — no commercial identity.
+    expect(estimateHasCommercialOneTime({
+      result: { oneTime: { items: [{ service: 'pre_slab_termiticide', price: 705 }] } },
+    })).toBe(false);
+    expect(estimateHasCommercialOneTime({})).toBe(false);
+  });
+
+  test('quote-wizard envelope: engineResult.lineItems one-time rows count, recurring commercial rows do not', () => {
+    // POST /public/quote/calculate persists the markers ONLY under
+    // engineResult.lineItems (codex #3594 r3 P1).
+    const wizard = (lineItems) => ({ engineResult: { summary: {}, lineItems } });
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'pre_slab_termiticide', price: 640, total: 640, annual: null, monthly: null,
+      isCommercial: true, commercialPricingMode: 'auto_estimate', taxable: true,
+    }]))).toBe(true);
+    // Recurring commercial auto-pricers carry the SAME markers plus an annual
+    // amount + estimatedPricing — they belong to the recurring stamp, not this one.
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'commercial_pest', annual: 2400, monthly: 200, price: null,
+      isCommercial: true, commercialPricingMode: 'auto_estimate', estimatedPricing: true,
+    }]))).toBe(false);
+    // A manual commercial quote row never counts.
+    expect(estimateHasCommercialOneTime(wizard([{
+      service: 'commercial_pest', quoteRequired: true, requiresManualReview: true,
+      isCommercial: true, commercialPricingMode: 'auto_estimate',
+    }]))).toBe(false);
+    expect(estimateHasCommercialOneTime(wizard([]))).toBe(false);
+    // A measurement-required commercial row (trenching, no perimeter) is not
+    // a PRICED row — no stamp signal.
+    expect(estimateHasCommercialOneTime({ result: { oneTime: { items: [{
+      service: 'trenching', price: null, requiresMeasurement: true,
+      isCommercial: true, commercialPricingMode: 'auto_estimate',
+    }] } } })).toBe(false);
+  });
+
+  test('round trip: gate-on commercial trenching keeps its identity through the legacy mapper (ONE_TIME_SERVICES path)', () => {
+    // Trenching maps via v1OtItems, not the specialty branch pre-slab uses —
+    // the admin save persists ONLY the mapped result (codex #3594 r4 P1).
+    process.env[GATE] = 'true';
+    const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { trenching: { perimeterLF: 200 } },
+    })));
+    const row = (mapped.oneTime?.items || []).find((i) => i.service === 'trenching');
+    expect(row).toMatchObject({ isCommercial: true, commercialPricingMode: 'auto_estimate', taxable: true });
+    expect(estimateHasCommercialOneTime({ result: mapped })).toBe(true);
+    // Residential trenching carries no commercial fields at all.
+    delete process.env[GATE];
+    const resRow = (mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'residential',
+      services: { trenching: { perimeterLF: 200 } },
+    }))).oneTime?.items || []).find((i) => i.service === 'trenching');
+    expect(resRow).toBeDefined();
+    expect(resRow.isCommercial).toBeUndefined();
+  });
+
+  test('round trip: gate-on commercial pre-slab survives the legacy mapper as a stampable signal', () => {
+    process.env[GATE] = 'true';
+    const engineResult = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    }));
+    const mapped = mapV1ToLegacyShape(engineResult);
+    expect(estimateHasCommercialOneTime({ result: mapped })).toBe(true);
+
+    // Gate off: the same request maps to a manual quote — no stamp signal.
+    delete process.env[GATE];
+    const manualMapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    })));
+    expect(estimateHasCommercialOneTime({ result: manualMapped })).toBe(false);
+
+    // Residential estimates never produce the signal.
+    const residentialMapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    })));
+    expect(estimateHasCommercialOneTime({ result: residentialMapped })).toBe(false);
+  });
+});
+
+describe('codex #3594 r2 — public one-time accept stamp + display-only copy flag (source guards)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const routeSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+  const clientSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'pages', 'EstimateViewPage.jsx'), 'utf8');
+
+  test('the one-time accept path stamps commercial identity inside the accept transaction', () => {
+    // The converter is skipped whenever treatAsOneTime — the route must carry
+    // the same one-way stamp itself, keyed on estimateHasCommercialOneTime.
+    expect(routeSrc).toMatch(
+      /if \(customerId && treatAsOneTime\s*\n\s*&& require\('\.\.\/services\/estimate-converter'\)\.estimateHasCommercialOneTime\(estData\)\) \{\s*\n\s*await trx\('customers'\)\s*\n\s*\.where\(\{ id: customerId \}\)\s*\n\s*\.whereRaw\("coalesce\(property_type, ''\) <> 'commercial'"\)\s*\n\s*\.update\(\{ property_type: 'commercial' \}\);/
+    );
+    // …and it lands BEFORE the converter bypass, i.e. inside the trx.
+    const stampAt = routeSrc.indexOf("estimateHasCommercialOneTime(estData)");
+    const bypassAt = routeSrc.indexOf('if (customerId && !treatAsOneTime && !annualPrepaySelected) {');
+    expect(stampAt).toBeGreaterThan(0);
+    expect(bypassAt).toBeGreaterThan(stampAt);
+  });
+
+  test('the manual Mark Won path stamps commercial identity for one-time wins', () => {
+    const manualSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-manual-acceptance.js'), 'utf8');
+    expect(manualSrc).toMatch(
+      /if \(updatedEstimate\.customer_id\s*\n\s*&& EstimateConverter\.estimateHasCommercialOneTime\(parseEstimateData\(updatedEstimate\.estimate_data\)\)\) \{\s*\n\s*await trx\('customers'\)\s*\n\s*\.where\(\{ id: updatedEstimate\.customer_id \}\)\s*\n\s*\.whereRaw\("coalesce\(property_type, ''\) <> 'commercial'"\)\s*\n\s*\.update\(\{ property_type: 'commercial' \}\);/
+    );
+    // …inside the win transaction, before the audit log.
+    expect(manualSrc.indexOf('estimateHasCommercialOneTime(parseEstimateData(updatedEstimate.estimate_data))'))
+      .toBeLessThan(manualSrc.indexOf('await logManualAcceptance(trx, {'));
+  });
+
+  test('scoped one-time commercial rows feed the COPY flag, never the approval-only classifier', () => {
+    const { isCommercialAutoAcceptEstimate, isCommercialOneTimePricedEstimate } = require('../routes/estimate-public');
+    const priced = {
+      estimate_data: JSON.stringify({
+        result: {
+          oneTime: {
+            items: [{
+              service: 'pre_slab_termiticide', price: 640, isCommercial: true,
+              propertyType: 'commercial', commercialPricingMode: 'auto_estimate',
+            }],
+          },
+        },
+      }),
+    };
+    expect(isCommercialOneTimePricedEstimate(priced)).toBe(true);
+    // Approval-only lane (no slot / no deposit / manual billing) stays
+    // recurring-commercial-specific.
+    expect(isCommercialAutoAcceptEstimate(priced)).toBe(false);
+    expect(isCommercialOneTimePricedEstimate({ estimate_data: '{}' })).toBe(false);
+    expect(routeSrc).toMatch(/commercialOneTimePriced: isCommercialOneTimePricedEstimate\(estimate\),/);
+  });
+
+  test('client folds the flag into the copy-pack detector only', () => {
+    expect(clientSrc).toMatch(/\|\| cta\?\.commercialOneTimePriced === true\s*\n\s*\|\| cta\?\.quoteRequiredReason === 'commercial_proposal'/);
+    expect(clientSrc).toMatch(/const isCommercialEstimate = isCommercialProposal \|\| cta\?\.commercialAutoPriced === true;/);
+    expect(clientSrc).not.toMatch(/isCommercialEstimate = [^\n]*commercialOneTimePriced/);
+  });
+});

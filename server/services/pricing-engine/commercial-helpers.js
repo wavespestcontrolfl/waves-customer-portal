@@ -237,9 +237,78 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
   };
 }
 
+// One-time services whose price is already UNIT-SCOPED (slab sqft, linear
+// feet, drill points, rooms, entry points, stations, palm counts) rather than
+// derived from residential home-size brackets. Behind
+// GATE_COMMERCIAL_ONETIME_SCOPED these price identically on commercial
+// properties — the work is the same scoped work — and carry commercial line
+// marking from markCommercialOneTimeLine. Every key must match the pricer's
+// own `service` value; an unlisted service stays on the manual-quote path
+// (fail closed). Deliberately NOT here: home-size-bracket one-times
+// (one_time_pest, one_time_lawn, german_roach*, flea, rodent_trapping family,
+// dethatching/top-dressing/plugging) need commercial sizing bases and
+// owner-approved numbers first; WDO is footprint-BRACKETED (resolvePestFootprint
+// picks residential brackets, and the public quote route can synthesize a
+// 2,000 sqft home value for an unmeasured commercial building — codex #3594
+// P1); palm_injection is an annual recurring program whose legacy-mapper round
+// trip drops the commercial identity and can seed the residential semiannual
+// auto-schedule (codex #3594 P1) — both return only with their own commercial
+// handling. exclusion V1 stays manual (minimum floors key off HOME sqft).
+const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
+  'pre_slab_termiticide',
+  'trenching',
+  'bora_care',
+  'foam_drill',
+  'termite_foam',
+  'stinging_insect',
+  'stinging_insect_v2',
+  // The live V2 exclusion shape (services.exclusion + pricingVersion:'v2')
+  // emits per-section rows keyed 'rodent_exclusion'. The alternate
+  // services.exclusionV2 spelling ('exclusion_v2') is deliberately ABSENT —
+  // its pricer is sqft-tiered off property.footprint (codex #3594 r2 P1).
+  'rodent_exclusion',
+  'rodent_wire_mesh',
+  'rodent_bird_box',
+  'rodent_sanitation',
+  'bed_bug',
+  'rodent_inspection',
+]);
+
+// Every scoped one-time here is nonresidential pest control, which FL taxes —
+// INCLUDING rodent_inspection: the canonical service_taxability seed exempts
+// only wdo_inspection / termite_inspection (§212.08(6)), and both
+// TaxCalculator's unmatched-commercial default and estimate-proposal-generate's
+// EXEMPT_INSPECTION_KEYS treat rodent_inspection as taxable. Marking it exempt
+// here made the accepted estimate disagree with the completion invoice
+// (codex #3594 r2 P1). The commercial-inspection ruling (owner/CPA) changes
+// the canonical table first, never this file.
+
+// Re-marks a residential-pricer line for a commercial property: commercial
+// identity fields, FL tax family, and the flat-commercial discount rules the
+// recurring commercial pricers carry (never WaveGuard/recurring-discountable).
+// Scope inputs (slab sqft, linear ft, counts) are rep-entered, not
+// satellite-estimated, so the line is NOT flagged estimatedPricing and keeps
+// the pricer's own detail/disclaimer.
+function markCommercialOneTimeLine(result, property = {}, options = {}) {
+  if (!result || typeof result !== 'object') return result;
+  return {
+    ...result,
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'auto_estimate',
+    discountable: false,
+    excludeFromPctDiscount: true,
+    taxable: true,
+    taxCategory: 'nonresidential_pest_control',
+  };
+}
+
 module.exports = {
   normalizeCommercialString,
   normalizePropertyType,
   isCommercialProperty,
   buildCommercialManualQuoteResult,
+  COMMERCIAL_SCOPED_ONETIME_SERVICES,
+  markCommercialOneTimeLine,
 };

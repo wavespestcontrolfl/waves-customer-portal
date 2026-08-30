@@ -7184,6 +7184,13 @@ function PropertyTab({ customer }) {
         const toSave = { ...pendingRef.current };
         if (!Object.keys(toSave).length) return;
         pendingRef.current = {};
+        // Freshness token (codex #3565 gh-r43): the server confirms a
+        // sprinkler field for the weekly watering plan only when this save
+        // was rendered against the CURRENT home — a queued pre-move autosave
+        // draining after an address change must not re-confirm the former
+        // home's settings. lastSavedRef tracks the server's latest view
+        // (load + every save response).
+        toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
@@ -9874,6 +9881,13 @@ function MyPlanTab({ customer, focusService }) {
   const [cancelDetails, setCancelDetails] = useState('');
   const [pauseSubmitted, setPauseSubmitted] = useState(false);
   const [cancelSubmitted, setCancelSubmitted] = useState(false);
+  // Server-reported outcome of the synchronous cancel (H0): true = the plan
+  // is already closed; false = the office is finishing it by hand.
+  const [cancelProcessed, setCancelProcessed] = useState(false);
+  const [cancelConfirmation, setCancelConfirmation] = useState(null);
+  // ET calendar date the server reports the cancel took effect (YYYY-MM-DD);
+  // on a retry this is the ORIGINAL request's date, never "today".
+  const [cancelEffectiveDate, setCancelEffectiveDate] = useState(null);
   const [pauseSubmitting, setPauseSubmitting] = useState(false);
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [showTierExplorer, setShowTierExplorer] = useState(false);
@@ -10733,14 +10747,14 @@ function MyPlanTab({ customer, focusService }) {
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Pause or cancel your plan any time.</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-                <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Pause My Plan</button>
+                <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Request a Pause</button>
                 <button type="button" onClick={() => setShowCancelForm(true)} style={smallLinkButton}>Cancel</button>
               </div>
             )}
 
             {showPauseForm && !pauseSubmitted && (
               <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Pause My Plan</div>
+                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Request a Pause</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
                   {/* This only files an office request — the copy must not
                       promise a hold the office hasn't confirmed. */}
@@ -10818,9 +10832,11 @@ function MyPlanTab({ customer, focusService }) {
 
             {showCancelForm && !cancelSubmitted && (
               <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Cancellation Request</div>
+                <div style={{ fontSize: 15, color: B.glassNavy, fontWeight: 850 }}>Cancel My Plan</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 }}>
-                  Pausing keeps your discount and service spot reserved.
+                  {/* Truth copy (H0): the cancel runs the moment it is submitted —
+                      say so, and never imply a pause is a live product. */}
+                  This takes effect right away: upcoming visits come off the calendar and autopay turns off. There is no cancellation fee; charges for visits already completed stay payable, and a visit already inside its late-cancellation window keeps the scheduled-visit fee from your booking.
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
                   {['Moving', 'Cost', 'Not satisfied', 'Switching providers', 'Other'].map(r => (
@@ -10864,11 +10880,14 @@ function MyPlanTab({ customer, focusService }) {
                       if (cancelSubmitting) return;
                       setCancelSubmitting(true);
                       try {
-                        await api.createRequest?.({
+                        const result = await api.createRequest?.({
                           category: 'cancellation',
                           subject: `Cancel WaveGuard ${tierName} plan`,
                           description: `Customer requested cancellation. Reason: ${cancelReason || 'Not specified'}. Details: ${cancelDetails || 'None'}`,
                         });
+                        setCancelProcessed(result?.cancellation?.processed === true);
+                        setCancelConfirmation(['sms', 'email'].includes(result?.cancellation?.confirmation) ? result.cancellation.confirmation : null);
+                        setCancelEffectiveDate(/^\d{4}-\d{2}-\d{2}$/.test(result?.cancellation?.effectiveDate || '') ? result.cancellation.effectiveDate : null);
                         setCancelSubmitted(true);
                         setShowCancelForm(false);
                       } catch (err) {
@@ -10879,7 +10898,7 @@ function MyPlanTab({ customer, focusService }) {
                     }}
                     style={{ ...primaryButton, background: B.grayMid, minHeight: 44, fontSize: 16, opacity: cancelSubmitting ? 0.65 : 1, cursor: cancelSubmitting ? 'wait' : 'pointer' }}
                   >
-                    {cancelSubmitting ? 'Sending...' : 'Submit Request'}
+                    {cancelSubmitting ? 'Cancelling...' : 'Cancel My Plan'}
                   </button>
                   <button data-glass-accent="" type="button" onClick={() => setShowCancelForm(false)} style={{ ...secondaryButton, minHeight: 44, fontSize: 16 }}>Keep My Plan</button>
                 </div>
@@ -10888,7 +10907,9 @@ function MyPlanTab({ customer, focusService }) {
 
             {cancelSubmitted && (
               <div style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
-                Cancellation request received. We will reach out to finalize.
+                {cancelProcessed
+                  ? `Your plan is cancelled${cancelEffectiveDate ? ` as of ${(() => { const [y, m, d] = cancelEffectiveDate.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); })()}` : ''}. Upcoming visits are off the calendar and autopay is off. Nothing more is charged for future service; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${cancelConfirmation === 'sms' ? ' A confirmation text is on its way.' : cancelConfirmation === 'email' ? ' A confirmation email is on its way.' : ' Keep this screen as your confirmation.'} Changed your mind? Call (941) 297-5749 and we will put it back.`
+                  : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
               </div>
             )}
           </section>

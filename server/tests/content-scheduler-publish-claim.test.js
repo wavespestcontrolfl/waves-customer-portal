@@ -305,6 +305,19 @@ describe('atomic publishing claim', () => {
     expect(retried).toBeUndefined();
   });
 
+  test('a body-image contract failure (BLOG_BODY_IMAGES_FAILED) parks like the other deterministic codes (PR #3567)', async () => {
+    mockState.pendingBlogs = [blog];
+    const imgErr = new Error('autonomous blog body images: only 1 of 2 insertion slot(s) found');
+    imgErr.code = 'BLOG_BODY_IMAGES_FAILED';
+    AstroPublisher.publishAstro.mockRejectedValue(imgErr);
+
+    const result = await ContentScheduler.processScheduledPosts();
+
+    expect(result.errors).toBe(1);
+    expect(mockState.updates.find((u) => u.table === 'blog_posts' && u.updates.publish_status === 'failed' && u.filters.some(([col, val]) => col === 'id' && val === 7))).toBeDefined();
+    expect(mockState.updates.find((u) => u.table === 'blog_posts' && u.updates.publish_status === 'pending' && u.filters.some(([col, val]) => col === 'id' && val === 7))).toBeUndefined();
+  });
+
   test('publish failure WITH Astro state parks the row at pending_review (claim-guarded)', async () => {
     mockState.pendingBlogs = [blog];
     AstroPublisher.publishAstro.mockRejectedValue(new Error('boom after PR opened'));

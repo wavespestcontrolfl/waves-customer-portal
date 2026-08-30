@@ -20,11 +20,22 @@ between every draft and any send.
 
 ## Prerequisites (operator/Adam sets these; not the agent)
 
-- `GATE_HERMES_WORKER=true` and `HERMES_SERVICE_TOKEN` set on the portal (Railway).
+- `GATE_HERMES_WORKER=true` on the portal (Railway).
+- **Auth is HMAC request signing** (portal plan §12): the signing secret
+  (`LINK_WORKER_SECRET_HERMES` on the portal) lives at
+  `/data/workspace/.waves-link-worker-secret`, and every request is signed with
+  the helper `sign-request.py` (same folder as this skill in the repo:
+  `docs/hermes/sign-request.py`) — copy it into the workspace once and
+  `from sign_request import signed_headers`. Sign EXACTLY the bytes you send:
+  `signed_headers("GET", full_url)` for claims,
+  `signed_headers("POST", full_url, body_bytes)` for reports.
+  *Transitional fallback:* until the operator confirms the HMAC cutover, the old
+  bearer token at `/data/workspace/.waves-portal-token` is still accepted
+  (`Authorization: Bearer …`) — but the portal logs every bearer request and the
+  token will be retired after 7 bearer-free days, so switch to signing as soon as
+  the secret file exists.
 - `GATE_LINK_OUTREACH=true` — the outreach lane master switch. **If it is off, the
   claim returns an empty list with a note and you must stop and tell the operator.**
-- The portal service token at `/data/workspace/.waves-portal-token` (same file the
-  signup skill uses).
 
 `PORTAL_URL` below = the same portal base URL the `waves-backlink-worker` signup
 skill already uses.

@@ -571,6 +571,24 @@ async function briefCategorySignalsForRun(run) {
   return brief || {};
 }
 
+// The refresh HEAD body-image check must validate the file publishRefresh
+// actually rewrote. publishRefresh resolves its target as brief.target_url
+// FIRST, then draft.page_url (its brief.page_url step is never populated —
+// content_briefs has no such column) — NOT resolveTargetForRun's draft-first
+// order, which is the post-merge finalize/social URL: a refresh draft whose
+// emitted frontmatter.canonical still names blog B would have the check
+// validate B while the PR modified brief target A. A lookup error throws
+// (the caller withholds this tick); no URL → null → fails closed downstream.
+async function refreshTargetUrlForRun(run) {
+  const draft = parseJsonObject(run.draft_payload);
+  let briefUrl = '';
+  if (run.brief_id) {
+    const brief = await db('content_briefs').where('id', run.brief_id).first('target_url');
+    briefUrl = String(brief?.target_url || '').trim();
+  }
+  return briefUrl || String(draft.page_url || '').trim() || null;
+}
+
 async function resolveTargetForRun(run) {
   const target = targetForRun(run);
   if (target.url || !run.brief_id) return target;
@@ -1297,6 +1315,43 @@ async function maybeAutoMerge(run, pr) {
     }
   }
 
+  // 3.55 Body-image contract at the HEAD (owner rule: ≥3 images per post).
+  //    publishOrUpdatePage enforced it when the PR opened — but only if
+  //    GATE_BLOG_BODY_IMAGES was on THEN. A PR opened under the old setting
+  //    must not auto-merge hero-only once the gate flips: with the gate on,
+  //    the post file on the PR branch is re-validated here, and a miss
+  //    WITHHOLDS the merge for a human (the same posture as the pin/
+  //    eligibility withholds above). Off → no-op.
+  //    (rewrite_title_meta PRs never reach this step: the metadata lane is
+  //    withheld for a human merge above — `awaiting_human_merge_metadata_lane`.)
+  let bodyImagesBaseSha = null;
+  if (['new_supporting_blog', 'refresh_existing_page'].includes(run.action_type) && typeof publisher.assertBodyImagesAtHead === 'function') {
+    let bodyImages;
+    try {
+      const draftForImages = parseJsonObject(run.draft_payload);
+      // The brief's category signals decide the route exactly as the
+      // publisher derived it (a lookup blip throws → withheld this tick).
+      const briefForImages = await briefCategorySignalsForRun(run);
+      bodyImages = await publisher.assertBodyImagesAtHead({
+        frontmatter: draftForImages?.frontmatter || {},
+        brief: briefForImages,
+        branch,
+        actionType: run.action_type,
+        // publishRefresh's own precedence (brief.target_url, then
+        // draft.page_url) — new-post runs resolve by slug, no target.
+        targetUrl: run.action_type === 'refresh_existing_page' ? await refreshTargetUrlForRun(run) : null,
+        filePath: draftForImages?.file_path || null,
+      });
+    } catch (err) {
+      bodyImages = { ok: false, reason: `body-image check failed: ${err.message}` };
+    }
+    if (!bodyImages.ok) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: body images — ${bodyImages.reason}`);
+      return { pending: true, reason: `body_images_required: ${bodyImages.reason}` };
+    }
+    bodyImagesBaseSha = bodyImages.baseSha || null;
+  }
+
   // 3.6 Repeat the queue-state re-check: step 3.5 added async work (run +
   //    brief reads), so an operator requeue/dismiss landing during it must
   //    still block the merge — only the PR SHA is pinned by the merge call
@@ -1306,7 +1361,23 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
-  // 3.7 Owner rulings 2026-08-27: the topic-targeting gate ran pre/post-draft,
+  // 3.7 The body-image check validated unchanged assets as the DEFAULT
+  //    branch carried them at that moment; a base push since then could
+  //    swap one of those blobs under the merge. Re-read the tip and let the
+  //    next tick re-validate against it. Runs here AND again immediately
+  //    before the merge call in the new_supporting_blog lane (the topic
+  //    recheck + locked queue read below are more async work — GH r24);
+  //    for the other lanes doMerge() follows this check directly.
+  const baseMovedSinceBodyImageCheck = async () => {
+    if (!bodyImagesBaseSha || typeof gh.getBranchSha !== 'function' || typeof gh.env !== 'function') return false;
+    const tip = await gh.getBranchSha(gh.env().defaultBranch);
+    if (!tip || tip === bodyImagesBaseSha) return false;
+    logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} PR #${pr.number}: base moved during gating (${bodyImagesBaseSha.slice(0, 9)} → ${tip.slice(0, 9)})`);
+    return true;
+  };
+  if (await baseMovedSinceBodyImageCheck()) return { pending: true, reason: 'base_moved_during_gating' };
+
+  // 3.8 Owner rulings 2026-08-27: the topic-targeting gate ran pre/post-draft,
   //     but this PR may have waited while another post claimed its entity, or
   //     remediation may have changed its targeting. Re-run it on the HEAD's
   //     blog file against a fresh live corpus — the same assertion mergeAstro
@@ -1349,6 +1420,12 @@ async function maybeAutoMerge(run, pr) {
         if (!(await queueRowStillParkedLocked(run, trx))) {
           logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
           withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        // 3.9 Last async step before the merge call: the base tip must
+        //     still be the one the body-image check hashed (GH r24).
+        if (await baseMovedSinceBodyImageCheck()) {
+          withheld = { pending: true, reason: 'base_moved_during_gating' };
           return null;
         }
         return doMerge();
@@ -1661,6 +1738,7 @@ module.exports = {
     targetForRun,
     spokeMergeBlockedByKillSwitch,
     resolveTargetForRun,
+    refreshTargetUrlForRun,
     deriveBlogRouteUrl,
     queueRowStillParked,
     finalizeMerged,

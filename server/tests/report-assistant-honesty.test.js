@@ -146,3 +146,53 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     expect(reconcile(longSentence).todaysResult).not.toContain('…');
   });
 });
+
+describe('watering questions answer with the weekly plan when the report carries one (codex #3565 gh-r29)', () => {
+  const plan = { title: 'This week: check the rain before you water', detail: 'Leave the turf irrigation off for now; run one cycle only if less than ½" has fallen.' };
+  test('plan present → the plan, before re-entry / trend routing', () => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: plan } } };
+    for (const q of ['How should I water this week?', 'What is my irrigation plan?', 'Should I run the sprinklers?']) {
+      expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
+    // gh-r38: controller phrasing without the word "water" is a watering question too.
+    for (const q of ['How long should I run each zone?', 'How many minutes per zone?']) {
+      expect(answerServiceReportQuestion({ question: q, data })).toBe(`${plan.title} ${plan.detail}`);
+    }
+    // gh-r46: "time zone" is not watering intent — the appointment router answers it.
+    expect(answerServiceReportQuestion({ question: 'What time zone is my next appointment?', data })).not.toBe(`${plan.title} ${plan.detail}`);
+    // Unrelated questions keep their routing.
+    expect(answerServiceReportQuestion({ question: 'When can my dog go outside?', data })).not.toMatch(/check the rain/);
+  });
+  test('safety and aftercare intents route BEFORE the plan (codex gh-r30)', () => {
+    const data = {
+      pressureIndex: null, dynamicContext: {},
+      reportV2: {
+        water: { weekPlan: { ...plan, visitInPlanWeek: true, prescribesRun: true, afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' } } },
+        aftercare: { watering: 'Water in today’s application — give the lawn a normal watering within the next 24 hours.', waterInRequired: true },
+      },
+    };
+    expect(answerServiceReportQuestion({ question: 'How many minutes until my dog can go outside?', data })).not.toMatch(/check the rain|turf irrigation/);
+    const after = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data });
+    expect(after).toMatch(/^Water in today’s application/);
+    expect(after).toMatch(/covered by today’s treatment watering-in\. No further turf runs this week\./);
+    expect(answerServiceReportQuestion({ question: 'How should I water this week?', data })).toBe(`${plan.title} ${plan.detail}`);
+    // gh-r45: a HOLD plan beside a required watering-in — the answer carries the plan's
+    // no-extra-runs guidance, never the label instruction alone.
+    const holdData = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs for the week.', visitInPlanWeek: true, prescribesRun: false } } } };
+    const holdAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: holdData });
+    expect(holdAnswer).toMatch(/^Water in today’s application/);
+    expect(holdAnswer).toMatch(/skip your turf watering\. Your lawn has what it needs for the week\./);
+    // gh-r31: a reopened HISTORICAL report (visit outside the plan week) never answers with the reduced plan.
+    const old = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { ...data.reportV2.water.weekPlan, visitInPlanWeek: false } } } };
+    const oldAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: old });
+    expect(oldAnswer).toMatch(/^Water in today’s application/);
+    expect(oldAnswer).not.toMatch(/No further turf runs this week/);
+    // Bare "minutes"/"zones" are not plan intent.
+    expect(answerServiceReportQuestion({ question: 'How many minutes did the visit take?', data })).not.toMatch(/check the rain/);
+  });
+
+  test('no plan → existing routing (irrigation → re-entry) is unchanged', () => {
+    const data = { pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan: null } } };
+    expect(answerServiceReportQuestion({ question: 'What is my irrigation plan?', data })).not.toMatch(/This week:/);
+  });
+});

@@ -385,6 +385,12 @@ const LOOKUP_ATTEMPT_STATUSES = new Set([
   // Terminal stamp for a lookup that THREW after the pending stamp — a
   // pending row must mean "running", never "died mid-pipeline".
   'error',
+  // Terminal stamp for a lookup whose PROCESS died after the pending
+  // stamp — the throw-wrapper can't fire across a process boundary, so a
+  // deploy landing mid-lookup left the row pending forever (observed
+  // 2026-08-28/29, both inside the overnight deploy window). Written only
+  // by sweepStalePendingAttempts below.
+  'interrupted',
 ]);
 
 async function markLookupAttempt(address, status, reason = null) {
@@ -422,6 +428,30 @@ async function markLookupAttempt(address, status, reason = null) {
   } catch (err) {
     logger.warn('[lookup-cache] attempt stamp failed', { status, error: err.message });
   }
+}
+
+// A 'pending' stamp with no terminal follow-up means the PROCESS exited
+// mid-lookup — the performPropertyLookup throw-wrapper stamps 'error' on any
+// throw, but nothing can stamp across a process boundary, so a deploy landing
+// mid-lookup leaves the row pending forever and it only self-heals if the same
+// address is ever looked up again. The pipeline's internal provider/image
+// timeouts keep a live lookup far under STALE_PENDING_MINUTES, so anything
+// older is dead, not running. Called from the scheduler's 15-min sweep; throws
+// to the caller (the cron logs) rather than swallowing like the stamp above,
+// because a silently failing sweep would recreate the exact blind spot it
+// closes.
+const STALE_PENDING_MINUTES = 15;
+
+async function sweepStalePendingAttempts() {
+  return db('property_lookups')
+    .where('last_attempt_status', 'pending')
+    .where('last_attempt_at', '<', db.raw(`now() - interval '${STALE_PENDING_MINUTES} minutes'`))
+    .update({
+      last_attempt_status: 'interrupted',
+      // last_attempt_at is left as-is on purpose: it records when the dead
+      // attempt started, which is the fact worth keeping.
+      last_attempt_reason: `pending >${STALE_PENDING_MINUTES}m — process exited mid-lookup (deploy/restart)`,
+    });
 }
 
 async function saveLookup(address, result) {
@@ -598,6 +628,7 @@ module.exports = {
   attachAddressAuditToCachedLookup,
   saveLookup,
   markLookupAttempt,
+  sweepStalePendingAttempts,
   saveVerifiedOverride,
   sanitizeVerifiedValue,
   VERIFIABLE_FIELDS,

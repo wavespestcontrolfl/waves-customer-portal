@@ -474,6 +474,18 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             title="Prepaid"
           >$</span>
         )}
+        {/* Visit group (visit-group-scope.md §3): this row is one of N
+            services at the same stop — one route card, one En Route /
+            On Site tap for the tech. Monochrome chip; the schedule feed
+            attaches `visit` only to grouped rows. */}
+        {service.visit && Number(service.visit.serviceCount) > 1 && (
+          <span
+            className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
+            style={{ height: 14, padding: '0 5px', fontSize: 9 }}
+            title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
+            data-testid="visit-chip"
+          >Visit · {service.visit.serviceCount}</span>
+        )}
       </div>
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>

@@ -952,6 +952,16 @@ async function applyContactCorrections({ customerId, corrections, source, source
     await knex.transaction(async (trx) => {
       // Row lock makes read → update → fan-out atomic against a concurrent
       // admin edit — the later writer waits and then sees committed state.
+      // Prefs advisory lock BEFORE the customer row lock — one global order
+      // (prefs advisory → customers row → prefs row) shared with the merge,
+      // the address route, and the turf fence: an address correction here
+      // reaches markSprinklerSettingsMoved's advisory lock via the fan-out,
+      // and row-then-advisory deadlocked against executeMerge (codex #3565
+      // gh-r38).
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(customerId)],
+      );
       const before = await trx('customers')
         .where({ id: customerId })
         .whereNull('deleted_at')

@@ -50,6 +50,59 @@ const CARD_HOLD_REVIEW_REASONS = new Set(['charge_failed', 'charge_review', 'cha
  * @returns {Promise<{cancelledCount:number, recurrenceStopped:number,
  *                    churned:boolean, ok:boolean, errors:string[]}>}
  */
+async function raiseTermiteRetrievalTask(customerId, requestId = null) {
+  // program filter: the table also holds rodent/trapping stations, which are
+  // always Waves-owned and are NOT bait-station rentals.
+  const stations = await db('termite_stations')
+    .where({ customer_id: customerId, program: 'termite' })
+    .select('id', 'owned_by', 'is_active');
+  const rented = (stations || []).filter((row) => row && row.owned_by === 'waves' && row.is_active !== false);
+  let flaggedRental = false;
+  if (!rented.length) {
+    // Customer-level flag (migration 20260726000003) covers rental programs
+    // whose stations were never pinned on the map.
+    const customer = await db('customers').where({ id: customerId }).first('termite_stations_rented');
+    flaggedRental = !!(customer && customer.termite_stations_rented === true);
+    if (!flaggedRental) return { raised: false, reason: 'no_rented_stations' };
+  }
+  const NotificationService = require('./notification-service');
+  const count = rented.length;
+  const result = await NotificationService.notifyAdmin(
+    'service',
+    'Termite stations to retrieve after cancellation',
+    (count
+      ? `${count} Waves-owned bait station${count === 1 ? '' : 's'} on this property need to be pulled — schedule the retrieval visit.`
+      : 'This account is flagged as a bait-station rental — confirm the stations on site and schedule the retrieval visit.')
+      + ' No charge to the customer.',
+    {
+      icon: '🪵',
+      // Forces the bell past GATE_ADMIN_BELL_POLICY (bellAllowed honours
+      // options.bell first): this is an office TASK, not an FYI, and must
+      // never be silenced by the category allowlist.
+      bell: true,
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      // Keyed per cancellation EVENT (request), not per customer: retries of
+      // the same request stay idempotent, while a restored customer who later
+      // cancels another rental program gets a fresh task.
+      dedupeKey: `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`,
+      metadata: { kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental },
+    }
+  );
+  // notifyAdmin resolves null (never throws) when the deduped insert fails —
+  // surface that as an error so the cancel is not reported fully processed
+  // while Waves-owned stations have no retrieval task.
+  if (!result) throw new Error('admin notification did not persist');
+  if (result.suppressed) {
+    // With bell:true the only remaining suppression is the internal
+    // test-customer gate (no reason) — no task wanted there. Anything else
+    // means no row landed for a real account: fail loudly.
+    if (result.reason) throw new Error(`admin notification suppressed (${result.reason})`);
+    return { raised: false, reason: 'internal_test_customer', stationCount: count };
+  }
+  if (!result.id) throw new Error('admin notification did not persist');
+  return { raised: true, stationCount: count };
+}
+
 async function processCancellationRequest({ customerId, reason, requestId } = {}) {
   if (!customerId) throw new Error('processCancellationRequest requires customerId');
   const cancelReason = String(reason || CHURN_REASON).slice(0, 500);
@@ -128,6 +181,23 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // recurring_ongoing=false instead of minting a fresh occurrence behind the
   // sweep's back. (The straggler re-sweep below covers an extension already
   // in flight past its flag read.)
+  // Rented termite bait stations are Waves property and come out of the
+  // ground when the program ends (signed agreement text, migration
+  // 20260729000001) — but nothing scheduled that retrieval until H0
+  // (2026-08-30). Raise an office task, deduped per request so retries never
+  // double-bell. Failure is recorded in `errors` and never blocks the churn.
+  // Only once the churn actually persisted: a failed customer update leaves
+  // the account active and billable, and staff must never be told to pull
+  // hardware from a live program.
+  if (churned) {
+    try {
+      await raiseTermiteRetrievalTask(customerId, requestId);
+    } catch (err) {
+      errors.push('termite_retrieval_task');
+      logger.error(`[cancellation-processor] termite station retrieval task failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   let recurrenceStopped = 0;
   try {
     recurrenceStopped = await db('scheduled_services')
@@ -495,4 +565,4 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   return { cancelledCount, recurrenceStopped, churned, ok, errors };
 }
 
-module.exports = { processCancellationRequest, CHURN_REASON, CANCELLABLE_STATUSES };
+module.exports = { processCancellationRequest, raiseTermiteRetrievalTask, CHURN_REASON, CANCELLABLE_STATUSES };

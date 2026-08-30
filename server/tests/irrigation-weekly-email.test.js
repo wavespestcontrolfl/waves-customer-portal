@@ -13,12 +13,17 @@ jest.mock('../models/db', () => {
   mockDb.raw = jest.fn((expr) => expr);
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+// The week-plan gate stays OFF here: these suites pin the legacy sweep
+// (plan mode has its own suites).
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan') }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
   activeSuppressionsFor: jest.fn(async () => []),
 }));
 jest.mock('../services/service-report/application-conditions', () => ({
+  // Real unit helpers — the forecast fetcher's ET₀ conversion is under test.
+  sumPrecipInches: jest.requireActual('../services/service-report/application-conditions').sumPrecipInches,
+  et0SumToInches: jest.requireActual('../services/service-report/application-conditions').et0SumToInches,
   fetchServiceWeekWeather: jest.fn(async () => ({ rainInches: null, et0Inches: null, dailyRain: null })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -31,7 +36,7 @@ const {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
   findEligibleCustomers,
-  fetchUpcomingWeekRainForecast,
+  fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,
@@ -314,28 +319,47 @@ describe('forecastLine', () => {
   });
 });
 
-describe('fetchUpcomingWeekRainForecast', () => {
+describe('fetchUpcomingWeekForecast', () => {
   // The module caches by coordinates — every case uses distinct coords.
-  const okJson = (precipitation_sum) => ({ ok: true, json: async () => ({ daily: { precipitation_sum } }) });
+  const okJson = (precipitation_sum, et0_fao_evapotranspiration, et0Unit = 'inch') => ({ ok: true, json: async () => ({ daily: { precipitation_sum, ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration } : {}) }, daily_units: { precipitation_sum: 'inch', ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration: et0Unit } : {}) } }) });
 
   test('a full 7-day window sums to inches', async () => {
+    // Under precipitation_unit=inch Open-Meteo reports ET₀ in inches too (daily_units).
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2], 'inch'));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: 1.4, days: 7 });
+    // …and a mm series (no precipitation_unit, or a unit change upstream) is converted, never divided twice.
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5.08, 5.08, 5.08, 5.08, 5.08, 5.08, 5.08], 'mm'));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.06, longitude: -81.06 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: 1.4 });
+    // Bounded to the plan week: a Thursday retry asks for Thu→Sun (4 days), never a rolling 7.
+    const thursday = new Date('2026-08-27T16:00:00Z');
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5], [0.2, 0.2, 0.2, 0.2], 'inch'));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.07, longitude: -81.07, horizonEnd: '2026-08-30', now: thursday })).resolves.toMatchObject({ rainInches: 0.85, et0Inches: 0.8, startDate: '2026-08-27', endDate: '2026-08-30', days: 4 });
+    const url = String(global.fetch.mock.calls[0][0]);
+    expect(url).toContain('start_date=2026-08-27');
+    expect(url).toContain('end_date=2026-08-30');
+    expect(url).not.toContain('forecast_days');
+    // A 7-day answer to a 4-day ask is a window mismatch → null.
     global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toBe(1.2);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.08, longitude: -81.08, horizonEnd: '2026-08-30', now: thursday })).resolves.toBe(null);
+    expect(String(global.fetch.mock.calls[0][0])).toContain('daily=precipitation_sum%2Cet0_fao_evapotranspiration');
   });
 
   test('a SHORT window (Open-Meteo 200 with a partial series) is unknown, not "little rain"', async () => {
     global.fetch = jest.fn(async () => okJson([0.1, 0.2, 0.3]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.02, longitude: -81.02 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.02, longitude: -81.02 })).resolves.toBe(null);
   });
 
   test('a null day inside the window is unknown', async () => {
     global.fetch = jest.fn(async () => okJson([0.1, 0, null, 0.5, 0, 0.3, 0.05]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
+    // A missing/partial ET₀ series leaves et0Inches null without dropping the rain window.
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5, 5, 5]));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.05, longitude: -81.05 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: null });
   });
 
   test('a non-2xx response fails soft to null', async () => {
     global.fetch = jest.fn(async () => ({ ok: false }));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
   });
 });
 
@@ -359,7 +383,10 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       'orWhereRaw', 'orWhereNotNull', 'orWhereExists', 'whereExists', 'select', 'orderBy', 'from', 'first',
     ]) b[m] = jest.fn(() => b);
     b.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
-    b.then = (resolve, reject) => Promise.resolve(cfg.rows ?? []).then(resolve, reject);
+    // `.first()` on a table with no configured rows resolves null, as knex
+    // does — an empty array is truthy and would read as a "sent" week-plan
+    // row / a delivery record in the customer-week dedupe.
+    b.then = (resolve, reject) => Promise.resolve(cfg.rows ?? (b.first.mock.calls.length ? null : [])).then(resolve, reject);
     return b;
   }
 
@@ -389,7 +416,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('gate on + surplus week → sends cut_back with week-scoped idempotency key on the suppressible stream', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary).toMatchObject({ shadow: false, candidates: 1, sent: 1, failed: 0 });
 
@@ -409,8 +436,32 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     expect(inserts.some((row) => row.interaction_type === 'email_outbound')).toBe(true);
   });
 
+  test('a momentary EMAIL_SEND_IN_PROGRESS collision is retried (bounded) before counting as failed (codex gh-r21)', async () => {
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan');
+    fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
+    const collision = Object.assign(new Error('email send already in progress'), { code: 'EMAIL_SEND_IN_PROGRESS', retryable: true });
+    EmailTemplateLibrary.sendTemplate
+      .mockRejectedValueOnce(collision)
+      .mockResolvedValueOnce({ sent: true, message: { provider_message_id: 'sg-2', sent_at: '2026-07-06T11:00:00Z' } });
+    const summary = await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    expect(summary.sent).toBe(1);
+    expect(summary.failed).toBe(0);
+    // Exhausted retries → the existing failure path (no infinite wait on a real in-flight send).
+    EmailTemplateLibrary.sendTemplate.mockReset();
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(collision);
+    const exhausted = await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(4); // 1 + 3 retries
+    expect(exhausted.failed).toBe(1);
+    // A non-collision error is never retried.
+    EmailTemplateLibrary.sendTemplate.mockReset();
+    EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('boom'));
+    await runWeeklyIrrigationEmailSweep({ now: NOW, inProgressRetryMs: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
   test('balanced week → the on-track email sends', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
@@ -421,7 +472,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('legacy lawn_type customer without a turf profile is scored against their real grass', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [{ ...CANDIDATE, grass_type: null, lawn_type: 'Argentine Bahia' }] }
@@ -440,7 +491,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('a provider error carrying an email address is logged redacted', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     const err = new Error('SendGrid 403: sender identity mismatch for dana@example.com');
     err.status = 403;
     EmailTemplateLibrary.sendTemplate.mockRejectedValue(err);
@@ -453,7 +504,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('deficit week with a target-covering forecast → on-track email, not add-water', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0, et0Inches: 1.6, dailyRain: [] });
     // 7 full days summing 1.4"; with the 1" schedule the projected week is
     // covered (the customer's irrigation is 1"/week vs the 1.25" target).
@@ -467,7 +518,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('incomplete rainfall window → nothing sends, rain_unknown counted, no forecast call is spent', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: null, et0Inches: null, dailyRain: null });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
@@ -477,7 +528,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('template-library dedupe (re-run same week) counts as deduped, not sent', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ deduped: true });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary.sent).toBe(0);
@@ -485,7 +536,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('the run cap counts ATTEMPTS, not successes — downstream failures cannot bypass it', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -503,7 +554,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('deduped and suppressed results refund the cap — they cannot starve the rest of the list', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -524,7 +575,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('a deduped result that DID reach the provider (webhook/supersede race) keeps its attempt', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -539,7 +590,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('per-customer failure is contained: one bad send does not abort the sweep', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }

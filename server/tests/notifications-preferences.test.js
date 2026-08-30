@@ -132,6 +132,10 @@ describe('notification preference updates', () => {
     expect(updates).toEqual({
       appointment_confirmation_channel: 'email',
       service_reminder_72h_channel: 'both',
+      // Any explicit 72h channel write stamps the explicit-choice marker
+      // (Codex #3588 P1) — the email-first promotion must never override a
+      // deliberate delivery-method selection, Text included.
+      service_reminder_72h_channel_explicit: true,
       service_reminder_24h_channel: 'sms',
       en_route_channel: 'email',
       // Arrival alerts are SMS-only (email twin retired 2026-08-06): the key
@@ -244,6 +248,10 @@ describe('account-level channel routing', () => {
     expect(CHANNEL_DB_COLUMNS).toEqual([
       'appointment_confirmation_channel',
       'service_reminder_72h_channel',
+      // The explicit-choice stamp routes to the primary-profile row WITH the
+      // channel it describes — the reminder cron reads both from the
+      // owner-resolved row (pre-push #3588 P1).
+      'service_reminder_72h_channel_explicit',
       'service_reminder_24h_channel',
       'en_route_channel',
       'tech_arrived_channel',

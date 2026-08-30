@@ -417,7 +417,16 @@ describe('deferred-replay registry', () => {
     await onTerminalDeferredReplay('customer_service_request_deferred', {
       is_cancellation: true, service_request_id: 'req-1', waves_customer_id: 'cust-1',
     });
-    expect(sendCancellationReceived).toHaveBeenCalledWith({ customerId: 'cust-1', request });
+    expect(sendCancellationReceived).toHaveBeenCalledWith({ customerId: 'cust-1', request, processed: false });
+
+    // H0: the route stamps the processor outcome on the scheduled row; a
+    // completed cancel gets the completed outcome line in the fallback email.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(request));
+    await onTerminalDeferredReplay('customer_service_request_deferred', {
+      is_cancellation: true, service_request_id: 'req-1', waves_customer_id: 'cust-1', cancellation_processed: true,
+    });
+    expect(sendCancellationReceived).toHaveBeenCalledWith({ customerId: 'cust-1', request, processed: true });
 
     // Ordinary request confirmations already emailed inline — no fallback.
     jest.clearAllMocks();

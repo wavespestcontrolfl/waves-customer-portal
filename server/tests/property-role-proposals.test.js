@@ -323,6 +323,15 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
           const preds = Object.assign({}, ...this._wheres);
           return (rows[table] || []).find((r) => Object.entries(preds).every(([k, v]) => r[k] === v)) || null;
         },
+        // Upsert shape used by the sprinkler-settings move guard the flip
+        // now calls (markSprinklerSettingsMoved): recorded like an update.
+        insert(row) { this._insert = row; return this; },
+        onConflict() { return this; },
+        async merge(patch) {
+          rows[table] = (rows[table] || []).concat([{ ...this._insert, ...patch }]);
+          updates.push({ table, upsert: true, patch });
+          return [1];
+        },
         async update(patch) {
           updates.push({ table, wheres: this._wheres, whereNulls: this._whereNulls, whereNotIn: this._whereNotIn, patch });
           const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));

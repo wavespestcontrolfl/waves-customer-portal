@@ -833,6 +833,157 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
+  it('registers irrigation_week_plans with the keep-sent handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepSent } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepSent);
+  });
+
+  describe('repointWeekPlansKeepSent (codex #3565 gh-r15: the delivered snapshot survives)', () => {
+    // Minimal in-memory irrigation_week_plans with the (customer_id,
+    // week_ending) unique enforced on update, so the handler's collision
+    // branches run against real row state.
+    const fakeTrx = (seed, messages = []) => {
+      const rows = seed.map((r) => ({ ...r }));
+      const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+      const unique = (id, customerId) => {
+        const me = rows.find((r) => r.id === id);
+        if (rows.some((r) => r.id !== id && r.customer_id === customerId && r.week_ending === me.week_ending)) {
+          const e = new Error('duplicate key'); e.code = '23505'; throw e;
+        }
+      };
+      const qb = (table) => {
+        if (table === 'email_messages') {
+          // The durable customer-week delivery record the delivered check reads.
+          let w = {}; let statuses = null;
+          const mq = {
+            where(a) { w = { ...w, ...a }; return mq; },
+            whereIn(col, vals) { statuses = vals; return mq; },
+            select() { return Promise.resolve(messages.filter((m) => matches(m, w) && (!statuses || statuses.includes(m.status))).map((m) => ({ ...m }))); },
+          };
+          return mq;
+        }
+        expect(table).toBe('irrigation_week_plans');
+        let where = {};
+        const api = {
+          where(a, b) { where = typeof a === 'object' ? { ...where, ...a } : { ...where, [a]: b }; return api; },
+          select() { return Promise.resolve(rows.filter((r) => matches(r, where)).map((r) => ({ ...r }))); },
+          first() { const r = rows.find((x) => matches(x, where)); return Promise.resolve(r ? { ...r } : undefined); },
+          update(patch) {
+            const hit = rows.filter((r) => matches(r, where));
+            for (const r of hit) { if (patch.customer_id) unique(r.id, patch.customer_id); Object.assign(r, patch); }
+            return Promise.resolve(hit.length);
+          },
+          del() { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) if (matches(rows[i], where)) rows.splice(i, 1); return Promise.resolve(before - rows.length); },
+        };
+        return api;
+      };
+      const trx = (table) => qb(table);
+      trx.transaction = async (fn) => fn(trx);
+      trx.fn = { now: () => 'NOW()' };
+      trx.rows = rows;
+      return trx;
+    };
+    const { repointWeekPlansKeepSent } = dedupe._test;
+
+    it('moves a non-colliding week and drops the loser copy when the winner already SENT that week', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:00:00Z' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
+        { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: '2026-08-17T10:00:00Z' },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/moved 1, replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id]).sort()).toEqual([['l2', WINNER], ['w1', WINNER]]);
+    });
+
+    it('replaces the winner UNSENT row with the loser SENT snapshot (the delivered decision survives)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1/);
+      expect(trx.rows).toEqual([{ id: 'l1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' }]);
+    });
+
+    it('both UNSENT but the loser\'s email was provider-accepted (delivery record names its decision hash) → the delivered snapshot survives (codex gh-r17)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['irrigation', 'plan:hash-l']) },
+        // A pre-provider failure on the winner's side is not a delivery.
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'failed', categories: JSON.stringify(['irrigation', 'plan:hash-w']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1 .* stamped 1/);
+      // The accepted-but-unstamped survivor is stamped so the report can render it.
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()']]);
+    });
+
+    it('a NON-colliding moved row that the provider accepted but never stamped is stamped on the way over (codex gh-r21)', async () => {
+      const trx = fakeTrx([
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+        { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: null, decision_hash: 'hash-old' },
+      ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-l']) }]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/moved 2, .* stamped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, 'NOW()'], ['l2', WINNER, null]]);
+    });
+
+    it('both provider-accepted, winner UNSTAMPED + loser STAMPED → the stamped (renderable) row survives (codex gh-r18)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z', decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-w']) },
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1 .* stamped 0/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['l1', WINNER, '2026-08-24T10:01:00Z']]);
+    });
+
+    it('both provider-accepted and both UNSTAMPED → the winner row stays and is stamped', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'delivered', categories: JSON.stringify(['plan:hash-w']) },
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-l']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1 duplicate row\(s\), stamped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id, r.sent_at])).toEqual([['w1', WINNER, 'NOW()']]);
+    });
+
+    it('a delivery record naming a DIFFERENT decision does not make an unsent row delivered', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-older']) }]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
+    });
+
+    it('both unsent → the winner row stays, the loser copy drops', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
+    });
+
+    it('rethrows a non-unique failure', async () => {
+      const trx = fakeTrx([{ id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null }]);
+      trx.transaction = async () => { throw new Error('connection reset'); };
+      await expect(repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER)).rejects.toThrow('connection reset');
+    });
+  });
+
   it('moves non-colliding CRM tags and drops duplicate tags instead of aborting', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
@@ -862,6 +1013,71 @@ describe('executeMerge', () => {
     expect(state.notificationsWhere).toEqual({ recipient_type: 'customer', recipient_id: LOSER });
     expect(result.repointed['notifications.recipient_id']).toBe(1);
     expect(result.repointed['email_messages.recipient_id']).toBe(1);
+  });
+
+  it('rewrites the irrigation weekly delivery identity (trigger_event_id) from the loser to the winner (codex #3565 gh-r16)', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    const base = trx.getMockImplementation();
+    state.triggerRewrites = [];
+    trx.mockImplementation((table) => {
+      if (table !== 'email_messages') return base(table);
+      return makeChain(table, (q) => {
+        if (q.called('select')) {
+          const like = q.args('where');
+          expect(like).toEqual(['trigger_event_id', 'like', `irrigation.weekly:${LOSER}:%`]);
+          return [{ id: 'em1', trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23` }];
+        }
+        // The polymorphic recipient repoint also updates email_messages —
+        // only the identity rewrite is under test here.
+        if (q.called('update')) { if (q.args('update')[0].trigger_event_id) state.triggerRewrites.push([q.args('where')[0], q.args('update')[0]]); return 1; }
+        return 1;
+      });
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.triggerRewrites).toEqual([[{ id: 'em1' }, { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23` }]]);
+    expect(result.repointed['email_messages.trigger_event_id']).toBe(1);
+    // Journaled row-precisely so the undo can rewrite exactly these back.
+    expect(JSON.parse(state.journal.repointed_ids).irrigation_trigger_ids).toEqual(['em1']);
+  });
+
+  it('merging DIFFERENT homes marks the surviving sprinkler settings moved (stamp + confirmation reset); the same home does not (codex #3565 gh-r22)', async () => {
+    const run = async (loserAddr) => {
+      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: '100 Main St', city: 'Bradenton', zip: '34205' };
+      const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', ...loserAddr };
+      const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+      const base = trx.getMockImplementation();
+      const stamps = [];
+      trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => {
+        if (q.called('update')) { stamps.push([q.args('where')[0], q.args('update')[0]]); return 1; }
+        return [];
+      })));
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      return { stamps, result };
+    };
+    const moved = await run({ address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' });
+    expect(moved.stamps).toHaveLength(1);
+    expect(moved.stamps[0][0]).toEqual({ customer_id: WINNER });
+    expect(moved.stamps[0][1].irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(moved.stamps[0][1].irrigation_confirmed_fields).toBe('[]');
+    expect(moved.result.repointed['property_preferences.irrigation_home_changed_at']).toBe(1);
+    const same = await run({ address_line1: '100 MAIN ST', city: 'bradenton', zip: '34205' });
+    expect(same.stamps).toEqual([]);
+  });
+
+  it('an addressless surviving shell inherits the loser\'s home — no move stamp (codex gh-r25)', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', address_line1: null, city: null, zip: null };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', address_line1: '200 Oak Ave', city: 'Sarasota', zip: '34236' };
+    const { trx } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    const base = trx.getMockImplementation();
+    const stamps = [];
+    trx.mockImplementation((table) => (table !== 'property_preferences' ? base(table) : makeChain(table, (q) => { if (q.called('update')) stamps.push(q.args('update')[0]); return q.called('update') ? 1 : []; })));
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(stamps).toEqual([]);
   });
 
   it('moves the cached account_credits with the ledger and zeroes the retired row', async () => {

@@ -35,9 +35,14 @@ describe('customer_turf_profiles write fence (contract)', () => {
     }
   });
 
-  test('the fence itself locks the customers row before the write runs', () => {
+  test('the fence itself locks the customers row before the write runs (prefs advisory first — codex #3565 gh-r38/r39)', () => {
     const src = fs.readFileSync(path.join(serverRoot, 'services/customer-pricing-ai.js'), 'utf8');
-    const fence = src.split('async function withTurfProfileFence')[1].slice(0, 400);
+    const fence = src.split('async function withTurfProfileFence')[1].slice(0, 1200);
     expect(fence).toMatch(/trx\('customers'\)\.where\(\{ id: customerId \}\)\.forUpdate\(\)/);
+    // Canonical lock order: the property-preferences advisory lock precedes the customers row lock.
+    const adv = fence.indexOf("'property-preferences'");
+    const row = fence.indexOf("trx('customers')");
+    expect(adv).toBeGreaterThan(-1);
+    expect(row).toBeGreaterThan(adv);
   });
 });

@@ -1307,7 +1307,7 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['serviceReportNotifyBilling', 'service_report_notify_billing'],
 ];
 
-const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);
+const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
@@ -3737,6 +3737,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // ordering: BEFORE the customers row lock below (customer-comms-
           // lock.js contract — revertMerge takes comms first, then
           // FOR-UPDATEs rows; row-lock-first-then-wait-here would deadlock).
+          // Property-preferences advisory lock FIRST — one global order
+          // (prefs advisory → comms → combined → customers row → prefs row)
+          // shared with executeMerge and the portal autosave: any path that
+          // takes it after another of these locks forms an AB-BA deadlock
+          // with a path taking them the other way (codex #3565 gh-r38/r39).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['property-preferences', String(req.params.id)],
+          );
           if (updates.waveguard_tier !== undefined || updates.monthly_rate !== undefined) {
             await lockCustomerComms(trx, req.params.id);
           }
@@ -3816,6 +3825,15 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // Coordinates cleared ATOMICALLY with the address (and the move
+          // stamp the fan-out writes in this same transaction): a committed
+          // move must never leave the former home's lat/lng readable beside
+          // the new address — the weekly watering sweep would fetch the old
+          // premise's rainfall under the new home (codex #3565 gh-r46). The
+          // async re-geocode below refills them.
+          if (['address_line1', 'city', 'state', 'zip'].some((f) => updates[f] !== undefined)) {
+            await trx('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
+          }
           // Only an ACTUAL rate change invalidates the attribution (codex
           // #3245 r4): the directory editor posts the whole form on every
           // save, so a presence check would wipe the seeded components on a
@@ -3989,7 +4007,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // If address changed, re-geocode (clear lat/lng first so ensureCustomerGeocoded refreshes)
     const addressChanged = ['address_line1', 'city', 'state', 'zip'].some(f => updates[f] !== undefined);
     if (addressChanged) {
-      await db('customers').where({ id: req.params.id }).update({ latitude: null, longitude: null });
+      // lat/lng were already cleared inside the update transaction (gh-r46).
       // Re-geocode the customer, then mirror the fresh coords onto the primary
       // property — syncPrimaryAddress cleared them on the address edit, so without
       // this the property row would stay permanently null after every address edit.
@@ -3998,19 +4016,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         .catch(() => {});
     }
 
-    // Fire-and-forget: trigger cancellation save when deactivating a customer
-    if (updates.active === false) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          cancellationSave.initiate(req.params.id, 'default').catch(err =>
-            logger.error(`[customers] Cancellation save on deactivation failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // The automated cancellation-save SMS sequence no longer fires on
+    // deactivation (owner ruling 2026-08-29: it promised a "retention offer"
+    // and a waived setup fee that were never defined; win-back is a manual
+    // send by the owner). The workflow module and its templates stay for
+    // sequences already in flight.
 
     // Contact change events for the 360 timeline — post-commit, best-effort
     // (the recorder never throws). Compaction above puts every slot column in
@@ -4108,20 +4118,8 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
       body: notes || '', admin_user_id: req.technicianId,
     });
 
-    // Fire-and-forget: trigger cancellation save workflow when moving to churned or at_risk
-    if (stage === 'churned' || (stage === 'at_risk' && oldStage !== 'at_risk')) {
-      try {
-        const cancellationSave = require('../services/workflows/cancellation-save');
-        if (cancellationSave.initiate) {
-          const cancelReason = req.body.churnReason || 'default';
-          cancellationSave.initiate(req.params.id, cancelReason).catch(err =>
-            logger.error(`[customers] Cancellation save failed: ${err.message}`)
-          );
-        }
-      } catch (err) {
-        logger.error(`[customers] Cancellation save require failed: ${err.message}`);
-      }
-    }
+    // Stage moves to churned / at_risk no longer start the cancellation-save
+    // SMS sequence (owner ruling 2026-08-29 — see the deactivation note above).
 
     // Fire-and-forget: update health score on stage change
     try {
@@ -5092,7 +5090,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // Body: {
 //   amount: number    — non-zero; negative deducts
 //   kind:   string     — 'prepayment' | 'goodwill' | 'adjustment'
-//   method?: string    — cash/check/zelle/card/other (prepayment only)
+//   method?: string    — cash/check/zelle/venmo/paypal/other (prepayment only)
 //   note?:  string
 // }
 //
@@ -5107,7 +5105,7 @@ router.get('/:id/credits', requireAdmin, async (req, res, next) => {
 // also applies the required card surcharge); booking it as a manual cash-
 // style payments row here would grant spendable credit + paid revenue
 // without actually collecting the card.
-const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'other'];
+const CREDIT_PAYMENT_METHODS = ['cash', 'check', 'zelle', 'venmo', 'paypal', 'other'];
 
 router.post('/:id/credits', requireAdmin, async (req, res, next) => {
   try {

@@ -692,8 +692,53 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           a 0" irrigation add, or a rain-only "total", contradicting the
           "Not on file" row above (codex P2 r22). Irrigation/total-flavored
           prose is suppressed with the row; a pure rain narrative stays. */}
-      {water.explanation && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
+      {/* With a weekly plan on the card the legal-first plan is the SOLE
+          watering instruction — the legacy balance explanation ("more
+          irrigation time will help") can contradict a hold or a
+          rain-conditional plan (codex gh-r21). */}
+      {water.explanation && !(water.weekPlan && water.weekPlan.title) && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
+      ) : null}
+      {water.scheduleUnconfirmed ? (
+        <p data-testid="lawn-schedule-unconfirmed" style={{ margin: '10px 0 0', fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
+          Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type (and your weekly inches, if you use them) under Irrigation in your portal to bring your irrigation figure back.
+        </p>
+      ) : null}
+      {/* This week's watering plan (server-gated): the same decision the Monday
+          email sent, so the card and the inbox never disagree. */}
+      {/* Treatment aftercare outranks the weekly plan (lawn-diagnostic-plan:
+          the post-application label directive wins first) — when today's
+          visit carries a watering instruction, the plan is qualified as
+          what to return to afterwards, never a competing instruction.
+          The run credit is stated ONLY for a label-REQUIRED watering-in
+          (the neutral "keep your schedule" fallback is not a watering) and
+          only when this visit falls inside the snapshot's plan week — a
+          reopened older report never credits a past treatment against the
+          current week's runs (codex gh-r14). A HOLD plan has no run to
+          cover — treatment-first still, but no "counts as a run" claim
+          (codex gh-r16). */}
+      {water.weekPlan && water.weekPlan.title ? (
+        <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+          {aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true ? (
+            <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={water.weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
+              {water.weekPlan.prescribesRun === true
+                ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
+                : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
+            </div>
+          ) : null}
+          {/* A credited watering-in REDUCES the plan shown — never the
+              unreduced run under the credit note (codex gh-r24). */}
+          {(() => {
+            const credited = aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true && water.weekPlan.prescribesRun === true && water.weekPlan.afterTreatment;
+            const shown = credited ? water.weekPlan.afterTreatment : water.weekPlan;
+            return (
+              <>
+                <div data-testid="lawn-week-plan-title" style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{shown.title}</div>
+                {shown.detail ? <div data-testid="lawn-week-plan-detail" style={{ marginTop: 3 }}>{shown.detail}</div> : null}
+              </>
+            );
+          })()}
+        </div>
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (

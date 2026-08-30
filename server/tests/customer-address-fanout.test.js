@@ -37,13 +37,20 @@ function makeConn(rowsByTable) {
         updates.push({ table, ids: updateIds, patch, whereRaw: qb.__whereRaw || [] });
         return Promise.resolve((updateIds || []).length);
       },
+      // Upsert shape used by the sprinkler-settings move guard.
+      insert: (row) => { qb.__insert = row; return qb; },
+      onConflict: (col) => { qb.__conflict = col; return qb; },
+      merge: (patch) => { updates.push({ table, kind: 'upsert', row: qb.__insert, conflict: qb.__conflict, patch }); return Promise.resolve([1]); },
     };
     return qb;
   };
-  conn.raw = (sql, bindings) => ({ __raw: sql, bindings });
+  conn.raw = (sql, bindings) => { (conn.__raw ||= []).push({ sql, bindings }); return { __raw: sql, bindings }; };
   conn.__updates = updates;
   return conn;
 }
+// The lead/estimate fan-out statements only — the irrigation home-moved stamp
+// (property_preferences, gh-r19) is asserted by its own tests below.
+const fanout = (conn) => conn.__updates.filter((u) => u.table !== 'property_preferences');
 
 const BEFORE = {
   id: 'cust-1',
@@ -163,7 +170,7 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 1 });
     const leadUpdate = conn.__updates.find((u) => u.table === 'leads');
     expect(leadUpdate.ids).toEqual(['lead-match']);
     expect(leadUpdate.patch).toMatchObject({
@@ -183,7 +190,7 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: afterWithUnit }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 1 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 1 });
     expect(conn.__updates.find((update) => update.table === 'leads').patch.address)
       .toBe('4867 Tobermorey Way, Unit 4');
     expect(conn.__updates.find((update) => update.table === 'estimates').patch.address)
@@ -202,8 +209,8 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before, after }, conn);
 
-    expect(counts).toEqual({ leads: 1, estimates: 0 });
-    expect(conn.__updates[0].patch.address).toBe('123 Main St, Unit 5');
+    expect(counts).toMatchObject({ leads: 1, estimates: 0 });
+    expect(fanout(conn)[0].patch.address).toBe('123 Main St, Unit 5');
   });
 
   test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {
@@ -256,7 +263,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(1);
-    expect(conn.__updates[0].patch).toMatchObject({ city: 'Bradenton', zip: '34211' });
+    expect(fanout(conn)[0].patch).toMatchObject({ city: 'Bradenton', zip: '34211' });
   });
 
   test('an address removal propagates nothing', async () => {
@@ -270,8 +277,8 @@ describe('propagateCustomerAddressChange', () => {
       conn,
     );
 
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
-    expect(conn.__updates).toHaveLength(0);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('no matching rows → no update statements at all', async () => {
@@ -282,8 +289,8 @@ describe('propagateCustomerAddressChange', () => {
 
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
-    expect(conn.__updates).toHaveLength(0);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('a FULL-string lead snapshot is rewritten with the full address, not just the street line', async () => {
@@ -352,7 +359,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('an unchanged lead resave is a no-op write (updated_at is never bumped for nothing)', async () => {
@@ -364,7 +371,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: AFTER, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('a spelled-out state in the proposal is the same place — proposalDelivery survives', async () => {
@@ -400,7 +407,7 @@ describe('propagateCustomerAddressChange', () => {
       conn,
     );
 
-    expect(counts).toEqual({ leads: 1, estimates: 0 });
+    expect(counts).toMatchObject({ leads: 1, estimates: 0 });
     const leadPatch = conn.__updates.find((u) => u.table === 'leads').patch;
     expect(leadPatch.address).toBe('4857 Tobermory Way');
     expect(leadPatch).not.toHaveProperty('city');
@@ -417,7 +424,7 @@ describe('propagateCustomerAddressChange', () => {
     const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
 
     expect(counts.leads).toBe(0);
-    expect(conn.__updates).toHaveLength(0);
+    expect(fanout(conn)).toHaveLength(0);
   });
 
   test('the proposal patch revalidates the proposal address at update time (concurrent-save guard)', async () => {
@@ -546,6 +553,80 @@ describe('propagateCustomerAddressChange', () => {
   test('missing customer id is a safe no-op', async () => {
     const conn = makeConn({ leads: [], estimates: [] });
     const counts = await propagateCustomerAddressChange({ before: null, after: null }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0 });
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+  });
+});
+
+describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
+  test('a primary-address move stamps property_preferences.irrigation_home_changed_at', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: AFTER }, conn);
+    const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
+    expect(stamp).toBeTruthy();
+    expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    // The move stamp + a reset of the per-field confirmation set — never the settings themselves.
+    expect(Object.keys(stamp.patch)).toEqual(['irrigation_home_changed_at', 'irrigation_confirmed_fields']);
+    expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
+    expect(counts.property_preferences).toBe(1); // mock: no prefs row → the guard is upserted
+  });
+  test('clearing the primary address stamps the move (no lead/estimate propagation, as before)', async () => {
+    const conn = makeConn({ leads: [{ id: 'l1', address: BEFORE.address_line1 }], estimates: [] });
+    const counts = await propagateCustomerAddressChange({ before: BEFORE, after: { ...BEFORE, address_line1: '' } }, conn);
+    expect(counts).toMatchObject({ leads: 0, estimates: 0 });
+    const stamp = conn.__updates.find((u) => u.table === 'property_preferences');
+    expect(stamp.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(stamp.patch.irrigation_confirmed_fields).toBe('[]');
+    expect(fanout(conn)).toHaveLength(0);
+  });
+  test('a unit-to-unit move in the same building stamps too (a unit is a distinct premise)', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Unit 4' }, after: { ...BEFORE, address_line2: 'Unit 7' } }, conn);
+    expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeTruthy();
+  });
+  test('markSprinklerSettingsMoved is the ONE writer of the move guard — fan-out, merge and the primary-residence promotion all use it (gh-r26)', async () => {
+    const { markSprinklerSettingsMoved } = require('../services/customer-address-fanout');
+    const conn = makeConn({});
+    await markSprinklerSettingsMoved('cust-1', conn);
+    // Takes the prefs PUT's customer-scoped advisory lock first…
+    expect(conn.__raw[0]).toEqual({ sql: 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', bindings: ['property-preferences', 'cust-1'] });
+    const w = conn.__updates.find((u) => u.table === 'property_preferences' && !u.kind);
+    expect(w.patch.irrigation_home_changed_at).toBeInstanceOf(Date);
+    expect(w.patch.irrigation_confirmed_fields).toBe('[]');
+    // …and, with no preferences row (the mock's update matched 0), upserts a minimal one carrying only the stamp.
+    const up = conn.__updates.find((u) => u.table === 'property_preferences' && u.kind === 'upsert');
+    expect(up.conflict).toBe('customer_id');
+    expect(Object.keys(up.row).sort()).toEqual(['customer_id', 'irrigation_confirmed_fields', 'irrigation_home_changed_at']);
+    const fs = require('fs');
+    const path = require('path');
+    expect(fs.readFileSync(path.join(__dirname, '../services/property-role-proposals.js'), 'utf8')).toMatch(/markSprinklerSettingsMoved\(customerId, trx\)/);
+    expect(fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8')).toMatch(/fanout\.markSprinklerSettingsMoved\(winnerId, sp\)/);
+    const src = fs.readFileSync(path.join(__dirname, '../services/customer-address-fanout.js'), 'utf8');
+    expect(src.match(/markSprinklerSettingsMoved\(customerId, conn\)/g)).toHaveLength(2);
+  });
+  test('homesDiffer is the shared premise test (street, unit, zip, city; normalized)', () => {
+    const { homesDiffer } = require('../services/customer-address-fanout');
+    expect(homesDiffer(BEFORE, AFTER)).toBe(true);
+    expect(homesDiffer(BEFORE, { ...BEFORE, address_line1: BEFORE.address_line1.toUpperCase() })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: '#4' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: 'Apt 7' })).toBe(true);
+    expect(homesDiffer(BEFORE, { ...BEFORE, zip: '34211-1234' })).toBe(false);
+    // gh-r29: postal-city aliases on the same ZIP are the same home; city decides only without a ZIP compare.
+    expect(homesDiffer({ ...BEFORE, city: 'Bradenton', zip: '34211' }, { ...BEFORE, city: 'Lakewood Ranch', zip: '34211' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, city: 'Bradenton', zip: '' }, { ...BEFORE, city: 'Sarasota', zip: '' })).toBe(true);
+    // gh-r30: completing a blank city/ZIP on the same street is not a move; missing evidence is never contradictory.
+    expect(homesDiffer({ ...BEFORE, city: '', zip: '' }, { ...BEFORE, city: 'Bradenton', zip: '34211' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, city: 'Bradenton', zip: '' }, { ...BEFORE, city: '', zip: '34211' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, zip: '34211' }, { ...BEFORE, zip: '34236' })).toBe(true);
+    // gh-r23: suffix spelling is a correction, never a move.
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main Street' }, { ...BEFORE, address_line1: '123 Main St' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St' }, { ...BEFORE, address_line1: '123 Main Ave' })).toBe(true);
+    // gh-r24: an inline unit moved to line 2 is the same premise; a different inline unit is not.
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 4' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St Apt 4', address_line2: '' }, { ...BEFORE, address_line1: '123 Main St', address_line2: 'Apt 7' })).toBe(true);
+  });
+  test('a formatting-only correction of the same home (case, unit spelling) does not stamp', async () => {
+    const conn = makeConn({ leads: [], estimates: [] });
+    await propagateCustomerAddressChange({ before: { ...BEFORE, address_line2: 'Apt 4' }, after: { ...BEFORE, address_line1: BEFORE.address_line1.toUpperCase(), address_line2: '#4' } }, conn);
+    expect(conn.__updates.find((u) => u.table === 'property_preferences')).toBeUndefined();
   });
 });

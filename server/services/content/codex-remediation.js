@@ -1070,6 +1070,60 @@ function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
  *
  * Returns { ok } or { ok:false, reason }. Every failure path is a park.
  */
+// Body-image contract on a REMEDIATED body, shared by both lanes: the
+// publisher inserted the in-article images before the PR opened; a fix that
+// rewrites a nearby section can drop one, and nothing else recounts. Same
+// validity contract as the publisher, checked against the PR BRANCH (where
+// the generated body-N.webp files live until merge): no hero in the body,
+// every ref committed, ≥ minimum distinct sources, distinct PICTURES (dHash).
+// Gate off → ok.
+// `mdx`: the target file's flavour (false = flat `.md`, where a raw HTML
+// block hides the Markdown inside it) — the same rendering the publisher's
+// own checks and pages-poll's HEAD check use for that file (GH r25).
+// `slug`: the post's own managed-namespace key(s), same contract as the
+// publisher's validateBodyImageRefs — without it a fix introducing another
+// post's body-N would pass here and strand at the merge-time HEAD gate
+// (GH r29).
+async function revalidateBodyImagesForFix({ body, heroSrc = '', prHeadRef = null, mdx = true, slug = null }, deps = {}) {
+  let bodyImagesOn = false;
+  try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
+  if (!bodyImagesOn) return { ok: true };
+  const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+  const gh = deps.gh || ghDefault;
+  if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
+  const getFile = (path) => gh.getFile(path, prHeadRef);
+  const valid = await pub.validateBodyImageRefs({ body, heroSrc, getFile, mdx, slug });
+  if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
+  if (valid.distinct < pub.BODY_IMAGE_MIN) {
+    return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
+  }
+  const srcs = [...new Set(pub.bodyImageRefs(body, { mdx }).map((r) => r.src))];
+  const pictures = await pub.assertDistinctPictures({ srcs, heroSrc, getFile });
+  if (!pictures.ok) return { ok: false, reason: `body images: ${pictures.reason}` };
+  return { ok: true };
+}
+// Scheduler-lane variant: the fixed MARKDOWN is all the lane has (no run /
+// draft payload) — hero src and body come from the fix itself.
+async function revalidateBodyImagesForMarkdown(fixedMarkdown, { prHeadRef = null, mdx = true, slug = null } = {}, deps = {}) {
+  let parsed;
+  try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
+  const data = (parsed && parsed.data) || {};
+  const heroSrc = (data.hero_image && typeof data.hero_image === 'object' && data.hero_image.src) || '';
+  // Own namespace keys from the FIXED frontmatter (route + stamped category
+  // route), plus whatever key(s) the caller derives (file path) — any
+  // matches; only a clearly foreign namespace fails (GH r29).
+  const keys = [...(Array.isArray(slug) ? slug : slug ? [slug] : [])];
+  try {
+    const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+    const p0 = pub.slugPathFromFrontmatter(data);
+    keys.push(p0);
+    if (typeof pub.categoryRouteSlug === 'function' && typeof pub.normalizeAutonomousCategory === 'function') {
+      keys.push(pub.categoryRouteSlug(p0, pub.normalizeAutonomousCategory(data, {})));
+    }
+  } catch (_) { /* no safe frontmatter slug — caller keys only */ }
+  return revalidateBodyImagesForFix({ body: String((parsed && parsed.content) || '').trim(), heroSrc, prHeadRef, mdx, slug: keys }, deps);
+}
+
 async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
   try {
     if (!run || !run.id) return { ok: false, reason: 'autonomous run row unavailable' };
@@ -1271,6 +1325,25 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // fix's verdict atomically with the head re-pin (PR r13 P1): merge
     // governance reads the run's comparison_table_result, and a fix that
     // INTRODUCES a named competitor must flip the run to governed.
+    // 5. Body-image minimum (owner rule: ≥3 images per post). The publisher
+    //    inserted the in-article images before the PR opened; a fix that
+    //    rewrites a nearby section can drop one, and nothing else recounts.
+    {
+      const heroSrc = (fixedData.hero_image && typeof fixedData.hero_image === 'object' && fixedData.hero_image.src)
+        || (draft.frontmatter && draft.frontmatter.hero_image && draft.frontmatter.hero_image.src) || '';
+      const slugKeys = [];
+      try {
+        const pubInt = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+        const p0 = pubInt.slugPathFromFrontmatter(fixedData.slug ? fixedData : (draft.frontmatter || {}));
+        slugKeys.push(p0);
+        if (typeof pubInt.categoryRouteSlug === 'function' && typeof pubInt.normalizeAutonomousCategory === 'function') {
+          slugKeys.push(pubInt.categoryRouteSlug(p0, pubInt.normalizeAutonomousCategory(fixedData.slug ? fixedData : (draft.frontmatter || {}), {})));
+        }
+      } catch (_) { /* no safe slug — namespace rule not applied */ }
+      const bodyImages = await revalidateBodyImagesForFix({ body: draft.body, heroSrc, prHeadRef: deps.prHeadRef || null, slug: slugKeys }, deps);
+      if (!bodyImages.ok) return bodyImages;
+    }
+
     return { ok: true, comparisonResult };
   } catch (err) {
     return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };
@@ -1522,7 +1595,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the caller's parent check must not have its unrelated changes blessed
     // by the post-fix re-pin (PR r16 P1).
     expectedParentSha = null,
-    onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
+    onPark = null, revalidateFix = null, revalidateBodyImages = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
 
@@ -1820,6 +1893,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
+  // Body-image contract on the fixed body (scheduler lane — the autonomous
+  // lane covers it inside revalidateFix). Fail or throw → park.
+  if (typeof revalidateBodyImages === 'function') {
+    let recheck;
+    try { recheck = await revalidateBodyImages(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
+    if (!recheck || recheck.ok !== true) {
+      return park(db, prNumber, `fix failed body-image contract: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
+    }
+  }
 
   // Last-instant pre-push guard, mirroring the merge path's: the LLM call and
   // gate re-runs above take real time, and the lane's claim (queue row /
@@ -2084,6 +2166,21 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // Last-instant claim check before the branch push (the CAS below guards
     // the row write; this guards the BRANCH write): skip the push entirely
     // when the row left the publishing claim or was repointed mid-flight.
+    // The fixed body must still carry its ≥ minimum distinct, committed body
+    // pictures (gate on) — checked against the PR branch, like the
+    // autonomous lane's validateAutonomousRunGates step 5.
+    // Rendered as the scheduler's file renders: publishAstro writes a flat
+    // `.md` (scheduledBlogFilePathForPost), whose raw HTML blocks hide the
+    // Markdown inside them — same flavour pages-poll's HEAD check applies.
+    revalidateBodyImages: async (fixedMarkdown) => {
+      const schedPath = String((deps.astroPublisher || require('../content-astro/astro-publisher')).scheduledBlogFilePathForPost(row) || '');
+      return revalidateBodyImagesForMarkdown(fixedMarkdown, {
+        prHeadRef: row.astro_branch_name,
+        mdx: !/\.md$/i.test(schedPath),
+        // File-path namespace key; ForMarkdown adds the frontmatter routes.
+        slug: [schedPath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, '')],
+      }, deps);
+    },
     prePushCheck: async () => {
       const fresh = await db('blog_posts').where({ id: row.id }).first();
       return !!fresh && fresh.publish_status === 'publishing'
@@ -2096,7 +2193,14 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
     onRemediated: async ({ markdown, body, datesRestamped, frontmatterChanges }) => {
-      const patch = { content: body, updated_at: new Date() };
+      // blog_posts.content is prose-only: the publisher-managed body-N.webp
+      // references exist on the PR branch (and on main only after the
+      // merge) — mirroring them would make a republish after a closed/
+      // failed PR fail on assets that never landed. publishAstro re-inserts
+      // (reusing the live pictures) on the next publish.
+      const pub = deps.astroPublisher || require('../content-astro/astro-publisher');
+      const mirrored = typeof pub.stripManagedBodyImagesForPost === 'function' ? pub.stripManagedBodyImagesForPost(body, row) : body;
+      const patch = { content: mirrored, updated_at: new Date() };
       // Whitelisted frontmatter fixes mirror into their row columns for the
       // same reason the body does: publishAstro rebuilds frontmatter from
       // blog_posts on a republish, so an unmirrored meta_description /
@@ -2386,7 +2490,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
     revalidateFix: async (fixedMarkdown) => {
-      const r = await revalidate(fixedMarkdown, run, deps);
+      const r = await revalidate(fixedMarkdown, run, { ...deps, prHeadRef: (pr && pr.head && pr.head.ref) || deps.prHeadRef || null });
       lastComparisonVerdict = (r && r.ok === true && r.comparisonResult) ? r.comparisonResult : null;
       return r;
     },
@@ -2397,6 +2501,8 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
 }
 
 module.exports = {
+  revalidateBodyImagesForFix,
+  revalidateBodyImagesForMarkdown,
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,

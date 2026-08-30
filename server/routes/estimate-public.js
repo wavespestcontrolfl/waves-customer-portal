@@ -8689,6 +8689,20 @@ function isCommercialAutoAcceptEstimate(estimate = {}) {
   return recurringRows.some(isCommercialSvc);
 }
 
+// DISPLAY-ONLY commercial identity for scoped one-time rows priced under
+// GATE_COMMERCIAL_ONETIME_SCOPED (codex #3594 r2 P1): those rows keep ordinary
+// service keys (pre_slab_termiticide, bed_bug, rodent_exclusion …), one-time
+// prices and no estimatedPricing, so isCommercialAutoAcceptEstimate — the
+// APPROVAL-ONLY classifier (no slot, no deposit, manual billing) — must NOT
+// learn them: a priced commercial one-time still books a slot and takes the
+// deposit like any one-time. This predicate feeds only cta.commercialOneTimePriced,
+// which the client folds into its commercial COPY-pack detector.
+function isCommercialOneTimePricedEstimate(estimate = {}) {
+  let data = estimate.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+  return require('../services/estimate-converter').estimateHasCommercialOneTime(data || {});
+}
+
 // The commercial deposit exemption covers accepts that mint NOTHING at accept
 // time: the recurring commercial program is manually invoiced after on-site
 // confirmation (held or not), and an UNinvoiced one-time commercial accept's
@@ -10340,6 +10354,22 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
+
+      // Commercial identity for a ONE-TIME accept (codex #3594 r2 P1): the
+      // one-time path below skips EstimateConverter entirely (`treatAsOneTime`),
+      // so the converter's one-way commercial stamp never runs for a
+      // structurally one-time-only scoped estimate (the motivating pre-slab
+      // case) — an existing customer stayed residential and a newly minted one
+      // got no property_type, and InvoiceService then zeroed the FL tax on the
+      // accepted taxable line. Same one-way rule as the converter: only ever
+      // SET commercial, inside this accept transaction.
+      if (customerId && treatAsOneTime
+        && require('../services/estimate-converter').estimateHasCommercialOneTime(estData)) {
+        await trx('customers')
+          .where({ id: customerId })
+          .whereRaw("coalesce(property_type, '') <> 'commercial'")
+          .update({ property_type: 'commercial' });
       }
 
       // Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): the verbatim
@@ -23744,6 +23774,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
         commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
+        // Scoped one-time commercial rows (GATE_COMMERCIAL_ONETIME_SCOPED):
+        // commercial COPY identity only — never the approval-only accept lane
+        // (codex #3594 r2 P1).
+        commercialOneTimePriced: isCommercialOneTimePricedEstimate(estimate),
         // Commercial glass release (GATE_ESTIMATE_COMMERCIAL_GLASS): the
         // client activates the commercial copy pack + on-page proposal
         // section only when the server affirms — fail-closed like
@@ -23927,6 +23961,7 @@ module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
+module.exports.isCommercialOneTimePricedEstimate = isCommercialOneTimePricedEstimate;
 module.exports.acceptanceServiceLists = acceptanceServiceLists;
 module.exports.isNonBillableOneTimeRow = isNonBillableOneTimeRow;
 module.exports.withSupplementedRecurringServices = withSupplementedRecurringServices;

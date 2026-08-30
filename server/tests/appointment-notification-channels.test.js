@@ -15,6 +15,7 @@ jest.mock('../services/appointment-email', () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
@@ -22,7 +23,8 @@ const NotificationService = require('../services/notification-service');
 const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
-const { apptChannel, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
+const { apptChannel, resolve72hChannel, isOneTimeVisit, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
+const { isEnabled } = require('../config/feature-gates');
 
 // Minimal knex-style chainable mock. first() resolves null so the
 // no-reachable-channel alert dedupe check finds no prior row and proceeds.
@@ -58,6 +60,96 @@ describe('apptChannel', () => {
     expect(apptChannel(null)).toBe('sms');
     expect(apptChannel(undefined)).toBe('sms');
     expect(apptChannel('phone')).toBe('sms');
+  });
+});
+
+describe('resolve72hChannel — email-first promotion, one-time visits only (GATE_REMINDER_72H_EMAIL_FIRST)', () => {
+  // scheduled_services stub: first() resolves the given row.
+  const ssDb = (row) => {
+    db.mockImplementation((table) => {
+      const q = chain();
+      if (table === 'scheduled_services') q.first = jest.fn(async () => row);
+      return q;
+    });
+  };
+  const oneTimeRow = { id: 'ss1', is_recurring: false, recurring_parent_id: null, recurring_pattern: null };
+
+  test('gate OFF: one-time visit with default/sms preference stays sms', async () => {
+    isEnabled.mockImplementation(() => false);
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+    await expect(resolve72hChannel(null, 'ss1')).resolves.toBe('sms');
+  });
+
+  test('gate ON: one-time visit with default/sms preference promotes to email', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('email');
+    await expect(resolve72hChannel(undefined, 'ss1')).resolves.toBe('email');
+    expect(isEnabled).toHaveBeenCalledWith('reminder72hEmailFirst');
+  });
+
+  test('gate ON: recurring lineage never promotes (is_recurring / booster parent / pattern)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb({ ...oneTimeRow, is_recurring: true });
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+    // Series "booster" visit: is_recurring=false WITH recurring_parent_id set
+    // (canonical lineage test, routes/pay-v2.js) — a bare is_recurring check
+    // would wrongly promote this row.
+    ssDb({ ...oneTimeRow, recurring_parent_id: 'parent1' });
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+    ssDb({ ...oneTimeRow, recurring_pattern: 'monthly' });
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+  });
+
+  test('gate ON: explicit email/both preferences pass through untouched (no lineage lookup)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('email', 'ss1')).resolves.toBe('email');
+    await expect(resolve72hChannel('both', 'ss1')).resolves.toBe('both');
+  });
+
+  test('fail closed: unreadable prefs row never promotes (hook P1 — email leg bypasses the consent validator)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { prefsUnavailable: true })).resolves.toBe('sms');
+    // Explicit email/both still pass through — those ARE the stored contract
+    // the existing email path already honors on unavailable prefs.
+    await expect(resolve72hChannel('email', 'ss1', { prefsUnavailable: true })).resolves.toBe('email');
+  });
+
+  test('explicit Text choice never promotes (Codex #3588 P1 — portal delivery-method control)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { explicitChoice: true })).resolves.toBe('sms');
+    // Un-stamped default still promotes.
+    await expect(resolve72hChannel('sms', 'ss1', { explicitChoice: false })).resolves.toBe('email');
+  });
+
+  test('portal-wide email opt-out never promotes (email leg is transactional_required and skips the toggle)', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(oneTimeRow);
+    await expect(resolve72hChannel('sms', 'ss1', { emailEnabled: false })).resolves.toBe('sms');
+    await expect(resolve72hChannel('sms', 'ss1', { emailEnabled: true })).resolves.toBe('email');
+  });
+
+  test('fail-safe: missing row, missing id, or thrown lookup keeps sms', async () => {
+    isEnabled.mockImplementation((k) => k === 'reminder72hEmailFirst');
+    ssDb(null); // no scheduled_services row
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+    await expect(resolve72hChannel('sms', null)).resolves.toBe('sms');
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(resolve72hChannel('sms', 'ss1')).resolves.toBe('sms');
+  });
+
+  test('isOneTimeVisit truth table', async () => {
+    ssDb(oneTimeRow);
+    await expect(isOneTimeVisit('ss1')).resolves.toBe(true);
+    ssDb({ ...oneTimeRow, is_recurring: true });
+    await expect(isOneTimeVisit('ss1')).resolves.toBe(false);
+    ssDb(null);
+    await expect(isOneTimeVisit('ss1')).resolves.toBe(false);
+    await expect(isOneTimeVisit(null)).resolves.toBe(false);
   });
 });
 
@@ -197,6 +289,25 @@ describe('getReminderPrefs account-level channel resolution', () => {
     expect(prefs.reminder72hChannel).toBe('email');
     // Toggles still come from the property's own row.
     expect(prefs.serviceReminder72h).toBe(true);
+  });
+
+  test('the 72h explicit-choice stamp rides the owner-resolved row (secondary profile honors the owner)', async () => {
+    setDbQueues({
+      notification_prefs: [
+        firstChain({ service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: false }),
+        // Owner deliberately chose Text — the stamp must surface even though
+        // the resolved channel value is the ambiguous 'sms'.
+        firstChain({ service_reminder_72h_channel: 'sms', service_reminder_72h_channel_explicit: true }),
+      ],
+      customers: [
+        firstChain({ account_id: 'acct-1', is_primary_profile: false }),
+        firstChain({ id: 'primary-1' }),
+      ],
+    });
+
+    const prefs = await getReminderPrefs('secondary-1');
+    expect(prefs.reminder72hChannel).toBe('sms');
+    expect(prefs.reminder72hChannelExplicit).toBe(true);
   });
 
   test('a FAILED owner-profile resolution marks prefs unavailable — the email fallback fails closed (Codex #3361 r28 P1)', async () => {
