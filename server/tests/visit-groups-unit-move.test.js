@@ -761,6 +761,20 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(assignDispatchJob).not.toHaveBeenCalled();
   });
 
+  test('a sibling whose shifted window would cross midnight is refused before any write — shiftClock must not wrap it into an early-morning window on the same date (codex r24 P2)', async () => {
+    // 14:00–19:00 anchor chained to a 19:00–20:00 sibling, anchor moved to 19:00–20:00 (+5h) ⇒ sibling 00:00–01:00 next day
+    db.__script = script({ visit: { ...VISIT, window_start: '14:00', window_end: '20:00' }, members: [member('a', { window_start: '14:00', window_end: '19:00' }), member('b', { window_start: '19:00', window_end: '20:00' })] });
+    const rebooker = fakeRebooker();
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '19:00-20:00', initiatedBy: 'admin' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b', isOperational: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(db.__calls.some((c) => c.op === 'update' || c.op === 'insert')).toBe(false);
+    // a negative offset below 00:00 is refused the same way
+    db.__script = script({ visit: { ...VISIT, window_start: '08:00', window_end: '10:00' }, members: [member('a', { window_start: '09:00', window_end: '10:00' }), member('b', { window_start: '08:00', window_end: '09:00' })] });
+    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '00:00-01:00', initiatedBy: 'admin' }))
+      .rejects.toMatchObject({ code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
+  });
+
   test('a live completion claim on ANY member freezes the move under the plan lock (local codex audit P0) — canSplit cannot see service_completion_attempts', async () => {
     const { LIVE_COMPLETION_CLAIM_STATUSES } = require('../services/visit-groups');
     expect(LIVE_COMPLETION_CLAIM_STATUSES).toEqual(['pending', 'side_effects_pending', 'side_effects_running', 'succeeded']);

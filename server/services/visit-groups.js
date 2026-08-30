@@ -1719,6 +1719,19 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             throw Object.assign(new Error(`Cannot move this stop: a grouped service's time is not allowed on the new slot — ${e.message}`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: m.id, isOperational: true });
           }
         };
+        // A shifted bound must stay inside the target day (codex r24 P2):
+        // shiftClock wraps modulo 24h, so a positive offset pushing a late
+        // sibling past midnight would derive an "early-morning" window the
+        // admin rules accept — on the same date, no longer one physical stop.
+        const shiftInDay = (row, bound) => {
+          const base = toMinutes(bound);
+          if (base == null || !Number.isFinite(delta)) return bound || null;
+          const total = base + delta;
+          if (total < 0 || total >= 1440) {
+            throw Object.assign(new Error(`Cannot move this stop: a grouped service's time would cross midnight on the new slot (${bound} shifted by ${delta > 0 ? '+' : ''}${delta} min) — move it separately`), { statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: row.id, isOperational: true });
+          }
+          return shiftClock(bound, delta);
+        };
         const targets = members.map((m) => {
           const isPrimary = m.id === primary.id;
           let window = null;
@@ -1727,8 +1740,8 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           if (win.start && (m.window_start || isPrimary)) {
             // The tapped row takes the requested slot even when it was
             // windowless (codex r3); a windowless sibling stays windowless.
-            targetStart = isPrimary ? win.start : shiftClock(m.window_start, delta);
-            targetEnd = isPrimary ? (win.end || (m.window_end ? shiftClock(m.window_end, delta) : null)) : shiftClock(m.window_end, delta);
+            targetStart = isPrimary ? win.start : shiftInDay(m, m.window_start);
+            targetEnd = isPrimary ? (win.end || (m.window_end ? shiftInDay(m, m.window_end) : null)) : shiftInDay(m, m.window_end);
             window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
             // A DERIVED sibling window must pass the admin window rules (on
             // the hour, ends by the day cutoff) BEFORE the first member

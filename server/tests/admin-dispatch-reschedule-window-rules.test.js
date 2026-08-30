@@ -126,6 +126,8 @@ describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
     expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
     expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({ seriesPolicy: 'single' });
     expect(SmartRebooker.reschedule.mock.calls[0][5]).not.toHaveProperty('expectOccurrenceIds');
+    // the observed membership rides in the rebooker CAS (codex r24 P1): an anchor detached since misses instead of moving alone un-acked
+    expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject({ visit_id: '11111111-1111-4111-8111-111111111111' });
     // an UNGROUPED recurring anchor keeps the disclosure contract (no seriesPolicy override)
     jest.clearAllMocks();
     mockVisitRow = { ...recurringRow(), visit_id: null };

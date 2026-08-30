@@ -6626,10 +6626,25 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes');
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
   if (!row || row.is_recurring !== true) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
+  // Grouped row (local gate r28): the handler's own grouped slot guard runs
+  // AFTER this planner strips the slot keys from the body, so it would see
+  // a same-slot edit, save the other fields, and only then have the unit
+  // mover refuse the implicit series move — a partial save. Refuse HERE,
+  // before the body is touched and before any write (same message as the
+  // handler's guard).
+  if (row.visit_id) {
+    const members = await require('../services/visit-groups').openMembers(db, row.visit_id);
+    if (members.length >= 2) {
+      throw Object.assign(
+        httpError(409, 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here. Nothing was changed.'),
+        { code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' },
+      );
+    }
+  }
   // Canonical window intake — the same presence/clear/malformed semantics
   // the handler applies: a half-cleared window is left for the handler's own
   // 422 (nothing moves); an explicit clear of BOTH bounds stays the

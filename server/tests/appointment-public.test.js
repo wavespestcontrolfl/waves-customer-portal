@@ -412,6 +412,16 @@ describe('grouped confirm + calendar guards (codex #3609 r12)', () => {
     expect(confirmedRowStillShown(cur, svc, {})).toBe(false);
   });
 
+  test('calendar eligibility is the page verdict: a chained stop stays eligible after an earlier member\'s own window ended; ungrouped keeps the row rule (codex r24 P2)', () => {
+    const { calendarEligible } = appointmentRouter._test;
+    const first = { status: 'confirmed', scheduled_date: '2026-08-05', window_start: '09:00:00' };
+    const at1130 = new Date('2026-08-05T15:30:00.000Z'); // 11:30 ET — the first member's 09–11 promise has ended
+    expect(calendarEligible(first, {}, at1130)).toBe(false);
+    expect(calendarEligible(first, { visit: { state: 'upcoming', phase: null } }, at1130)).toBe(true);
+    expect(calendarEligible(first, { visit: { state: 'in_progress', phase: 'en_route' } }, at1130)).toBe(false);
+    expect(calendarEligible({ ...first, status: 'cancelled' }, { visit: { state: 'upcoming', phase: null } }, at1130)).toBe(false);
+  });
+
   test('the calendar file starts at the VISIT start when grouped, the row start otherwise', () => {
     expect(calendarWindowStart({ window_start: '10:00:00' }, { visit: { windowStart: '09:00' } })).toBe('09:00');
     expect(calendarWindowStart({ window_start: '10:00:00' }, {})).toBe('10:00');

@@ -14981,6 +14981,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // no series acknowledgement is owed. "Reschedule series" (scope
         // 'series') keeps its own refusal for grouped anchors.
         rescheduleOptions.seriesPolicy = 'single';
+        // The observed membership rides in the rebooker's CAS (codex r24 P1):
+        // an anchor detached from its visit between this read and the move
+        // would otherwise reach the rebooker ungrouped WITH seriesPolicy
+        // 'single' and move alone without the acknowledgement this route
+        // still requires for ungrouped anchors — it now misses the CAS
+        // (409, re-submit) instead.
+        rescheduleOptions.expect = { ...(rescheduleOptions.expect || {}), visit_id: job.visit_id };
       } else if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
         let preview = null;
         try {

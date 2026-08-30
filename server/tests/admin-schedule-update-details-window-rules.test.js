@@ -184,6 +184,24 @@ describe('date-only moves + the scheduling-field CAS', () => {
     expect(status).toBe(418);
   });
 
+  test('collective gate on: a GROUPED recurring row\'s date move is refused inside the planner — before the body is stripped, before any write (local gate r28 / codex #3609)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    try {
+      db.mockImplementation(() => {
+        const c = chain({ ...STORED, is_recurring: true, status: 'confirmed', visit_id: 'visit-1' });
+        c.whereNotIn = jest.fn().mockReturnThis();
+        c.select = jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'confirmed' }, { id: 'svc-2', status: 'pending' }]); // openMembers
+        return c;
+      });
+      const { status, body } = await put({ scheduledDate: '2099-02-01', notes: 'gate check', seriesAck: true, seriesAckIds: ['x'] });
+      expect(status).toBe(409);
+      expect(body.code).toBe('VISIT_EDIT_SCHEDULE_UNSUPPORTED');
+      expect(db.transaction).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    }
+  });
+
   test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {
     db.mockImplementation(() => chain({ ...STORED, window_start: null, window_end: null }));
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });

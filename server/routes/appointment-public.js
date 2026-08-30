@@ -424,6 +424,14 @@ async function confirmGroupedSiblings(trx, svc) {
   return done;
 }
 
+// Calendar eligibility = the page's own verdict (codex r24 P2): grouped ⇒
+// the STOP's state (an earlier chained member's two-hour window can have
+// ended while the stop is still upcoming); ungrouped ⇒ the row's quoted
+// window (calendarIcsAvailable).
+function calendarEligible(svc, visitInfo, now = new Date()) {
+  return visitInfo?.visit ? pageStateForGroup(svc, visitInfo, now).state === 'upcoming' : calendarIcsAvailable(svc, now);
+}
+
 // The calendar file's DTSTART: the visit's shared start when grouped (the
 // arrival promise the page shows), the row's own start otherwise.
 function calendarWindowStart(svc, visitInfo) {
@@ -755,9 +763,6 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
-    if (!calendarIcsAvailable(svc)) return res.status(404).json({ error: 'Not found' });
-
-    const date = apptDateStr(svc.scheduled_date);
     // Grouped visit: the event starts at the STOP's canonical start, the
     // same window the page promised — a later member's link must not file a
     // calendar event that disagrees with its own page (codex r12).
@@ -766,6 +771,13 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     // membership cannot be read (fail closed) — the event would name a
     // service whose slot is stale.
     if (visitInfo.visitUnknown || visitInfo.visit?.pendingRebook) return res.status(404).json({ error: 'Not found' });
+    // Eligibility is the SAME verdict the page shows (codex r24 P2): for a
+    // grouped stop that is the stop's state (an earlier chained member's own
+    // two-hour window can have ended while the stop is still upcoming);
+    // ungrouped, the row's own quoted window.
+    if (!calendarEligible(svc, visitInfo)) return res.status(404).json({ error: 'Not found' });
+
+    const date = apptDateStr(svc.scheduled_date);
     const start = calendarWindowStart(svc, visitInfo);
 
     // ET wall-clock -> real instants, so the event lands correctly in any
@@ -1065,6 +1077,7 @@ router._test = {
   visitServicesFor,
   confirmGroupedSiblings,
   calendarWindowStart,
+  calendarEligible,
   calendarUid,
   calendarSummaryLabel,
   readConfirmedAnchorLocked,
