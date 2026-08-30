@@ -139,6 +139,17 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(wdo.quoted).toMatchObject({ quoteRequired: false });
   });
 
+  test('markerless engineInputs (click-mint / v1 shape) still freeze the price-bearing property facts', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-3', status: 'sent', source: 'service_report_cta',
+      monthly_total: '80.00', annual_total: '960.00', onetime_total: null,
+      estimate_data: { engineInputs: { homeSqFt: 1800, lotSqFt: 6000, stories: 2 } },
+    });
+    expect(audit.quote.property).toMatchObject({ homeSqFt: 1800, lotSqFt: 6000, stories: 2 });
+    // Missing fields are null, never a fabricated 0.
+    expect(audit.quote.property.measuredTurfSf).toBeNull();
+  });
+
   test('a bare legacy payload builds without a crash and with null-safe provenance', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-2', status: 'sent', monthly_total: null, annual_total: null,

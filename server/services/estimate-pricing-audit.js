@@ -213,10 +213,17 @@ function quotedFieldsFrom(item) {
 
 function quoteProvenanceFrom(estimate, data, result) {
   const { profileFromEstimateData } = require('./estimate-winloss');
-  const profile = profileFromEstimateData(data) || {};
+  // profileFromEstimateData is a LOOKUP classifier — it rejects markerless
+  // engineInputs on purpose (no provenance to classify). For freezing the
+  // price-bearing inputs that concern doesn't apply: click-mints and v1
+  // rows store their exact facts in engineInputs/inputs without markers,
+  // so those are the fallback (codex pre-push P1).
+  const profile = profileFromEstimateData(data) || data?.engineInputs || data?.inputs || {};
   const recurring = result?.recurring || {};
   const bundle = data?.sendSnapshot?.pricingBundle || null;
-  const number = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  // Missing is null, never 0 — Number(null) is 0 and would fabricate a
+  // zero-sqft property (codex pre-push P1).
+  const number = (v) => (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
   return {
     renderedAt: data?.sendSnapshot?.renderedAt || null,
     source: estimate.source || null,

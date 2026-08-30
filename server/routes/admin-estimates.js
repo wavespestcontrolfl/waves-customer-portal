@@ -1638,12 +1638,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             // an audit-snapshot failure never unwinds a delivered send.
             try {
               const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
-              let siblingData = sibling.estimate_data;
-              if (typeof siblingData === 'string') { try { siblingData = JSON.parse(siblingData); } catch { siblingData = {}; } }
-              await saveEstimatePricingAuditSnapshot(
-                { ...sibling, estimate_data: { ...(siblingData || {}), ...siblingSnapshotPatch } },
-                { trigger: 'group_send' },
-              );
+              // Re-read the PUBLISHED row like the anchor path does — the
+              // pre-claim `sibling` still carries draft/scheduled status and
+              // stale send metadata (codex pre-push P1).
+              const publishedSibling = await db('estimates').where({ id: sibling.id }).first();
+              if (publishedSibling) {
+                await saveEstimatePricingAuditSnapshot(publishedSibling, { trigger: 'group_send' });
+              }
             } catch (auditErr) {
               logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
             }
