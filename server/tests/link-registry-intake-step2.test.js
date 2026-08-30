@@ -87,6 +87,15 @@ describe('parseOpportunities (step 2 shape)', () => {
     ] });
   });
 
+  test('a recognized CSV cell is ONE reference kept whole: commas / parentheses inside a quoted Website cell reach the durable item and the submission hint intact', () => {
+    const csv = 'Name,Website,Action\n"Acme, Inc.","https://sample.example/a,b(c)",Claim\nnot a url at all,Skip me\n';
+    const r = parseOpportunities(csv);
+    expect(r.candidates).toEqual([expect.objectContaining({ domain: 'sample.example', url: 'https://sample.example/a,b(c)', raws: ['https://sample.example/a,b(c)'], note: 'Acme, Inc. | Claim' })]);
+    expect(r.dropped).toEqual([]); // a cell that does not start like a host yields nothing (free-text tokenizer finds no host in it either)
+    // free text still tokenizes on the same characters
+    expect(parseOpportunities('see sample.example/a,b and more').candidates[0]).toEqual(expect.objectContaining({ domain: 'sample.example', url: 'https://sample.example/a' }));
+  });
+
   test('plain text without a header is not treated as CSV', () => {
     expect(parseCsvOpportunities('foo.com, bar.com\nbaz.com')).toBeNull();
     expect(parseOpportunities('foo.com, bar.com\nbaz.com').candidates.map((c) => c.domain)).toEqual(['foo.com', 'bar.com', 'baz.com']);

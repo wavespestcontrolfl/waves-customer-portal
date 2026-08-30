@@ -4,7 +4,9 @@
  * that records every update.
  */
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (name, fn) => fn()) }));
 const { isEnabled } = require('../config/feature-gates');
+const { runExclusive } = require('../utils/cron-lock');
 const { enrichDomains, BULK_MAX } = require('../services/seo/link-registry-enrich');
 
 function fakeDb({ domains = [], competitorBacklinks = [] } = {}) {
@@ -71,7 +73,7 @@ const ALL4 = (targets) => [['bulkRanks', targets], ['bulkSpamScore', targets], [
 const NOW = new Date('2026-08-29T12:00:00Z');
 const D = (id, domain, extra = {}) => ({ id, domain, discovery_priority: 'normal', enriched_at: null, created_at: NOW, ...extra });
 
-beforeEach(() => { isEnabled.mockReset(); isEnabled.mockReturnValue(true); });
+beforeEach(() => { isEnabled.mockReset(); isEnabled.mockReturnValue(true); runExclusive.mockReset(); runExclusive.mockImplementation(async (name, fn) => fn()); });
 
 describe('enrichDomains', () => {
   test('enriches a batch with ONE call per §4 metric (rank, spam, referring domains, traffic); maps all four; caches raw payloads; enriched_at set only after the full set', async () => {
@@ -163,7 +165,7 @@ describe('enrichDomains', () => {
     expect(r).toMatchObject({ dryRun: true, gated: false, selected: 2, enriched: 0, calls: 0, failed: [], wouldCall: 4 });
     expect(dfs.calls).toEqual([]);
     expect(db._store.updates).toEqual([]);
-    expect(db._store.raws).toEqual([]); // no lock, no transaction: report only
+    expect(runExclusive).not.toHaveBeenCalled(); // no lock, no transaction: report only
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
@@ -174,13 +176,17 @@ describe('enrichDomains', () => {
     ];
     const order = [];
     const db = fakeDb({ domains });
-    db.raw.mockImplementation(async (sql, bind) => { order.push(['raw', sql, bind]); return {}; });
+    runExclusive.mockImplementation(async (name, fn, opts) => { order.push(['lock', name, opts]); const r = await fn(); order.push(['unlock', name]); return r; });
     const dfs = fakeDfs({ ranks: (t) => { order.push(['bulkRanks', t]); return dfsResp(t.map((x) => ({ target: x, rank: 1 }))); }, spam: (t) => dfsResp(t.map((x) => ({ target: x, spam_score: 0 }))) });
     const r = await enrichDomains(db, { dataforseo: dfs, domainIds: ['d1', 'd2'], now: NOW });
     expect(order).toEqual([
-      ['raw', 'SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']],
+      ['lock', 'link-registry-enrich', { recordHealth: false }],
       ['bulkRanks', ['open.example']],
+      ['unlock', 'link-registry-enrich'],
     ]);
+    // paid calls run OUTSIDE any transaction; the only transaction is the short conditional persist after them
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db._store.raws).toEqual([]);
     expect(r).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1, calls: 4 });
     expect(db._store.updates.map((u) => u.where.id)).toEqual(['d1']);
     // force = deliberate re-spend: no re-check, both targets go out (still under the lock)
@@ -189,14 +195,23 @@ describe('enrichDomains', () => {
     const r2 = await enrichDomains(db2, { dataforseo: dfs2, domainIds: ['d1', 'd2'], force: true, now: NOW });
     expect(dfs2.calls[0]).toEqual(['bulkRanks', ['open.example', 'taken.example']]);
     expect(r2).toMatchObject({ enriched: 2, skippedClaimed: 0 });
-    expect(db2._store.raws).toHaveLength(1);
     // force still honors the in-lock freshness check: a row another run stamped between selection and the lock is skipped
     const db3 = fakeDb({ domains: domains.map((d) => ({ ...d })) });
-    db3.raw.mockImplementation(async () => { const i = db3._store.domains.findIndex((d) => d.id === 'd2'); db3._store.domains[i] = { ...db3._store.domains[i], enriched_at: new Date(NOW.getTime() + 1000) }; return {}; }); // a concurrent run stamped d2 (new row object: selection's copy keeps the old stamp)
+    runExclusive.mockImplementationOnce(async (name, fn) => { const i = db3._store.domains.findIndex((d) => d.id === 'd2'); db3._store.domains[i] = { ...db3._store.domains[i], enriched_at: new Date(NOW.getTime() + 1000) }; return fn(); }); // a concurrent run stamped d2 before we got the lock (new row object: selection's copy keeps the old stamp)
     const dfs3 = fakeDfs({ ranks: (t) => dfsResp(t.map((x) => ({ target: x, rank: 1 }))), spam: (t) => dfsResp(t.map((x) => ({ target: x, spam_score: 0 }))) });
     const r3 = await enrichDomains(db3, { dataforseo: dfs3, domainIds: ['d1', 'd2'], force: true, now: NOW });
     expect(dfs3.calls[0]).toEqual(['bulkRanks', ['open.example']]);
     expect(r3).toMatchObject({ selected: 2, enriched: 1, skippedClaimed: 1 });
+  });
+
+  test('lease held elsewhere (overlapping scheduler / admin run): skipped, zero calls, zero writes', async () => {
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    const db = fakeDb({ domains: [D('d1', 'a.example')] });
+    const dfs = fakeDfs();
+    const r = await enrichDomains(db, { dataforseo: dfs, now: NOW });
+    expect(r).toMatchObject({ selected: 1, enriched: 0, calls: 0, skipped: 'lease_held' });
+    expect(dfs.calls).toEqual([]);
+    expect(db._store.updates).toEqual([]);
   });
 
   test('selection: un-enriched only unless force; explicit domainIds; owner_seed first; limit honored', async () => {
@@ -226,7 +241,8 @@ describe('enrichDomains', () => {
     const db = fakeDb({ domains: [D('d1', 'a.example')] });
     await expect(enrichDomains(db, { dataforseo: fakeDfs({ throwOn: 'bulkSpamScore' }), now: NOW })).rejects.toThrow('DFS down');
     expect(db._store.updates).toEqual([]);
-    expect(db._store.raws).toEqual([['SELECT pg_advisory_xact_lock(hashtext(?))', ['seo_link_enrich']]]); // the lock was held; the throw rolls the batch back
+    expect(db.transaction).not.toHaveBeenCalled(); // the throw happens before the persist transaction ever opens
+    expect(runExclusive).toHaveBeenCalledWith('link-registry-enrich', expect.any(Function), { recordHealth: false });
   });
 
   test('a null response (client swallowed a transport/auth failure) = batch failed, enriched_at left NULL for retry, competitors_linked still written', async () => {

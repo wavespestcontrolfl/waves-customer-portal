@@ -18,7 +18,13 @@ const { isEnabled } = require('../../config/feature-gates');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 
 const BULK_MAX = 1000;
-const ENRICH_LOCK_KEY = 'seo_link_enrich'; // pg_advisory_xact_lock(hashtext(key)) around every paid batch
+// One enrich run at a time across instances and the admin job: a SESSION
+// advisory lock on a dedicated pooled connection (utils/cron-lock.runExclusive)
+// — released in finally, never held inside a transaction, so a stalled
+// DataForSEO request can hold at most that one connection. An overlapping run
+// is SKIPPED (`skipped: 'lease_held'`), never queued.
+const ENRICH_LOCK_KEY = 'link-registry-enrich';
+const defaultExclusive = (name, fn) => require('../../utils/cron-lock').runExclusive(name, fn, { recordHealth: false });
 // §4 enrich = rank, spam, referring domains, traffic — one bulk call each per
 // batch (≤1000 targets). enrichment JSON caches every raw item under its key.
 const BULK_CALLS = Object.freeze([
@@ -86,7 +92,10 @@ async function competitorsLinked(db, hosts) {
 
 /**
  * enrichDomains(db, { domainIds, limit, force, dryRun, now, dataforseo })
- *   → { dryRun, gated, selected, enriched, failed, calls }
+ *   → { dryRun, gated, selected, enriched, skippedClaimed, failed, calls, skipped? }
+ *
+ * - skipped: 'lease_held' when another enrich run holds the session lock
+ *   (overlapping scheduler / admin runs never spend twice and never queue).
  *
  * - gated: no API call; competitors_linked still written (not dryRun).
  * - dryRun: selection + counts only; zero writes, zero API calls.
@@ -98,7 +107,7 @@ async function competitorsLinked(db, hosts) {
  *   next run retries. A domain absent from a non-null response gets
  *   enriched_at + `{ missing: true }` so we never re-spend on it.
  */
-async function enrichDomains(db, { domainIds = null, limit = 500, force = false, dryRun = false, now = new Date(), dataforseo = require('./dataforseo') } = {}) {
+async function enrichDomains(db, { domainIds = null, limit = 500, force = false, dryRun = false, now = new Date(), dataforseo = require('./dataforseo'), exclusive = defaultExclusive } = {}) {
   const rows = await selectDomains(db, { domainIds, limit, force });
   const gated = !isEnabled('seoIntelligence');
   const out = { dryRun, gated, selected: rows.length, enriched: 0, skippedClaimed: 0, failed: [], calls: 0 };
@@ -112,89 +121,98 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
   }
 
   const nowIso = now instanceof Date ? now.toISOString() : String(now);
-  for (const candidates of chunk(rows, BULK_MAX)) {
-    await db.transaction(async (trx) => {
+  const stamp = (v) => (v == null ? null : new Date(v).getTime());
+  const freeSignal = (r) => ({ competitors_linked: linked.get(canonicalProspectDomain(r.domain)) || 0, updated_at: now });
+
+  if (gated) {
+    // No credits, no lock: competitors_linked is a free signal.
+    for (const batch of chunk(rows, BULK_MAX)) {
+      await db.transaction(async (trx) => {
+        for (const r of batch) await trx('seo_link_domains').where({ id: r.id }).update(freeSignal(r));
+      });
+    }
+    return out;
+  }
+
+  const ran = await exclusive(ENRICH_LOCK_KEY, async () => {
+    for (const candidates of chunk(rows, BULK_MAX)) {
+      // 1. Freshness check — a row is spent on only if its enriched_at is
+      //    still what selection saw (NULL normally; the same stamp for a
+      //    forced refresh). Plain read: the session lock serializes runs.
+      const current = await db('seo_link_domains').select('id', 'enriched_at').whereIn('id', candidates.map((r) => r.id));
+      const seen = new Map((current || []).map((r) => [r.id, stamp(r.enriched_at)]));
+      const fresh = (r) => seen.has(r.id) && seen.get(r.id) === (force ? stamp(r.enriched_at) : null);
+      out.skippedClaimed += candidates.filter((r) => !fresh(r)).length;
+      const batch = candidates.filter(fresh);
+      if (!batch.length) continue;
+      const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
+
+      // 2. All four bulk calls complete (or throw) OUTSIDE any transaction and
+      //    BEFORE any write — §4 enrich = rank, spam, referring domains,
+      //    traffic. A null response from ANY of them fails the whole batch:
+      //    enriched_at stays NULL so the next run retries; nothing partial is
+      //    ever marked done.
+      const responses = {};
+      for (const [key, method] of BULK_CALLS) {
+        responses[key] = items(await dataforseo[method](targets));
+        out.calls += 1;
+      }
       const patches = [];
-      let batch = candidates;
-
-      if (gated) {
-        for (const r of batch) {
-          const host = canonicalProspectDomain(r.domain);
-          patches.push({ id: r.id, patch: { competitors_linked: linked.get(host) || 0, updated_at: now } });
-        }
+      const missingCall = BULK_CALLS.find(([key]) => !responses[key]);
+      if (missingCall) {
+        for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: `${missingCall[0]}_no_response` });
+        for (const r of batch) patches.push({ row: r, patch: freeSignal(r) }); // still write the free signal
       } else {
-        // Credit discipline: one enrich run at a time across instances and the
-        // admin job. The transaction-scoped advisory lock is held through the
-        // paid calls, and the batch is re-checked INSIDE it, so two overlapping
-        // runs can never both see enriched_at IS NULL for the same domain.
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [ENRICH_LOCK_KEY]);
-        // In-lock freshness check for EVERY paid batch, force included: a row
-        // is spent on only if its enriched_at is still what selection saw —
-        // NULL for a normal run; the same (possibly non-NULL) stamp for a
-        // forced refresh. A row another run stamped in between is skipped.
-        const current = await trx('seo_link_domains').select('id', 'enriched_at').whereIn('id', batch.map((r) => r.id));
-        const stamp = (v) => (v == null ? null : new Date(v).getTime());
-        const seen = new Map((current || []).map((r) => [r.id, stamp(r.enriched_at)]));
-        const fresh = (r) => seen.has(r.id) && seen.get(r.id) === (force ? stamp(r.enriched_at) : null);
-        out.skippedClaimed += batch.filter((r) => !fresh(r)).length;
-        batch = batch.filter(fresh);
-        if (!batch.length) return;
-        const targets = [...new Set(batch.map((r) => canonicalProspectDomain(r.domain)).filter(Boolean))];
-
-        // All four bulk calls complete (or throw) BEFORE any write for this
-        // batch — §4 enrich = rank, spam, referring domains, traffic. A null
-        // response from ANY of them fails the whole batch: enriched_at stays
-        // NULL so the next run retries, and nothing partial is ever marked done.
-        const responses = {};
-        for (const [key, method] of BULK_CALLS) {
-          responses[key] = items(await dataforseo[method](targets));
-          out.calls += 1;
+        const byHost = {};
+        for (const [key] of BULK_CALLS) {
+          byHost[key] = new Map();
+          for (const it of responses[key]) { const h = canonicalProspectDomain(it && it.target); if (h) byHost[key].set(h, it); }
         }
-        const missingCall = BULK_CALLS.find(([key]) => !responses[key]);
-        if (missingCall) {
-          for (const r of batch) out.failed.push({ id: r.id, domain: r.domain, reason: `${missingCall[0]}_no_response` });
-          // still write the free signal
-          for (const r of batch) patches.push({ id: r.id, patch: { competitors_linked: linked.get(canonicalProspectDomain(r.domain)) || 0, updated_at: now } });
-        } else {
-          const byHost = {};
-          for (const [key] of BULK_CALLS) {
-            byHost[key] = new Map();
-            for (const it of responses[key]) { const h = canonicalProspectDomain(it && it.target); if (h) byHost[key].set(h, it); }
-          }
-
-          for (const r of batch) {
-            try {
-              const host = canonicalProspectDomain(r.domain);
-              const hit = Object.fromEntries(BULK_CALLS.map(([key]) => [key, byHost[key].get(host) || null]));
-              const patch = { competitors_linked: linked.get(host) || 0, enriched_at: now, updated_at: now };
-              if (BULK_CALLS.every(([key]) => !hit[key])) {
-                patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
-              } else {
-                const enrichment = { fetched_at: nowIso };
-                for (const [key] of BULK_CALLS) enrichment[key] = hit[key] || { missing: true };
-                const dr = hit.bulk_ranks ? intOrNull(hit.bulk_ranks.rank) : null; // one_hundred scale (dataforseo.bulkRanks)
-                if (dr != null) patch.domain_rating = dr;
-                const ss = hit.bulk_spam_score ? intOrNull(hit.bulk_spam_score.spam_score) : null;
-                if (ss != null) patch.spam_score = ss;
-                const rd = hit.bulk_referring_domains ? intOrNull(hit.bulk_referring_domains.referring_domains) : null;
-                if (rd != null) patch.referring_domains = rd;
-                const organic = hit.bulk_traffic && hit.bulk_traffic.metrics && hit.bulk_traffic.metrics.organic;
-                const traffic = organic ? intOrNull(organic.etv) : null;
-                if (traffic != null) patch.organic_traffic = traffic;
-                patch.enrichment = JSON.stringify(enrichment);
-              }
-              patches.push({ id: r.id, patch });
-            } catch (err) {
-              out.failed.push({ id: r.id, domain: r.domain, reason: `map_error: ${err.message}` });
+        for (const r of batch) {
+          try {
+            const host = canonicalProspectDomain(r.domain);
+            const hit = Object.fromEntries(BULK_CALLS.map(([key]) => [key, byHost[key].get(host) || null]));
+            const patch = { ...freeSignal(r), enriched_at: now };
+            if (BULK_CALLS.every(([key]) => !hit[key])) {
+              patch.enrichment = JSON.stringify({ missing: true, fetched_at: nowIso });
+            } else {
+              const enrichment = { fetched_at: nowIso };
+              for (const [key] of BULK_CALLS) enrichment[key] = hit[key] || { missing: true };
+              const dr = hit.bulk_ranks ? intOrNull(hit.bulk_ranks.rank) : null; // one_hundred scale (dataforseo.bulkRanks)
+              if (dr != null) patch.domain_rating = dr;
+              const ss = hit.bulk_spam_score ? intOrNull(hit.bulk_spam_score.spam_score) : null;
+              if (ss != null) patch.spam_score = ss;
+              const rd = hit.bulk_referring_domains ? intOrNull(hit.bulk_referring_domains.referring_domains) : null;
+              if (rd != null) patch.referring_domains = rd;
+              const organic = hit.bulk_traffic && hit.bulk_traffic.metrics && hit.bulk_traffic.metrics.organic;
+              const traffic = organic ? intOrNull(organic.etv) : null;
+              if (traffic != null) patch.organic_traffic = traffic;
+              patch.enrichment = JSON.stringify(enrichment);
             }
+            patches.push({ row: r, patch });
+          } catch (err) {
+            out.failed.push({ id: r.id, domain: r.domain, reason: `map_error: ${err.message}` });
           }
         }
       }
 
-      for (const { id, patch } of patches) await trx('seo_link_domains').where({ id }).update(patch);
-      out.enriched += patches.filter((p) => p.patch.enriched_at).length;
-    });
-  }
+      // 3. Persist, conditionally: each write lands only while the row still
+      //    carries the stamp the freshness check saw (a short transaction —
+      //    nothing external runs inside it).
+      await db.transaction(async (trx) => {
+        for (const { row, patch } of patches) {
+          const was = seen.get(row.id);
+          let q = trx('seo_link_domains').where({ id: row.id });
+          q = was == null ? q.whereNull('enriched_at') : q.where({ enriched_at: new Date(was) });
+          const n = await q.update(patch);
+          if (!n) { out.skippedClaimed += 1; continue; }
+          if (patch.enriched_at) out.enriched += 1;
+        }
+      });
+    }
+    return out;
+  });
+  if (ran && ran.skipped) return { ...out, skipped: ran.reason || true };
   return out;
 }
 

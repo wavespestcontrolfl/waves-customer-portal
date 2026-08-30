@@ -9,6 +9,7 @@
 const logger = require('../logger');
 
 const BASE_URL = 'https://api.dataforseo.com/v3';
+const REQUEST_TIMEOUT_MS = Number(process.env.DATAFORSEO_TIMEOUT_MS) || 60000;
 
 function normalizeIndexedUrl(value) {
   return String(value || '')
@@ -75,6 +76,7 @@ class DataForSEO {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), // a stalled call must never hold a caller's lease/connection open
         });
 
         if (res.status === 429) {

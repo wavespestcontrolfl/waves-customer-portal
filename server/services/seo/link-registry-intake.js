@@ -25,6 +25,7 @@ const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 // Anything that looks like a host or URL. Emails are stripped first so
 // `joe@example.com` does not contribute `example.com`.
 const TOKEN_RE = /(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}(?::\d{1,5})?(?:\/[^\s,;"'<>()[\]{}]*)?/gi;
+const CELL_RE = new RegExp(`^${TOKEN_RE.source}`, 'i'); // does a CSV cell START like a host/URL
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}/g;
 const X_POST_RE = /^(?:https?:\/\/)?(?:www\.|mobile\.)?(?:x|twitter)\.com\/[^/\s]+\/status\/\d+/i;
 
@@ -104,9 +105,15 @@ function parseOpportunities(text) {
   const unresolvedNotes = {}; // raw reference → its CSV context (distinct notes, ' | '-joined)
   const dropped = [];
   for (const input of inputs) {
-    const src = csv ? input.raw : input.raw; // csv rows are already one reference each
-    for (const rawMatch of src.match(TOKEN_RE) || []) {
-      const token = rawMatch.replace(/[.,;:!?)]+$/, '');
+    // A recognized CSV cell is ONE reference and is kept WHOLE — commas,
+    // parentheses and other URL characters are legal inside a quoted cell and
+    // the free-text tokenizer would cut them off. The tokenizer only decides
+    // whether the cell starts like a host. Free text still tokenizes.
+    const cell = csv ? input.raw.trim() : '';
+    const whole = cell && !/\s/.test(cell) && CELL_RE.test(cell);
+    const matches = whole ? [cell] : (input.raw.match(TOKEN_RE) || []);
+    for (const rawMatch of matches) {
+      const token = whole ? rawMatch : rawMatch.replace(/[.,;:!?)]+$/, '');
       if (isReferenceToken(token)) {
         if (!unresolved.includes(token)) unresolved.push(token);
         if (input.note) {
