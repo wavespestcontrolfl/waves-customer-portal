@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Cloud Agent — per-boot startup (runs on each container start; stays attached).
-# The PostgreSQL server process is not part of the snapshot, so start it here,
-# then launch the API server + Vite client.
+# Cloud Agent — per-boot startup. Provisions INFRASTRUCTURE ONLY:
+# PostgreSQL comes up and pending migrations are applied against the local
+# database. It deliberately does NOT auto-launch the application server —
+# server/index.js boots side-effecting workers (receipt/SMS/email delivery
+# queues, S3 photo-reclaim, the scheduler's paid LLM canary, etc.), so merely
+# booting the agent must never be able to spend money or contact providers.
+# Start the app on demand with `.cursor/dev.sh` (see the printed hint).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.cursor/lib.sh
-source "$(dirname "$0")/lib.sh"
+source "${SCRIPT_DIR}/lib.sh"
+cd "${REPO_ROOT}"
 
-# Refuse a remote/prod DATABASE_URL injected via the secrets panel before the
-# server (or migrations) can target it.
+# Fast pre-check on an injected DATABASE_URL, then the authoritative effective
+# check (dotenv .env + knexfile fallbacks) before any migration runs.
 assert_local_database_url
 
 echo "[start] starting PostgreSQL cluster"
@@ -16,17 +21,17 @@ sudo pg_ctlcluster 16 main start 2>/dev/null || true
 for _ in $(seq 1 30); do sudo -u postgres pg_isready -q && break; sleep 1; done
 sudo -u postgres pg_isready
 
+assert_local_effective_database_url
+
 echo "[start] applying any pending migrations"
 npm run db:migrate
 
-# Boot the API in the app's side-effect-safe mode: NODE_ENV=test makes
-# index.js skip initScheduledJobs()/initBankingSync(), so merely booting the
-# agent never fires the paid LLM canary or any automated cron — even if
-# provider credentials are injected via the secrets panel. Feature gates still
-# resolve as non-production (all dev features usable). The Vite client stays in
-# development mode (dotenv's NODE_ENV=development applies to it). See the two
-# Codex P1 findings on PR #3620.
-echo "[start] launching API (:3001, NODE_ENV=test — no cron side effects) + Vite client (:5173)"
-exec npx concurrently -k -n api,web -c blue,green \
-  "cd server && NODE_ENV=test npm run dev" \
-  "cd client && npm run dev"
+cat <<'HINT'
+[start] Infrastructure ready (PostgreSQL up, migrations applied).
+[start] The application server is NOT auto-started (its boot workers can send
+        SMS/email and mutate S3 when credentials are present).
+[start] To run the dev servers (API :3001 + Vite client :5173) on demand:
+
+            bash .cursor/dev.sh
+
+HINT

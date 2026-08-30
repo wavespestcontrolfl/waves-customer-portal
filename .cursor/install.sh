@@ -5,14 +5,18 @@
 #   - a local dev role/database matching .env.example
 #   - a local .env (created only if missing — never overwrites secrets)
 #   - node workspace dependencies
-#   - knex migrations
+#   - knex migrations (against the LOCAL database only)
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# Resolve our own directory BEFORE changing cwd so relative/`./install.sh`
+# invocations still find lib.sh.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=.cursor/lib.sh
-source "$(dirname "$0")/lib.sh"
+source "${SCRIPT_DIR}/lib.sh"
+cd "${REPO_ROOT}"
 
-# Refuse a remote/prod DATABASE_URL injected via the secrets panel BEFORE we
-# migrate — knexfile keeps a process-env DATABASE_URL over the local .env below.
+# Fast pre-check: reject an obviously non-local DATABASE_URL injected via the
+# secrets panel before doing any heavy work. (The authoritative check that also
+# covers a cached .env / fallback vars runs right before migrations, below.)
 assert_local_database_url
 
 echo "[install] ensuring PostgreSQL 16 + pgvector are present"
@@ -29,10 +33,16 @@ sudo pg_ctlcluster 16 main start 2>/dev/null || true
 for _ in $(seq 1 30); do sudo -u postgres pg_isready -q && break; sleep 1; done
 
 echo "[install] ensuring dev role + database"
+# Create the role if missing, otherwise RECONCILE it — a cached/partial state
+# may hold waves_user with a stale password or without the privileges the
+# role-creating migrations need. Either way it ends with the exact password
+# baked into LOCAL_DATABASE_URL and the required attributes.
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
 DO $$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'waves_user') THEN
-    CREATE ROLE waves_user LOGIN PASSWORD 'waves_dev_password' SUPERUSER CREATEROLE CREATEDB;
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'waves_user') THEN
+    ALTER ROLE waves_user WITH LOGIN PASSWORD 'waves_dev_password' SUPERUSER CREATEROLE CREATEDB;
+  ELSE
+    CREATE ROLE waves_user WITH LOGIN PASSWORD 'waves_dev_password' SUPERUSER CREATEROLE CREATEDB;
   END IF;
 END $$;
 SQL
@@ -53,7 +63,7 @@ CLIENT_URL=http://localhost:5173
 WAVES_FDACS_LICENSE=JB351547
 VITE_WAVES_FDACS_LICENSE=JB351547
 
-DATABASE_URL=postgresql://waves_user:waves_dev_password@127.0.0.1:5432/waves_portal
+DATABASE_URL=${LOCAL_DATABASE_URL}
 DB_POOL_MIN=2
 DB_POOL_MAX=10
 
@@ -71,6 +81,11 @@ fi
 
 echo "[install] installing node dependencies"
 npm install
+
+# Authoritative DB-target guard: resolve the effective URL the way knexfile
+# does (dotenv .env + fallback vars) and refuse anything non-local BEFORE we
+# migrate. Runs here (post-install) because it needs node deps.
+assert_local_effective_database_url
 
 echo "[install] running database migrations"
 npm run db:migrate
