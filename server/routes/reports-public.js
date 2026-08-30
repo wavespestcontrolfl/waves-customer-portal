@@ -166,7 +166,7 @@ const {
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
-const { reserviceReportPdfSignature, reserviceReportRenderedSignature } = require('../services/service-report/reservice-report');
+const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -1623,6 +1623,11 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
           // leaks a later same-day sibling the moment a rating is submitted
           // (codex P2 #2824 r2).
           currentServiceRecordId: service.id || null,
+          // Same exclusion as buildReportV1Data: this response replaces the
+          // page's filtered history client-side, so without the flag the
+          // callback points reappear the moment a rating is submitted
+          // (codex #3623 r2 P1).
+          excludeCallbacks: reserviceReportCopyGateOn(),
         }).catch(() => [])
       : [];
 
@@ -1854,6 +1859,7 @@ router.get('/:token', async (req, res, next) => {
       // WaveGuard" line (reservice-report.js); a flip or billing change
       // must re-render the cached document.
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
+      const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1871,7 +1877,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1990,11 +1996,15 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (await reserviceTrendsPdfSignature(service, db) !== reserviceTrendsSignature) {
+          // Same fence as pdf-queue: a callback inserted/reclassified
+          // mid-render must not store the old chart under the new key.
+          logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
         } else if (unreachablePhotos > 0) {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

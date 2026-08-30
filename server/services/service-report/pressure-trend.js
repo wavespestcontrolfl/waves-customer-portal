@@ -1,4 +1,5 @@
 const db = require('../../models/db');
+const { reserviceReportCopyGateOn } = require('./reservice-report');
 const { detectServiceLine } = require('./service-line-configs');
 const { dateOnlyToNoonUtc, formatVisitLabel, normalizeDate } = require('./time-format');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -157,6 +158,16 @@ async function buildPressureTrendContext({
     .select('id', 'started_at', 'ended_at', 'service_date', 'created_at', 'pressure_index')
     .where({ customer_id: record.customer_id, status: 'completed' })
     .whereNot({ id: record.id })
+    // Customer-facing trend line: callback visits are not data points while
+    // the re-service gate is on (owner-delegated ruling 2026-08-30, #3623);
+    // pest-pressure SCORING elsewhere still counts them by design.
+    .modify((q) => {
+      if (reserviceReportCopyGateOn()) {
+        q.where(function notCallback() {
+          this.where('is_callback', false).orWhereNull('is_callback');
+        });
+      }
+    })
     // Optional: restrict the trend to visits before a given service date, so a
     // permanent token doesn't fold in later visits. beforeStartedAt keeps
     // legitimate same-day EARLIER visits (a morning visit before an afternoon

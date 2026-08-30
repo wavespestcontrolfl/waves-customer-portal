@@ -33,6 +33,7 @@
  *    re-service IS, not about what was found today.
  */
 
+const crypto = require('crypto');
 const { detectServiceLine } = require('./service-line-configs');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
@@ -289,9 +290,48 @@ function reserviceReportCopyGateOn() {
   return gateOn();
 }
 
+/**
+ * PDF cache-key component for the TREND-EXCLUSION side of the gate: with
+ * the gate on, REGULAR reports for a customer who has any callback record
+ * render a different chart/baseline/trend than their cached pre-gate PDFs
+ * (activity-scores-store / since-last-visit / pest-pressure display), so
+ * their keys must move. Customers with no callback records — the vast
+ * majority — keep '' and every existing key. A failed lookup returns a
+ * distinct token so uncertainty re-renders instead of serving stale.
+ */
+async function reserviceTrendsPdfSignature(service = {}, knex = null) {
+  if (!gateOn()) return '';
+  if (!knex || !service?.customer_id) return '';
+  try {
+    // The SET of relevant callback records, bounded to this report's window
+    // (rows dated after the report can't affect its token-scoped queries):
+    // adding, backfilling, or reclassifying a callback changes the id set
+    // and therefore the key, so a cached PDF can never stay pinned to a
+    // stale chart (codex #3623 r4 P1 — existence alone froze '-rstr1').
+    const rows = await knex('service_records')
+      .where({ customer_id: service.customer_id, is_callback: true })
+      .modify((query) => {
+        if (service.service_date) query.where('service_date', '<=', service.service_date);
+      })
+      .orderBy('id', 'asc')
+      .select('id');
+    if (!rows.length) return '';
+    const digest = crypto.createHash('sha1').update(rows.map((row) => String(row.id)).join(',')).digest('hex').slice(0, 8);
+    return `-rstr${rows.length}-${digest}`;
+  } catch {
+    // UNIQUE per failure: a shared uncertainty token could be STORED under
+    // a key that a later unrelated failure then matches, serving a stale
+    // chart (codex #3623 GH P2). A unique token never matches any stored
+    // key (lookup re-renders) and trips the render-stability fence on the
+    // store side, so an uncertain render is served without being cached.
+    return `-rstru-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  }
+}
+
 module.exports = {
   buildReserviceReport,
   reserviceReportCopyGateOn,
+  reserviceTrendsPdfSignature,
   resolveCallbackBilling,
   reserviceReportPdfSignature,
   reserviceReportRenderedSignature,
