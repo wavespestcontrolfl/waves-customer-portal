@@ -493,10 +493,10 @@ describe('unit-type parcel-scale lot verify flag', () => {
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
   });
 
-  test('county-attested ≤4-unit parcel (duplex ruling) keeps its lot un-flagged', () => {
+  test('county-attested ≤4-unit condo parcel (duplex ruling) keeps its lot un-flagged', () => {
     const flags = buildFieldVerifyFlags({
       formattedAddress: '7 Example Duplex Ln, Testville, FL 00000',
-      propertyType: 'Multifamily',
+      propertyType: 'Condominium',
       squareFootage: 2400,
       lotSize: 9000,
       unitCount: 2,
@@ -504,6 +504,21 @@ describe('unit-type parcel-scale lot verify flag', () => {
       _parcel: { residentialUnits: 2 },
     }, null, null);
     expect(flags.find((f) => f.field === 'lotSize')).toBeUndefined();
+  });
+
+  test('apartment/multifamily whole-building records never fire the condo unit-lot flag', () => {
+    for (const propertyType of ['Multifamily', 'Apartment Building', 'Condo Association']) {
+      const flags = buildFieldVerifyFlags({
+        formattedAddress: '9 Example Complex Dr, Testville, FL 00000',
+        propertyType,
+        squareFootage: 63096,
+        lotSize: 93940,
+        unitCount: 8,
+        _source: 'county',
+      }, null, null);
+      expect({ propertyType, flagged: !!flags.find((f) => f.field === 'lotSize') })
+        .toEqual({ propertyType, flagged: false });
+    }
   });
 
   test('a lot the merge already field-flagged gets ONE flag (the generic evidence loop), not two', () => {

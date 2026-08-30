@@ -3199,12 +3199,16 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     });
   }
 
-  // The INVERSE hazard: a unit-type property (condo/apartment/multifamily)
-  // whose record DOES carry a lotSize is usually carrying the development's
-  // whole parcel — lot-priced services (mosquito's treatable area, rodent
-  // scoping) would quote the entire grounds for one door (estimator-engine
-  // audit 2026-08-30 #3). Lawn self-defends (lot-derived turf grades LOW
-  // and parks), so this surfaces the parcel-scale lot for verification.
+  // The INVERSE hazard: a CONDO record that DOES carry a lotSize is usually
+  // carrying the development's whole parcel — county rolls file condo units
+  // as per-unit folios, so the lot on one is the association's grounds, and
+  // lot-priced services (mosquito's treatable area, rodent scoping) would
+  // quote the entire development for one door (estimator-engine audit
+  // 2026-08-30 #3). Lawn self-defends (lot-derived turf grades LOW and
+  // parks). Deliberately CONDO-ONLY: apartment/multifamily strings are
+  // whole-building records that route COMMERCIAL (detectCategory) where the
+  // parcel lot is the correct basis — flagging them stripped the lot from
+  // legitimate association/property-manager quotes (codex P1 r2).
   // HOA common-area parcels and aggregated/association records are
   // deliberately EXCLUDED: there the association or complex owner is the
   // customer, the parcel-scale lot is the correct quoting basis, and the
@@ -3228,8 +3232,8 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
     && !rc._fieldEvidence?.lotSize?.fieldVerify
     && !rc._parcel?.aggregated && !rc._parcel?.association
     && !countyAttestedSmallResidential(rc)
-    && !/hoa\s*common/i.test(String(unitLotSignalRc?.propertyType || ''))
-    && /condo|apartment|multifamily/i.test(String(unitLotSignalRc?.propertyType || ''))) {
+    && !/hoa\s*common|association/i.test(String(unitLotSignalRc?.propertyType || ''))
+    && /condo/i.test(String(unitLotSignalRc?.propertyType || ''))) {
     flags.push({
       field: 'lotSize',
       reason: 'This lot size describes the development’s parcel, not one unit — confirm whether the quote covers a single unit (use the unit’s own treatable area) or the whole property before mosquito, rodent, or other lot-priced pricing',
