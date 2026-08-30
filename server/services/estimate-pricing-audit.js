@@ -584,6 +584,9 @@ function normalizeEngineLineItems(result) {
       flea_knockdown_single: 'flea',
       stinging_insect: 'stinging',
       stinging_insect_v2: 'stinging',
+      wasp: 'stinging',
+      exclusion_v2: 'exclusion',
+      rodent_exclusion: 'exclusion',
     };
     const serviceKey = SERVICE_MAP[item.service]
       ? item.service
