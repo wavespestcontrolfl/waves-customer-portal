@@ -2829,6 +2829,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       // it here would demote the retry's GBP post to text-only. Run-level
       // ONLY: a per-variant gbpImageUrl is a legacy pre-deploy AI scene.
       gbpImageUrl: preview.visual?.gbpImageUrl || null,
+      // ...and whether that GBP image is a hero PHOTO (watermark on retry) —
+      // dropping the flag here would default a retry to "branded" and post
+      // the raw photo unwatermarked.
+      gbpImageBranded: preview.visual?.gbpImageBranded,
       variant: preview.visual?.variant || 'campaign',
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
