@@ -340,17 +340,25 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
     // customers.billing_mode scalar can be stale/legacy while a paid term
     // is live, and prepay CATEGORICALLY excludes the money offer. Money-
     // critical → a lookup failure fails closed (treated as prepay).
-    // Durable paid signals for the monthly lane: settled invoices AND
-    // successful payments-ledger rows (StripeService.chargeMonthly writes
-    // dues to payments, not invoices). Fail closed to 0 — the gate blocks.
+    // Durable paid-DUES signals for the monthly lane — restricted to
+    // membership dues on BOTH rails (an unrelated one-time charge or
+    // deposit must not count as a paid cycle): payments rows carry
+    // chargeMonthly's load-bearing "WaveGuard Monthly" description marker /
+    // metadata.type=monthly_autopay (the same %LIKE% billing-cron keys on),
+    // and dues invoices carry the marker in their title. Fail closed to 0.
     leg('paidInvoiceCount', () => dbh('invoices')
       .where({ customer_id: customerId })
       .where(function paidSignal() {
         this.whereNotNull('paid_at').orWhereIn('status', ['paid', 'prepaid']);
       })
+      .where('title', 'ilike', '%WaveGuard Monthly%')
       .count({ n: '*' }).first(), null),
     leg('paidPaymentsCount', () => dbh('payments')
       .where({ customer_id: customerId, status: 'paid' })
+      .where(function duesMarker() {
+        this.where('description', 'ilike', '%WaveGuard Monthly%')
+          .orWhereRaw("metadata->>'type' = 'monthly_autopay'");
+      })
       .count({ n: '*' }).first(), null),
     leg('livePrepayTerm', async () => {
       const { coveredTermsAsOf } = require('../annual-prepay-renewals');

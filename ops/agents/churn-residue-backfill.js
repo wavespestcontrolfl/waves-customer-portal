@@ -64,6 +64,10 @@ async function main() {
         .orWhereNotNull('waveguard_tier')
         .orWhereRaw('COALESCE(monthly_rate, 0) > 0')
         .orWhere('billing_mode', 'per_application')
+        // A standalone leftover fee (mode already nulled by a partial prior
+        // cleanup) is still operational — admin-customers accepts it as the
+        // prerequisite for flipping the account back to per_application.
+        .orWhereRaw(hasPerAppFee ? 'COALESCE(per_application_fee, 0) > 0' : 'false')
         .orWhere('autopay_enabled', true)
         .orWhereNotNull('next_charge_date')
         .orWhereExists(function staleSeriesFlag() {
@@ -91,7 +95,8 @@ async function main() {
         });
       }
     })
-    .select('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
+    .select('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode',
+      ...(hasPerAppFee ? ['per_application_fee'] : []));
 
   console.log(`[churn-residue-backfill] ${candidates.length} candidate account(s); mode=${EXECUTE ? 'EXECUTE' : 'DRY RUN'}`);
 
@@ -116,12 +121,14 @@ async function main() {
             .orWhereIn('track_state', ['en_route', 'on_property']);
         })
         .first('id'),
+      // Canonical coverage authority (term status + invoice state + refunds
+      // — a refunded in-window term is NOT live coverage and must not shield
+      // an account from the wind-down).
       hasPrepayTerms
-        ? dbh('annual_prepay_terms')
-          .where({ customer_id: customerId })
-          .where('term_start', '<=', etToday)
-          .where('term_end', '>=', etToday)
-          .first('id')
+        ? (() => {
+          const { coveredTermsAsOf } = require(path.join(__dirname, '..', '..', 'server', 'services', 'annual-prepay-renewals'));
+          return coveredTermsAsOf(dbh, etToday).where('t.customer_id', customerId).first('t.id');
+        })()
         : Promise.resolve(null),
     ]);
     return !!(liveSeries || upcoming || inProgress || coveredTerm);
@@ -158,7 +165,7 @@ async function main() {
         Number(candidate.monthly_rate) > 0 ? `monthly_rate $${Number(candidate.monthly_rate).toFixed(2)}→null${candidate.churn_mrr == null ? ' (churn_mrr snapshotted first)' : ''}` : null,
         candidate.billing_mode === 'per_application'
           ? (uninvoiced ? 'per_application lane RETAINED (completed uninvoiced visit)' : 'billing_mode+per_application_fee→null')
-          : null,
+          : (hasPerAppFee && Number(candidate.per_application_fee) > 0 ? 'standalone per_application_fee→null' : null),
         Number(methods && methods.n) > 0 ? `disable ${methods.n} payment method(s)` : null,
         Number(retries && retries.n) > 0 ? `disarm ${retries.n} failed-payment retr${Number(retries.n) === 1 ? 'y' : 'ies'}` : null,
         Number(staleFlags && staleFlags.n) > 0 ? `clear recurring_ongoing on ${staleFlags.n} cancelled row(s)` : null,
@@ -199,6 +206,13 @@ async function main() {
       if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
       let laneCleared = false;
       let laneRetainedForUninvoiced = false;
+      if (customer.billing_mode !== 'per_application' && hasPerAppFee && Number(customer.per_application_fee) > 0) {
+        // Standalone fee with no lane stamp: nothing prices from it at
+        // completion (pricing requires billing_mode='per_application'), so
+        // clearing it is unconditionally safe — and leaving it would let a
+        // win-back silently reuse the old price.
+        update.per_application_fee = null;
+      }
       if (customer.billing_mode === 'per_application') {
         const completedUninvoiced = await trx('scheduled_services as s')
           .where('s.customer_id', customer.id)

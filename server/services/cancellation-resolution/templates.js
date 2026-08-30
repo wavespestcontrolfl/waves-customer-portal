@@ -60,9 +60,9 @@ const TEMPLATES = Object.freeze([
   {
     id: 'price_receipt_offer',
     reason: 'price',
-    headline: 'What your plan has actually done this year',
+    headline: 'What your plan has actually done for you',
     body:
-      'This year: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices. ' +
+      'In the past 12 months: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices. ' +
       OFFER_LINE,
     slots: { visits: v.posInt, callbacks: v.nonNegInt, savings: v.money, family: v.family },
     action: { type: 'retention_offer', ...RETENTION_OFFER },
@@ -70,8 +70,8 @@ const TEMPLATES = Object.freeze([
   {
     id: 'price_receipt',
     reason: 'price',
-    headline: 'What your plan has actually done this year',
-    body: 'This year: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices.',
+    headline: 'What your plan has actually done for you',
+    body: 'In the past 12 months: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices.',
     slots: { visits: v.posInt, callbacks: v.nonNegInt, savings: v.money },
     action: { type: 'none' },
   },
@@ -128,7 +128,7 @@ const TEMPLATES = Object.freeze([
     id: 'results_lawn_two_seasons',
     reason: 'results_lawn',
     headline: 'Lawn recovery is a two-season job',
-    body: 'You are {visits} visits in. Lawn recovery takes two seasons; your report photos show where it started. We will come out at no charge, treat what is not responding, and you decide after.',
+    body: 'You are {visits} visits in. Lawn recovery is a two-season job. We will come out at no charge, treat what is not responding, and you decide after.',
     slots: { visits: v.posInt },
     action: { type: 'book_reservice', lane: 'lawn' },
   },
@@ -323,8 +323,8 @@ const TEMPLATES = Object.freeze([
   {
     id: 'other_receipt',
     reason: 'other',
-    headline: 'What your plan has actually done this year',
-    body: 'This year: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices. If something is not working, tell us and we fix it first.',
+    headline: 'What your plan has actually done for you',
+    body: 'In the past 12 months: {visits} visits, {callbacks} callbacks at no charge, and {savings} saved by WaveGuard on your invoices. If something is not working, tell us and we fix it first.',
     slots: { visits: v.posInt, callbacks: v.nonNegInt, savings: v.money },
     action: { type: 'none' },
   },
