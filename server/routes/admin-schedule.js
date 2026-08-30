@@ -5987,6 +5987,23 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // Grouped visit (visit-group-scope.md §2; codex #3609 r23 P1):
+              // this bulk mover writes ONE row directly, so moving a member
+              // here would strand its siblings at the old stop and detach
+              // the visit — and a selection holding several members would
+              // move and text them as separate stops. Same rule as
+              // update-details: refuse before the first write; the schedule's
+              // move (the unit mover) carries the whole visit.
+              if (svc.visit_id && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                const { openMembers } = require('../services/visit-groups');
+                const members = await openMembers(trx, svc.visit_id);
+                if (members.length >= 2) {
+                  throw Object.assign(
+                    new Error('grouped with another service at the same stop — move the stop from the schedule (the whole visit moves together), or separate the services first'),
+                    { isValidation: true, code: 'VISIT_BULK_MOVE_UNSUPPORTED' },
+                  );
+                }
+              }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
               const updates = {

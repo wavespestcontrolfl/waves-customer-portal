@@ -173,6 +173,22 @@ test('terminal rows land in failed[] with the reason; nothing is updated', async
   expect(body.failed).toEqual([{ id: 'svc-1', reason: 'already completed' }]);
 });
 
+test('a GROUPED member is refused before any write (codex #3609 r23 P1): the bulk mover writes one row, so it would strand the siblings — the schedule move carries the visit', async () => {
+  const updateChain = chain();
+  wireTrx({
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', visit_id: 'visit-1' }) }),
+      chain({ select: jest.fn().mockResolvedValue([{ id: 'svc-1', status: 'pending' }, { id: 'svc-2', status: 'pending' }]) }), // openMembers
+      updateChain,
+    ],
+  });
+  const { status, body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
+  expect(status).toBe(200);
+  expect(body.updated).toEqual([]);
+  expect(body.failed).toEqual([{ id: 'svc-1', reason: expect.stringMatching(/grouped with another service at the same stop/) }]);
+  expect(updateChain.update).not.toHaveBeenCalled();
+});
+
 test('a past scheduledDate produces per-row failed[] entries instead of moving anything', async () => {
   const { status, body } = await bulk({
     action: 'reschedule',

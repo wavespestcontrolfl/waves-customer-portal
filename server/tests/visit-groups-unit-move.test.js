@@ -45,7 +45,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
-jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]) }));
+jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]), acquireOccupancyLock: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
 
 const db = require('../models/db');

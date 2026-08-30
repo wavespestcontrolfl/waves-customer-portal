@@ -1993,13 +1993,27 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             // advisory staff surfaces warn and assign, as the rebooker would.
             if (options.technicianId) {
               const landed = landedState[target.id] || {};
+              // Rung 1 first (occupancy.js ORDERING CONTRACT, codex r23 P1):
+              // the date-wide occupancy lock guards the tech-blind global
+              // predicate below — an unassigned or other-tech row committed
+              // after the member's move would otherwise pass the tech-scoped
+              // probe (AGENTS.md booking conflict-check class). Then the
+              // destination tech's slot-reserve lock, then row locks — the
+              // rebooker's own order.
+              const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+              await acquireOccupancyLock(t, newDateStr);
               await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
               const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
-              const clashId = await destinationTechClash(t, {
-                technicianId: options.technicianId, date: newDateStr,
-                windowStart: (row && row.window_start) || landed.window_start || target.startHHMM || null,
-                windowEnd: (row && row.window_end) || landed.window_end || null,
+              const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
+              const windowEnd = (row && row.window_end) || landed.window_end || null;
+              const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
+              const globalClash = windowStart && probeEnd ? await findConflictingVisits({
+                db: t, date: newDateStr, windowStart: String(windowStart).slice(0, 5), windowEnd: probeEnd,
+                excludeServiceIds: plan.memberIds, excludeStatuses: ['cancelled', 'completed'],
+              }) : [];
+              const clashId = (globalClash && globalClash.length ? globalClash[0].id : null) || await destinationTechClash(t, {
+                technicianId: options.technicianId, date: newDateStr, windowStart, windowEnd,
                 durationMinutes: row ? row.estimated_duration_minutes : null, excludeIds: plan.memberIds,
               });
               if (clashId && options.overlapAdvisory !== true) {
