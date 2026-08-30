@@ -47,6 +47,9 @@ function row(overrides = {}) {
   return {
     id: 'est-1',
     status: 'accepted',
+    // Delivered by default — rows without ANY delivery evidence classify
+    // expired_unsent (dead) and leave the rates, which is its own test.
+    sent_at: daysAgo(6),
     accepted_at: daysAgo(5),
     declined_at: null,
     expires_at: null,

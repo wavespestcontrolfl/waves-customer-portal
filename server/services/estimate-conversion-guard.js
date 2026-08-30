@@ -322,6 +322,7 @@ function excludePendingFirstBookings(query) {
 
 module.exports = {
   customerConvertedSince,
+  whereNoConversionBeforeEstimate,
   archiveConvertedOpenEstimates,
   excludePendingFirstBookings,
   NON_LIVE_APPOINTMENT_STATUSES,

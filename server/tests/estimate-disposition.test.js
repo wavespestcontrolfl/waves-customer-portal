@@ -47,6 +47,8 @@ describe('dispositionFromDeclineReason — legacy labels', () => {
     ['Price, went with Orkin', 'declined_price'], // first keyword hit wins
     ['Moved out of area', 'invalid_lead'],
     ['Chose another provider', 'declined_competitor'], // pipeline free-text suggestion
+    ['Doing it themselves', 'diy'], // the code's own label must round-trip
+    ['Going to do it myself', 'diy'],
     ['went with another company', 'declined_competitor'],
     ['hired someone else', 'declined_competitor'],
     ['They hated the color of the truck', 'declined_other'],
@@ -61,9 +63,14 @@ describe('dispositionFromDeclineReason — legacy labels', () => {
 });
 
 describe('expiredDispositionFor — opened vs never opened', () => {
-  test('no view signal at all → expired_unviewed', () => {
+  test('no view signal at all → expired_unviewed (delivered) or expired_unsent (internal draft)', () => {
     expect(expiredDispositionFor({ status: 'sent', view_count: 0, last_viewed_at: null, viewed_at: null })).toBe('expired_unviewed');
     expect(expiredDispositionFor({ status: 'sent' })).toBe('expired_unviewed');
+    expect(expiredDispositionFor({ status: 'expired', sent_at: '2026-08-01T00:00:00Z' })).toBe('expired_unviewed');
+    // Aged-out draft with NO delivery evidence: dead, not a customer loss.
+    expect(expiredDispositionFor({ status: 'draft', view_count: 0 })).toBe('expired_unsent');
+    expect(expiredDispositionFor({ status: 'expired' })).toBe('expired_unsent');
+    expect(dispositionGroup('expired_unsent')).toBe('dead');
   });
 
   test.each([
@@ -77,7 +84,7 @@ describe('expiredDispositionFor — opened vs never opened', () => {
 
   test('the SQL twin keeps a staff-stamped disposition and checks the same signals', () => {
     expect(EXPIRED_DISPOSITION_SQL).toMatch(/^COALESCE\(disposition,/);
-    for (const signal of ['view_count', 'last_viewed_at', 'viewed_at', "status = 'viewed'"]) {
+    for (const signal of ['view_count', 'last_viewed_at', 'viewed_at', "status = 'viewed'", "sent_at IS NOT NULL", 'expired_unsent']) {
       expect(EXPIRED_DISPOSITION_SQL).toContain(signal);
     }
   });

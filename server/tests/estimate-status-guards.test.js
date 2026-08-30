@@ -50,6 +50,12 @@ jest.mock('../services/estimate-pricing-audit', () => ({
 }));
 jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateSent: jest.fn() }));
 jest.mock('../services/estimate-manual-acceptance', () => ({ markEstimateManuallyAccepted: jest.fn() }));
+jest.mock('../services/estimate-conversion-guard', () => ({
+  customerConvertedSince: jest.fn(async () => ({ converted: false })),
+  whereNoConversionBeforeEstimate: jest.fn((q) => q),
+  excludePendingFirstBookings: jest.fn((q) => q),
+  NON_LIVE_APPOINTMENT_STATUSES: ['cancelled', 'rescheduled', 'skipped', 'no_show'],
+}));
 jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
   estimateExpiresAt: jest.fn(),
@@ -376,6 +382,36 @@ describe('POST /api/admin/estimates/:id/archive disposition', () => {
       disposition: 'archived_unresolved',
       disposition_source: 'system',
     }));
+  });
+
+  test('archive applies the conversion-sweep criteria before defaulting: evidence + no prior → converted_other_path', async () => {
+    const guard = require('../services/estimate-conversion-guard');
+    guard.customerConvertedSince.mockResolvedValueOnce({ converted: true, reason: 'paid-invoice' });
+    const estimate = { id: 'e1', status: 'sent', archived_at: null, disposition: null, customer_id: 'c1' };
+    const readBuilder = makeBuilder({ first: estimate });
+    const depositBuilder = makeBuilder({ first: null });
+    const priorCheckBuilder = makeBuilder({ first: { id: 'e1' } }); // none-before passed
+    const writeBuilder = makeBuilder({ updateCount: 1 });
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ ...estimate, archived_at: 'NOW' }]) }));
+    db.mockImplementationOnce(() => readBuilder)
+      .mockImplementationOnce(() => depositBuilder)
+      .mockImplementationOnce(() => priorCheckBuilder)
+      .mockImplementationOnce(() => writeBuilder);
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: 'converted_other_path',
+      disposition_source: 'system',
+    }));
+  });
+
+  test('a guard-error conversion verdict never mints a phantom conversion on archive', async () => {
+    const guard = require('../services/estimate-conversion-guard');
+    guard.customerConvertedSince.mockResolvedValueOnce({ converted: true, reason: 'guard-error' });
+    const { writeBuilder } = makeArchiveBuilders({ id: 'e1', status: 'viewed', archived_at: null, disposition: null, customer_id: 'c1' });
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'archived_unresolved' }));
   });
 
   test('a staff reason in the archive body wins over the system default', async () => {

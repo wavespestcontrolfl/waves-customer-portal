@@ -2799,11 +2799,33 @@ router.post('/:id/archive', async (req, res, next) => {
         ? staffDispositionUpdates(req.body)
         : null;
       if (given?.error) return res.status(400).json({ error: given.error });
-      Object.assign(archiveUpdates, given?.updates || {
-        disposition: 'archived_unresolved',
-        disposition_source: 'system',
-        disposition_at: db.fn.now(),
-      });
+      let systemUpdates = null;
+      if (!given) {
+        // Before defaulting to a LOSS, apply the conversion sweep's own
+        // criteria (GH codex P1): evidence can land between sweep runs, and
+        // this write sets archived_at — the sweep only scans unarchived
+        // rows, so a false archived_unresolved here would be permanent.
+        // customerConvertedSince fails toward converted on lookup errors
+        // (guard-error), which must NOT mint a phantom conversion here.
+        let disposition = 'archived_unresolved';
+        try {
+          const { customerConvertedSince, whereNoConversionBeforeEstimate } = require('../services/estimate-conversion-guard');
+          const since = await customerConvertedSince(estimate);
+          if (since.converted && since.reason !== 'guard-error') {
+            const noPrior = await db('estimates')
+              .where({ id: estimate.id })
+              .modify(whereNoConversionBeforeEstimate)
+              .first('id');
+            if (noPrior) disposition = 'converted_other_path';
+          }
+        } catch { /* classification stays archived_unresolved */ }
+        systemUpdates = {
+          disposition,
+          disposition_source: 'system',
+          disposition_at: db.fn.now(),
+        };
+      }
+      Object.assign(archiveUpdates, given?.updates || systemUpdates);
     }
     // Predicate on the OBSERVED state, not just id (codex pre-push P1
     // TOCTOU): a public decline / accept / conversion sweep committing

@@ -31,6 +31,10 @@ const DISPOSITIONS = [
   // is excluded from loss rates (customer converted through another path).
   { code: 'expired_unviewed', label: 'Expired — never opened', group: 'lost', source: 'system' },
   { code: 'expired_viewed', label: 'Expired — opened, no decision', group: 'lost', source: 'system' },
+  // Internal drafts age out too (every draft gets expires_at at creation) —
+  // the customer never received anything, so this is process debris, not a
+  // customer loss (GH codex P1): group 'dead' keeps it out of every rate.
+  { code: 'expired_unsent', label: 'Expired — never sent (internal)', group: 'dead', source: 'system' },
   { code: 'archived_unresolved', label: 'Archived without a decision', group: 'lost', source: 'system' },
   { code: 'converted_other_path', label: 'Converted another way', group: 'won_elsewhere', source: 'system' },
   // Customer-authored: the public /:token/decline button (no reason is
@@ -72,6 +76,13 @@ const LEGACY_LABEL_TO_CODE = new Map([
   ['not needed', 'not_needed'],
   ['no response', 'no_response'],
   ['diy', 'diy'],
+  // The canonical label and its spoken variants (GH codex P2) — the code's
+  // own label must round-trip through the legacy free-text path.
+  ['doing it themselves', 'diy'],
+  ['do it themselves', 'diy'],
+  ['doing it myself', 'diy'],
+  ['do it myself', 'diy'],
+  ['doing it ourselves', 'diy'],
   ['invalid', 'invalid_lead'],
   ['out of area', 'invalid_lead'],
   ['duplicate', 'invalid_lead'],
@@ -124,7 +135,11 @@ function expiredDispositionFor(row) {
     || !!row?.last_viewed_at
     || !!row?.viewed_at
     || row?.status === 'viewed';
-  return opened ? 'expired_viewed' : 'expired_unviewed';
+  if (opened) return 'expired_viewed';
+  // No delivery evidence at all: a never-sent internal draft that aged out
+  // (drafts get expires_at at creation) — not a customer loss (GH codex P1).
+  const everSent = !!row?.sent_at || row?.status === 'sent';
+  return everSent ? 'expired_unviewed' : 'expired_unsent';
 }
 
 // SQL twin of expiredDispositionFor for set-based sweeps (evaluated against
@@ -132,7 +147,9 @@ function expiredDispositionFor(row) {
 // COALESCE keeps any disposition a staff member already stamped.
 const EXPIRED_DISPOSITION_SQL = `COALESCE(disposition, CASE
   WHEN COALESCE(view_count, 0) > 0 OR last_viewed_at IS NOT NULL OR viewed_at IS NOT NULL OR status = 'viewed'
-  THEN 'expired_viewed' ELSE 'expired_unviewed' END)`;
+  THEN 'expired_viewed'
+  WHEN sent_at IS NOT NULL OR status = 'sent' THEN 'expired_unviewed'
+  ELSE 'expired_unsent' END)`;
 
 function positiveMoneyOrNull(value) {
   if (value === null || value === undefined || value === '') return null;

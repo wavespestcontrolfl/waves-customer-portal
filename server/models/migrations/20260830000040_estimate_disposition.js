@@ -38,7 +38,10 @@ exports.up = async function up(knex) {
     UPDATE estimates SET
       disposition = CASE
         WHEN COALESCE(view_count, 0) > 0 OR last_viewed_at IS NOT NULL OR viewed_at IS NOT NULL
-        THEN 'expired_viewed' ELSE 'expired_unviewed' END,
+        THEN 'expired_viewed'
+        WHEN sent_at IS NOT NULL THEN 'expired_unviewed'
+        -- Aged-out internal draft: never delivered, not a customer loss.
+        ELSE 'expired_unsent' END,
       disposition_source = 'system',
       disposition_at = COALESCE(expires_at, updated_at, created_at)
     WHERE status = 'expired' AND disposition IS NULL
@@ -60,7 +63,8 @@ exports.up = async function up(knex) {
         WHEN LOWER(decline_reason) LIKE '%not ready%' OR LOWER(decline_reason) LIKE '%timing%' THEN 'declined_timing'
         WHEN LOWER(decline_reason) LIKE '%not needed%' THEN 'not_needed'
         WHEN LOWER(decline_reason) LIKE '%no response%' THEN 'no_response'
-        WHEN LOWER(decline_reason) LIKE '%diy%' THEN 'diy'
+        WHEN LOWER(decline_reason) LIKE '%diy%' OR LOWER(decline_reason) LIKE '%doing it themselves%' OR LOWER(decline_reason) LIKE '%do it themselves%'
+          OR LOWER(decline_reason) LIKE '%doing it myself%' OR LOWER(decline_reason) LIKE '%do it myself%' OR LOWER(decline_reason) LIKE '%doing it ourselves%' THEN 'diy'
         WHEN LOWER(decline_reason) LIKE '%invalid%' OR LOWER(decline_reason) LIKE '%out of area%' OR LOWER(decline_reason) LIKE '%duplicate%' THEN 'invalid_lead'
         ELSE 'declined_other' END,
       disposition_note = CASE
