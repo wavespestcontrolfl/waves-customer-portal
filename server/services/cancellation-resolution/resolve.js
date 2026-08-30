@@ -75,6 +75,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
   if (normalized.invalid) return { kind: 'none', reasonCode: reason, scope, why: 'invalid_scope' };
   const ctx = { ...context, reasonCode: reason };
   const hasPest = scope.includes('pest_control');
+  const hasLawn = scope.includes('lawn_care');
   const holdable = scope.some((f) => f === 'lawn_care' || f === 'mosquito' || f === 'tree_shrub');
   // A callback-lookup FAILURE ('unknown' sentinel) blocks BOTH lanes: the
   // engine cannot promise a free re-service without proving one is not
@@ -106,6 +107,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       break;
 
     case 'results_pest':
+      if (!hasPest) break; // never promise a pest re-service on a lane the account does not own
       if (pestLane) break; // a free callback is already on the calendar
       candidates = [
         facts.callbacks12mo >= 2 ? { id: 'results_pest_program_change', values: { callbacks: facts.callbacks12mo } } : null,
@@ -117,6 +119,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       break;
 
     case 'results_lawn':
+      if (!hasLawn) break; // same ownership rule as results_pest
       if (lawnLane) break;
       candidates = [
         facts.lastFinding && facts.lastFinding.lane === 'lawn'

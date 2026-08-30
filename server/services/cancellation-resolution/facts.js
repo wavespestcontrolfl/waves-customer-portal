@@ -171,7 +171,7 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
 
   const [
     visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
-    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families,
+    findings, earliestFinding, complaintRequest, lastComplaint, priorOffer, manualOverride, shownCases, termite, properties, prefs, callbackLanes, families, livePrepayTerm,
   ] = await Promise.all([
     leg('visitCounts', () => dbh('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
@@ -218,6 +218,9 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       .where({ customer_id: customerId })
       .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
       .whereNull('paid_at') // an invoice paid_at-stamped is settled even if status lags
+      // Payer-owned debt (builder/HOA/property manager) is not the
+      // customer's — it must not block their retention offer.
+      .whereNull('payer_id')
       .whereNotNull('due_date')
       .where('due_date', '<', today)
       .whereRaw('COALESCE(total, 0) - COALESCE(credit_applied, 0) > 0')
@@ -327,6 +330,14 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
       return Object.keys(await openReserviceCallbacks(customerId, dbh));
     }, 'error'),
     leg('families', () => loadFamilies(customerId, today, dbh), []),
+    // Live annual-prepay term from the canonical term authority — the
+    // customers.billing_mode scalar can be stale/legacy while a paid term
+    // is live, and prepay CATEGORICALLY excludes the money offer. Money-
+    // critical → a lookup failure fails closed (treated as prepay).
+    leg('livePrepayTerm', async () => {
+      const { coveredTermsAsOf } = require('../annual-prepay-renewals');
+      return coveredTermsAsOf(dbh, today).where('t.customer_id', customerId).first('t.id');
+    }, 'error'),
   ]);
 
   // Customer-visibility filter (mirrors report-copy-context.js): a typed
@@ -349,13 +360,15 @@ async function loadCancellationFacts(customerId, { now = new Date(), dbh = db } 
 
   const complaintMsg = (Array.isArray(lastComplaint) ? lastComplaint : []).find((m) => COMPLAINT_KEYWORDS.test(String(m.body || '')));
 
-  const prepay = customer.billing_mode === 'annual_prepay';
+  // Prepay verdict from BOTH the scalar and the live term authority; an
+  // errored term lookup fails closed (blocks the offer).
+  const prepay = customer.billing_mode === 'annual_prepay' || livePrepayTerm === 'error' || !!livePrepayTerm;
 
   // FAIL CLOSED on money-critical facts: a query failure must never widen
   // eligibility. An errored leg resolves to the value that BLOCKS the offer
   // (not current / complaint open / callback open / offer just granted);
   // moneyFactsDegraded records that it happened.
-  const moneyFactsDegraded = [pastDue, failedPayment, complaintRequest, priorOffer, manualOverride, callbackLanes].includes('error');
+  const moneyFactsDegraded = [pastDue, failedPayment, complaintRequest, priorOffer, manualOverride, callbackLanes, livePrepayTerm].includes('error');
   const accountCurrent = (pastDue === 'error' || failedPayment === 'error') ? false : (!pastDue && !failedPayment);
   const openComplaint = complaintRequest === 'error' ? true : !!complaintRequest;
   const openLanes = callbackLanes === 'error' ? ['unknown'] : (Array.isArray(callbackLanes) ? callbackLanes : []);

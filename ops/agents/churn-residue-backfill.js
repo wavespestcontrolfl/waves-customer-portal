@@ -138,7 +138,8 @@ async function main() {
         .where({ id: candidate.id })
         .forUpdate()
         .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode',
-          ...(hasPerAppFee ? ['per_application_fee'] : []));
+          ...(hasPerAppFee ? ['per_application_fee'] : []),
+          ...(hasTierSource ? ['waveguard_tier_source'] : []));
       if (!customer) return;
       if (!(customer.pipeline_stage === 'churned' || customer.active === false)) return;
       if (
@@ -246,6 +247,10 @@ async function main() {
             monthly_rate: wound.prior.monthly_rate,
             billing_mode: wound.prior.billing_mode,
             ...(hasPerAppFee ? { per_application_fee: wound.prior.per_application_fee } : {}),
+            // Provenance restores WITH the label: an auto-derived tier
+            // restored without waveguard_tier_source='auto' would read as a
+            // real membership and bypass label-only safeguards.
+            ...(hasTierSource ? { waveguard_tier_source: wound.prior.waveguard_tier_source } : {}),
             updated_at: trx.fn.now(),
           });
           if (hasLedger && wound.planRates.length) {
