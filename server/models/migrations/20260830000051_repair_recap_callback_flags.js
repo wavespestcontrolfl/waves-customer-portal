@@ -7,10 +7,9 @@
  * (20260618000002) predates the July recap path and cannot have repaired
  * these rows.
  *
- * Source of truth: the linked scheduled_services row's is_callback — the
- * flag the scheduler stamps from the catalog. Only false/NULL records
- * linked to an authoritative TRUE visit are promoted; nothing is ever
- * demoted (an operator-set true record stays true).
+ * Source of truth: the record's OWN creation-time evidence — the recap
+ * marker in field_flags plus the frozen service_type naming a re-service.
+ * Only false/NULL records are promoted; nothing is ever demoted.
  *
  * down(): intentionally a no-op — the repaired value IS the authoritative
  * value; reverting would reintroduce the defect.
@@ -22,19 +21,22 @@ exports.up = async function up(knex) {
     console.log('[migration] is_callback column missing — nothing to repair');
     return;
   }
-  // Scope: ONLY rows the recap path created (field_flags.recap = true) —
-  // that is the population whose insert omitted the flag. An unscoped
-  // repair would also promote ordinary completed visits whose scheduled
-  // row was LATER repointed to a callback via update-details, rewriting
-  // history the record deliberately preserved (codex GH-r3 P2).
+  // Scope: ONLY rows the recap path created (field_flags.recap = true)
+  // whose OWN frozen service_type names a re-service — both stamped at
+  // record creation, so the repair rests on creation-time evidence alone.
+  // The scheduled row's CURRENT is_callback is deliberately not consulted:
+  // update-details can repoint a visit after the fact in either direction,
+  // and this migration must never rewrite what was true at completion
+  // (codex GH-r3 P2 + local r8 P1). The name regex is the same safety net
+  // re-service.js uses (\bre-?service\b, case-insensitive).
   const hasFieldFlags = await knex.schema.hasColumn('service_records', 'field_flags');
   if (!hasFieldFlags) {
     console.log('[migration] field_flags column missing — no recap-created rows to repair');
     return;
   }
   const repaired = await knex('service_records')
-    .whereIn('scheduled_service_id', knex('scheduled_services').select('id').where({ is_callback: true }))
     .whereRaw("(field_flags ->> 'recap') = 'true'")
+    .whereRaw("service_type ~* '\\mre-?service\\M'")
     .where(function notTrue() {
       this.where('is_callback', false).orWhereNull('is_callback');
     })

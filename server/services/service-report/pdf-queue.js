@@ -65,6 +65,19 @@ async function ensureReportToken(serviceRecordId, knex = db) {
   return token;
 }
 
+// Cached probe for the rollout window where 20260830000050 has not run yet
+// (new code, old schema): resolves once per process; a probe failure reads
+// as "absent" and only costs the re-service key component until restart.
+let serviceTierSourceColumnPresent = null;
+async function hasServiceTierSourceColumn(knex) {
+  if (serviceTierSourceColumnPresent === true) return true;
+  try {
+    const cols = await knex('service_records').columnInfo();
+    serviceTierSourceColumnPresent = !!cols.service_tier_source;
+  } catch { return false; }
+  return serviceTierSourceColumnPresent;
+}
+
 async function loadServiceRecordForPdf(recordId, knex = db) {
   return knex('service_records')
     .where({ 'service_records.id': recordId })
@@ -437,11 +450,15 @@ async function getOrRenderServiceReportPdf(recordId, {
     // side compute "no assessment" while renderAndStore — which uses the
     // full record — computes the real hash. The keys would never match and
     // every lawn PDF would re-render on every lookup.
-    // is_callback + service_tier ride along for the re-service component
-    // (reservice-report.js): without them this side computes '' while
-    // renderAndStore — full record — stores callback PDFs under -rs1m/-rs1n,
-    // and every callback PDF would re-render on every lookup.
-    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', 'service_tier_source');
+    // is_callback + service_tier(+_source) ride along for the re-service
+    // component (reservice-report.js): without them this side computes ''
+    // while renderAndStore — full record — stores callback PDFs under
+    // -rs1m*/-rs1n*, and every callback PDF would re-render on every
+    // lookup. service_tier_source ships in THIS deploy's migration
+    // (20260830000050), so during the Railway rollout overlap the column
+    // may not exist yet — probe once and select it conditionally instead
+    // of failing every PDF lookup (codex r8 P1).
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'is_callback', 'service_tier', ...(await hasServiceTierSourceColumn(knex) ? ['service_tier_source'] : []));
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
