@@ -55,7 +55,7 @@ test('applies the move and atomically increments the change count', async () => 
   expect(res).toMatchObject({ ok: true, pre_status: 'confirmed', post_status: 'confirmed' });
   expect(update.mock.calls[0][0].auto_dispatch_change_count).toEqual({ raw: 'COALESCE(auto_dispatch_change_count, 0) + 1' });
   // reminders re-aligned to the new slot (non-notifying)
-  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false, preserveMoveHold: true });
+  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith('s1', '2026-08-11T08:00', { sendNotification: false, preserveMoveHold: false });
 });
 
 test('the tapped row\'s bookkeeping is fenced on the landed slot; a miss skips EVERY stamp (local audit)', async () => {

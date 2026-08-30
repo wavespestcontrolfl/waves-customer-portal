@@ -13103,7 +13103,8 @@ const CallRecordingProcessor = {
                       try {
                         const rearmed = await db('appointment_reminders')
                           .where({ scheduled_service_id: scheduledServiceId })
-                          .where({ cancelled: false })
+                          // never re-open a sibling-suppressed row (codex)
+                          .where({ cancelled: false, suppressed_by_sibling: false })
                           .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
                         if (rearmed > 0) {
                           // The sweep's canonical confirmation fans out to

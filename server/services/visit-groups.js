@@ -2154,7 +2154,28 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           // retarget's options.technicianId patch.
           || (options.technicianId !== undefined && String(visit.technician_id || '') !== String(options.technicianId || ''))
           || staleLiveResidue;
-        if (!stale) return;
+        if (!stale) {
+          // Healthy stop, but a RETAINED hold can still be parked on the
+          // members (codex on-merge round: a full success whose release —
+          // now the caller's sync — transiently failed). Clear stamps
+          // older than the takeover grace; a live mover's stamp survives.
+          const parked = await t('appointment_reminders')
+            .whereIn('scheduled_service_id', rows.map((r) => r.id))
+            .whereNotNull('move_hold_until')
+            .forUpdate()
+            .select('id', 'move_hold_until');
+          const releasableParked = parked.filter((r) => {
+            const until = new Date(r.move_hold_until).getTime();
+            if (until <= Date.now()) return true;
+            return Date.now() - (until - MOVE_HOLD_TTL_MS) >= MOVE_HOLD_TAKEOVER_AFTER_MS;
+          });
+          if (releasableParked.length) {
+            await t('appointment_reminders').whereIn('id', releasableParked.map((r) => r.id))
+              .update({ move_hold_until: null, move_hold_token: null });
+            logger.info(`[visit-groups] no-op re-save of healthy visit ${plan.visitId} released ${releasableParked.length} retained hold row(s)`);
+          }
+          return;
+        }
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
         if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
@@ -2782,12 +2803,15 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // move, whose full success releases (or the stamp expires in 24h).
     logger.warn(`[visit-groups] unit move of visit ${plan.visitId}: parent retarget failed — reminder hold kept`);
   } else {
-    // Full success: release the hold (fenced on our stamp). A failed
-    // release leaves the rows quiet until the stamp expires and warns.
-    await releaseReminderHold((err) => {
-      warnings.push('reminder hold release failed for the moved stop — reminders stay quiet until the hold expires (24h)');
-      logger.warn(`[visit-groups] unit move reminder-hold release failed for visit ${plan.visitId}: ${err.message}`);
-    });
+    // Full success: the hold is NOT released here (codex on-merge round) —
+    // releasing before the caller's own reminder bookkeeping (dispatch's
+    // syncRescheduleReminder + reschedule notice) opens a gap the 15-min
+    // sweep can text into, duplicating the route's notice. The caller's
+    // post-move handleReschedule sync is the fenced finalizer: its
+    // token-keyed repair-release verifies the one-stop + parent tuple and
+    // clears the cohort; the healthy no-op repair and the 24h TTL are the
+    // backstops if the sync never runs.
+    logger.info(`[visit-groups] unit move of visit ${plan.visitId} complete — hold retained for the caller's reminder sync to release`);
   }
   // members: per-row pre-move state so a caller with its own post-move
   // bookkeeping (auto-dispatch restores 'pending' + stamps) can apply it

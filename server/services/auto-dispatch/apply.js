@@ -365,10 +365,11 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     const reminderRecord = await AppointmentReminders.handleReschedule(
       service.id,
       `${best.date}T${best.start_time || '08:00'}`,
-      // preserveMoveHold: this sync is part of the move machinery itself —
-      // on a PARTIAL grouped move the retained cohort hold must survive it
-      // (staff repair, not this sync, releases it — codex #3609 r34).
-      { sendNotification: false, preserveMoveHold: true },
+      // preserveMoveHold only on INCOMPLETE outcomes (codex on-merge
+      // round): a full success no longer releases inside the mover — this
+      // sync is the fenced finalizer and its repair-release clears the
+      // cohort; a partial/failed-retarget move keeps the hold for staff.
+      { sendNotification: false, preserveMoveHold: partialFailed.length > 0 || moveResult?.visitMove?.parentRetargetFailed === true },
     );
     // handleReschedule flips confirmation_sent→true assuming a reschedule notice
     // will follow; auto-dispatch sends none. If a creation confirmation was still

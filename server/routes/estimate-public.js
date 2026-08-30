@@ -12805,7 +12805,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   try {
                     await db('appointment_reminders')
                       .where({ scheduled_service_id: confirmedAppointmentRow.id })
-                      .where({ cancelled: false })
+                      // never re-open a sibling-suppressed row (codex): the
+                      // slot owner carries the messaging.
+                      .where({ cancelled: false, suppressed_by_sibling: false })
                       .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
                     logger.info(`[estimate-accept] Confirmation SMS held (grouped move) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
                   } catch (rearmErr) {

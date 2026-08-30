@@ -283,6 +283,27 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
   return !isWithinSendWindowET();
 }
 
+// Office-lane hand-off with a VERIFIED result (codex on-merge round):
+// notification-service catches persistence errors and resolves null, so a
+// bare call can log a successful hand-off while no notification exists —
+// silently losing the only durable record of the obligation. One retry,
+// then a loud error naming the lost manual action.
+async function handOffToOffice(title, message) {
+  const notify = () => require('./notification-service').notifyAdmin('comms', title, message);
+  try {
+    let res = await notify();
+    if (!res) res = await notify();
+    if (!res) {
+      logger.error(`[appt-remind] OFFICE HAND-OFF LOST (notification could not be persisted): ${title} — ${message}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.error(`[appt-remind] OFFICE HAND-OFF LOST (${err.message}): ${title} — ${message}`);
+    return false;
+  }
+}
+
 // The notice kinds a grouped unit move's durable send hold governs — the
 // same set deliverAppointmentNotice's entry check covers.
 const MOVE_HOLD_KINDS = new Set(['confirmation', '72h', '24h']);
@@ -489,16 +510,11 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // hand the email leg durably to the office lane instead (the same
     // exception rail every other partial hold uses).
     if (smsOk && emailRes?.held) {
-      try {
-        await require('./notification-service').notifyAdmin(
-          'comms',
-          'Held appointment email needs a manual send',
-          `The ${kind} email leg of a 'both'-channel notice was held by an in-progress visit move after the text was already delivered — send it from the composer once the stop settles${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
-        );
-        logger.info(`[appt-remind] ${kind} email leg held after a delivered SMS — handed to the office lane`);
-      } catch (notifyErr) {
-        logger.error(`[appt-remind] held email-leg hand-off failed for ${customerId}: ${notifyErr.message}`);
-      }
+      const handedOff = await handOffToOffice(
+        'Held appointment email needs a manual send',
+        `The ${kind} email leg of a 'both'-channel notice was held by an in-progress visit move after the text was already delivered — send it from the composer once the stop settles${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
+      );
+      if (handedOff) logger.info(`[appt-remind] ${kind} email leg held after a delivered SMS — handed to the office lane`);
       return smsOk;
     }
     // Neither channel reached the customer — raise the same human-follow-up
@@ -662,10 +678,21 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   });
   if (!reached && holdOutcome.blockedCode === 'MOVE_HOLD' && scheduledServiceId) {
     try {
-      await db('appointment_reminders')
-        .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+      // NEVER re-open a sibling-suppressed row (codex on-merge round): it
+      // normally never delivers — re-arming it would send its own pristine-
+      // label confirmation beside the slot owner's. When nothing re-armed
+      // (suppressed or no row), the obligation goes to the office lane.
+      const rearmed = await db('appointment_reminders')
+        .where({ scheduled_service_id: scheduledServiceId, cancelled: false, suppressed_by_sibling: false })
         .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-      logger.info(`[appt-remind] confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
+      if (rearmed > 0) {
+        logger.info(`[appt-remind] confirmation for ${scheduledServiceId} held (grouped move) — re-armed for the stranded-confirmation sweep`);
+      } else {
+        await handOffToOffice(
+          'Held confirmation needs a manual send',
+          `A confirmation for service ${scheduledServiceId} was held by an in-progress visit move and its reminder row cannot be re-armed (sibling-suppressed or missing) — send it from the composer once the stop settles.`,
+        );
+      }
     } catch (rearmErr) {
       logger.error(`[appt-remind] held confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
     }
@@ -1365,16 +1392,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     sentAny = sentAny || sent;
   }
   if (sentAny && moveHeldRoles.length) {
-    try {
-      await require('./notification-service').notifyAdmin(
-        'comms',
-        'Held appointment notice needs a manual send',
-        `A ${messageType} text to ${moveHeldRoles.length} appointment contact(s) (${moveHeldRoles.join(', ')}) was held by an in-progress visit move after another contact was already texted — send it from the composer once the stop settles.`,
-      );
-      logger.info(`[appt-remind] ${messageType}: ${moveHeldRoles.length} move-held contact(s) handed to the office lane (partial fan-out)`);
-    } catch (notifyErr) {
-      logger.error(`[appt-remind] move-held contact hand-off failed for customer ${customer.id}: ${notifyErr.message}`);
-    }
+    const handedOff = await handOffToOffice(
+      'Held appointment notice needs a manual send',
+      `A ${messageType} text to ${moveHeldRoles.length} appointment contact(s) (${moveHeldRoles.join(', ')}) was held by an in-progress visit move after another contact was already texted — send it from the composer once the stop settles.`,
+    );
+    if (handedOff) logger.info(`[appt-remind] ${messageType}: ${moveHeldRoles.length} move-held contact(s) handed to the office lane (partial fan-out)`);
   }
   // Partial fan-out across the 20:00 boundary (codex r20): one accepted
   // contact makes callers finalize 'sent', so a later held contact would

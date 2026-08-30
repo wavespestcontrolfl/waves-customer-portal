@@ -805,16 +805,18 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(rem[1].ops).toEqual(expect.arrayContaining([['where', { scheduled_service_id: 'a' }]])); // re-stamp
     expect(rem[1].values).toEqual({ move_hold_until: rem[0].values.move_hold_until, move_hold_token: rem[0].values.move_hold_token });
     expect(rem[0].values.move_hold_token).toMatch(/^[0-9a-f]{32}$/); // unique cohort token (codex r35)
-    // FULL success: claim + per-member re-stamps, then ONE release fenced on OUR stamp, keyed on the members
+    // FULL success: claim + per-member re-stamps — the mover RETAINS the
+    // hold (codex on-merge round): releasing before the caller's own
+    // reminder sync opened a sweep-vs-notice duplicate window; the
+    // caller's handleReschedule repair-release (token-keyed, one-stop +
+    // parent verified) is the finalizer, with the healthy no-op repair
+    // and the 24h TTL as backstops.
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: reminders };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     rem = db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update');
-    expect(rem.length).toBe(4); // claim + 2 re-stamps + release
-    const release = rem[rem.length - 1];
-    expect(release.values).toEqual({ move_hold_until: null, move_hold_token: null });
-    // release is keyed on the TOKEN ALONE (uncapped r36): late joiners that inherited it release too
-    expect(release.ops).toEqual(expect.arrayContaining([['where', { move_hold_token: rem[0].values.move_hold_token }]]));
+    expect(rem.length).toBe(3); // claim + 2 re-stamps — NO release inside the mover
+    expect(rem.every((c) => c.values.move_hold_until instanceof Date)).toBe(true);
     // ABORT (primary never moved): the hold is released before rethrow
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };
@@ -839,8 +841,7 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() + 24 * 3600000 - 10 * 60000) }] : []) } };
     await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
-    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(3); // takeover claim + 2 per-member re-stamps
-    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until === null).length).toBe(1); // full success releases the taken-over lease
+    expect(db.__calls.filter((c) => c.table === 'appointment_reminders' && c.op === 'update' && c.values.move_hold_until instanceof Date).length).toBe(3); // takeover claim + 2 per-member re-stamps (retained — the caller's sync releases)
     // an EXPIRED foreign hold (abandoned partial) is claimable
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')] }), appointment_reminders: { select: (ops) => (ops.some((o) => o[0] === 'forUpdate') ? [{ id: 'rem-a', move_hold_until: new Date(Date.now() - 60000) }] : []) } };
