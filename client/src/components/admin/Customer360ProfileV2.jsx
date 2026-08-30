@@ -3635,18 +3635,20 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
 
 // Does the server's estimate-derived prefill apply to what the operator is
 // recording? Three checks, all required, all fail-closed:
-// 1. Label: EXACT identity after stripping only service/plan/program filler —
-//    cadence words are KEPT, so "Quarterly Pest Control Service" matches
-//    "Quarterly Pest Control" but neither "Commercial Pest Control" nor
-//    "Monthly Pest Control" does. Never substring-match a money prefill.
+// 1. Label: EXACT identity of the CADENCE-NEUTRAL service — cadence words
+//    and service/plan/program filler drop out, so an estimate line named
+//    plain "Pest Control" matches the modal's "Quarterly Pest Control"
+//    default — but "Commercial Pest Control" never matches "Pest Control".
+//    Never substring-match a money prefill. Cadence safety does NOT ride the
+//    label: it is enforced by checks 2-3 against the estimate's own
+//    coverageCadence/coverageVisitCount, so a monthly quote still never
+//    lands on a quarterly schedule.
 // 2. Cadence: the modal's coverage cadence must equal the estimate's own.
 // 3. Visit count: ditto — the quoted annual is only valid for the quoted
 //    schedule.
 function annualPrepaySuggestionLabelKey(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/\b(service|plan|program)\b/g, " ")
-    .replace(/[^a-z0-9]+/g, "")
+  return normalizeAnnualPrepayLabelKey(value)
+    .replace(/service|plan|program/g, "")
     .trim();
 }
 
@@ -3663,10 +3665,36 @@ export function estimateSuggestionMatchesService(suggestion, serviceType, covera
 export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrepayTerms = [], estimateSuggestion = null, onClose, onSaved }) {
   const initialStart = defaultAnnualPrepayStart(activeTerm);
   const serviceOptions = deriveAnnualPrepayServiceOptions(customer, activeTerm, prepaidPlans, annualPrepayTerms);
-  const defaultServiceBase = serviceOptions[0]?.value || inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
-  const defaultCoverageCadence = inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
+  // For a brand-new customer (no options, no term, no prepaid plans) the
+  // eligible estimate is the ONLY signal of what plan is being recorded —
+  // without this, service/cadence fall to the Quarterly Pest Control
+  // defaults and a valid lawn/tree-shrub suggestion could never prefill.
+  const inferredServiceBase = inferAnnualPrepayServiceBase(customer, activeTerm, prepaidPlans);
+  // inferAnnualPrepayServiceBase never returns "" — its terminal fallback is
+  // the literal "Pest Control", which is a GUESS, not a signal, when the
+  // customer carries no serviceTypes either. Only then may the estimate
+  // seed the defaults.
+  const inferredBaseIsGuess = inferredServiceBase === "Pest Control"
+    && !String(customer?.serviceTypes || "").trim();
+  // deriveAnnualPrepayServiceOptions also pads an empty list with a
+  // "Pest Control" fallback option — that lone guess is not a signal either.
+  const optionsAreFallbackOnly = serviceOptions.length === 1 && serviceOptions[0]?.source === "fallback";
+  const seedFromSuggestion = estimateSuggestion
+    && !estimateSuggestion.blocked
+    && Number(estimateSuggestion.amount) > 0
+    && (serviceOptions.length === 0 || optionsAreFallbackOnly)
+    && !activeTerm
+    && (prepaidPlans || []).length === 0
+    && inferredBaseIsGuess;
+  const defaultServiceBase = (!optionsAreFallbackOnly && serviceOptions[0]?.value)
+    || (seedFromSuggestion ? estimateSuggestion.serviceLabel : inferredServiceBase);
+  const defaultCoverageCadence = seedFromSuggestion && estimateSuggestion.coverageCadence
+    ? estimateSuggestion.coverageCadence
+    : inferAnnualPrepayInitialCadence(activeTerm, prepaidPlans);
   const defaultServiceType = formatAnnualPrepayServiceLabel(defaultServiceBase, defaultCoverageCadence) || "Quarterly Pest Control";
-  const defaultVisitCount = ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4";
+  const defaultVisitCount = seedFromSuggestion && Number(estimateSuggestion.coverageVisitCount) > 0
+    ? String(estimateSuggestion.coverageVisitCount)
+    : (ANNUAL_PREPAY_CADENCE_VISITS[defaultCoverageCadence] || "4");
   const suggestedAmount = inferAnnualPrepaySuggestedAmount(
     { ...customer, prepaidPlans, annualPrepayTerms },
     defaultServiceType,

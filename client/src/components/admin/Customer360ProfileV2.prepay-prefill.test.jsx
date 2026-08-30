@@ -45,11 +45,13 @@ function renderModal(props = {}) {
 }
 
 describe('estimateSuggestionMatchesService', () => {
-  it('requires exact label identity (cadence words kept), cadence, and visit count', () => {
+  it('requires cadence-neutral label identity plus cadence and visit-count agreement', () => {
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'quarterly', 4)).toBe(true);
-    // Cadence is part of the identity — a monthly label, cadence, or count
-    // never receives the quarterly quote.
-    expect(estimateSuggestionMatchesService(SUGGESTION, 'Monthly Pest Control Plan', 'quarterly', 4)).toBe(false);
+    // Estimate lines often store the plain service name — cadence words are
+    // neutral in the LABEL because checks 2-3 enforce the schedule.
+    expect(estimateSuggestionMatchesService({ ...SUGGESTION, serviceLabel: 'Pest Control' }, 'Quarterly Pest Control', 'quarterly', 4)).toBe(true);
+    expect(estimateSuggestionMatchesService(SUGGESTION, 'Monthly Pest Control Plan', 'quarterly', 4)).toBe(true);
+    // The SCHEDULE checks are what stop a cross-cadence money prefill.
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'monthly', 12)).toBe(false);
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Pest Control', 'quarterly', 6)).toBe(false);
     expect(estimateSuggestionMatchesService(SUGGESTION, 'Quarterly Mosquito Service', 'quarterly', 4)).toBe(false);
@@ -142,6 +144,32 @@ describe('AnnualPrepayModal estimate prefill', () => {
     fireEvent.change(serviceInput, { target: { value: 'Quarterly Pest Control' } });
     expect(amountInput).toHaveValue(null);
     expect(screen.queryByText(/From estimate/)).not.toBeInTheDocument();
+  });
+
+  it('a cadence-neutral estimate label still prefills against the cadenced default', () => {
+    renderModal({ estimateSuggestion: { ...SUGGESTION, serviceLabel: 'Pest Control' } });
+    const amountInput = document.querySelector('input[type="number"][step="0.01"]');
+    expect(amountInput).toHaveValue(384);
+    expect(screen.getByText(/From estimate #0B1C2D/)).toBeInTheDocument();
+  });
+
+  it('seeds service, cadence, and visit count from a non-pest estimate for a brand-new customer', () => {
+    renderModal({
+      estimateSuggestion: {
+        ...SUGGESTION,
+        serviceLabel: 'Lawn Care Program',
+        coverageCadence: 'every_6_weeks',
+        coverageVisitCount: 9,
+        amount: 810,
+      },
+    });
+    const serviceInput = screen.getByPlaceholderText('Enter custom service label');
+    expect(serviceInput.value).toMatch(/Lawn Care/);
+    const visitInput = document.querySelector('input[type="number"][step="1"]');
+    expect(visitInput).toHaveValue(9);
+    const amountInput = document.querySelector('input[type="number"][step="0.01"]');
+    expect(amountInput).toHaveValue(810);
+    expect(screen.getByText(/From estimate #0B1C2D/)).toBeInTheDocument();
   });
 
   it('renders exactly as before with no suggestion', () => {
