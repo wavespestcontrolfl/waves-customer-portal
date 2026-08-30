@@ -33,6 +33,7 @@
  *    re-service IS, not about what was found today.
  */
 
+const crypto = require('crypto');
 const { detectServiceLine } = require('./service-line-configs');
 
 // Read at CALL time, exact `'true'` — the same rule as the sibling V2
@@ -302,10 +303,21 @@ async function reserviceTrendsPdfSignature(service = {}, knex = null) {
   if (!gateOn()) return '';
   if (!knex || !service?.customer_id) return '';
   try {
-    const row = await knex('service_records')
+    // The SET of relevant callback records, bounded to this report's window
+    // (rows dated after the report can't affect its token-scoped queries):
+    // adding, backfilling, or reclassifying a callback changes the id set
+    // and therefore the key, so a cached PDF can never stay pinned to a
+    // stale chart (codex #3623 r4 P1 — existence alone froze '-rstr1').
+    const rows = await knex('service_records')
       .where({ customer_id: service.customer_id, is_callback: true })
-      .first('id');
-    return row ? '-rstr1' : '';
+      .modify((query) => {
+        if (service.service_date) query.where('service_date', '<=', service.service_date);
+      })
+      .orderBy('id', 'asc')
+      .select('id');
+    if (!rows.length) return '';
+    const digest = crypto.createHash('sha1').update(rows.map((row) => String(row.id)).join(',')).digest('hex').slice(0, 8);
+    return `-rstr${rows.length}-${digest}`;
   } catch {
     return '-rstru';
   }

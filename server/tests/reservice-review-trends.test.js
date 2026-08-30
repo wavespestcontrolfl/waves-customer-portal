@@ -114,18 +114,32 @@ describe('trend word recomputed against the filtered history (codex #3623 r1)', 
 describe('reserviceTrendsPdfSignature (codex #3623 r1 P2)', () => {
   const { reserviceTrendsPdfSignature } = require('../services/service-report/reservice-report');
   const svc = { customer_id: 'cust-1' };
-  const knexWith = (row) => (table) => ({ where() { return this; }, async first() { if (row === 'throw') throw new Error('down'); return row; } });
+  const knexWith = (rows) => () => {
+    const chain = {
+      where() { return chain; },
+      modify(fn) { fn(chain); return chain; },
+      orderBy() { return chain; },
+      async select() { if (rows === 'throw') throw new Error('down'); return rows; },
+    };
+    return chain;
+  };
 
-  test("gate on + customer has a callback record: '-rstr1'; none: ''; lookup failure: distinct re-render token", async () => {
+  test('gate on: key derives from the SET of callback records — adding or reclassifying one moves it', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
-    expect(await reserviceTrendsPdfSignature(svc, knexWith({ id: 'cb' }))).toBe('-rstr1');
-    expect(await reserviceTrendsPdfSignature(svc, knexWith(null))).toBe('');
+    const one = await reserviceTrendsPdfSignature(svc, knexWith([{ id: 'cb-1' }]));
+    const two = await reserviceTrendsPdfSignature(svc, knexWith([{ id: 'cb-1' }, { id: 'cb-2' }]));
+    const swapped = await reserviceTrendsPdfSignature(svc, knexWith([{ id: 'cb-9' }]));
+    expect(one).toMatch(/^-rstr1-[0-9a-f]{8}$/);
+    expect(two).toMatch(/^-rstr2-[0-9a-f]{8}$/);
+    expect(one).not.toBe(two);
+    expect(one).not.toBe(swapped);
+    expect(await reserviceTrendsPdfSignature(svc, knexWith([]))).toBe('');
     expect(await reserviceTrendsPdfSignature(svc, knexWith('throw'))).toBe('-rstru');
   });
 
   test('gate dark: always empty — existing keys untouched', async () => {
     delete process.env.GATE_RESERVICE_REPORT_COPY;
-    expect(await reserviceTrendsPdfSignature(svc, knexWith({ id: 'cb' }))).toBe('');
+    expect(await reserviceTrendsPdfSignature(svc, knexWith([{ id: 'cb-1' }]))).toBe('');
   });
 });
 
