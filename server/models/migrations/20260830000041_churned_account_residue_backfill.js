@@ -88,7 +88,58 @@ exports.up = async function up(knex) {
      
     await knex.transaction(async (trx) => {
       await windDownIfStillResidue(trx, customer.id);
+    }).catch((err) => {
+      // A concurrent booking raced this account mid-wind-down: everything
+      // rolled back; the audit script keeps reporting it. Anything else is
+      // a real failure and must stop the migration.
+      if (err && err.code === 'BACKFILL_CONCURRENT_LIVE_WORK') return;
+      throw err;
     });
+  }
+
+  // Every "leave this account alone" signal in one place, run TWICE per
+  // customer: before the wind-down, and again after its writes — the row
+  // lock does not serialize scheduled_services/payments inserts, so under
+  // READ COMMITTED the post-write re-read sees a booking that committed
+  // mid-transaction, and throwing here rolls the whole wind-down back.
+  async function hasLiveState(trx, customerId) {
+    const [liveSeries, upcoming, inProgress, coveredTerm] = await Promise.all([
+      trx('scheduled_services')
+        .where({ customer_id: customerId, recurring_ongoing: true })
+        .whereNot('status', 'cancelled')
+        .first('id'),
+      // ET calendar date, not UTC (AGENTS.md America/New_York rule): after
+      // 8 PM ET a UTC "today" is tomorrow and would skip a same-day visit.
+      // 'rescheduled' rows keep their ORIGINAL (often past) date while
+      // remaining live rebook intents — date-exempt as in the eligibility gate.
+      trx('scheduled_services')
+        .where({ customer_id: customerId })
+        .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
+        .where(function dateOrRescheduled() {
+          this.whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+            .orWhere('status', 'rescheduled');
+        })
+        .first('id'),
+      // A tech actively working the property (any date) is live state too.
+      trx('scheduled_services')
+        .where({ customer_id: customerId })
+        .where(function liveWork() {
+          this.whereIn('status', ['en_route', 'on_site'])
+            .orWhereIn('track_state', ['en_route', 'on_property']);
+        })
+        .first('id'),
+      // Live annual-prepay coverage (deliberately status-blind: ANY covering
+      // term keeps the account out — over-skipping is safe, the audit script
+      // keeps reporting it).
+      hasPrepayTerms
+        ? trx('annual_prepay_terms')
+          .where({ customer_id: customerId })
+          .where('term_start', '<=', etToday)
+          .where('term_end', '>=', etToday)
+          .first('id')
+        : Promise.resolve(null),
+    ]);
+    return !!(liveSeries || upcoming || inProgress || coveredTerm);
   }
 
   async function windDownIfStillResidue(trx, customerId) {
@@ -100,46 +151,7 @@ exports.up = async function up(knex) {
       .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
     if (!customer) return;
     if (!(customer.pipeline_stage === 'churned' || customer.active === false)) return; // re-won — leave alone
-    const [liveSeries, upcoming, inProgress, coveredTerm] = await Promise.all([
-      trx('scheduled_services')
-        .where({ customer_id: customer.id, recurring_ongoing: true })
-        .whereNot('status', 'cancelled')
-        .first('id'),
-      // ET calendar date, not UTC (AGENTS.md America/New_York rule): after
-      // 8 PM ET a UTC "today" is tomorrow and would skip a same-day visit.
-      trx('scheduled_services')
-        .where({ customer_id: customer.id })
-        .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
-        .where(function dateOrRescheduled() {
-          // 'rescheduled' rows keep their ORIGINAL (often past) date while
-          // remaining live rebook intents (cancellation-eligibility.js) —
-          // they are date-exempt here exactly as in the eligibility gate.
-          this.whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
-            .orWhere('status', 'rescheduled');
-        })
-        .first('id'),
-      // A tech actively working the property (any date) is live state too.
-      trx('scheduled_services')
-        .where({ customer_id: customer.id })
-        .where(function liveWork() {
-          this.whereIn('status', ['en_route', 'on_site'])
-            .orWhereIn('track_state', ['en_route', 'on_property']);
-        })
-        .first('id'),
-      // Live annual-prepay coverage (deliberately status-blind: ANY term
-      // whose window covers today keeps the account out of this wind-down —
-      // over-skipping is safe, the audit script keeps reporting it; the
-      // opposite mistake deactivates a customer with paid coverage).
-      hasPrepayTerms
-        ? trx('annual_prepay_terms')
-          .where({ customer_id: customer.id })
-          .where('term_start', '<=', etToday)
-          .where('term_end', '>=', etToday)
-          .first('id')
-        : Promise.resolve(null),
-    ]);
-    if (liveSeries || upcoming || inProgress || coveredTerm) return; // possibly a mistaken stage-flip — leave for the audit script
-
+    if (await hasLiveState(trx, customer.id)) return; // possibly a mistaken stage-flip — leave for the audit script
     const update = {
       active: false,
       autopay_enabled: false,
@@ -150,6 +162,8 @@ exports.up = async function up(knex) {
     };
     if ((await trx.schema.hasColumn('customers', 'waveguard_tier_source'))) update.waveguard_tier_source = null;
     if (customer.churn_mrr == null && Number(customer.monthly_rate) > 0) update.churn_mrr = customer.monthly_rate;
+    let laneCleared = false;
+    let laneRetainedForUninvoiced = false;
     if (customer.billing_mode === 'per_application') {
       // Same guard as the processor's lane wind-down: a COMPLETED but
       // uninvoiced application is priced from these fields by billing
@@ -165,6 +179,9 @@ exports.up = async function up(knex) {
       if (!completedUninvoiced) {
         update.billing_mode = null;
         if (hasPerAppFee) update.per_application_fee = null;
+        laneCleared = true;
+      } else {
+        laneRetainedForUninvoiced = true;
       }
     }
     await trx('customers').where({ id: customer.id }).update(update);
@@ -197,9 +214,20 @@ exports.up = async function up(knex) {
         `${customer.active ? 'active=true' : ''}${customer.active && (customer.waveguard_tier || Number(customer.monthly_rate) > 0) ? ' and ' : ''}` +
         `${customer.waveguard_tier ? `tier ${customer.waveguard_tier}` : ''}${customer.waveguard_tier && Number(customer.monthly_rate) > 0 ? ' / ' : ''}` +
         `${Number(customer.monthly_rate) > 0 ? `rate $${Number(customer.monthly_rate).toFixed(2)}` : ''}` +
-        `${customer.billing_mode === 'per_application' ? ' (per-application lane + fee cleared)' : ''}` +
-        '. Deactivated, cleared tier/rate/plan-rate components, autopay off. No visits or billing were live; no customer contact.',
+        `${laneCleared ? ' (per-application lane + fee cleared)' : ''}` +
+        `${laneRetainedForUninvoiced ? ' (per-application lane + fee RETAINED — a completed visit is not yet invoiced; office settles it, then clears the lane)' : ''}` +
+        '. Deactivated, cleared tier/rate/plan-rate components, autopay off. No upcoming or in-progress work was live; no customer contact.',
     });
+
+    // Post-write re-check: a booking committed mid-transaction (customer
+    // row locks do not serialize service inserts) makes this wind-down
+    // wrong — roll the whole per-customer transaction back and leave the
+    // account for the audit script.
+    if (await hasLiveState(trx, customer.id)) {
+      const raceErr = new Error('BACKFILL_CONCURRENT_LIVE_WORK');
+      raceErr.code = 'BACKFILL_CONCURRENT_LIVE_WORK';
+      throw raceErr;
+    }
   }
 };
 
