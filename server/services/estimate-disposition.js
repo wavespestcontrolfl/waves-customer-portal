@@ -170,7 +170,15 @@ function staffDispositionUpdates(body = {}) {
   if (code === 'declined_competitor') {
     const name = typeof body.competitorName === 'string' ? body.competitorName.trim().slice(0, 120) : '';
     updates.competitor_name = name || null;
-    updates.competitor_price = positiveMoneyOrNull(body.competitorPrice);
+    const priceSupplied = body.competitorPrice !== undefined && body.competitorPrice !== null
+      && String(body.competitorPrice).trim() !== '';
+    const price = positiveMoneyOrNull(body.competitorPrice);
+    // A supplied-but-unusable price must fail loudly, not vanish behind a
+    // successful save (codex pre-push P1).
+    if (priceSupplied && price === null) {
+      return { error: 'Competitor price must be a dollar amount between 0 and 99,999,999.99.' };
+    }
+    updates.competitor_price = price;
   }
   // Keep the legacy human label populated for every existing badge/list
   // reader; when only a code came in, derive the label from it.

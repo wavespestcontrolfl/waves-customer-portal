@@ -70,19 +70,40 @@ exports.up = async function up(knex) {
   `);
 
   // Backfill archived LIVE (sent/viewed) rows — the archive path never
-  // rewrote status, so these carry their whole story in disposition. Split
-  // on conversion evidence (a completed service for the customer after the
-  // estimate was created — an approximation of the conversion sweep's
-  // rule): converted customers were WINS routed around the estimate, the
-  // rest were parked courtships.
+  // rewrote status, so these carry their whole story in disposition.
+  // converted_other_path mirrors archiveConvertedOpenEstimates +
+  // whereNoConversionBeforeEstimate (estimate-conversion-guard.js): at
+  // least one conversion signal (paid invoice OR completed visit) exists,
+  // and NO conversion evidence of ANY kind predates the estimate — a
+  // pre-converted customer's archived upsell stays archived_unresolved
+  // instead of masquerading as the conversion.
   await knex.raw(`
     UPDATE estimates e SET
-      disposition = CASE WHEN e.customer_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM scheduled_services ss
-        WHERE ss.customer_id = e.customer_id
-          AND ss.status = 'completed'
-          AND COALESCE(ss.completed_at, ss.created_at) >= e.created_at
-      ) THEN 'converted_other_path' ELSE 'archived_unresolved' END,
+      disposition = CASE WHEN e.customer_id IS NOT NULL
+        AND (
+          EXISTS (SELECT 1 FROM invoices i
+            WHERE i.customer_id = e.customer_id AND i.status = 'paid')
+          OR EXISTS (SELECT 1 FROM scheduled_services ss
+            WHERE ss.customer_id = e.customer_id AND ss.status = 'completed')
+        )
+        AND NOT EXISTS (SELECT 1 FROM invoices i
+          WHERE i.customer_id = e.customer_id AND i.status = 'paid'
+            AND LEAST(i.created_at, COALESCE(i.paid_at, i.created_at)) < e.created_at)
+        AND NOT EXISTS (SELECT 1 FROM scheduled_services ss
+          WHERE ss.customer_id = e.customer_id
+            AND ss.status NOT IN ('cancelled', 'rescheduled', 'skipped', 'no_show')
+            AND ss.created_at < e.created_at)
+        AND NOT EXISTS (SELECT 1 FROM scheduled_services ss
+          WHERE ss.customer_id = e.customer_id AND ss.status = 'completed'
+            AND COALESCE(ss.completed_at, ss.scheduled_date::timestamp AT TIME ZONE 'America/New_York') < e.created_at)
+        AND NOT EXISTS (SELECT 1 FROM service_records sr
+          WHERE sr.customer_id = e.customer_id AND sr.status = 'completed'
+            AND sr.service_date::timestamp AT TIME ZONE 'America/New_York' < e.created_at)
+        AND NOT EXISTS (SELECT 1 FROM customers c
+          WHERE c.id = e.customer_id
+            AND c.pipeline_stage IN ('active_customer', 'won', 'at_risk')
+            AND COALESCE(c.member_since, (c.created_at AT TIME ZONE 'America/New_York')::date) < (e.created_at AT TIME ZONE 'America/New_York')::date)
+      THEN 'converted_other_path' ELSE 'archived_unresolved' END,
       disposition_source = 'system',
       disposition_at = COALESCE(e.archived_at, e.updated_at, e.created_at)
     WHERE e.status IN ('sent', 'viewed')

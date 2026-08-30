@@ -106,12 +106,14 @@ describe('staffDispositionUpdates — PATCH payload', () => {
     }).updates;
     expect(other).toMatchObject({ competitor_name: null, competitor_price: null });
 
-    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: 'lots' }).updates.competitor_price).toBeNull();
-    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '-5' }).updates.competitor_price).toBeNull();
-    // decimal(10,2) range guard — overflow must not become a 500.
-    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '100000000' }).updates.competitor_price).toBeNull();
-    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '1e100' }).updates.competitor_price).toBeNull();
+    // A SUPPLIED but unusable price is a loud 400, never a silent null save
+    // (codex P1); the decimal(10,2) range guard rides the same rule.
+    for (const bad of ['lots', '-5', '100000000', '1e100']) {
+      expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: bad }).error).toMatch(/Competitor price/);
+    }
     expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '99999999.99' }).updates.competitor_price).toBe(99999999.99);
+    expect(staffDispositionUpdates({ disposition: 'declined_competitor', competitorPrice: '' }).updates.competitor_price).toBeNull();
+    expect(staffDispositionUpdates({ disposition: 'declined_competitor' }).updates.competitor_price).toBeNull();
   });
 
   test('legacy declineReason alone maps to a code; unknown text is kept as the note', () => {
