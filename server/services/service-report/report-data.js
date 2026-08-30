@@ -4920,6 +4920,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+  // Lawn callback reports fold the fragmented cards into the narrative
+  // (owner 2026-08-30, first-callback eyeball): the tech-reviewed AI report
+  // already tells the found/did/recommend story in prose — the "What we
+  // found & did" tiles, the "What we recommend" list, and the generic lawn
+  // program explainer restate it as noise on a complaint visit. Suppressed
+  // ONLY when that narrative actually composed (summarySource
+  // 'technician_report'): a callback whose completion produced no reviewed
+  // narrative keeps every card — removal must never lose the sole record.
+  // The Re-entry card independently carries the irrigation/re-entry timing,
+  // so dropping the recommendation list loses no safety guidance. Same kill
+  // switch as the rest of the lane (unset GATE_RESERVICE_REPORT_COPY).
+  const lawnCallbackNarrativeOwns = reserviceReportCopyGateOn()
+    && service.is_callback === true
+    && serviceLine === 'lawn'
+    && visitSummarySource === 'technician_report';
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -5050,7 +5066,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         visitSequence: typedSnapshot.visitSequence || 1,
         isProgressVisit: (typedSnapshot.visitSequence || 1) > 1,
         todaysResult: typedSnapshot.todaysResult || null,
-        findings: Array.isArray(typedSnapshot.findings) ? typedSnapshot.findings : [],
+        // Empty on lawn callbacks whose narrative owns the story — hides
+        // the "What we found & did" tiles on web AND PDF from one point.
+        findings: !lawnCallbackNarrativeOwns && Array.isArray(typedSnapshot.findings)
+          ? typedSnapshot.findings : [],
         nextStepChips: Array.isArray(typedSnapshot.nextStepChips) ? typedSnapshot.nextStepChips : [],
         photoSummary: typedSnapshot.photoSummary || null,
         schemaVersion: typedSnapshot.schemaVersion || null,
@@ -5141,12 +5160,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       ...parseJsonObject(service.weather_data),
     },
     findings,
-    recommendations,
+    recommendations: lawnCallbackNarrativeOwns ? [] : recommendations,
     protocol,
     advisory,
     lawnAssessment,
     mowingHeight,
-    lawnProgramOverview,
+    lawnProgramOverview: lawnCallbackNarrativeOwns ? null : lawnProgramOverview,
     visualServiceMoments: approvedVisualMoments,
     proofMoments: approvedVisualMoments,
     // Drop the gauge/lawn-length photo from the gallery only when Lawn Report V2

@@ -592,7 +592,12 @@ async function buildServiceReportV1ResponseData(service, token, {
   // failure/suppression and the report renders exactly as today.
   let crossSell = null;
   let referral = null;
-  if (mode === 'live' && composeOffers) {
+  // Owner 2026-08-30 (extends the R4 review-ask ruling): a complaint-driven
+  // visit is the wrong moment for an upsell quote or a referral ask, just
+  // as it is for a Google ask — callback reports carry neither card while
+  // the re-service gate is on. Gate-dark keeps today's behavior.
+  const callbackSuppressesOffers = reserviceReportCopyGateOn() && data.isCallback === true;
+  if (mode === 'live' && composeOffers && !callbackSuppressesOffers) {
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('reportCrossSell')) {
       const { buildReportCrossSell } = require('../services/service-report/cross-sell');
