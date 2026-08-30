@@ -549,14 +549,20 @@ function normalizeEngineLineItems(result) {
   for (const item of items) {
     const serviceKey = item.service || keyFromName(item.name);
     const quoted = quotedFieldsFrom(item);
-    const monthly = Number(item.monthly);
+    // Number(null) is a finite 0 — nullish values must fall through, not
+    // zero out revenue or cadence (codex pre-push P1 x2).
+    const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+    const monthly = num(item.monthly);
     const isRecurring = Number.isFinite(monthly) && monthly !== 0;
+    const annual = num(item.annual);
     const price = isRecurring
-      ? money(Number.isFinite(Number(item.annual)) ? Number(item.annual) : monthly * 12)
-      : money(item.price ?? item.total ?? 0);
-    // Palm cadence persists ONLY as appsPerYear (public-quote projection) —
-    // without it visitsFor costs the program as one visit (codex pre-push P1).
-    const visitsPerYear = Number(item.visitsPerYear ?? item.visits ?? item.appsPerYear);
+      ? money(Number.isFinite(annual) ? annual : monthly * 12)
+      : money(Number.isFinite(num(item.price)) ? num(item.price) : (Number.isFinite(num(item.total)) ? num(item.total) : 0));
+    // Cadence persists under several names: palm as appsPerYear, and the
+    // public-quote projection's `frequency` can itself be numeric.
+    const visitsPerYear = [item.visitsPerYear, item.visits, item.appsPerYear, item.frequency]
+      .map(num)
+      .find((v) => Number.isFinite(v) && v > 0);
     lines.push({
       ...(quoted ? { quoted } : {}),
       serviceKey,
@@ -567,7 +573,7 @@ function normalizeEngineLineItems(result) {
       priceBeforeDiscount: price,
       discount: 0,
       priceSource: 'saved_estimate.engineResult.lineItems',
-      ...(Number.isFinite(visitsPerYear) && visitsPerYear > 0 ? { visitsPerYear } : {}),
+      ...(visitsPerYear !== undefined ? { visitsPerYear } : {}),
     });
   }
   return lines;

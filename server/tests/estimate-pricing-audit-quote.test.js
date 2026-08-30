@@ -189,7 +189,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         engineResult: {
           lineItems: [
             { service: 'pest_control', name: 'Pest Control', monthly: 55, annual: 660, pricingVersion: 'v2' },
-            { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660 },
+            { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: null, frequency: 9 },
             { service: 'flea_treatment', name: 'Flea Treatment', price: 150, monthly: null },
             { service: 'palm_injection', name: 'Palm Injection', monthly: 30, annual: 360, appsPerYear: 2 },
           ],
@@ -197,6 +197,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       },
     });
     expect(audit.lines).toHaveLength(4);
+    const lawnLine = audit.lines.find((l) => l.serviceKey === 'lawn_care');
+    expect(lawnLine.price).toBe(660); // annual:null falls through to monthly*12, never 0
+    expect(lawnLine.visitsPerYear).toBe(9); // numeric frequency counts as cadence
     const palm = audit.lines.find((l) => l.serviceKey === 'palm_injection');
     expect(palm.visitsPerYear).toBe(2); // appsPerYear reaches the COGS visit count
     expect(palm.quoted).toMatchObject({ appsPerYear: 2 });
