@@ -244,6 +244,32 @@ async function recordSetupFeeClaimForInvoice(trx, { invoiceId, anchorId, amount 
   return true;
 }
 
+// Customer 360 / prepay-on-book mint (codex #3591 r36 P1): the modal relays
+// the preview's mintPayload, whose setupFeeAmount is a CLIENT-carried number.
+// Re-derive the obligation from the persisted series anchor (must belong to
+// this customer), refuse a mismatch (the preview and the mint must agree to
+// the cent), then run the same ledger + claim-retire step the on-site switch
+// runs so a later void/refund of this prepay restores the claim. Errors carry
+// `switchConflict` (→ 409) like the switch lane.
+async function retirePrepayOnBookSetupClaim(trx, { customerId, scheduledServiceId, invoiceId, amount }) {
+  const fee = cents(Math.max(0, Number(amount) || 0));
+  if (!(fee > 0)) return { recorded: false, retired: false };
+  const conflict = (message) => { const err = new Error(message); err.switchConflict = true; return err; };
+  if (!scheduledServiceId) throw conflict('setupFeeAmount requires scheduledServiceId — the committed series the bait-station setup belongs to');
+  const visit = await trx('scheduled_services')
+    .where({ id: scheduledServiceId })
+    .first('id', 'customer_id', 'recurring_parent_id', 'source_estimate_id');
+  if (!visit || String(visit.customer_id) !== String(customerId)) throw conflict('The prepaid series does not belong to this customer — refresh and retry');
+  const anchorId = visit.recurring_parent_id || visit.id;
+  // Through module.exports so a caller's spy on the shared resolver sees
+  // this leg exactly as it sees the preview's (same test seam).
+  const owed = await module.exports.resolveDirectRodentSetupObligation(trx, { id: anchorId });
+  if (Math.round(owed * 100) !== Math.round(fee * 100)) {
+    throw conflict(`The bait-station setup changed since the preview (previewed $${fee.toFixed(2)}, now $${Number(owed).toFixed(2)}) — refresh and retry`);
+  }
+  return retireDirectSetupClaimForPrepay(trx, { anchorId, invoiceId, amount: fee });
+}
+
 // The on-site prepay switch bills a DIRECT rodent series' unwaived setup as
 // its own prepay line (codex #3591 r33 P1). The series parent may ALSO hold
 // the durable per-application claim (pending_setup_fee) an earlier
@@ -850,6 +876,7 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 module.exports = {
   recordSetupFeeClaimForInvoice,
   retireDirectSetupClaimForPrepay,
+  retirePrepayOnBookSetupClaim,
   buildSecurePlanContext,
   deriveSecurePlanContext,
   prepaySelectionState,

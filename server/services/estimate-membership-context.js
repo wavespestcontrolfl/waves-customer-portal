@@ -39,13 +39,22 @@ const {
 } = require('../utils/address-normalizer');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 
-// Which of these rodent bait rows were created by a 2026-08-29+ (new-model)
-// estimate: the creating estimate's stored result carries the
-// perApplicationBilled / stations marker (rodentBaitLegacyReplaySignal
-// returns null). Rows without a source estimate, or whose estimate cannot be
-// read, are NOT new-model.
+// Which of these rodent bait rows belong to a 2026-08-29+ (new-model) plan.
+// Two durable signals (codex #3591 r36 P1):
+//   • ESTIMATE-origin rows: the creating estimate's stored result carries
+//     the perApplicationBilled / stations marker (rodentBaitLegacyReplaySignal
+//     returns null).
+//   • DIRECT rows (admin booking, call booking, /secure — source_estimate_id
+//     is null BY DESIGN): the series ROOT's created_at is on/after the
+//     realignment cutoff — only the bracket ladder has existed since, so a
+//     direct series booked after it is bracket-priced, per-application, and
+//     a full WaveGuard member. Resolved at the root (children are seeded
+//     later than the plan they belong to, so a child's own created_at would
+//     misread a pre-cutoff plan as new).
+// An estimate that cannot be read, a root that cannot be read, or a root
+// created before the cutoff is NOT new-model (fail closed → left alone).
 async function rodentRowsWithNewModelProvenance(database, rows = []) {
-  const { rodentBaitLegacyReplaySignal } = require('./rodent-bait-legacy-replay');
+  const { rodentBaitLegacyReplaySignal, RODENT_BAIT_REALIGNMENT_DATE } = require('./rodent-bait-legacy-replay');
   const sourceIds = [...new Set(rows.map((row) => row.source_estimate_id).filter(Boolean).map(String))];
   const newModelEstimateIds = new Set();
   if (sourceIds.length) {
@@ -59,9 +68,38 @@ async function rodentRowsWithNewModelProvenance(database, rows = []) {
       if (hasRodentRow && rodentBaitLegacyReplaySignal(data) === null) newModelEstimateIds.add(String(est.id));
     }
   }
-  return new Set(rows
+  const out = new Set(rows
     .filter((row) => row.source_estimate_id && newModelEstimateIds.has(String(row.source_estimate_id)))
     .map((row) => String(row.id)));
+  const directRows = rows.filter((row) => !row.source_estimate_id);
+  if (directRows.length) {
+    const directIds = [...new Set(directRows.map((row) => String(row.id)))];
+    const own = await database('scheduled_services')
+      .whereIn('id', directIds)
+      .select('id', 'recurring_parent_id', 'source_estimate_id', 'created_at');
+    const byId = new Map((own || []).map((r) => [String(r.id), r]));
+    const rootIds = [...new Set((own || []).map((r) => String(r.recurring_parent_id || r.id)))];
+    const roots = rootIds.length
+      ? await database('scheduled_services').whereIn('id', rootIds).select('id', 'source_estimate_id', 'created_at')
+      : [];
+    const rootById = new Map((roots || []).map((r) => [String(r.id), r]));
+    for (const row of directRows) {
+      const self = byId.get(String(row.id));
+      if (!self) continue;
+      const root = rootById.get(String(self.recurring_parent_id || self.id));
+      if (!root) continue;
+      // A root that DOES carry estimate provenance decides through the
+      // estimate branch (its children may have been seeded without the
+      // stamp) — never through its creation date.
+      if (root.source_estimate_id) {
+        if (newModelEstimateIds.has(String(root.source_estimate_id))) out.add(String(row.id));
+        continue;
+      }
+      const createdKey = visitDateKey(root.created_at);
+      if (createdKey && createdKey >= RODENT_BAIT_REALIGNMENT_DATE) out.add(String(row.id));
+    }
+  }
+  return out;
 }
 const {
   toQualifyingKey,
@@ -1557,10 +1595,11 @@ async function computeMembershipContext(database, {
         // Grandfathered rodent bait plans keep their snapshotted rate and
         // never receive the new tier % (owner 2026-08-29) — they still COUNT
         // toward the tier, but they are never repriced by an extension
-        // (codex #3591 r14 P1). Only rows whose creating estimate carries
-        // new-model provenance (perApplicationBilled / stations) qualify;
-        // rows with no source estimate cannot prove it and are left alone.
-        // FAIL CLOSED: a probe failure leaves the family off the plan.
+        // (codex #3591 r14 P1). Only rows with new-model provenance qualify:
+        // a creating estimate carrying the perApplicationBilled / stations
+        // marker, or a DIRECT series whose root was booked on/after the
+        // realignment cutoff (codex #3591 r36 P1); anything unprovable is
+        // left alone. FAIL CLOSED: a probe failure leaves the family off.
         if (familyKey === 'rodent_bait') {
           let newModelIds;
           try {

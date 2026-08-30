@@ -180,6 +180,9 @@ describe('annual-prepay preview — pricing', () => {
       expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'svc-1' }));
       expect(spy.mock.calls[0][1].service_type).toBeUndefined();
       expect(body.mintPayload.setupFeeAmount).toBe(99);
+      // The committed anchor rides with the setup so the Customer 360 mint
+      // can re-derive it and ledger the claim (codex #3591 r36 P1).
+      expect(body.mintPayload.scheduledServiceId).toBe('svc-1');
       // Rodent plan class: no fee-waiver incentive on this lane.
       expect(body.setupFee).toBeNull();
     } finally {
@@ -198,6 +201,7 @@ describe('annual-prepay preview — pricing', () => {
   test('pest series: no setup line on the mint payload', async () => {
     const { body } = await preview({});
     expect(body.mintPayload.setupFeeAmount).toBeUndefined();
+    expect(body.mintPayload.scheduledServiceId).toBeUndefined();
   });
 
   test('the mint payload carries server-derived money + the booked visit as the coverage anchor', async () => {

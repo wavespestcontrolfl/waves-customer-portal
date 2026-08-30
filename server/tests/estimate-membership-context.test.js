@@ -2287,11 +2287,24 @@ describe('existing-service tier extension snapshot', () => {
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(fresh.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
 
-    // No source estimate → cannot prove new-model → left alone. Probe failure → fail closed.
+    // No source estimate AND no readable creation date → cannot prove
+    // new-model → left alone. Probe failure → fail closed.
     const unsourced = await computeMembershipContext(fakeDb({
       scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null })),
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
     expect(unsourced.existingServices).toEqual([]);
+    // A DIRECT series (admin/call/secure booking — no estimate by design)
+    // whose ROOT was created on/after the 2026-08-29 realignment is
+    // bracket-priced new-model and DOES extend (codex #3591 r36 P1)…
+    const directNew = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-09-02T14:00:00.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(directNew.existingServices).toEqual([expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 89, newPerVisit: 80.1, rowIds: ['r1', 'r2'] })]);
+    // …while a direct series booked BEFORE the cutoff keeps its snapshotted rate.
+    const directOld = await computeMembershipContext(fakeDb({
+      scheduledRows: newRows.map((row) => ({ ...row, source_estimate_id: null, recurring_parent_id: null, created_at: '2026-07-14T14:00:00.000Z' })),
+    }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });
+    expect(directOld.existingServices).toEqual([]);
     const failed = await computeMembershipContext(fakeDb({
       scheduledRows: newRows, estimateRows: [newEstimate], estimatesQueryThrows: true,
     }), { customerId: 'cust-1', freezeExtensionPlan: true, estData: lawnEstimateData() });

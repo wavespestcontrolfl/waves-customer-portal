@@ -27,7 +27,8 @@ jest.mock('../routes/admin-customers', () => ({ _private: { lockAndAssertNoAnnua
 const fs = require('fs');
 const path = require('path');
 const InvoiceService = require('../services/invoice');
-const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice } = require('../services/secure-appointment-plans');
+const plans = require('../services/secure-appointment-plans');
+const { retireDirectSetupClaimForPrepay, recordSetupFeeClaimForInvoice, retirePrepayOnBookSetupClaim } = plans;
 
 // Minimal knex-shaped connection: per-table first()/update()/delete()
 // answers, every write recorded.
@@ -90,6 +91,47 @@ describe('retireDirectSetupClaimForPrepay — the mint side', () => {
   });
 });
 
+describe('retirePrepayOnBookSetupClaim — the Customer 360 / prepay-on-book mint (codex #3591 r36 P1)', () => {
+  const visit = { id: 'svc-child', customer_id: 'cust-1', recurring_parent_id: 'svc-parent', source_estimate_id: null };
+  let owedSpy;
+  beforeEach(() => { owedSpy = jest.spyOn(plans, 'resolveDirectRodentSetupObligation').mockResolvedValue(99); });
+  afterEach(() => owedSpy.mockRestore());
+
+  test('re-derives the setup from the series ANCHOR (must be this customer\'s), then ledgers + retires like the switch', async () => {
+    const trx = conn({ scheduledService: visit });
+    // The anchor read (recorded stamp) comes from the same first(); make the
+    // parent read return the visit row (stamp-less) — the ledger row is the
+    // observable outcome.
+    const out = await retirePrepayOnBookSetupClaim(trx, { customerId: 'cust-1', scheduledServiceId: 'svc-child', invoiceId: 'inv-prepay', amount: 99 });
+    expect(out).toEqual({ recorded: true, retired: false });
+    expect(owedSpy).toHaveBeenCalledWith(trx, { id: 'svc-parent' });
+    expect(trx.writes).toEqual([
+      expect.objectContaining({ table: 'setup_fee_claims', op: 'insert', row: { invoice_id: 'inv-prepay', scheduled_service_id: 'svc-parent', amount: 99 } }),
+    ]);
+  });
+
+  test('a fee with no anchor, another customer\'s series, or a preview/mint mismatch refuses (409-class) before any write', async () => {
+    await expect(retirePrepayOnBookSetupClaim(conn({ scheduledService: visit }), { customerId: 'cust-1', scheduledServiceId: null, invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/requires scheduledServiceId/) });
+    const foreign = conn({ scheduledService: { ...visit, customer_id: 'cust-2' } });
+    await expect(retirePrepayOnBookSetupClaim(foreign, { customerId: 'cust-1', scheduledServiceId: 'svc-child', invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/does not belong/) });
+    owedSpy.mockResolvedValue(0);
+    const drifted = conn({ scheduledService: visit });
+    await expect(retirePrepayOnBookSetupClaim(drifted, { customerId: 'cust-1', scheduledServiceId: 'svc-child', invoiceId: 'inv-prepay', amount: 99 }))
+      .rejects.toMatchObject({ switchConflict: true, message: expect.stringMatching(/changed since the preview/) });
+    expect(foreign.writes).toEqual([]);
+    expect(drifted.writes).toEqual([]);
+  });
+
+  test('no fee → no-op (a pest / member prepay never touches the ledger)', async () => {
+    const trx = conn({ scheduledService: visit });
+    expect(await retirePrepayOnBookSetupClaim(trx, { customerId: 'cust-1', scheduledServiceId: null, invoiceId: 'inv-prepay', amount: 0 })).toEqual({ recorded: false, retired: false });
+    expect(owedSpy).not.toHaveBeenCalled();
+    expect(trx.writes).toEqual([]);
+  });
+});
+
 describe('restoreRetiredSetupFeeClaimForPrepay — the void/refund side', () => {
   const claim = { id: 'claim-1', scheduled_service_id: 'svc-parent', amount: '99.00' };
 
@@ -136,6 +178,20 @@ describe('source contracts — where the lifecycle is wired', () => {
       expect(superseded).toBeGreaterThan(-1);
       expect(claim).toBeGreaterThan(superseded);
     }
+  });
+
+  test('the Customer 360 mint requires the anchor whenever a setup is billed, runs the service step under its transaction, maps conflicts to 409, and never writes the ledger itself', () => {
+    const customers = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    expect(customers).toMatch(/if \(setupFeeAmount > 0 && !setupScheduledServiceId\) \{\s*\n\s*return res\.status\(400\)/);
+    expect(customers).toMatch(/if \(setupFeeAmount > 0\) \{\s*\n\s*await require\('\.\.\/services\/secure-appointment-plans'\)\.retirePrepayOnBookSetupClaim\(trx, \{/);
+    const mintAt = customers.indexOf("router.post('/:id/annual-prepay-invoice'");
+    const claimAt = customers.indexOf('retirePrepayOnBookSetupClaim(trx', mintAt);
+    const conflictAt = customers.indexOf('if (err && err.switchConflict) return res.status(409)', claimAt);
+    expect(claimAt).toBeGreaterThan(mintAt);
+    expect(conflictAt).toBeGreaterThan(claimAt);
+    expect(customers.includes("('setup_fee_claims')")).toBe(false);
+    // The preview hands the mint the anchor beside the setup, never alone.
+    expect(schedule).toMatch(/\.\.\.\(pricing\.prepay\.setupAmount > 0 && input\.anchorVisit\?\.id \? \{ scheduledServiceId: String\(input\.anchorVisit\.id\) \} : \{\}\),/);
   });
 
   test('the switch route retires the claim through the service, only for a DIRECT series with a billed setup, and never writes the ledger itself', () => {

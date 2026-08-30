@@ -12989,8 +12989,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
       mintPayload: {
         amount: pricing.prepay.coverageTotal,
         // Billed as its own invoice line by the mint; never folded into the
-        // coverage basis the term splits across visits.
+        // coverage basis the term splits across visits. The committed series
+        // anchor rides with it (codex #3591 r36 P1): the Customer 360 mint
+        // re-derives the setup from THAT row and ledgers the claim against
+        // the prepay so a later void/refund can restore it.
         ...(pricing.prepay.setupAmount > 0 ? { setupFeeAmount: pricing.prepay.setupAmount } : {}),
+        ...(pricing.prepay.setupAmount > 0 && input.anchorVisit?.id ? { scheduledServiceId: String(input.anchorVisit.id) } : {}),
         visitCount: visitsPerYear,
         coverageCadence,
         serviceType: coverageServiceType,

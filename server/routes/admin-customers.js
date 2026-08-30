@@ -4451,6 +4451,14 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       return res.status(400).json({ error: 'setupFeeAmount must be a non-negative amount in whole cents' });
     }
     const setupFeeAmount = Math.round(setupFeeInput * 100) / 100;
+    // The committed series the setup belongs to (prepay-on-book relays the
+    // preview's mintPayload). Required whenever a setup is billed — the mint
+    // re-derives the fee from this row and ledgers the claim against the
+    // prepay so a void/refund restores it (codex #3591 r36 P1).
+    const setupScheduledServiceId = cleanOptionalText(req.body?.scheduledServiceId) || null;
+    if (setupFeeAmount > 0 && !setupScheduledServiceId) {
+      return res.status(400).json({ error: 'setupFeeAmount requires scheduledServiceId (the committed series the bait-station setup belongs to)' });
+    }
 
     const parsedVisitCount = parseAnnualPrepayVisitCount(req.body?.visitCount ?? 4);
     if (parsedVisitCount.error) return res.status(400).json({ error: parsedVisitCount.error });
@@ -4672,6 +4680,18 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // invoices apply 0 and the ledger stays untouched). A mismatch means the
       // ledger moved under us — roll the whole mint back rather than leave a
       // credit line without dollar-for-dollar ledger backing.
+      // Server-trusted setup: re-derived from the persisted anchor (must be
+      // this customer's), ledgered against this prepay, and the series
+      // parent's per-application claim retired — the same service step the
+      // on-site switch and the secure-plan prepay run (codex #3591 r36 P1).
+      if (setupFeeAmount > 0) {
+        await require('../services/secure-appointment-plans').retirePrepayOnBookSetupClaim(trx, {
+          customerId: customer.id,
+          scheduledServiceId: setupScheduledServiceId,
+          invoiceId: invoice.id,
+          amount: setupFeeAmount,
+        });
+      }
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
       // The setup line's share of the GROSS year (invoice.total is already
       // net of the deposit credit create() applied — a net ratio undersizes
@@ -4870,6 +4890,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
     if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
     if (err && err.depositCreditUnavailable) return res.status(409).json({ error: err.message });
+    if (err && err.switchConflict) return res.status(409).json({ error: err.message });
     next(err);
   }
 });

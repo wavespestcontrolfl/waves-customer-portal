@@ -17,6 +17,14 @@
 // commercial-floor-replay.js.
 // ============================================================
 
+// The realignment cutoff (owner directive 2026-08-29; migration
+// 20260829000040). A DIRECT rodent bait series (no source estimate — admin
+// booking, call booking, /secure) created on/after this date can only have
+// been priced by the bracket ladder, so its ROOT row's created_at is the
+// durable new-model signal for rows that carry no estimate provenance
+// (codex #3591 r36 P1). Pre-cutoff roots keep their snapshotted rate.
+const RODENT_BAIT_REALIGNMENT_DATE = '2026-08-29';
+
 function firstPositiveNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -63,4 +71,4 @@ function rodentBaitLegacyReplaySignal(estData = {}) {
   return null;
 }
 
-module.exports = { rodentBaitLegacyReplaySignal };
+module.exports = { rodentBaitLegacyReplaySignal, RODENT_BAIT_REALIGNMENT_DATE };
