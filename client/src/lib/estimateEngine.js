@@ -2251,6 +2251,10 @@ export function calculateEstimate(inputs) {
       lsf, sc, tf, oa, grassType, grassCode: lp.code, grassName: lp.name, hardscape,
       requestedGrassType: requestedGrassType || null,
       grassTypeWasDefaulted,
+      // Consumed by the pages' estimateRequiresQuote deep scan — an
+      // unsupported grass type priced off the St. Augustine table must not
+      // be sendable from the client fallback without review (codex P1).
+      ...(grassTypeWasDefaulted ? { requiresCustomQuote: true } : {}),
       turfEstimated: turfArea.turfEstimated,
       turfConfidence: turfArea.turfConfidence,
       turfBasis: turfArea.turfBasis,

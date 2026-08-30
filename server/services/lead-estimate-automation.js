@@ -424,13 +424,17 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
     // status/generated flags park.
     const typeUnresolved = unitScopeGuardrailsEnabled()
       && automation.review.includes('property_type_unresolved');
-    // Estimate-level field-verify flags (FIELD_VERIFY_TURF_SQFT — a LOW-graded
-    // turf basis) park the draft too: the line items carry no review marker on
-    // that path, so a lot-fallback turf price could auto-send unreviewed
-    // (estimator-engine audit 2026-08-30). Totals stay visible as provisional,
-    // matching the typeUnresolved contract above.
+    // Estimate-level field-verify flags park the draft too: turf-priced line
+    // items other than lawn carry no review marker on the lot-fallback path,
+    // so a guessed turf price could auto-send unreviewed (estimator-engine
+    // audit 2026-08-30). Parking keys on the flags that MEAN verify-before-
+    // customer-ready — TURF_CAPPED_TO_PARCEL is an informational provenance
+    // clamp on an otherwise-trusted vision measurement and does not park
+    // (codex P1: a blanket length check parked MEDIUM-graded turf). Totals
+    // stay visible as provisional, matching the typeUnresolved contract above.
     const fieldVerifyFlags = Array.isArray(estimate?.fieldVerify) ? estimate.fieldVerify : [];
-    const fieldVerifyRequired = fieldVerifyFlags.length > 0;
+    const parkingFieldVerifyFlags = fieldVerifyFlags.filter((flag) => flag !== 'TURF_CAPPED_TO_PARCEL');
+    const fieldVerifyRequired = parkingFieldVerifyFlags.length > 0;
     const parked = quoteRequired || typeUnresolved || fieldVerifyRequired;
     automation.status = parked ? 'manual_review_required' : 'generated';
     automation.generated = !parked;
@@ -438,7 +442,7 @@ function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, body = {}
     automation.fieldVerify = fieldVerifyFlags;
     automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
       || (typeUnresolved ? 'property_type_unresolved' : null)
-      || (fieldVerifyRequired ? fieldVerifyFlags[0] : null);
+      || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);
 
     return {
       automation,
