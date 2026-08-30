@@ -13,6 +13,30 @@ const { resolveAnnualPrepayInvoiceTotal } = require('../services/estimate-conver
 
 const PEST_LINE = { service: 'pest', name: 'Quarterly Pest Control Service', frequency: 'quarterly' };
 
+// Minimal knex-ish stub: no open deposits, clean call rows, empty otherwise.
+function stubDb({ deposits = [], callRow } = {}) {
+  const chain = (result) => ({
+    where: () => chain(result),
+    whereIn: () => chain(result),
+    whereNotNull: () => chain(result),
+    first: async () => result,
+    select: async () => [],
+  });
+  return (table) => {
+    if (table === 'estimate_deposits') return chain(deposits[0] || null);
+    if (table === 'call_log') return chain(callRow);
+    return chain(null);
+  };
+}
+
+function buildSuggestion(estimates, overrides = {}) {
+  return buildAnnualPrepayEstimateSuggestion(estimates, {
+    resolveLineCadence: (line) => line?.frequency || null,
+    db: stubDb(),
+    ...overrides,
+  });
+}
+
 function pestEstimate(overrides = {}) {
   return {
     id: '5a0b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d',
@@ -83,7 +107,7 @@ describe('pickAnnualPrepayEstimate', () => {
 describe('buildAnnualPrepayEstimateSuggestion', () => {
   test('single-recurring-line pest estimate suggests the resolver amount off monthly × 12', async () => {
     const estimate = pestEstimate();
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([estimate], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([estimate]);
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.estimateId).toBe(estimate.id);
     expect(suggestion.baseAnnual).toBe(384);
@@ -111,16 +135,42 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         result: { recurring: { services: [{ service: 'mosquito', name: 'Mosquito Service', frequency: 'seasonal_feb_oct', visitsPerYear: 9 }] } },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([seasonal], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([seasonal]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
 
   test("the bundle's single option key is the schedule authority when no line reader is given", async () => {
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate()]);
+    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate()], { db: stubDb() });
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.coverageCadence).toBe('quarterly');
     expect(suggestion.coverageVisitCount).toBe(4);
+  });
+
+  test('an open reservation deposit blocks the prefill; unverifiable deposit state fails closed', async () => {
+    const withDeposit = await buildSuggestion([pestEstimate()], {
+      db: stubDb({ deposits: [{ id: 'd-1' }] }),
+    });
+    expect(withDeposit.blocked).toBe(true);
+    expect(withDeposit.amount).toBeUndefined();
+    // No connection to check deposits against → no amount.
+    const noDb = await buildSuggestion([pestEstimate()], { db: null });
+    expect(noDb.blocked).toBe(true);
+    expect(noDb.amount).toBeUndefined();
+  });
+
+  test('a pending engine reprice blocks the prefill (stale fallback dollars)', async () => {
+    const repricePending = pestEstimate({
+      estimate_data: {
+        estimatorEngine: {
+          reprice_pending_at: new Date().toISOString(),
+        },
+        result: { recurring: { services: [PEST_LINE] } },
+      },
+    });
+    const suggestion = await buildSuggestion([repricePending]);
+    expect(suggestion.blocked).toBe(true);
+    expect(suggestion.amount).toBeUndefined();
   });
 
   test('rounding residue: display-monthly × 12 re-anchors to the engine annual', async () => {
@@ -135,7 +185,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([drifty], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([drifty]);
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.baseAnnual).toBe(392);
   });
@@ -152,13 +202,13 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([nonDefault], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([nonDefault]);
     expect(suggestion.blocked).toBeUndefined();
     expect(suggestion.baseAnnual).toBe(360);
   });
 
   test('stored annual_total wins over monthly × 12', async () => {
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([pestEstimate({ annual_total: 400 })], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([pestEstimate({ annual_total: 400 })]);
     expect(suggestion.baseAnnual).toBe(400);
   });
 
@@ -172,7 +222,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([bundle], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([bundle]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
     expect(suggestion.shortRef).toBe(shortEstimateRef(bundle.id));
@@ -190,7 +240,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([withOneTime], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([withOneTime]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -201,7 +251,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
       onetime_total: 368,
       estimate_data: { result: { oneTime: { items: [{ service: 'cockroach', name: 'German Roach Cleanout', price: 368 }] } } },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([oneTime], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([oneTime]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -214,7 +264,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
       },
     });
     // No connection to verify against → no amount.
-    const noDb = await buildAnnualPrepayEstimateSuggestion([engineDraft], { resolveLineCadence: (line) => line?.frequency || null });
+    const noDb = await buildSuggestion([engineDraft]);
     expect(noDb.blocked).toBe(true);
     expect(noDb.amount).toBeUndefined();
     // A durable call-side quarantine verdict → no amount.
@@ -240,7 +290,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([managerApproval], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([managerApproval]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });
@@ -252,7 +302,7 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
         result: { recurring: { services: [PEST_LINE] } },
       },
     });
-    const suggestion = await buildAnnualPrepayEstimateSuggestion([existing], { resolveLineCadence: (line) => line?.frequency || null });
+    const suggestion = await buildSuggestion([existing]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });

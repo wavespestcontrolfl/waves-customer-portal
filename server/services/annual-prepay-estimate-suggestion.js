@@ -150,6 +150,42 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     return blocked('estimate prepay eligibility could not be verified');
   }
 
+  // Canonical acceptance blockers the prepay guard doesn't carry: a pending
+  // engine reprice means the stored dollars are stale fallbacks, and a
+  // persisted bermuda-suppression estimate is only acceptable while its gate
+  // is live (acceptance bills stored rows without re-pricing — a
+  // save-then-gate-off sequence would charge a disabled add-on).
+  try {
+    if (require('./estimate-clarify-asks').repricePendingActive(estData?.estimatorEngine)) {
+      return blocked('estimate has a pending reprice');
+    }
+    const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+    if (estimateDataCarriesBermudaSuppression(estData)
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+      return blocked('estimate carries a gated add-on');
+    }
+  } catch {
+    return blocked('estimate acceptance blockers could not be verified');
+  }
+
+  // An open reservation deposit must be consumed by the estimate's OWN
+  // accept flow — closing the quote here would leave paid deposit dollars
+  // double-creditable (still refundable/applicable elsewhere). Fail closed
+  // whenever the deposit state cannot be checked.
+  if (!db) return blocked('estimate deposit state could not be verified');
+  try {
+    const openDeposit = await db('estimate_deposits')
+      .where({ estimate_id: estimate.id })
+      .where(function openStates() {
+        this.whereIn('status', ['pending', 'received', 'refunding'])
+          .orWhereRaw('credited_amount + refunded_amount < amount');
+      })
+      .first('id');
+    if (openDeposit) return blocked('estimate has an open reservation deposit');
+  } catch {
+    return blocked('estimate deposit state could not be verified');
+  }
+
   // Review-lane pricing never auto-applies (estimator-authority rule): the
   // same quote-requirement guard the public accept path enforces — manager
   // approval, commercial proposal/risk review, low-confidence site quote,
