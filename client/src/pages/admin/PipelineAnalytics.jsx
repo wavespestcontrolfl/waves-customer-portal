@@ -420,7 +420,12 @@ export default function PipelineAnalytics({
     // when the offer was resolved — same basis as MRR won, so a win always
     // lands in the same range tab for both KPIs (an offer created before
     // the window but accepted inside it counts in both, not just one).
+    // One denominator rule with the win/loss and source cards (GH codex
+    // P1): rows classified never-winnable (invalid/duplicate lead,
+    // converted through another path) leave the close-rate math.
+    const NEVER_WINNABLE = ["invalid_lead", "converted_other_path"];
     const resolvedInRange = activeRows.filter((e) => {
+      if (NEVER_WINNABLE.includes(e.disposition)) return false;
       const resolvedAt = resolutionDate(e);
       return (
         resolvedAt != null && withinDateRange(resolvedAt, selectedRange, nowMs)

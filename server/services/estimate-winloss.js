@@ -186,7 +186,7 @@ function sentCohorts(rows, { days, nowMs }) {
 
   const baseCutoff = nowMs - days * DAY_MS;
   for (const row of rows) {
-    const sentAt = ms(row.sent_at);
+    const sentAt = sentAnchorMs(row);
     if (sentAt == null) continue;
     const disposition = effectiveDisposition(row);
     if (excludedFromRates(disposition)) continue;
@@ -235,6 +235,24 @@ function sentCohorts(rows, { days, nowMs }) {
     medianDaysToDecision: median(daysToDecision),
     cohorts,
   };
+}
+
+// Cohort anchor = FIRST real delivery, not sent_at (GH codex P1, mirroring
+// estimate-source-performance): every resend overwrites sent_at (resetting
+// cohort age and stranding viewed_at before it), and service_report_cta
+// mints stamp sent_at with NOTHING delivered — those anchor on the
+// deliveryState.firstDeliveredAt an operator's later real handoff wrote,
+// or drop out entirely. Generic rows anchor on the EARLIEST surviving
+// delivery evidence (a view or accept cannot precede first delivery).
+function sentAnchorMs(row) {
+  if (String(row.source || '') === 'service_report_cta') {
+    const data = parseEstimateData(row.estimate_data);
+    return ms(data?.deliveryState?.firstDeliveredAt);
+  }
+  if (row.sent_at == null) return null;
+  const candidates = [ms(row.sent_at), ms(row.viewed_at), ms(row.accepted_at)]
+    .filter((ts) => ts != null);
+  return candidates.length ? Math.min(...candidates) : null;
 }
 
 const SLICE_COLUMNS = [
@@ -433,9 +451,14 @@ async function winLossSlices({ days = 90 } = {}) {
 
 module.exports = {
   winLossSlices,
+  // Shared with estimate-source-performance so every card on the page uses
+  // ONE denominator rule (GH codex P1): never-winnable rows leave rates.
+  effectiveDisposition,
+  excludedFromRates,
   _private: {
     bandFor,
     effectiveDisposition,
+    sentAnchorMs,
     sentCohorts,
     COHORT_MATURITY_DAYS,
     profileFromEstimateData,

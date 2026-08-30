@@ -48,15 +48,20 @@ exports.up = async function up(knex) {
   // declined_other with the text preserved as the note.
   await knex.raw(`
     UPDATE estimates SET
+      -- Same substring matching and precedence as the runtime normalizer
+      -- (dispositionFromDeclineReason, estimate-disposition.js) so
+      -- historical and new rows stay comparable (GH codex P2): every
+      -- needle is a CONTAINS match, tried in the Map's insertion order.
       disposition = CASE
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%expensive%' OR LOWER(TRIM(decline_reason)) = 'price' THEN 'declined_price'
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%competitor%' THEN 'declined_competitor'
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%not ready%' OR LOWER(TRIM(decline_reason)) LIKE '%timing%' THEN 'declined_timing'
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%not needed%' THEN 'not_needed'
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%no response%' THEN 'no_response'
-        WHEN LOWER(TRIM(decline_reason)) = 'diy' THEN 'diy'
-        WHEN LOWER(TRIM(decline_reason)) LIKE '%invalid%' OR LOWER(TRIM(decline_reason)) LIKE '%out of area%' OR LOWER(TRIM(decline_reason)) LIKE '%duplicate%' THEN 'invalid_lead'
         WHEN COALESCE(TRIM(decline_reason), '') = '' THEN 'declined_by_customer'
+        WHEN LOWER(decline_reason) LIKE '%too expensive%' OR LOWER(decline_reason) LIKE '%price%' THEN 'declined_price'
+        WHEN LOWER(decline_reason) LIKE '%competitor%' OR LOWER(decline_reason) LIKE '%another provider%' OR LOWER(decline_reason) LIKE '%other provider%'
+          OR LOWER(decline_reason) LIKE '%another company%' OR LOWER(decline_reason) LIKE '%other company%' OR LOWER(decline_reason) LIKE '%someone else%' THEN 'declined_competitor'
+        WHEN LOWER(decline_reason) LIKE '%not ready%' OR LOWER(decline_reason) LIKE '%timing%' THEN 'declined_timing'
+        WHEN LOWER(decline_reason) LIKE '%not needed%' THEN 'not_needed'
+        WHEN LOWER(decline_reason) LIKE '%no response%' THEN 'no_response'
+        WHEN LOWER(decline_reason) LIKE '%diy%' THEN 'diy'
+        WHEN LOWER(decline_reason) LIKE '%invalid%' OR LOWER(decline_reason) LIKE '%out of area%' OR LOWER(decline_reason) LIKE '%duplicate%' THEN 'invalid_lead'
         ELSE 'declined_other' END,
       disposition_note = CASE
         WHEN COALESCE(TRIM(decline_reason), '') <> ''
@@ -87,7 +92,10 @@ exports.up = async function up(knex) {
           -- conversion of it (codex pre-push P1).
           EXISTS (SELECT 1 FROM invoices i
             WHERE i.customer_id = e.customer_id AND i.status = 'paid'
-              AND LEAST(i.created_at, COALESCE(i.paid_at, i.created_at)) <= e.archived_at)
+              -- PAYMENT time bounds the positive evidence (GH codex P2): an
+              -- invoice created before archival but paid after proves
+              -- nothing existed when staff archived the courtship.
+              AND COALESCE(i.paid_at, i.created_at) <= e.archived_at)
           OR EXISTS (SELECT 1 FROM scheduled_services ss
             WHERE ss.customer_id = e.customer_id AND ss.status = 'completed'
               AND COALESCE(ss.completed_at, ss.scheduled_date::timestamp AT TIME ZONE 'America/New_York', ss.created_at) <= e.archived_at)

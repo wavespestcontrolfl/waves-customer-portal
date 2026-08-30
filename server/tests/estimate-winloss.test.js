@@ -345,6 +345,31 @@ describe('winLossSlices — audit slices', () => {
     expect(sentCohorts.sentTotal).toBe(1);
   });
 
+  test('cohorts anchor on first delivery: resends do not reset age, undelivered CTA mints drop out', async () => {
+    const sent = [
+      // Resent yesterday, but first VIEWED 10d ago — the anchor is the
+      // earliest delivery evidence, so the row stays in its mature cohort.
+      row({ id: 'resent', status: 'viewed', accepted_at: null, sent_at: daysAgo(1), viewed_at: daysAgo(10), view_count: 2 }),
+      // CTA mint stamped sent_at with nothing delivered → not a cohort row.
+      row({ id: 'mint', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta', estimate_data: {} }),
+      // CTA mint an operator later really delivered → anchored on that handoff.
+      row({
+        id: 'mint-sent', status: 'sent', accepted_at: null, sent_at: daysAgo(9), source: 'service_report_cta',
+        estimate_data: { deliveryState: { firstDeliveredAt: daysAgo(8) } },
+      }),
+    ];
+    mockDbHandler = estimatesTable([], sent);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    // Base-window stats key off the ANCHOR: resent's real first delivery
+    // was 10d ago (not yesterday's resend), mint-sent's 8d — both outside
+    // the 7d recent window, and the undelivered mint has no anchor at all.
+    expect(sentCohorts.sentTotal).toBe(0);
+    const bucket = sentCohorts.cohorts.find((c) => c.maturityDays === 7);
+    // resent (anchor 10d) and mint-sent (8d) sit in the 7d bucket's shifted
+    // window [now-14, now-7]; the undelivered mint never appears.
+    expect(bucket).toMatchObject({ sent: 2, won: 0, lost: 0, open: 2 });
+  });
+
   test('no sent rows → empty cohorts with null rates', async () => {
     mockDbHandler = estimatesTable([], []);
     const { sentCohorts } = await winLossSlices({ days: 7 });
