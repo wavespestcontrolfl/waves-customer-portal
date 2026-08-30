@@ -1575,6 +1575,48 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :40 — Link intake resolver sweep (§3.4d): pending references
+  // (shortener links, post URLs) → hosts via the SSRF-pinned resolver. Claims
+  // FOR UPDATE SKIP LOCKED, so overlapping ticks/instances are safe without a
+  // cron lock. No credits spent, no communications.
+  cron.schedule('40 * * * *', async () => {
+    try {
+      const r = await require('./seo/link-registry-intake').resolveIntakeItems(db, { limit: 50 });
+      if (r.claimed) logger.info(`[link-intake] resolver sweep: claimed ${r.claimed} resolved ${r.resolved} unresolved ${r.unresolved} dropped ${r.dropped} parked ${r.parked} errors ${r.errors.length}`);
+    } catch (err) { logger.error(`Link intake resolver sweep failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // WEEKLY SUNDAY 4:10AM — Registry feeders, after the 3:30 backlink scan (§4):
+  // existing-profile baseline (idempotent) → competitor-gap ingestion → enrich
+  // (DataForSEO, gated by GATE_SEO_INTELLIGENCE inside the service). Services
+  // are called directly — never the admin HTTP route. The feeders consume
+  // seo_backlinks, so they run INSIDE the scan's own lock ('backlink-scan'):
+  // a scan still paging at 4:10 keeps the lease and the feeders wait (10-min
+  // retries, up to an hour) rather than reading rows the scan is still
+  // transitioning; while they run, no scan can start.
+  cron.schedule('10 4 * * 0', async () => {
+    try {
+      await runExclusive('link-registry-sunday-feeders', async () => {
+        const feeders = async () => {
+          const b = await require('./seo/link-registry-baseline').importExistingBacklinks(db);
+          logger.info(`[link-intake] baseline: scanned ${b.scanned} domains +${b.domainsCreated} placements +${b.placementsCreated} reconciled ${b.placementsReconciled} mappings +${b.mappingsCreated} paths +${b.pathsCreated} skipped ${b.skipped.length}`);
+          const g = await require('./seo/link-registry-gap-ingest').ingestCompetitorGap(db);
+          logger.info(`[link-intake] competitor gap: scanned ${g.scanned} candidates ${g.candidates} inserted ${g.inserted} touched ${g.touched} existing ${g.existing}`);
+          const e = await require('./seo/link-registry-enrich').enrichDomains(db, { limit: 1000 });
+          logger.info(`[link-intake] enrich: ${e.gated ? 'GATED (GATE_SEO_INTELLIGENCE off)' : ''}${e.skipped ? `SKIPPED (${e.skipped}) ` : ''} selected ${e.selected} enriched ${e.enriched} failed ${e.failed.length} calls ${e.calls}`);
+          return { ran: true };
+        };
+        for (let attempt = 1; attempt <= 6; attempt++) {
+          const r = await runExclusive('backlink-scan', feeders, { recordHealth: false });
+          if (!(r && r.skipped)) return;
+          logger.info(`[link-intake] Sunday feeders: backlink scan still holds its lock (${r.reason}) — retry ${attempt}/6 in 10 min`);
+          await new Promise((resolve) => setTimeout(resolve, 10 * 60e3));
+        }
+        logger.warn('[link-intake] Sunday feeders: backlink scan held its lock for an hour — skipped this week');
+      });
+    } catch (err) { logger.error(`Link registry Sunday feeders failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 4:30AM — Link prospect verifier (live/follow reconcile + crawl fallback)
   cron.schedule('30 4 * * *', async () => {
     logger.info('Running: Link prospect verifier');
