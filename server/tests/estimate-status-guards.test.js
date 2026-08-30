@@ -195,9 +195,20 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
     db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
 
     const res = makeRes();
-    await patchHandler({ params: { id: 'e1' }, body: { status: 'declined' } }, res, jest.fn());
+    await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'No response' } }, res, jest.fn());
 
     expect(res.status).toHaveBeenCalledWith(409);
+  });
+
+  test('400s on sent→declined with no reason — every decline carries a disposition', async () => {
+    const readBuilder = makeBuilder({ first: { id: 'e1', status: 'sent' } });
+    db.mockImplementation(() => readBuilder);
+
+    const res = makeRes();
+    await patchHandler({ params: { id: 'e1' }, body: { status: 'declined' } }, res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(readBuilder.update).not.toHaveBeenCalled();
   });
 
   test('re-declining an already-declined estimate updates the reason without re-stamping declined_at', async () => {
@@ -208,7 +219,10 @@ describe('PATCH /api/admin/estimates/:id status guard', () => {
     const res = makeRes();
     await patchHandler({ params: { id: 'e1' }, body: { status: 'declined', declineReason: 'timing' } }, res, jest.fn());
 
-    expect(writeBuilder.update).toHaveBeenCalledWith({ decline_reason: 'timing' });
+    const written = writeBuilder.update.mock.calls[0][0];
+    expect(written).toMatchObject({ decline_reason: 'timing', disposition: 'declined_timing', disposition_source: 'staff' });
+    expect(written.declined_at).toBeUndefined();
+    expect(written.status).toBeUndefined();
     expect(res.json).toHaveBeenCalledWith({ success: true });
   });
 });
@@ -306,5 +320,57 @@ describe('public select-tier / preferences post-lock TOCTOU guard', () => {
       monthly_total: expect.any(Number),
     }));
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+});
+
+// Archive stamps a disposition on LIVE rows (estimator audit 2026-08-29 P0):
+// a parked courtship is a loss outcome, not a vanished one.
+describe('POST /api/admin/estimates/:id/archive disposition', () => {
+  const archiveHandler = routeHandler(adminEstimatesRouter, '/:id/archive', 'post');
+
+  function makeArchiveBuilders(estimate, { deposit = null } = {}) {
+    const readBuilder = makeBuilder({ first: estimate });
+    const depositBuilder = makeBuilder({ first: deposit });
+    const writeBuilder = makeBuilder({ updateCount: 1 });
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ ...estimate, archived_at: 'NOW' }]) }));
+    db.mockImplementationOnce(() => readBuilder)
+      .mockImplementationOnce(() => depositBuilder)
+      .mockImplementationOnce(() => writeBuilder);
+    return { writeBuilder };
+  }
+
+  beforeEach(() => { db.mockReset(); });
+
+  test('archiving a live sent row with no reason classifies it archived_unresolved (system)', async () => {
+    const { writeBuilder } = makeArchiveBuilders({ id: 'e1', status: 'sent', archived_at: null, disposition: null });
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+      archived_at: expect.anything(),
+      disposition: 'archived_unresolved',
+      disposition_source: 'system',
+    }));
+  });
+
+  test('a staff reason in the archive body wins over the system default', async () => {
+    const { writeBuilder } = makeArchiveBuilders({ id: 'e1', status: 'viewed', archived_at: null, disposition: null });
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: { disposition: 'invalid_lead' } }, res, jest.fn());
+    expect(writeBuilder.update).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: 'invalid_lead',
+      disposition_source: 'staff',
+    }));
+  });
+
+  test('a terminal row keeps the disposition it already carries', async () => {
+    const readBuilder = makeBuilder({ first: { id: 'e1', status: 'expired', archived_at: null, disposition: 'expired_viewed' } });
+    const writeBuilder = makeBuilder({ updateCount: 1 });
+    writeBuilder.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'e1' }]) }));
+    db.mockImplementationOnce(() => readBuilder).mockImplementationOnce(() => writeBuilder);
+    const res = makeRes();
+    await archiveHandler({ params: { id: 'e1' }, body: {} }, res, jest.fn());
+    const written = writeBuilder.update.mock.calls[0][0];
+    expect(written.disposition).toBeUndefined();
+    expect(written.archived_at).toBeDefined();
   });
 });

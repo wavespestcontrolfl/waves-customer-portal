@@ -16,7 +16,7 @@ import {
   Textarea,
   cn,
 } from "../ui";
-import { DECLINE_REASONS } from "../../pages/admin/EstimatePage";
+import { DECLINE_REASONS, declinePayload } from "../../pages/admin/EstimatePage";
 
 // Match the EstimatesPageV2 surface — the estimates page is locked to Roboto
 // per Adam's design call, and these modals only render from that page, so
@@ -104,6 +104,9 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
 
 export function DeclineModalV2({ estimate, onClose, onSaved }) {
   const [reason, setReason] = useState("");
+  const [competitorName, setCompetitorName] = useState("");
+  const [competitorPrice, setCompetitorPrice] = useState("");
+  const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
@@ -112,7 +115,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: "declined", declineReason: reason }),
+        body: JSON.stringify(declinePayload({ reason, competitorName, competitorPrice, note })),
       });
       onSaved();
     } catch (err) {
@@ -139,10 +142,10 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
         </div>{" "}
         <div className="flex flex-col gap-1.5">
           {DECLINE_REASONS.map((r) => {
-            const selected = reason === r;
+            const selected = reason === r.code;
             return (
+              <React.Fragment key={r.code}>
               <label
-                key={r}
                 className={cn(
                   "flex items-center gap-2.5 px-3 py-2 rounded-xs cursor-pointer",
                   "text-13 border-hairline transition-colors",
@@ -156,7 +159,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
                   type="radio"
                   name="declineReason"
                   checked={selected}
-                  onChange={() => setReason(r)}
+                  onChange={() => setReason(r.code)}
                   className="sr-only"
                 />{" "}
                 <span
@@ -168,8 +171,37 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
                   )}
                   aria-hidden
                 />
-                {r}
+                {r.label}
               </label>
+              {selected && r.fields === "competitor" && (
+                <div className="grid grid-cols-2 gap-2 ml-6 mb-1">
+                  <input
+                    value={competitorName}
+                    onChange={(ev) => setCompetitorName(ev.target.value)}
+                    placeholder="Competitor"
+                    aria-label="Competitor"
+                    className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900"
+                  />
+                  <input
+                    value={competitorPrice}
+                    onChange={(ev) => setCompetitorPrice(ev.target.value)}
+                    placeholder="Their price ($)"
+                    aria-label="Competitor price"
+                    inputMode="decimal"
+                    className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900"
+                  />
+                </div>
+              )}
+              {selected && r.fields === "note" && (
+                <input
+                  value={note}
+                  onChange={(ev) => setNote(ev.target.value)}
+                  placeholder="What happened?"
+                  aria-label="Decline note"
+                  className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900 ml-6 mb-1"
+                />
+              )}
+              </React.Fragment>
             );
           })}
         </div>{" "}

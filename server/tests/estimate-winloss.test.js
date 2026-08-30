@@ -23,13 +23,21 @@ jest.mock('../services/logger', () => ({
 
 const { winLossSlices, _private } = require('../services/estimate-winloss');
 
-function estimatesTable(rows) {
-  const builder = {
-    whereIn: () => builder,
-    where: () => builder,
-    select: async () => rows,
+// Both reads (resolved rows, then the sent-cohort read) hit the same mock;
+// pass `sentRows` to feed the cohort read something different.
+function estimatesTable(rows, sentRows = []) {
+  let call = 0;
+  const make = (result) => {
+    const builder = {
+      whereIn: () => builder,
+      where: () => builder,
+      whereNotNull: () => builder,
+      whereNull: () => builder,
+      select: async () => result,
+    };
+    return builder;
   };
-  return () => builder;
+  return () => make(call++ === 0 ? rows : sentRows);
 }
 
 const NOW = Date.now();
@@ -228,5 +236,86 @@ describe('resolutionDateMs fallback chain (mirrors client resolutionDate)', () =
   });
   test('open statuses resolve to null', () => {
     expect(resolutionDateMs({ status: 'sent', created_at: '2026-06-01T00:00:00Z' })).toBeNull();
+  });
+});
+
+// ── Estimator-audit slices (2026-08-29): dispositions, service line, lead
+// source, WaveGuard tier, sent cohorts ──────────────────────────────────────
+describe('winLossSlices — audit slices', () => {
+  const lawnData = { result: { recurring: { tier: 'gold', services: [{ service: 'lawn', name: 'Lawn Care', mo: 48 }] } } };
+
+  test('why-we-lose counts stamped dispositions and derives unstamped ones; dead/won-elsewhere leave the rates', async () => {
+    mockDbHandler = estimatesTable([
+      row({ id: 'w', lead_source: 'Google', waveguard_tier: 'silver', estimate_data: lawnData }),
+      row({ id: 'x', status: 'expired', accepted_at: null, expires_at: daysAgo(2), disposition: 'expired_unviewed', lead_source: 'google', service_interest: 'Pest Control' }),
+      // Unstamped expired row with an open signal → derived expired_viewed.
+      row({ id: 'y', status: 'expired', accepted_at: null, expires_at: daysAgo(2), view_count: 3, lead_source: null, service_interest: 'Mosquito' }),
+      // Unstamped declined row with a legacy label → derived code.
+      row({ id: 'z', status: 'declined', accepted_at: null, declined_at: daysAgo(1), decline_reason: 'Too expensive', lead_source: 'referral', estimate_data: lawnData }),
+      // Never winnable: counted in "why we lose", excluded from every rate.
+      row({ id: 'dead', status: 'declined', accepted_at: null, declined_at: daysAgo(1), disposition: 'invalid_lead', lead_source: 'thumbtack' }),
+    ]);
+
+    const result = await winLossSlices({ days: 90 });
+
+    expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 1 });
+    expect(result.byDisposition).toEqual([
+      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 25, group: 'lost' }),
+      expect.objectContaining({ code: 'expired_viewed', count: 1 }),
+      expect.objectContaining({ code: 'declined_price', count: 1 }),
+      expect.objectContaining({ code: 'invalid_lead', count: 1, group: 'dead' }),
+    ]);
+
+    const lawn = result.byServiceLine.find((s) => s.key === 'lawn');
+    expect(lawn).toMatchObject({ label: 'Lawn Care', won: 1, lost: 1, total: 2, winRatePct: 50 });
+    expect(result.byServiceLine.find((s) => s.key === 'pest')).toMatchObject({ won: 0, lost: 1 });
+    expect(result.byServiceLine.find((s) => s.key === 'mosquito')).toMatchObject({ lost: 1 });
+
+    expect(result.byLeadSource.find((s) => s.key === 'google')).toMatchObject({ won: 1, lost: 1, total: 2 });
+    expect(result.byLeadSource.find((s) => s.key === 'unknown')).toMatchObject({ lost: 1 });
+    expect(result.byLeadSource.find((s) => s.key === 'thumbtack')).toBeUndefined(); // dead row left the rates
+
+    // Column wins; falls back to the persisted recurring.tier; else "none".
+    expect(result.byWaveguardTier.find((t) => t.key === 'silver')).toMatchObject({ label: 'Silver', won: 1 });
+    expect(result.byWaveguardTier.find((t) => t.key === 'gold')).toMatchObject({ label: 'Gold', lost: 1 });
+    expect(result.byWaveguardTier.find((t) => t.key === 'none')).toMatchObject({ label: 'No bundle', total: 2 });
+  });
+
+  test('sent cohorts: outcome as of N days after send, open offers counted, immature ages skipped', async () => {
+    const sent = [
+      // Sent 40d ago, accepted 3d after → won in every mature cohort (7/14/30).
+      row({ id: 'w', sent_at: daysAgo(40), accepted_at: daysAgo(37), viewed_at: daysAgo(39.5), view_count: 1 }),
+      // Sent 20d ago, expired at 7d → open in 7d cohort? expired_at = 13d ago = 7d after send → lost at 7d and 14d; 30d immature.
+      row({ id: 'l', status: 'expired', accepted_at: null, sent_at: daysAgo(20), expires_at: daysAgo(13), view_count: 0 }),
+      // Sent 3d ago, still live → too young for every cohort.
+      row({ id: 'o', status: 'viewed', accepted_at: null, sent_at: daysAgo(3), viewed_at: daysAgo(2.5) }),
+      // Sent 10d ago, declined 9d after → 7d cohort: open; 14d immature.
+      row({ id: 'd', status: 'declined', accepted_at: null, sent_at: daysAgo(10), declined_at: daysAgo(1) }),
+      // Dead lead never counts.
+      row({ id: 'x', status: 'declined', accepted_at: null, sent_at: daysAgo(50), declined_at: daysAgo(49), disposition: 'invalid_lead' }),
+      // Archived rows excluded (converted elsewhere / cleaned up).
+      row({ id: 'a', sent_at: daysAgo(50), accepted_at: daysAgo(49), archived_at: daysAgo(10) }),
+    ];
+    mockDbHandler = estimatesTable([], sent);
+
+    const { sentCohorts } = await winLossSlices({ days: 30 });
+
+    expect(sentCohorts.sentTotal).toBe(4);
+    expect(sentCohorts.viewedTotal).toBe(2);
+    expect(sentCohorts.viewRatePct).toBe(50);
+    expect(sentCohorts.cohorts.map((c) => c.maturityDays)).toEqual([7, 14, 30]); // ≤ window only
+    const at = (m) => sentCohorts.cohorts.find((c) => c.maturityDays === m);
+    expect(at(7)).toMatchObject({ sent: 3, won: 1, lost: 1, open: 1, winRatePct: 33.3, lossRatePct: 33.3 });
+    expect(at(14)).toMatchObject({ sent: 2, won: 1, lost: 1, open: 0 });
+    expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0, open: 0, winRatePct: 100 });
+    expect(sentCohorts.medianHoursToFirstView).toBe(12); // 0.5d for both viewed rows
+    expect(sentCohorts.medianDaysToDecision).toBe(6); // 3d (won) and 9d (declined)
+  });
+
+  test('no sent rows → empty cohorts with null rates', async () => {
+    mockDbHandler = estimatesTable([], []);
+    const { sentCohorts } = await winLossSlices({ days: 7 });
+    expect(sentCohorts).toMatchObject({ sentTotal: 0, viewRatePct: null, medianHoursToFirstView: null });
+    expect(sentCohorts.cohorts).toEqual([expect.objectContaining({ maturityDays: 7, sent: 0, winRatePct: null })]);
   });
 });

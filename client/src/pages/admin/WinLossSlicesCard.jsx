@@ -27,6 +27,22 @@ function n(cell) {
   return cell?.total ?? 0;
 }
 
+function RateTable({ rows }) {
+  return (
+    <table className="w-full text-13">
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.key} className="border-b border-hairline last:border-0">
+            <td className="py-1 text-zinc-700">{row.label}</td>
+            <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">{pct(row)}</td>
+            <td className="py-1 text-right text-zinc-500 w-16 tabular-nums">n={row.total}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export default function WinLossSlicesCard() {
   const [days, setDays] = useState(90);
   const [data, setData] = useState(null);
@@ -54,6 +70,15 @@ export default function WinLossSlicesCard() {
 
   const topFields = (data?.byFlagField || []).slice(0, 6);
   const bands = data?.recurringBandsByFlag || [];
+  // Estimator-audit slices (2026-08-29): why we lose, and win rate by
+  // service line / lead source / WaveGuard tier, plus the sent-cohort
+  // funnel. Older payloads without these keys render the original card.
+  const dispositions = data?.byDisposition || [];
+  const serviceLines = (data?.byServiceLine || []).slice(0, 8);
+  const leadSources = (data?.byLeadSource || []).slice(0, 8);
+  const tiers = data?.byWaveguardTier || [];
+  const cohorts = data?.sentCohorts;
+  const lossTotal = dispositions.reduce((sum, d) => sum + d.count, 0);
 
   return (
     <Card className="mb-4 p-4">
@@ -193,6 +218,100 @@ export default function WinLossSlicesCard() {
               Bands are display buckets, not pricing config.
             </div>
           </div>
+
+          {dispositions.length > 0 && (
+            <div>
+              <div className="text-13 text-zinc-500 mb-1">
+                Why we lose ({lossTotal} losses
+                {data.excludedFromRates > 0
+                  ? `, ${data.excludedFromRates} never winnable and kept out of rates`
+                  : ""}
+                )
+              </div>
+              <table className="w-full text-13">
+                <tbody>
+                  {dispositions.map((d) => (
+                    <tr key={d.code} className="border-b border-hairline last:border-0">
+                      <td className="py-1 text-zinc-700">{d.label}</td>
+                      <td className="py-1 text-right font-medium text-zinc-900 tabular-nums">
+                        {d.count}
+                      </td>
+                      <td className="py-1 text-right text-zinc-500 w-16 tabular-nums">
+                        {d.pctOfLosses == null ? "—" : `${d.pctOfLosses}%`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {serviceLines.length > 0 && (
+            <div>
+              <div className="text-13 text-zinc-500 mb-1">Win rate by service line</div>
+              <RateTable rows={serviceLines} />
+            </div>
+          )}
+
+          {(leadSources.length > 0 || tiers.length > 0) && (
+            <div>
+              {leadSources.length > 0 && (
+                <>
+                  <div className="text-13 text-zinc-500 mb-1">Win rate by lead source</div>
+                  <RateTable rows={leadSources} />
+                </>
+              )}
+              {tiers.length > 0 && (
+                <>
+                  <div className="text-13 text-zinc-500 mt-3 mb-1">Win rate by WaveGuard tier</div>
+                  <RateTable rows={tiers} />
+                </>
+              )}
+            </div>
+          )}
+
+          {cohorts && cohorts.sentTotal > 0 && (
+            <div>
+              <div className="text-13 text-zinc-500 mb-1">
+                Sent cohorts — outcome as of N days after send
+              </div>
+              <table className="w-full text-13">
+                <thead>
+                  <tr className="text-zinc-500">
+                    <th className="text-left font-normal py-1">Age</th>
+                    <th className="text-right font-normal py-1">Won</th>
+                    <th className="text-right font-normal py-1">Lost</th>
+                    <th className="text-right font-normal py-1">Open</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cohorts.cohorts
+                    .filter((c) => c.sent > 0)
+                    .map((c) => (
+                      <tr key={c.maturityDays} className="border-b border-hairline last:border-0">
+                        <td className="py-1 text-zinc-700">
+                          {c.maturityDays}d <span className="text-zinc-500">(n={c.sent})</span>
+                        </td>
+                        <td className="py-1 text-right text-zinc-900 tabular-nums">{c.winRatePct}%</td>
+                        <td className="py-1 text-right text-zinc-900 tabular-nums">{c.lossRatePct}%</td>
+                        <td className="py-1 text-right text-zinc-900 tabular-nums">
+                          {Math.round(((c.open / c.sent) * 1000)) / 10}%
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+              <div className="text-13 text-zinc-500 mt-2">
+                Opened {cohorts.viewRatePct ?? 0}% of {cohorts.sentTotal} sent
+                {cohorts.medianHoursToFirstView != null
+                  ? ` · median ${cohorts.medianHoursToFirstView} h to first view`
+                  : ""}
+                {cohorts.medianDaysToDecision != null
+                  ? ` · median ${cohorts.medianDaysToDecision} d to decision`
+                  : ""}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Card>

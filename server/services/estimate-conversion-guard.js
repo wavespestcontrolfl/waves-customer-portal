@@ -256,7 +256,17 @@ async function archiveConvertedOpenEstimates() {
         .whereRaw("estimate_deposits.estimate_id = estimates.id")
         .where("estimate_deposits.status", "received");
     })
-    .update({ archived_at: now, updated_at: now })
+    .update({
+      archived_at: now,
+      updated_at: now,
+      // The customer bought some other way — a WIN routed around the
+      // estimate, so win/loss analytics must not count it as a loss
+      // (estimate-disposition.js group 'won_elsewhere'). Any disposition
+      // staff already stamped wins.
+      disposition: db.raw("COALESCE(disposition, 'converted_other_path')"),
+      disposition_source: db.raw("COALESCE(disposition_source, 'system')"),
+      disposition_at: db.raw("COALESCE(disposition_at, ?)", [now]),
+    })
     .returning(["id", "customer_name", "status"]);
 
   const archived = Array.isArray(archivedRows) ? archivedRows : [];

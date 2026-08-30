@@ -19,8 +19,16 @@
  */
 
 const db = require('../models/db');
+const { DISPOSITIONS, dispositionGroup, dispositionFromDeclineReason, expiredDispositionFor } = require('./estimate-disposition');
+const { inferEstimateServiceLines, SERVICE_LINE_LABELS } = require('./estimate-service-lines');
 
 const RESOLVED_STATUSES = ['accepted', 'declined', 'expired'];
+
+// Sent-cohort maturities (estimator audit 2026-08-29 §5): conversion is
+// measured from SENT date at fixed ages so a 3-day-old open estimate is
+// neither a loss nor silently dropped from the denominator.
+const COHORT_MATURITY_DAYS = [7, 14, 30, 60, 90];
+const DAY_MS = 86400000;
 
 // Fixed, documented ANALYTICS bands — display buckets only, deliberately
 // not pricing config. Re-banding is a copy change, not a pricing decision.
@@ -112,6 +120,112 @@ function finalize(cell) {
   return cell;
 }
 
+// Disposition for a resolved row: the stamped column when present, else the
+// same derivation the sweep/backfill use (pre-migration rows, or a decline
+// that came through an older client), so the slice never shows a hole.
+function effectiveDisposition(row) {
+  if (row.disposition) return row.disposition;
+  if (row.status === 'expired') return expiredDispositionFor(row);
+  if (row.status === 'declined') return dispositionFromDeclineReason(row.decline_reason) || 'declined_other';
+  return null;
+}
+
+// Rows that are not real demand (invalid/duplicate/out-of-area) or that
+// converted through another path must not sit in a win-RATE denominator.
+function excludedFromRates(disposition) {
+  const group = dispositionGroup(disposition);
+  return group === 'dead' || group === 'won_elsewhere';
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const value = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return Math.round(value * 10) / 10;
+}
+
+function ms(value) {
+  if (!value) return null;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
+}
+
+function tallyKeyed(map, key, isWon) {
+  if (!map.has(key)) map.set(key, emptyCell());
+  tally(map.get(key), isWon);
+}
+
+function keyedToList(map, labelFor = (k) => k, sortByTotal = true) {
+  const list = [...map.entries()].map(([key, cell]) => ({ key, label: labelFor(key), ...finalize(cell) }));
+  return sortByTotal ? list.sort((a, b) => b.total - a.total) : list;
+}
+
+// Sent-cohort funnel: for each maturity M (≤ window), every estimate SENT at
+// least M days ago and inside the window is won / lost / still open AS OF
+// M days after send. Timing medians come from the whole sent window.
+function sentCohorts(rows, { days, nowMs }) {
+  const maturities = COHORT_MATURITY_DAYS.filter((m) => m <= days);
+  const cohorts = maturities.map((maturityDays) => ({
+    maturityDays, sent: 0, won: 0, lost: 0, open: 0, winRatePct: null, lossRatePct: null,
+  }));
+  const hoursToFirstView = [];
+  const daysToDecision = [];
+  let sentTotal = 0;
+  let viewedTotal = 0;
+
+  for (const row of rows) {
+    const sentAt = ms(row.sent_at);
+    if (sentAt == null) continue;
+    if (row.archived_at) continue;
+    if (excludedFromRates(effectiveDisposition(row))) continue;
+    sentTotal += 1;
+    const firstView = ms(row.viewed_at) ?? ms(row.last_viewed_at);
+    const opened = (Number(row.view_count) || 0) > 0 || firstView != null || row.status === 'viewed';
+    if (opened) viewedTotal += 1;
+    if (firstView != null && firstView >= sentAt) hoursToFirstView.push((firstView - sentAt) / 3600000);
+
+    const wonAt = row.status === 'accepted' ? (ms(row.accepted_at) ?? sentAt) : null;
+    let lostAt = null;
+    if (row.status === 'declined') lostAt = ms(row.declined_at) ?? ms(row.updated_at) ?? sentAt;
+    else if (row.status === 'expired') lostAt = ms(row.expires_at) ?? ms(row.updated_at) ?? sentAt;
+    const decidedAt = wonAt ?? (row.status === 'declined' ? lostAt : null);
+    if (decidedAt != null && decidedAt >= sentAt) daysToDecision.push((decidedAt - sentAt) / DAY_MS);
+
+    for (const cohort of cohorts) {
+      const horizon = sentAt + cohort.maturityDays * DAY_MS;
+      if (horizon > nowMs) continue; // not mature yet for this age
+      cohort.sent += 1;
+      if (wonAt != null && wonAt <= horizon) cohort.won += 1;
+      else if (lostAt != null && lostAt <= horizon) cohort.lost += 1;
+      else cohort.open += 1;
+    }
+  }
+
+  for (const cohort of cohorts) {
+    cohort.winRatePct = cohort.sent > 0 ? Math.round((cohort.won / cohort.sent) * 1000) / 10 : null;
+    cohort.lossRatePct = cohort.sent > 0 ? Math.round((cohort.lost / cohort.sent) * 1000) / 10 : null;
+  }
+  return {
+    sentTotal,
+    viewedTotal,
+    viewRatePct: sentTotal > 0 ? Math.round((viewedTotal / sentTotal) * 1000) / 10 : null,
+    medianHoursToFirstView: median(hoursToFirstView),
+    medianDaysToDecision: median(daysToDecision),
+    cohorts,
+  };
+}
+
+const SLICE_COLUMNS = [
+  'id', 'status', 'accepted_at', 'declined_at', 'expires_at',
+  'created_at', 'updated_at', 'archived_at', 'monthly_total',
+  'onetime_total', 'estimate_data',
+  // Disposition / cohort / slice inputs (estimator audit 2026-08-29).
+  'sent_at', 'viewed_at', 'last_viewed_at', 'view_count',
+  'lead_source', 'source', 'waveguard_tier', 'disposition', 'decline_reason',
+  'service_interest', 'notes',
+];
+
 async function winLossSlices({ days = 90 } = {}) {
   const cutoffMs = Date.now() - days * 86400000;
   const cutoff = new Date(cutoffMs);
@@ -128,11 +242,14 @@ async function winLossSlices({ days = 90 } = {}) {
       .orWhere('expires_at', '>=', cutoff)
       .orWhere('updated_at', '>=', cutoff)
       .orWhere('created_at', '>=', cutoff))
-    .select(
-      'id', 'status', 'accepted_at', 'declined_at', 'expires_at',
-      'created_at', 'updated_at', 'archived_at', 'monthly_total',
-      'onetime_total', 'estimate_data',
-    );
+    .select(...SLICE_COLUMNS);
+  // Second, status-agnostic read for the sent-cohort funnel: everything sent
+  // inside the window, open offers included (they are the "open" bar).
+  const sentRows = await db('estimates')
+    .whereNotNull('sent_at')
+    .where('sent_at', '>=', cutoff)
+    .whereNull('archived_at')
+    .select(...SLICE_COLUMNS);
 
   const totals = emptyCell();
   const byFlagPresence = {
@@ -155,6 +272,14 @@ async function winLossSlices({ days = 90 } = {}) {
     clean: emptyCell(),
     flagged: emptyCell(),
   }));
+  // Audit slices: why we lose, and win rate by service line / lead source /
+  // WaveGuard tier. Every input is a persisted column or the persisted
+  // estimate_data — never today's price constants.
+  const byDispositionCount = new Map();
+  const byServiceLine = new Map();
+  const byLeadSource = new Map();
+  const byWaveguardTier = new Map();
+  let excludedFromRatesCount = 0;
 
   for (const row of rows) {
     // This card reports RATES, so archived rows drop symmetrically —
@@ -166,9 +291,33 @@ async function winLossSlices({ days = 90 } = {}) {
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
     const isWon = row.status === 'accepted';
+    const estimateData = parseEstimateData(row.estimate_data);
+
+    const disposition = isWon ? null : effectiveDisposition(row);
+    if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
+    // Dead/won-elsewhere rows are counted in "why we lose" above but leave
+    // every RATE denominator — they were never a winnable offer.
+    if (disposition && excludedFromRates(disposition)) {
+      excludedFromRatesCount += 1;
+      continue;
+    }
     tally(totals, isWon);
 
-    const profile = profileFromEstimateData(parseEstimateData(row.estimate_data));
+    const lines = inferEstimateServiceLines({
+      ...row,
+      estimateData,
+      serviceInterest: row.service_interest,
+      monthlyTotal: parseFloat(row.monthly_total || 0),
+      onetimeTotal: parseFloat(row.onetime_total || 0),
+    });
+    // One estimate can carry several lines; each line records the outcome
+    // of the estimate it rode on (a bundle loss is a loss for every line).
+    for (const key of new Set(lines.map((l) => l.key || 'unknown'))) tallyKeyed(byServiceLine, key, isWon);
+    tallyKeyed(byLeadSource, String(row.lead_source || '').trim().toLowerCase() || 'unknown', isWon);
+    const tier = String(row.waveguard_tier || estimateData?.result?.recurring?.tier || estimateData?.engineResult?.recurring?.tier || '').trim().toLowerCase();
+    tallyKeyed(byWaveguardTier, tier && tier !== 'none' ? tier : 'none', isWon);
+
+    const profile = profileFromEstimateData(estimateData);
     const flags = verifyFlagsFrom(profile);
     const presence = !profile ? 'noProfile' : (flags.length ? 'flagged' : 'clean');
     tally(byFlagPresence[presence], isWon);
@@ -210,17 +359,35 @@ async function winLossSlices({ days = 90 } = {}) {
     .map(([field, cell]) => ({ field, ...finalize(cell) }))
     .sort((a, b) => b.total - a.total);
 
+  const lossTotal = [...byDispositionCount.values()].reduce((a, b) => a + b, 0);
+  const byDisposition = DISPOSITIONS
+    .map((d) => ({
+      code: d.code,
+      label: d.label,
+      group: d.group,
+      count: byDispositionCount.get(d.code) || 0,
+      pctOfLosses: lossTotal > 0 ? Math.round(((byDispositionCount.get(d.code) || 0) / lossTotal) * 1000) / 10 : null,
+    }))
+    .filter((d) => d.count > 0)
+    .sort((a, b) => b.count - a.count);
+
   return {
     days,
     resolved: totals.total,
     won: totals.won,
     lost: totals.lost,
     winRatePct: totals.winRatePct,
+    excludedFromRates: excludedFromRatesCount,
     byFlagPresence,
     byFlagField: flagFields,
     byFlagPriority,
     byPriceBand,
     recurringBandsByFlag,
+    byDisposition,
+    byServiceLine: keyedToList(byServiceLine, (k) => SERVICE_LINE_LABELS[k] || k),
+    byLeadSource: keyedToList(byLeadSource),
+    byWaveguardTier: keyedToList(byWaveguardTier, (k) => (k === 'none' ? 'No bundle' : k.charAt(0).toUpperCase() + k.slice(1))),
+    sentCohorts: sentCohorts(sentRows, { days, nowMs: Date.now() }),
   };
 }
 
@@ -228,6 +395,9 @@ module.exports = {
   winLossSlices,
   _private: {
     bandFor,
+    effectiveDisposition,
+    sentCohorts,
+    COHORT_MATURITY_DAYS,
     profileFromEstimateData,
     resolutionDateMs,
     verifyFlagsFrom,

@@ -6234,13 +6234,33 @@ function getUrgencyIndicator(e) {
 }
 
 /* ── Decline reason options ────────────────────────────────── */
+// Normalized loss dispositions (server/services/estimate-disposition.js —
+// staff codes). `code` is what analytics slice on; `label` is what the
+// operator reads and what lands in the legacy decline_reason badge.
+// `fields` opens the extra inputs for that option.
 const DECLINE_REASONS = [
-  "Too expensive",
-  "Went with competitor",
-  "Not ready",
-  "Service not needed",
-  "No response",
+  { code: "declined_price", label: "Too expensive" },
+  { code: "declined_competitor", label: "Went with competitor", fields: "competitor" },
+  { code: "declined_timing", label: "Not ready / timing" },
+  { code: "not_needed", label: "Service not needed" },
+  { code: "diy", label: "Doing it themselves" },
+  { code: "no_response", label: "No response" },
+  { code: "invalid_lead", label: "Invalid / out of area / duplicate" },
+  { code: "declined_other", label: "Other", fields: "note" },
 ];
+
+// Body for PATCH /admin/estimates/:id from a decline modal's state.
+function declinePayload({ reason, competitorName, competitorPrice, note }) {
+  const option = DECLINE_REASONS.find((r) => r.code === reason);
+  return {
+    status: "declined",
+    disposition: reason,
+    declineReason: option?.label || reason,
+    dispositionNote: note?.trim() || undefined,
+    competitorName: option?.fields === "competitor" ? competitorName?.trim() || undefined : undefined,
+    competitorPrice: option?.fields === "competitor" && competitorPrice?.trim() ? competitorPrice.trim() : undefined,
+  };
+}
 
 /* ── Follow-Up Modal ──────────────────────────────────────── */
 function FollowUpModal({ estimate, onClose, onSent }) {
@@ -6390,6 +6410,9 @@ function FollowUpModal({ estimate, onClose, onSent }) {
 function DeclineModal({ estimate, onClose, onSaved }) {
   const isMobile = useIsMobile();
   const [reason, setReason] = useState("");
+  const [competitorName, setCompetitorName] = useState("");
+  const [competitorPrice, setCompetitorPrice] = useState("");
+  const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
 
   const handleSave = async () => {
@@ -6398,7 +6421,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: "declined", declineReason: reason }),
+        body: JSON.stringify(declinePayload({ reason, competitorName, competitorPrice, note })),
       });
       onSaved();
     } catch (err) {
@@ -6484,19 +6507,19 @@ function DeclineModal({ estimate, onClose, onSaved }) {
           }}
         >
           {DECLINE_REASONS.map((r) => (
+            <React.Fragment key={r.code}>
             <label
-              key={r}
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: 10,
                 cursor: "pointer",
                 fontSize: 14,
-                color: reason === r ? C.heading : C.gray,
+                color: reason === r.code ? C.heading : C.gray,
                 padding: "8px 12px",
                 borderRadius: 8,
-                background: reason === r ? `${C.red}18` : "transparent",
-                border: `1px solid ${reason === r ? C.red : C.border}`,
+                background: reason === r.code ? `${C.red}18` : "transparent",
+                border: `1px solid ${reason === r.code ? C.red : C.border}`,
                 transition: "all 0.15s",
               }}
             >
@@ -6504,12 +6527,41 @@ function DeclineModal({ estimate, onClose, onSaved }) {
               <input
                 type="radio"
                 name="declineReason"
-                checked={reason === r}
-                onChange={() => setReason(r)}
+                checked={reason === r.code}
+                onChange={() => setReason(r.code)}
                 style={{ accentColor: C.red, width: 16, height: 16 }}
               />
-              {r}
+              {r.label}
             </label>
+            {reason === r.code && r.fields === "competitor" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, margin: "0 0 4px 26px" }}>
+                <input
+                  value={competitorName}
+                  onChange={(ev) => setCompetitorName(ev.target.value)}
+                  placeholder="Competitor"
+                  aria-label="Competitor"
+                  style={{ padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: "transparent", color: C.heading, fontSize: 14 }}
+                />
+                <input
+                  value={competitorPrice}
+                  onChange={(ev) => setCompetitorPrice(ev.target.value)}
+                  placeholder="Their price ($)"
+                  aria-label="Competitor price"
+                  inputMode="decimal"
+                  style={{ padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: "transparent", color: C.heading, fontSize: 14 }}
+                />
+              </div>
+            )}
+            {reason === r.code && r.fields === "note" && (
+              <input
+                value={note}
+                onChange={(ev) => setNote(ev.target.value)}
+                placeholder="What happened?"
+                aria-label="Decline note"
+                style={{ margin: "0 0 4px 26px", padding: "8px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: "transparent", color: C.heading, fontSize: 14 }}
+              />
+            )}
+            </React.Fragment>
           ))}
         </div>{" "}
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
@@ -7648,6 +7700,7 @@ export {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
   DECLINE_REASONS,
+  declinePayload,
   classifyEstimate,
   getUrgencyIndicator,
   detectCompetitor,
