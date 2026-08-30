@@ -10,6 +10,7 @@
 
 const db = require('../../models/db');
 const { scoreLevelWord } = require('./activity-indicators');
+const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 const HISTORY_LIMIT = 8;
 
@@ -81,6 +82,15 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
       })
       .modify((query) => {
         if (service.service_date) query.where('service_date', '<=', service.service_date);
+        // Owner-delegated ruling 2026-08-30: callback visits are not trend
+        // data points on the customer chart — except the CURRENT visit,
+        // which must always chart itself. Gate-dark keeps today's chart.
+        if (reserviceReportCopyGateOn()) {
+          query.whereNotIn('service_record_id', knex('service_records')
+            .select('id')
+            .where({ customer_id: service.customer_id, is_callback: true })
+            .whereNot({ id: service.id }));
+        }
       })
       .orderBy('service_date', 'desc')
       .orderBy('created_at', 'desc')
@@ -131,6 +141,13 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
         })
         .modify((query) => {
           if (service.service_date) query.where('service_date', '<=', service.service_date);
+          // The progress chip's "first visit" must be a REGULAR visit —
+          // a callback (current one included) is never the baseline.
+          if (reserviceReportCopyGateOn()) {
+            query.whereNotIn('service_record_id', knex('service_records')
+              .select('id')
+              .where({ customer_id: service.customer_id, is_callback: true }));
+          }
         })
         .orderBy('service_date', 'asc')
         .orderBy('created_at', 'asc')

@@ -4942,7 +4942,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the card would otherwise show a placeholder identity.
     techVisitCard: process.env.GATE_REPORT_TECH_PHOTO === 'true'
       && !!(service.technician_name || service.technician_first_name),
-    reviewRequestEligible: !service.has_left_google_review,
+    // Owner ruling 2026-08-30: a complaint-driven visit is the wrong moment
+    // for a Google ask — callback reports never request a review while the
+    // re-service gate is on. Gate-dark keeps today's behavior.
+    reviewRequestEligible: !service.has_left_google_review
+      && !(reserviceReportCopyGateOn() && service.is_callback === true),
     hasLeftGoogleReview: !!service.has_left_google_review,
     // Canonical review office for the report CTA, resolved SERVER-side
     // (config/locations.js resolveReviewLocation: city → zip → geo → stored

@@ -1,6 +1,7 @@
 const db = require('../../models/db');
 const { detectServiceLine } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 function pressureValue(value) {
   const n = customerVisiblePressureIndex(value);
@@ -47,6 +48,17 @@ async function buildSinceLastVisitContext({ record, currentPressureIndexOverride
             .where('started_at', '<', record.started_at);
         });
       }
+    });
+  }
+  // Owner-delegated ruling 2026-08-30 (#3617 follow-up): a callback taken
+  // days after treatment at peak activity is a misleading baseline — the
+  // next regular visit's "since last visit" delta would read as a huge
+  // improvement. Customer-facing comparisons skip callback records while
+  // the re-service gate is on; pest-pressure SCORING elsewhere still counts
+  // them (review-window.js — deliberate, untouched).
+  if (reserviceReportCopyGateOn()) {
+    priorQuery = priorQuery.where(function notCallback() {
+      this.where('is_callback', false).orWhereNull('is_callback');
     });
   }
   // strict callers (pre-visit brief) must see an outage as an error, not
