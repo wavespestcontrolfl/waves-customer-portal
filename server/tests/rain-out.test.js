@@ -3301,3 +3301,16 @@ describe('rain-out service', () => {
     });
   });
 });
+
+describe('commit summary — visit-covered members are not separate stops (local codex audit)', () => {
+  const { summarizeCommitResults } = require('../services/rain-out')._test;
+  test('movedCount counts physical stops; covered members are counted apart; failures exclude covered', () => {
+    const out = summarizeCommitResults([
+      { id: 'a', ok: true, newDate: '2026-09-02', smsSent: true, warnings: ['w1'] },
+      { id: 'b', ok: true, coveredByVisit: 'v1', newDate: '2026-09-02', smsSent: false, smsReason: 'covered_by_visit' },
+      { id: 'c', ok: false, error: 'SLOT_TAKEN' },
+    ]);
+    expect(out).toMatchObject({ ok: true, movedCount: 1, coveredCount: 1, failedCount: 1, overlapCount: 1, overlapWarnings: ['w1'] });
+    expect(summarizeCommitResults([{ id: 'x', ok: false, error: 'boom' }])).toMatchObject({ ok: false, reason: 'boom', movedCount: 0, coveredCount: 0, failedCount: 1 });
+  });
+});

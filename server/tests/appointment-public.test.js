@@ -383,7 +383,7 @@ describe('grouped visit payload (codex #3609 r10)', () => {
     // each member carries its OWN pristine label (codex r15 P2) — the
     // reminder row's merged label ("A & B") is the heading, never the list
     expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
-      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true } });
+      .toEqual({ visit: { serviceCount: 2, membershipKey: appointmentRouter._test.membershipKeyFor([{ id: 'a' }, { id: 'b' }]), services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00', allConfirmed: false, anyConfirmable: true, pendingRebook: false } });
     expect(require('../services/appointment-reminders').buildServiceLabel).toHaveBeenCalledWith('a', 'pest_control');
     // the REAL module exposes the helper at the top level (codex r16 P2: a _test-only export made every call throw into the raw-key fallback)
     expect(typeof jest.requireActual('../services/appointment-reminders').buildServiceLabel).toBe('function');
@@ -526,6 +526,24 @@ describe('lone-member visit keeps the confirm race verdict (local codex audit)',
     trx = membersTrx([]);
     expect(await membersMatchShown(trx, { id: 'a', visit_id: null }, { membershipKey: null })).toEqual([]);
     expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('a member awaiting its replacement slot makes the whole stop pendingRebook (local audit)', async () => {
+    const { visitServicesFor } = appointmentRouter._test;
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async () => [
+          { id: 'a', service_type: 'pest_control', status: 'confirmed', source_action: null, customer_confirmed: true },
+          { id: 'b', service_type: 'Lawn Fertilization', status: 'rescheduled', source_action: null, customer_confirmed: false },
+        ],
+        first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
+      };
+      return api;
+    });
+    const out = await visitServicesFor({ id: 'a', visit_id: 'v1' });
+    expect(out.visit.pendingRebook).toBe(true);
+    expect(out.visit.anyConfirmable).toBe(false);
   });
 
   test('an unreadable member lookup fails closed: visitUnknown, never an ungrouped payload', async () => {

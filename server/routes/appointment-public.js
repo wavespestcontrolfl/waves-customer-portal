@@ -269,6 +269,10 @@ async function visitServicesFor(svc) {
         // confirmable while any member can still be customer-confirmed.
         allConfirmed: members.every(isConfirmed),
         anyConfirmable: members.some(isConfirmable),
+        // A member awaiting its replacement slot (status 'rescheduled') makes
+        // the whole stop pending-rebook: its stored slot is stale, so the
+        // group must not render as booked (local codex audit).
+        pendingRebook: members.some((m) => String(m.status || '').toLowerCase() === 'rescheduled'),
       },
     };
   } catch (err) {
@@ -525,7 +529,11 @@ router.get('/:token', async (req, res, next) => {
     // Unknown membership fails closed: the page can't be changed online
     // until the lookup works (never a solo page over a possibly grouped stop).
     const { visitUnknown, ...visitInfo } = visitInfoRaw;
-    const state = visitUnknown ? 'not_available' : liveState;
+    // Grouped state aggregates the members: any member awaiting a rebook
+    // makes the stop pending-rebook, whichever member's link this is.
+    const state = visitUnknown ? 'not_available'
+      : (visitInfo.visit?.pendingRebook && liveState === 'upcoming') ? 'pending_rebook'
+        : liveState;
     const base = {
       state,
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
@@ -660,6 +668,10 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     // same window the page promised — a later member's link must not file a
     // calendar event that disagrees with its own page (codex r12).
     const visitInfo = await visitServicesFor(svc);
+    // No calendar file for a stop with a member awaiting rebook, or one whose
+    // membership cannot be read (fail closed) — the event would name a
+    // service whose slot is stale.
+    if (visitInfo.visitUnknown || visitInfo.visit?.pendingRebook) return res.status(404).json({ error: 'Not found' });
     const start = calendarWindowStart(svc, visitInfo);
 
     // ET wall-clock -> real instants, so the event lands correctly in any

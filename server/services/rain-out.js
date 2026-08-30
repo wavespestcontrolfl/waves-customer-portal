@@ -2044,7 +2044,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     });
   }
 
-  const moved = results.filter((r) => r.ok);
+  return summarizeCommitResults(results);
+}
+
+// The commit summary the sheets render. A member already carried by its
+// visit's unit move (coveredByVisit) is not a second physical stop (local
+// codex audit): the tech sheet compares movedCount with texts sent, so
+// covered rows never inflate it ("1/2 texted") — they are counted apart.
+function summarizeCommitResults(results) {
+  const moved = results.filter((r) => r.ok && !r.coveredByVisit);
+  const covered = results.filter((r) => r.ok && r.coveredByVisit);
   // Every advisory overlap warning from every moved stop, flattened: a
   // series shift returns one dated warning per clashing occurrence, so the
   // count is per WARNING (per clashing date), never per stop, and the sheets
@@ -2054,7 +2063,8 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     ok: moved.length > 0,
     reason: moved.length === 0 ? (results[0]?.error || 'nothing_moved') : undefined,
     movedCount: moved.length,
-    failedCount: results.length - moved.length,
+    coveredCount: covered.length,
+    failedCount: results.length - moved.length - covered.length,
     overlapCount: overlapWarnings.length,
     overlapWarnings,
     results,
@@ -2073,6 +2083,7 @@ module.exports = {
   loadOccupancy,
   conflictsForTarget,
   _test: {
+    summarizeCommitResults,
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
     EXTRA_REASON_LEADS, GATE_ACCESS_CLAUSE, isValidReason, sanitizeCustomerNote,
