@@ -53,6 +53,16 @@ describe('pickAnnualPrepayEstimate', () => {
     expect(pickAnnualPrepayEstimate([sent, viewed]).id).toBe(viewed.id);
   });
 
+  test('past-due sent/viewed estimates are excluded; accepted ones do not expire', () => {
+    const expiredViewed = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', viewed_at: '2026-08-25T00:00:00Z', expires_at: '2026-08-26T00:00:00Z' });
+    const olderLive = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-10T00:00:00Z', expires_at: '2099-01-01T00:00:00Z' });
+    const expiredAccepted = pestEstimate({ id: '33333333-3333-4333-8333-333333333333', status: 'accepted', accepted_at: '2026-08-01T00:00:00Z', expires_at: '2026-08-02T00:00:00Z' });
+
+    expect(pickAnnualPrepayEstimate([expiredViewed, olderLive]).id).toBe(olderLive.id);
+    expect(pickAnnualPrepayEstimate([expiredViewed])).toBeNull();
+    expect(pickAnnualPrepayEstimate([expiredAccepted]).id).toBe(expiredAccepted.id);
+  });
+
   test('estimates already consumed by a term are excluded', () => {
     const consumed = pestEstimate({ id: '11111111-1111-4111-8111-111111111111', status: 'accepted', accepted_at: '2026-08-29T00:00:00Z' });
     const open = pestEstimate({ id: '22222222-2222-4222-8222-222222222222', viewed_at: '2026-08-20T00:00:00Z' });
@@ -109,6 +119,20 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
       estimate_data: { result: { oneTime: { items: [{ service: 'cockroach', name: 'German Roach Cleanout', price: 368 }] } } },
     });
     const suggestion = buildAnnualPrepayEstimateSuggestion([oneTime]);
+    expect(suggestion.blocked).toBe(true);
+    expect(suggestion.amount).toBeUndefined();
+  });
+
+  test('quote-required estimates never auto-price (review-lane guard)', () => {
+    const managerApproval = pestEstimate({
+      estimate_data: {
+        result: {
+          recurring: { services: [PEST_LINE] },
+          oneTime: { items: [{ service: 'dethatching', name: 'St. Augustine Dethatching', quoteRequired: true }] },
+        },
+      },
+    });
+    const suggestion = buildAnnualPrepayEstimateSuggestion([managerApproval]);
     expect(suggestion.blocked).toBe(true);
     expect(suggestion.amount).toBeUndefined();
   });

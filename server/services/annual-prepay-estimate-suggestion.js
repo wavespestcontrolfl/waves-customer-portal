@@ -28,9 +28,15 @@ function suggestionActivityStamp(estimate = {}) {
 // to a prior year.
 function pickAnnualPrepayEstimate(estimates = [], { excludeIds = [] } = {}) {
   const excluded = new Set((excludeIds || []).filter(Boolean).map(String));
+  const now = Date.now();
   const ranked = (Array.isArray(estimates) ? estimates : [])
     .filter((e) => e && SUGGESTION_STATUSES[String(e.status)] && !e.archived_at
-      && !excluded.has(String(e.id)));
+      && !excluded.has(String(e.id))
+      // The expiration sweep isn't the boundary: a still-`sent`/`viewed` row
+      // whose expires_at has passed is a stale quote (public helpers reject it
+      // the same way). Accepted estimates don't expire.
+      && !(String(e.status) !== 'accepted' && e.expires_at
+        && new Date(e.expires_at).getTime() < now));
   ranked.sort((a, b) => (
     (new Date(suggestionActivityStamp(b)) - new Date(suggestionActivityStamp(a)))
     || (SUGGESTION_STATUSES[String(b.status)] - SUGGESTION_STATUSES[String(a.status)])
@@ -69,9 +75,18 @@ function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateId
   const {
     acceptanceServiceLists,
     annualPrepayEligibleForEstimateData,
+    resolveEstimateQuoteRequirement,
   } = require('../routes/estimate-public');
 
   const estData = parseEstimateData(estimate.estimate_data);
+
+  // Review-lane pricing never auto-applies (estimator-authority rule): the
+  // same quote-requirement guard the public accept path enforces — manager
+  // approval, commercial proposal/risk review, low-confidence site quote,
+  // retired-cadence and lapsed-membership requotes — blocks the prefill.
+  const quoteRequirement = resolveEstimateQuoteRequirement(null, estData);
+  if (quoteRequirement?.quoteRequired) return blocked('estimate needs a manual quote');
+
   const { recurringSvcList } = acceptanceServiceLists(estData);
   const recurring = Array.isArray(recurringSvcList) ? recurringSvcList : [];
   if (recurring.length === 0) return blocked('estimate has no recurring services');
