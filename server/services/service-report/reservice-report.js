@@ -289,9 +289,32 @@ function reserviceReportCopyGateOn() {
   return gateOn();
 }
 
+/**
+ * PDF cache-key component for the TREND-EXCLUSION side of the gate: with
+ * the gate on, REGULAR reports for a customer who has any callback record
+ * render a different chart/baseline/trend than their cached pre-gate PDFs
+ * (activity-scores-store / since-last-visit / pest-pressure display), so
+ * their keys must move. Customers with no callback records — the vast
+ * majority — keep '' and every existing key. A failed lookup returns a
+ * distinct token so uncertainty re-renders instead of serving stale.
+ */
+async function reserviceTrendsPdfSignature(service = {}, knex = null) {
+  if (!gateOn()) return '';
+  if (!knex || !service?.customer_id) return '';
+  try {
+    const row = await knex('service_records')
+      .where({ customer_id: service.customer_id, is_callback: true })
+      .first('id');
+    return row ? '-rstr1' : '';
+  } catch {
+    return '-rstru';
+  }
+}
+
 module.exports = {
   buildReserviceReport,
   reserviceReportCopyGateOn,
+  reserviceTrendsPdfSignature,
   resolveCallbackBilling,
   reserviceReportPdfSignature,
   reserviceReportRenderedSignature,

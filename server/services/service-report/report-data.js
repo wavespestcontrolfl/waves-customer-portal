@@ -3322,6 +3322,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           // Trim same-day sibling rows at this report's own score row so a
           // later visit completed the same day can't chart on this token.
           currentServiceRecordId: service.id || null,
+          // Customer-facing chart: callbacks are not trend data points
+          // while the re-service gate is on (#3623; scoring unaffected).
+          excludeCallbacks: reserviceReportCopyGateOn(),
         }).catch(() => [])
       : Promise.resolve([]),
     serviceCoverageConfigPromise,

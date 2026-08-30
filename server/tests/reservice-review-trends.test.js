@@ -76,3 +76,73 @@ describe('activity chart callback exclusion', () => {
     expect(knex.applied.find((entry) => entry.method === 'whereNotIn' && entry.args[0] === 'service_record_id')).toBeUndefined();
   });
 });
+
+describe('trend word recomputed against the filtered history (codex #3623 r1)', () => {
+  const snapshot = { activity: { score: 2, indicatorKey: 'pest_activity', label: 'Pest activity', trend: 'down', trendWord: 'improving' } };
+  const record2 = { id: 'rec-now', customer_id: 'cust-1', service_date: '2026-08-30' };
+
+  test('gate on: trend derives from the filtered prior point, not the snapshot', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    // History rows: a regular visit scored 1 (the callback scored 5 is
+    // excluded by the query in production; the fake returns post-filter rows).
+    const knex = fakeKnex({ rows: [
+      { service_record_id: 'rec-now', service_date: '2026-08-30', score: 2 },
+      { service_record_id: 'rec-old', service_date: '2026-08-01', score: 1 },
+    ] });
+    const view = await loadActivityCustomerView(knex, { snapshot, service: record2 });
+    // 1 → 2 is WORSE, though the callback-inflated snapshot said 'improving'.
+    expect(view.trend).not.toBe('down');
+    expect(view.trendWord).not.toBe('improving');
+  });
+
+  test('gate dark: snapshot trend words pass through untouched', async () => {
+    delete process.env.GATE_RESERVICE_REPORT_COPY;
+    const knex = fakeKnex({ rows: [] });
+    const view = await loadActivityCustomerView(knex, { snapshot, service: record2 });
+    expect(view.trend).toBe('down');
+    expect(view.trendWord).toBe('improving');
+  });
+});
+
+describe('reserviceTrendsPdfSignature (codex #3623 r1 P2)', () => {
+  const { reserviceTrendsPdfSignature } = require('../services/service-report/reservice-report');
+  const svc = { customer_id: 'cust-1' };
+  const knexWith = (row) => (table) => ({ where() { return this; }, async first() { if (row === 'throw') throw new Error('down'); return row; } });
+
+  test("gate on + customer has a callback record: '-rstr1'; none: ''; lookup failure: distinct re-render token", async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    expect(await reserviceTrendsPdfSignature(svc, knexWith({ id: 'cb' }))).toBe('-rstr1');
+    expect(await reserviceTrendsPdfSignature(svc, knexWith(null))).toBe('');
+    expect(await reserviceTrendsPdfSignature(svc, knexWith('throw'))).toBe('-rstru');
+  });
+
+  test('gate dark: always empty — existing keys untouched', async () => {
+    delete process.env.GATE_RESERVICE_REPORT_COPY;
+    expect(await reserviceTrendsPdfSignature(svc, knexWith({ id: 'cb' }))).toBe('');
+  });
+});
+
+describe('pest-pressure display exclusion is OPT-IN (scoring callers unaffected)', () => {
+  const { loadHistoryForCustomer } = require('../services/pest-pressure/store');
+  function recordingKnex() {
+    const applied = [];
+    const chain = {
+      leftJoin() { return chain; },
+      where(...args) { if (typeof args[0] === 'function') { args[0].call(chain, chain); } else applied.push(args); return chain; },
+      orWhere(...args) { applied.push(['orWhere', ...args]); return chain; },
+      orWhereNull(...args) { applied.push(['orWhereNull', ...args]); return chain; },
+      orderBy() { return chain; }, orderByRaw() { return chain; }, limit() { return chain; },
+      async select() { return []; },
+    };
+    return Object.assign(() => chain, { applied });
+  }
+
+  test('excludeCallbacks: true applies the is_callback filter; default does not', async () => {
+    const withFlag = recordingKnex();
+    await loadHistoryForCustomer(withFlag, 'cust-1', { serviceLine: 'pest', excludeCallbacks: true });
+    expect(JSON.stringify(withFlag.applied)).toContain('is_callback');
+    const without = recordingKnex();
+    await loadHistoryForCustomer(without, 'cust-1', { serviceLine: 'pest' });
+    expect(JSON.stringify(without.applied)).not.toContain('is_callback');
+  });
+});

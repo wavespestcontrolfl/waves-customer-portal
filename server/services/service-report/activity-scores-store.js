@@ -9,7 +9,7 @@
  */
 
 const db = require('../../models/db');
-const { scoreLevelWord } = require('./activity-indicators');
+const { scoreLevelWord, trendDirection, trendWordForScores } = require('./activity-indicators');
 const { reserviceReportCopyGateOn } = require('./reservice-report');
 
 const HISTORY_LIMIT = 8;
@@ -165,6 +165,19 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     }
   }
 
+  // The completion-time snapshot's trend compared against the LATEST prior
+  // activity row — which may be a callback the chart above just filtered
+  // out. Recompute against the filtered prior point so the trend word can't
+  // contradict the chart it sits beside (codex #3623 r1 P1). Gate-dark
+  // keeps the immutable snapshot values.
+  let trend = activity.trend || null;
+  let trendWord = activity.trendWord || null;
+  if (reserviceReportCopyGateOn()) {
+    const priorPoint = history.filter((point) => !point.isCurrent).slice(-1)[0] || null;
+    trend = trendDirection(activity.score, priorPoint ? priorPoint.score : null);
+    trendWord = trendWordForScores(activity.score, priorPoint ? priorPoint.score : null);
+  }
+
   return {
     indicatorKey: activity.indicatorKey,
     label: activity.label,
@@ -172,8 +185,8 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     maxScore: 5,
     levelWord: activity.levelWord || scoreLevelWord(activity.score),
     source: activity.source || null,
-    trend: activity.trend || null,
-    trendWord: activity.trendWord || null,
+    trend,
+    trendWord,
     isBaseline: history.filter((point) => !point.isCurrent).length === 0,
     history,
     progress: buildActivityProgress({
