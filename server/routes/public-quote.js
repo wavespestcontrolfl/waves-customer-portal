@@ -895,12 +895,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     // A lot the lookup itself flagged verify-first (the condo unit-lot flag:
     // a per-unit folio carrying the association's parcel — GH codex P1 on
-    // #3626; or any weak/conflicting lot evidence) is NOT a measured lot on
-    // this no-review-lane path. The customer-confirmed leg still wins — a
-    // hand-entered lot is explicit. Canonical read: lookupDimensionIsTrustworthy.
+    // #3626; or any weak lot evidence) is NOT a measured lot on this
+    // no-review-lane path. The measured VALUE comes from the SERVER profile,
+    // never ep.lotSqFt — the client payload pricing a lot it attests itself
+    // is the same manipulation vector as the turf P0 on #3622, and a cache
+    // miss must fail to "unmeasured", not to the client's number (pre-push
+    // codex P0). The customer-confirmed leg still wins — a hand-entered lot
+    // is an explicit override. Canonical read: lookupDimensionIsTrustworthy.
     const lotDimensionTrusted = lookupDimensionIsTrustworthy(trustedTurf, 'lotSqFt');
     const realLotSqFt = resolveRealLotSqFt({
-      enrichedLotSqFt: lotDimensionTrusted ? ep.lotSqFt : null,
+      enrichedLotSqFt: lotDimensionTrusted && Number(trustedTurf.lotSqFt) > 0 ? trustedTurf.lotSqFt : null,
       lotSqFt,
       lotSizeConfirmed,
     });
