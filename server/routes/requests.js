@@ -84,6 +84,14 @@ const createSchema = Joi.object({
   reasonCode: Joi.string().valid(...REASON_CODE_VALUES).optional(),
   resolutionTemplateId: Joi.string().trim().max(60).optional(),
   resolutionOutcome: Joi.string().valid('shown', 'accepted', 'declined').optional(),
+  // The same scope/context the preview took, so the commit-time recompute
+  // resolves the SAME situation the customer was shown (families intersect
+  // server-derived ownership; the address is re-validated server-side).
+  families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),
+  newAddress: Joi.string().trim().max(400).optional(),
+  competitorQuote: Joi.boolean().optional(),
+  adverseEvent: Joi.boolean().optional(),
+  safetyComplaint: Joi.boolean().optional(),
 });
 
 // Strip any HTML-ish characters before storage so admin/UI surfaces can never
@@ -96,12 +104,13 @@ function stripHtml(s) {
 // a case failure never blocks or un-reports a cancel. Called from the fresh
 // create AND both retry branches, so a transient insert failure on the first
 // submit is repaired by any retry.
-async function recordCancellationCase({ customerId, requestId, value = {}, snapshot = null, resolution = null, resolutionOutcome = null, processed = false, reasonText = null }) {
+async function recordCancellationCase({ customerId, requestId, value = {}, families = [], snapshot = null, resolution = null, resolutionOutcome = null, processed = false, reasonText = null }) {
   if (!CancellationResolution.cancelFlowV2Enabled()) return;
   try {
     await CancellationResolution.openCancellationCase({
       customerId,
       serviceRequestId: requestId,
+      families,
       reasonCode: value.reasonCode || null,
       reasonText,
       resolution,
@@ -361,17 +370,29 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       } catch (snapErr) {
         logger.warn(`Cancellation case snapshot failed for ${req.customer.id}: ${snapErr.message}`);
       }
-      // The audit record is the SERVER's resolution, recomputed here — never
-      // the caller's claim. The claimed template id is only used below to
-      // decide whether the claimed outcome refers to the card the server
-      // would actually have shown.
+      // The audit record is the SERVER's resolution, recomputed here under
+      // the SAME scope/context the preview took (address re-validated, never
+      // trusted) — never the caller's claim. The claimed template id is only
+      // used below to decide whether the claimed outcome refers to the card
+      // the server would actually have shown.
       if (value.reasonCode) {
         try {
+          let newAddressInServiceArea = null;
+          if (value.newAddress) {
+            const { validateAddress } = require('../services/address-validation');
+            const verdict = await validateAddress({ addressLines: [value.newAddress] });
+            newAddressInServiceArea = verdict && typeof verdict.inServiceArea === 'boolean' ? verdict.inServiceArea : null;
+          }
           const preview = await CancellationResolution.previewCancellationResolution({
             customerId: req.customer.id,
             reasonCode: value.reasonCode,
-            families: [],
-            context: {},
+            families: Array.isArray(value.families) ? value.families : [],
+            context: {
+              newAddressInServiceArea,
+              hasCompetitorQuote: value.competitorQuote === true,
+              adverseEvent: value.adverseEvent === true,
+              safetyComplaint: value.safetyComplaint === true,
+            },
           });
           serverResolution = preview ? preview.resolution : null;
         } catch (resErr) {
@@ -406,6 +427,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           customerId: req.customer.id,
           requestId: request.id,
           value,
+          families: Array.isArray(value.families) ? value.families : [],
           reasonText: cleanDescription || null,
           resolution: serverResolution,
           resolutionOutcome: outcome,

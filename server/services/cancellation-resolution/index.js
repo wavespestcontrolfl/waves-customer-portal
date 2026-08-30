@@ -44,7 +44,28 @@ async function openCancellationCase({
   if (!customerId) throw new Error('openCancellationCase requires customerId');
   if (serviceRequestId) {
     const existing = await dbh('cancellation_cases').where({ service_request_id: serviceRequestId }).first();
-    if (existing) return existing;
+    if (existing) {
+      // Retry repair, not an early return: a first attempt can leave the row
+      // 'open' (processor partially failed) or missing server-derived fields.
+      // Fill only what is absent and promote open→committed when this retry
+      // reports the cancel as processed — never rewrite recorded facts.
+      const repair = {};
+      if (processed && existing.status === 'open') repair.status = 'committed';
+      if (!existing.reason_code && isReasonCode(reasonCode)) repair.reason_code = reasonCode;
+      const retryCard = resolution && resolution.kind === 'card' ? resolution.card : null;
+      if (!existing.resolution_template_id && retryCard) {
+        repair.resolution_template_id = retryCard.templateId;
+        repair.resolution_slots = JSON.stringify(retryCard.slots || {});
+        repair.resolution_action = JSON.stringify(retryCard.action || {});
+        repair.resolution_outcome = resolutionOutcome || 'shown';
+      }
+      if (Object.keys(repair).length) {
+        repair.updated_at = new Date();
+        await dbh('cancellation_cases').where({ id: existing.id }).update(repair);
+        return { ...existing, ...repair };
+      }
+      return existing;
+    }
   }
   const code = isReasonCode(reasonCode) ? reasonCode : null;
   const meta = code ? reasonCodeMeta(code) : null;

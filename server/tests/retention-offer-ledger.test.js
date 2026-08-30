@@ -62,12 +62,14 @@ describe('retentionDiscountForInvoice', () => {
   });
 });
 
-describe('cooldownFloor month-end clamping', () => {
+describe('cooldownFloor month-end clamping (ET calendar)', () => {
   test('18 months back from Aug 31 clamps to Feb 28, never overflows to Mar 03', () => {
-    const floor = cooldownFloor(new Date('2026-08-31T12:00:00-04:00'));
-    expect(floor.getFullYear()).toBe(2025);
-    expect(floor.getMonth()).toBe(1); // February
-    expect(floor.getDate()).toBe(28);
+    expect(cooldownFloor(new Date('2026-08-31T12:00:00-04:00'))).toBe('2025-02-28');
+  });
+
+  test('boundary is computed on the ET calendar, not UTC (post-8PM ET is still today)', () => {
+    // 2026-09-01T01:00Z is 2026-08-31 9PM ET — the floor must be Feb 28, not Mar 01.
+    expect(cooldownFloor(new Date('2026-09-01T01:00:00Z'))).toBe('2025-02-28');
   });
 
   test('an offer granted 2025-03-01 still blocks on 2026-08-31 (anniversary is 2026-09-01)', () => {
@@ -82,10 +84,7 @@ describe('cooldownFloor month-end clamping', () => {
   });
 
   test('a plain mid-month boundary behaves as calendar months', () => {
-    const floor = cooldownFloor(new Date('2026-08-15T12:00:00-04:00'));
-    expect(floor.getFullYear()).toBe(2025);
-    expect(floor.getMonth()).toBe(1);
-    expect(floor.getDate()).toBe(15);
+    expect(cooldownFloor(new Date('2026-08-15T12:00:00-04:00'))).toBe('2025-02-15');
   });
 });
 

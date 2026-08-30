@@ -12,6 +12,7 @@
  */
 
 const db = require('../../models/db');
+const { etDateString } = require('../../utils/datetime-et');
 const { RETENTION_OFFER } = require('./templates');
 
 const OFFER_REASONS = Object.freeze(['price', 'diy']);
@@ -23,18 +24,21 @@ const MIN_PAID_VISITS = 4;
 const COOLDOWN_MONTHS = 18;
 const OFFER_TTL_DAYS = 365;
 
-// True 18-calendar-month boundary. setMonth alone overflows at month ends
-// (2026-08-31 minus 18 months would land on 2025-03-03 and let a
-// 2025-03-01 offer through 6 days early) — clamp to the target month's
-// last day instead.
-function cooldownFloor(now) {
-  const day = now.getDate();
-  const floor = new Date(now.getTime());
-  floor.setDate(1);
-  floor.setMonth(floor.getMonth() - COOLDOWN_MONTHS);
-  const lastDay = new Date(floor.getFullYear(), floor.getMonth() + 1, 0).getDate();
-  floor.setDate(Math.min(day, lastDay));
-  return floor;
+// True 18-calendar-month boundary as an ET calendar DATE string
+// ('YYYY-MM-DD'). Two traps handled here: setMonth overflows at month ends
+// (Aug 31 minus 18 months would land on Mar 03 and let a Mar 01 offer
+// through early), and Railway runs in UTC, so local Date getters shift the
+// boundary by a day around the ET evening rollover — the calendar
+// components come from etDateString instead (AGENTS.md America/New_York
+// rule). Comparisons happen on ET dates, never on raw instants.
+function cooldownFloor(now = new Date()) {
+  const [y, m, d] = etDateString(now).split('-').map(Number);
+  let ty = y;
+  let tm = m - COOLDOWN_MONTHS;
+  while (tm < 1) { tm += 12; ty -= 1; }
+  const lastDay = new Date(Date.UTC(ty, tm, 0)).getUTCDate(); // day 0 of next month
+  const td = Math.min(d, lastDay);
+  return `${ty}-${String(tm).padStart(2, '0')}-${String(td).padStart(2, '0')}`;
 }
 
 /**
@@ -60,11 +64,11 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
   const floor = cooldownFloor(now);
   if (facts.priorRetentionOfferAt) {
     const at = new Date(facts.priorRetentionOfferAt);
-    if (!Number.isNaN(at.getTime()) && at > floor) blockers.push('offer_within_18_months');
+    if (!Number.isNaN(at.getTime()) && etDateString(at) > floor) blockers.push('offer_within_18_months');
   }
   if (facts.manualPriceOverrideAt) {
     const at = new Date(facts.manualPriceOverrideAt);
-    if (!Number.isNaN(at.getTime()) && at > floor) blockers.push('manual_override_within_18_months');
+    if (!Number.isNaN(at.getTime()) && etDateString(at) > floor) blockers.push('manual_override_within_18_months');
   }
   return { eligible: blockers.length === 0, familyKey, blockers };
 }
@@ -88,7 +92,7 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }
     const now = new Date();
     const recent = await trx('retention_offers')
       .where({ customer_id: customerId })
-      .where('granted_at', '>', cooldownFloor(now))
+      .whereRaw("(granted_at AT TIME ZONE 'America/New_York')::date > ?", [cooldownFloor(now)])
       .first('id', 'granted_at');
     if (recent) {
       const err = new Error('retention_offer_cooldown');
