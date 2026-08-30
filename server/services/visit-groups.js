@@ -1863,15 +1863,6 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               ? { customer_confirmed: plan.snapshots[String(id)].customer_confirmed } : {}),
           },
         });
-        // The rebooker keeps a destination end when the restored window has
-        // none (windowEnd = win.end || row.window_end) — clear it explicitly,
-        // fenced on the restored slot; a miss is a rollback failure (codex r18).
-        if (t.original.start && !t.original.end) {
-          const cleared = await db('scheduled_services')
-            .where({ id, visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start })
-            .update({ window_end: null, updated_at: db.fn.now() });
-          if (Number(cleared) !== 1) throw new Error('original open-ended window could not be restored (row changed)');
-        }
         // Technician restore for EVERY member incl. the primary (the caller's
         // technicianId rode the primary's own move) through the canonical
         // writer, fenced on the tech this move set; a compensation failure
@@ -1881,29 +1872,45 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (options.technicianId !== undefined && String(t.expect.technician_id || '') !== String(options.technicianId || '')) {
           await db.transaction((x) => alignMemberTechnician(x, id, t.expect.technician_id || null, { skipVisitSeam: true, expectTechnicianId: options.technicianId || null }));
         }
-        // The rebooker forces 'confirmed' on every move: a member that was
-        // pending/rescheduled before this move must read that way again
-        // after the rollback (fenced on the restored slot + the forced
-        // status; a history row records the compensation). A miss means
-        // another writer got there first — the row is reported stuck.
+        // Everything the forward move mutated goes back in ONE row-locking
+        // transaction (local codex audit P0): the row is re-read FOR UPDATE
+        // and must still be EXACTLY the state the rollback reschedule + tech
+        // restore left — restored slot, this visit, the forced 'confirmed',
+        // the original technician, the snapshotted confirmation marker, and
+        // no live transition since (track_state not live, no en-route /
+        // arrival stamps). Only then: the open-ended window end cleared (the
+        // rebooker keeps a destination end), the pre-move status restored
+        // (history row), and route_order / date-exception / lifecycle /
+        // confirmation fields put back from the locked snapshot. A newer
+        // confirmation or technician/lifecycle transition therefore fails
+        // the verification and the row is reported stuck — never
+        // overwritten.
+        const snap = (plan.snapshots && plan.snapshots[String(id)]) || {};
         const prev = String(t.previousStatus || '');
-        if (prev && prev !== 'confirmed') {
-          const restored = await db('scheduled_services')
-            .where({ id, status: 'confirmed', visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start, window_end: t.original.end })
-            .update({ status: prev, updated_at: db.fn.now() });
-          if (Number(restored) !== 1) throw new Error(`status could not be restored to ${prev} (row changed)`);
-          await db('job_status_history').insert({ job_id: id, from_status: 'confirmed', to_status: prev, transitioned_by: null });
-        }
-        // Everything else the move mutated (route_order, date-exception stamp,
-        // tracker/lifecycle fields) goes back to its snapshot, fenced on the
-        // restored slot; a miss is a rollback failure (local audit).
-        const snap = plan.snapshots && plan.snapshots[String(id)];
-        if (snap && Object.keys(snap).length) {
-          const put = await db('scheduled_services')
-            .where({ id, visit_id: plan.visitId, scheduled_date: t.original.date, window_start: t.original.start })
-            .update({ ...snap, updated_at: db.fn.now() });
-          if (Number(put) !== 1) throw new Error('route/lifecycle/exception state could not be restored (row changed)');
-        }
+        await db.transaction(async (x) => {
+          const cur = await x('scheduled_services').where({ id }).forUpdate().first();
+          const norm = (v) => (v ? String(v).slice(0, 5) : null);
+          const liveTrack = new Set(['en_route', 'on_site', 'arrived']);
+          const expectTech = t.expect.technician_id || null;
+          const ok = !!cur
+            && String(cur.visit_id || '') === String(plan.visitId)
+            && dateOnly(cur.scheduled_date) === t.original.date
+            && norm(cur.window_start) === t.original.start
+            && String(cur.status) === 'confirmed'
+            && String(cur.technician_id || '') === String(expectTech || '')
+            && (snap.customer_confirmed === undefined || !!cur.customer_confirmed === !!snap.customer_confirmed)
+            && !liveTrack.has(String(cur.track_state || ''))
+            && cur.en_route_at == null && cur.arrived_at == null;
+          if (!ok) throw new Error('row changed after the rollback reschedule — restoration refused (newer state kept)');
+          const patch = { ...snap, updated_at: x.fn.now() };
+          if (t.original.start && !t.original.end) patch.window_end = null;
+          if (prev && prev !== 'confirmed') patch.status = prev;
+          const n = await x('scheduled_services').where({ id }).update(patch);
+          if (Number(n) !== 1) throw new Error('restoration write matched no row');
+          if (patch.status) {
+            await x('job_status_history').insert({ job_id: id, from_status: 'confirmed', to_status: prev, transitioned_by: null });
+          }
+        });
         if (!t.isPrimary) {
           await require('./appointment-reminders').handleReschedule(id, `${t.original.date}T${t.original.start || '08:00'}`, {
             sendNotification: false, keepPendingConfirmation: true,

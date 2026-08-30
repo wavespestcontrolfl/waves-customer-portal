@@ -617,6 +617,12 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
   const script = ({ visit = FROZEN, members, landed = null }) => ({
     service_visits: { first: (ops) => (ops.some((o) => o[0] === 'max') ? { max: 0 } : visit) },
     scheduled_services: {
+      // the rollback's FOR UPDATE re-read: the row as the rollback reschedule + tech restore left it
+      first: (ops) => {
+        const w = ops.find((o) => o[0] === 'where' && o[1] && o[1].id);
+        const m = w && members.find((x) => String(x.id) === String(w[1].id));
+        return (m && ops.some((o) => o[0] === 'forUpdate')) ? { ...m, visit_id: 'v1', status: 'confirmed', track_state: 'scheduled' } : null;
+      },
       select: (ops) => (ops.some((o) => o[0] === 'orderBy') ? (landed || members.map((m) => ({ ...m, scheduled_date: '2026-09-02' }))) // retarget read (FOR UPDATE + ORDER BY)
         : ops.some((o) => o[0] === 'forUpdate') ? members
         : ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') ? members.map((m) => ({ ...m, visit_id: 'v1' }))
@@ -648,8 +654,12 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     const rebooker = fakeRebooker({ b: 'throw' });
     const err = await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }).catch((e) => e);
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
+    // one row-locking restoration: FOR UPDATE re-read, then the status flip on the locked row
+    const lockRead = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'first' && c.ops.some((o) => o[0] === 'forUpdate'));
+    expect(lockRead.ops).toEqual(expect.arrayContaining([['where', { id: 'a' }], ['forUpdate']]));
     const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
-    expect(restore.ops).toEqual([['where', { id: 'a', status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: '10:00' }]]);
+    expect(restore.ops).toEqual([['where', { id: 'a' }]]);
+    expect(db.__calls.indexOf(lockRead)).toBeLessThan(db.__calls.indexOf(restore));
     const hist = db.__calls.find((c) => c.table === 'job_status_history' && c.op === 'insert');
     expect(hist.values).toEqual({ job_id: 'a', from_status: 'confirmed', to_status: 'pending', transitioned_by: null });
     // a live member on a frozen visit: refused before any write (its lifecycle could never be compensated)
@@ -698,12 +708,10 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
     const rb = rebooker.reschedule.mock.calls.find((c) => c[3] === 'visit_move_rollback');
     expect(rb[2]).toEqual({ start: '09:00', end: null });
-    // the rebooker keeps the destination end for an open-ended window: cleared explicitly, fenced on the restored slot (codex r18)
-    const clear = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.window_end === null);
-    expect(clear.ops).toEqual([['where', { id: 'a', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00' }]]);
-    expect(db.__calls.indexOf(clear)).toBeLessThan(db.__calls.indexOf(db.__calls.find((c) => c.op === 'update' && c.values.status === 'pending')));
+    // the rebooker keeps the destination end for an open-ended window: cleared in the same locked restoration as the status flip (codex r18 / P0)
     const restore = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.status === 'pending');
-    expect(restore.ops).toEqual([['where', { id: 'a', status: 'confirmed', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00', window_end: null }]]);
+    expect(restore.values).toMatchObject({ status: 'pending', window_end: null });
+    expect(restore.ops).toEqual([['where', { id: 'a' }]]);
   });
 
   test('rollback restores the snapshotted route order / date-exception stamp / lifecycle fields, fenced on the restored slot (local audit)', async () => {
@@ -717,7 +725,7 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     const err = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin' }).catch((e) => e);
     expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: ['a'], rollbackFailed: [] });
     const put = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.route_order === 3);
-    expect(put.ops).toEqual([['where', { id: 'a', visit_id: 'v1', scheduled_date: '2026-08-30', window_start: '09:00' }]]);
+    expect(put.ops).toEqual([['where', { id: 'a' }]]); // on the FOR UPDATE-locked row, after full-state verification
     expect(put.values).toMatchObject({ route_order: 3, date_exception: false, track_state: 'scheduled', en_route_at: null });
   });
 
@@ -746,6 +754,21 @@ describe('moveVisitAsUnit — frozen visits move ALL-OR-NOTHING (local codex aud
     db.__script = script({ visit: { ...VISIT, scheduled_date: '2026-09-02', stop_base_key: 'p1:2026-09-02' }, members: [member('a', { scheduled_date: '2026-09-02' }), member('b', { scheduled_date: '2026-09-02' })] });
     const noop = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
     expect(noop.visitMove).toMatchObject({ alreadyAtTarget: true, unchanged: ['a', 'b'] });
+  });
+
+  test('restoration is refused (row stuck) when the row changed after the rollback reschedule — a newer confirmation or live transition is never overwritten (local audit P0)', async () => {
+    for (const changed of [{ customer_confirmed: true }, { track_state: 'en_route', en_route_at: '2026-08-30T13:00:00Z' }, { technician_id: 't9' }, { status: 'pending' }]) {
+      jest.clearAllMocks(); db.__calls.length = 0;
+      db.__script = script({ members: [member('a'), member('b')] });
+      const snapSelect = db.__script.scheduled_services.select;
+      db.__script.scheduled_services.select = (ops) => (ops.some((o) => o[0] === 'whereIn' && o[1] === 'id') && !ops.some((o) => o[0] === 'forUpdate')
+        ? [{ id: 'a', visit_id: 'v1', customer_confirmed: false }, { id: 'b', visit_id: 'v1', customer_confirmed: false }] : snapSelect(ops));
+      const baseFirst = db.__script.scheduled_services.first;
+      db.__script.scheduled_services.first = (ops) => { const r = baseFirst(ops); return r && r.id === 'a' ? { ...r, ...changed } : r; };
+      const err = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' }).catch((e) => e);
+      expect(err).toMatchObject({ code: 'VISIT_MEMBER_MOVE_FAILED', rolledBack: [], rollbackFailed: ['a'] });
+      expect(db.__calls.some((c) => c.op === 'update' && c.values.route_order !== undefined)).toBe(false);
+    }
   });
 
   test('a member that diverged before the retarget on a FROZEN visit rolls the rest back and refuses (codex r18)', async () => {
