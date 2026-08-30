@@ -252,10 +252,17 @@ exports.down = async function down(knex) {
     rodent_per_station_overage: ['Rodent Per-Station Overage', 4],
   };
   for (const configKey of Object.keys(RETIRED_ROW_NAMES)) {
-    const auditRow = await knex('pricing_config_audit')
-      .where({ config_key: configKey, changed_by: MIGRATION_TAG, reason: UP_REASON })
+    // Current-cycle ownership (codex #3591 r54 P2): the LATEST audit entry
+    // for the key — any author — must be this migration's up(), or a stale
+    // first-cycle snapshot would recreate a row an admin deliberately
+    // deleted after the previous cycle.
+    const latestRetiredAudit = await knex('pricing_config_audit')
+      .where({ config_key: configKey })
       .orderBy('id', 'desc')
       .first();
+    const auditRow = latestRetiredAudit && latestRetiredAudit.changed_by === MIGRATION_TAG && latestRetiredAudit.reason === UP_REASON
+      ? latestRetiredAudit
+      : null;
     if (!auditRow || !auditRow.old_value) continue;
     const exists = await knex('pricing_config').where({ config_key: configKey }).first('id');
     if (exists) continue;

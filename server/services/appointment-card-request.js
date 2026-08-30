@@ -540,11 +540,19 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       } catch { /* best-effort page */ }
       return skip('commercial_rodent_setup_staff_review');
     };
-    const visitIsCommercialBait = async () => {
+    // 'commercial' | 'residential' | 'unknown' — an indeterminate catalog
+    // read must NOT read as residential (codex #3591 r54 P1): rodent-labeled
+    // visits fail closed to staff review instead of a dead-end /secure link.
+    const visitCommercialBaitVerdict = async () => {
       try {
         const { authoritativeServiceKey } = require('./secure-appointment-plans');
-        return (await authoritativeServiceKey(db, visit)) === 'commercial_rodent_bait';
-      } catch { return false; }
+        return (await authoritativeServiceKey(db, visit)) === 'commercial_rodent_bait' ? 'commercial' : 'residential';
+      } catch { return 'unknown'; }
+    };
+    const rodentLabeled = () => /rodent|bait/i.test(String(visit.service_type || ''));
+    const visitIsCommercialBait = async () => {
+      const verdict = await visitCommercialBaitVerdict();
+      return verdict === 'commercial' || (verdict === 'unknown' && rodentLabeled());
     };
     if (savedMethod) {
       const secured = await autoSecureFromSavedMethod({ visit, savedMethod, trigger });

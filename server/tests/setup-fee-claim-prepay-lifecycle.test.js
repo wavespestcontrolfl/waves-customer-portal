@@ -899,3 +899,15 @@ describe('r51 local audit — ambiguous multi-series anchors stay untouched (cod
     expect(reversal.writes.filter((w) => w.table === 'scheduled_services')).toEqual([]);
   });
 });
+
+describe('r54 local audit — the street-scoped preview endpoint rides the canonical evidence resolver (codex #3591 r54 local P1)', () => {
+  test('?street= routes through resolveCustomerQualifyingEvidence (normalized comparison), account-wide otherwise (source contract)', () => {
+    const customersSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    const routeAt = customersSrc.indexOf("router.get('/:id/waveguard-qualifying-services'");
+    const section = customersSrc.slice(routeAt, routeAt + 2000);
+    expect(section).toMatch(/resolveCustomerQualifyingEvidence\(db, \{/);
+    expect(section).toMatch(/address: street,/);
+    expect(section).toMatch(/evidence\?\.tierKeys/);
+    expect(section).not.toMatch(/streetScope = \{ estimateStreet: street/);
+  });
+});

@@ -5124,6 +5124,40 @@ const InvoiceService = {
    * revival sync retries (codex #3591 r46 local P0); a missing anchor or
    * mid-mint stamp pages a human instead of wedging the revival.
    */
+  // The lost-dispute cancel re-minted the switch-superseded per-application
+  // invoice (prepay-switch-restore marker) — a REVIVED prepay's coverage
+  // makes that restored AR a duplicate (codex #3591 r54 P1): void the
+  // untouched/unpaid restorations; money attached pages a human.
+  async _retireSwitchRestoredInvoicesForRevivedPrepay(conn, prepayInvoiceId) {
+    const restored = await conn("invoices")
+      .whereIn("id", function restoredIds() {
+        // restored rows carry prepaySwitchRestoreMarker(<voidedId>) where the
+        // VOIDED row's notes carry the superseded-by marker for THIS prepay.
+        this.select(conn.raw("i2.id"))
+          .from({ i2: "invoices" })
+          .join({ v: "invoices" }, conn.raw("i2.notes like '%[prepay-switch-restore:' || v.id || ']%'"))
+          .where("v.notes", "like", `%[prepay-switch-superseded-by:${prepayInvoiceId}]%`);
+      })
+      .whereNotIn("status", ["void", "cancelled", "canceled", "refunded"])
+      .select("id", "status", "sent_at", "paid_at", "payment_recorded_at", "stripe_payment_intent_id", "payer_statement_id");
+    let voided = 0;
+    for (const inv of restored || []) {
+      const moneyAttached = inv.paid_at || inv.payment_recorded_at || inv.stripe_payment_intent_id
+        || inv.payer_statement_id
+        || ["paid", "prepaid", "processing"].includes(String(inv.status).toLowerCase());
+      if (!moneyAttached) {
+        voided += await conn("invoices")
+          .where({ id: inv.id, status: inv.status })
+          .whereNull("paid_at").whereNull("payment_recorded_at").whereNull("stripe_payment_intent_id").whereNull("payer_statement_id")
+          .update({ status: "void", updated_at: new Date() });
+      } else {
+        logger.error(`[invoice] FIX: revived prepay ${prepayInvoiceId}: switch-restored invoice ${inv.id} has money attached (${inv.status}) — refund/reconcile so the coverage is not collected twice`);
+      }
+    }
+    if (voided) logger.info(`[invoice] revived prepay ${prepayInvoiceId}: ${voided} switch-restored per-application invoice(s) voided — coverage is prepaid again`);
+    return voided;
+  },
+
   async retireRodentSetupObligationForRevivedPrepay(conn, prepayInvoiceId) {
     if (!prepayInvoiceId) return null;
     const invoiceRow = await conn("invoices")

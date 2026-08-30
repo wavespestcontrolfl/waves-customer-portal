@@ -2411,18 +2411,22 @@ function propertyFieldOverLimit(body) {
 // decides).
 router.get('/:id/waveguard-qualifying-services', requireAdmin, async (req, res, next) => {
   try {
-    const { loadExistingQualifyingServiceKeys } = require('../services/waveguard-existing-services');
-    // ?street= scopes the TIER evidence to the quoted address (codex #3591
-    // r52 local P1): the estimator preview must count the same
-    // property-scoped families the authoritative save resolves — the
-    // account-wide list stays the setup-waiver evidence.
+    const { loadExistingQualifyingServiceKeys, resolveCustomerQualifyingEvidence } = require('../services/waveguard-existing-services');
+    // ?street= scopes the TIER evidence to the quoted address through the
+    // SAME resolver the authoritative save uses (codex #3591 r52/r54 local
+    // P1 — raw strings never reach the normalized street comparison), so
+    // the preview counts exactly the families the save will. Without a
+    // street the account-wide list serves as before (setup-waiver evidence).
     const street = cleanOptionalText(req.query?.street) || null;
-    let streetScope = null;
     if (street) {
-      const cust = await db('customers').where({ id: req.params.id }).first('address');
-      streetScope = { estimateStreet: street, customerPrimaryStreet: cust?.address || null };
+      const evidence = await resolveCustomerQualifyingEvidence(db, {
+        customerId: req.params.id,
+        address: street,
+        logger,
+      });
+      return res.json({ keys: Array.isArray(evidence?.tierKeys) ? evidence.tierKeys : [] });
     }
-    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id, { streetScope });
+    const keys = await loadExistingQualifyingServiceKeys(db, req.params.id);
     res.json({ keys: Array.isArray(keys) ? keys : [] });
   } catch (err) { next(err); }
 });

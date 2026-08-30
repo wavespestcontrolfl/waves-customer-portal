@@ -2636,6 +2636,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           .returning('*');
         if (updated) {
           await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+          // …and any switch-restored per-application invoice becomes a
+          // duplicate of the revived coverage (codex #3591 r54 P1).
+          await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
         }
         return updated;
       };
@@ -2663,6 +2666,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // …and the setup line is live again — retire the restored claim
           // and re-ledger the record (codex #3591 r45 local P0).
           await require('./invoice').retireRodentSetupObligationForRevivedPrepay(t, invoice.id);
+          // …and any switch-restored per-application invoice becomes a
+          // duplicate of the revived coverage (codex #3591 r54 P1).
+          await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
         }
         return updated;
       };

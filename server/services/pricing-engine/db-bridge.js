@@ -14,6 +14,14 @@ const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c =
 // removes from the DB row reverts to the code default on the NEXT sync
 // instead of lingering until a process restart.
 const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
+// Pristine code defaults for the rodent bracket ladder (codex #3591 r54
+// P1): a DB row that disappears or invalidates after a prior sync must
+// fall back to these, not keep the stale process-global values.
+const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
+  baitBrackets: constants.RODENT.baitBrackets,
+  baitBracketExtension: constants.RODENT.baitBracketExtension,
+  baitVisitsPerYear: constants.RODENT.baitVisitsPerYear,
+}));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -1236,6 +1244,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // rodent_setup_fee, rodent_post_exclusion) are deliberately NOT read:
     // their constants no longer exist, and migration 20260829000040 retires
     // the rows themselves.
+    // Rebase to the pristine ladder BEFORE applying the optional row
+    // (codex #3591 r54 P1) — every snapshot starts from code defaults, so a
+    // deleted/invalidated DB row cannot pin stale values in this process
+    // while a fresh pod prices from defaults.
+    constants.RODENT.baitBrackets = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBrackets));
+    constants.RODENT.baitBracketExtension = JSON.parse(JSON.stringify(RODENT_BRACKET_DEFAULTS.baitBracketExtension));
+    constants.RODENT.baitVisitsPerYear = RODENT_BRACKET_DEFAULTS.baitVisitsPerYear;
     if (config.rodent_bait_brackets) {
       const rb = config.rodent_bait_brackets;
       if (Array.isArray(rb.brackets) && rb.brackets.length > 0) {
