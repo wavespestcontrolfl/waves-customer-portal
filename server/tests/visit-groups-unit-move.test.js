@@ -808,7 +808,8 @@ describe('moveVisitAsUnit — frozen visits are refused (local codex audit P0)',
     expect(rem.length).toBe(4); // claim + 2 re-stamps + release
     const release = rem[rem.length - 1];
     expect(release.values).toEqual({ move_hold_until: null, move_hold_token: null });
-    expect(release.ops).toEqual(expect.arrayContaining([['whereIn', 'scheduled_service_id', ['a', 'b']], ['where', { move_hold_token: rem[0].values.move_hold_token }]]));
+    // release is keyed on the TOKEN ALONE (uncapped r36): late joiners that inherited it release too
+    expect(release.ops).toEqual(expect.arrayContaining([['where', { move_hold_token: rem[0].values.move_hold_token }]]));
     // ABORT (primary never moved): the hold is released before rethrow
     db.__calls.length = 0; jest.clearAllMocks();
     db.__script = { ...script({ members: [member('a'), member('b')], landed: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] }), appointment_reminders: reminders };

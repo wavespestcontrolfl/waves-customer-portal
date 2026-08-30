@@ -685,7 +685,12 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
             .update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
         }
       } catch (holdErr) {
-        require('./logger').warn(`[visit-groups] join hold-inherit for visit ${visit.id} failed: ${holdErr.message}`);
+        // FAIL CLOSED (uncapped r36 P1): this inherit is the ONLY thing
+        // keeping a mid-move joiner quiet — a swallowed failure commits an
+        // unheld member that can text stale details while the move runs.
+        // Aborting rolls the join back; createOrJoinVisit's retry loop (or
+        // the caller's) re-attempts.
+        throw Object.assign(new Error(`visit join aborted — the member hold could not be inherited: ${holdErr.message}`), { code: holdErr.code || 'VISIT_JOIN_HOLD_FAILED' });
       }
     }
     if (visit.technician_id) {
@@ -2134,7 +2139,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // Keyed on the MEMBERS + our stamp (codex r28): a reminder row
       // created or re-stamped mid-move carries the same stamp and is
       // released with the rest; a newer mover's stamp is never touched.
-      await db('appointment_reminders').whereIn('scheduled_service_id', reminderHoldMemberIds.length ? reminderHoldMemberIds : plan.memberIds)
+      // Keyed on the TOKEN ALONE (uncapped r36 P1): the member-id snapshot
+      // predates late joins that inherited this token — the crypto-unique
+      // token IS the cohort, so every row carrying it releases together.
+      await db('appointment_reminders')
         .where({ move_hold_token: reminderHoldToken })
         .update({ move_hold_until: null, move_hold_token: null });
     } catch (err) {
@@ -2198,8 +2206,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // (expectTechnicianId ⇒ ASSIGNMENT_STALE) is the technician verdict.
       return true;
     } catch (readErr) {
+      // INDETERMINATE, never "not landed" (uncapped r36 P1): the move may
+      // have committed with only the verification read failing — treating
+      // it as false would take the primary's nothing-moved abort branch
+      // and release the cohort hold over a possibly-moved stop.
       logger.warn(`[visit-groups] unit move landed-check for ${t.id} failed: ${readErr.message}`);
-      return false;
+      throw Object.assign(new Error(`could not verify whether ${t.id} landed: ${readErr.message}`), { code: 'VISIT_LANDED_UNVERIFIABLE' });
     }
   };
   const ordered = [...pending.filter((x) => x.isPrimary), ...pending.filter((x) => !x.isPrimary)];
@@ -2379,7 +2391,26 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // reconcile — a member that sits at its planned target is a committed
       // move (parent retarget + seams must still run for it); only a row
       // still at its old placement is a real failure.
-      if (await memberLandedAt(target)) {
+      let landedVerdict;
+      try {
+        landedVerdict = await memberLandedAt(target);
+      } catch (verifyErr) {
+        // INDETERMINATE landing (uncapped r36 P1): the move may have
+        // committed with only the verification read failing. Never take
+        // the nothing-moved branch (which releases the cohort hold) —
+        // report the member as failed/partial so the hold is RETAINED and
+        // staff repair the stop; the reconciler/TTL are the backstops.
+        if (target.isPrimary) {
+          // The primary's outcome is unknowable right now: abort WITHOUT
+          // the nothing-moved release — the hold stays until the board is
+          // re-saved (or the TTL expires), so no stale text can go out
+          // either way.
+          throw Object.assign(new Error('Could not verify whether this stop moved — reload the board and re-save it; no automated texts will go out until the stop is verified.'), { statusCode: 503, code: 'VISIT_MOVE_UNVERIFIED', isOperational: true });
+        }
+        await failSibling(target, verifyErr, verifyErr.message);
+        continue;
+      }
+      if (landedVerdict) {
         moved.push(target.id);
         landedState[target.id] = targetTuple(target);
         warnings.push(`${target.isPrimary ? 'the tapped service' : `service ${target.id}`} moved but its post-move cleanup failed: ${err.message}`);
