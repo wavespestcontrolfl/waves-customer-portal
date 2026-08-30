@@ -96,6 +96,11 @@ function resolutionDateMs(row) {
   if (row.status === 'accepted') return pick(row.accepted_at, row.created_at);
   if (row.status === 'declined') return pick(row.declined_at, row.updated_at, row.created_at);
   if (row.status === 'expired') return pick(row.expires_at, row.updated_at, row.created_at);
+  // A live sent/viewed row archived with a disposition (archived_unresolved,
+  // a staff reason, converted_other_path) resolved when it was classified —
+  // codex pre-push P1: these rows must reach byDisposition or the archive
+  // route's "stays in the loss picture" guarantee is false.
+  if (row.disposition && row.archived_at) return pick(row.disposition_at, row.archived_at, row.updated_at, row.created_at);
   return null;
 }
 
@@ -177,8 +182,13 @@ function sentCohorts(rows, { days, nowMs }) {
   for (const row of rows) {
     const sentAt = ms(row.sent_at);
     if (sentAt == null) continue;
-    if (row.archived_at) continue;
-    if (excludedFromRates(effectiveDisposition(row))) continue;
+    const disposition = effectiveDisposition(row);
+    if (excludedFromRates(disposition)) continue;
+    // Archived rows KEEP their historical outcome — dropping them re-wrote
+    // past cohort rates every time a row was tidied away (codex pre-push
+    // P1, survivorship bias). Only an archived live row with no
+    // classification at all is skipped: it has no outcome to report.
+    if (row.archived_at && !disposition && !RESOLVED_STATUSES.includes(row.status)) continue;
     sentTotal += 1;
     const firstView = ms(row.viewed_at) ?? ms(row.last_viewed_at);
     const opened = (Number(row.view_count) || 0) > 0 || firstView != null || row.status === 'viewed';
@@ -189,6 +199,7 @@ function sentCohorts(rows, { days, nowMs }) {
     let lostAt = null;
     if (row.status === 'declined') lostAt = ms(row.declined_at) ?? ms(row.updated_at) ?? sentAt;
     else if (row.status === 'expired') lostAt = ms(row.expires_at) ?? ms(row.updated_at) ?? sentAt;
+    else if (row.archived_at && disposition) lostAt = ms(row.disposition_at) ?? ms(row.archived_at) ?? sentAt;
     const decidedAt = wonAt ?? (row.status === 'declined' ? lostAt : null);
     if (decidedAt != null && decidedAt >= sentAt) daysToDecision.push((decidedAt - sentAt) / DAY_MS);
 
@@ -222,8 +233,8 @@ const SLICE_COLUMNS = [
   'onetime_total', 'estimate_data',
   // Disposition / cohort / slice inputs (estimator audit 2026-08-29).
   'sent_at', 'viewed_at', 'last_viewed_at', 'view_count',
-  'lead_source', 'source', 'waveguard_tier', 'disposition', 'decline_reason',
-  'service_interest', 'notes',
+  'lead_source', 'source', 'waveguard_tier', 'disposition', 'disposition_at',
+  'decline_reason', 'service_interest', 'notes',
 ];
 
 async function winLossSlices({ days = 90 } = {}) {
@@ -235,20 +246,25 @@ async function winLossSlices({ days = 90 } = {}) {
   // a freshly-declined old estimate); the precise resolution-date filter
   // below trims to the real window.
   const rows = await db('estimates')
-    .whereIn('status', RESOLVED_STATUSES)
+    // Resolved statuses, PLUS archived live rows that carry a disposition —
+    // their loss classification lives only in that column (status stays
+    // sent/viewed on archive).
+    .where((q) => q.whereIn('status', RESOLVED_STATUSES).orWhereNotNull('disposition'))
     .where((q) => q
       .where('accepted_at', '>=', cutoff)
       .orWhere('declined_at', '>=', cutoff)
       .orWhere('expires_at', '>=', cutoff)
+      .orWhere('disposition_at', '>=', cutoff)
       .orWhere('updated_at', '>=', cutoff)
       .orWhere('created_at', '>=', cutoff))
     .select(...SLICE_COLUMNS);
   // Second, status-agnostic read for the sent-cohort funnel: everything sent
   // inside the window, open offers included (they are the "open" bar).
+  // Archived rows deliberately INCLUDED — sentCohorts keeps their
+  // historical outcome (see the survivorship note there).
   const sentRows = await db('estimates')
     .whereNotNull('sent_at')
     .where('sent_at', '>=', cutoff)
-    .whereNull('archived_at')
     .select(...SLICE_COLUMNS);
 
   const totals = emptyCell();
@@ -287,7 +303,6 @@ async function winLossSlices({ days = 90 } = {}) {
     // for exactly this reason: archived losses are never fetched, so
     // counting archived wins would skew rates upward. (Its archived-accepted
     // carve-out feeds only the VOLUME funnel/MRR KPIs, not rates.)
-    if (row.archived_at) continue;
     const resolvedAt = resolutionDateMs(row);
     if (resolvedAt == null || resolvedAt < cutoffMs) continue;
     const isWon = row.status === 'accepted';
@@ -295,6 +310,11 @@ async function winLossSlices({ days = 90 } = {}) {
 
     const disposition = isWon ? null : effectiveDisposition(row);
     if (disposition) byDispositionCount.set(disposition, (byDispositionCount.get(disposition) || 0) + 1);
+    // Archived rows still drop from every RATE symmetrically (archived
+    // losses and wins leave together — same reasoning as PipelineAnalytics'
+    // activeRows), but their classification above stays in "why we lose":
+    // archiving no longer erases a loss from the story (codex pre-push P1).
+    if (row.archived_at) continue;
     // Dead/won-elsewhere rows are counted in "why we lose" above but leave
     // every RATE denominator — they were never a winnable offer.
     if (disposition && excludedFromRates(disposition)) {

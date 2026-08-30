@@ -254,14 +254,18 @@ describe('winLossSlices — audit slices', () => {
       row({ id: 'z', status: 'declined', accepted_at: null, declined_at: daysAgo(1), decline_reason: 'Too expensive', lead_source: 'referral', estimate_data: lawnData }),
       // Never winnable: counted in "why we lose", excluded from every rate.
       row({ id: 'dead', status: 'declined', accepted_at: null, declined_at: daysAgo(1), disposition: 'invalid_lead', lead_source: 'thumbtack' }),
+      // Archived live row with a classification: visible in "why we lose",
+      // out of the rates (archived drops stay symmetric) — codex pre-push P1.
+      row({ id: 'parked', status: 'viewed', accepted_at: null, archived_at: daysAgo(4), disposition: 'archived_unresolved', disposition_at: daysAgo(4) }),
     ]);
 
     const result = await winLossSlices({ days: 90 });
 
     expect(result).toMatchObject({ resolved: 4, won: 1, lost: 3, winRatePct: 25, excludedFromRates: 1 });
     expect(result.byDisposition).toEqual([
-      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 25, group: 'lost' }),
+      expect.objectContaining({ code: 'expired_unviewed', count: 1, pctOfLosses: 20, group: 'lost' }),
       expect.objectContaining({ code: 'expired_viewed', count: 1 }),
+      expect.objectContaining({ code: 'archived_unresolved', count: 1 }),
       expect.objectContaining({ code: 'declined_price', count: 1 }),
       expect.objectContaining({ code: 'invalid_lead', count: 1, group: 'dead' }),
     ]);
@@ -293,23 +297,29 @@ describe('winLossSlices — audit slices', () => {
       row({ id: 'd', status: 'declined', accepted_at: null, sent_at: daysAgo(10), declined_at: daysAgo(1) }),
       // Dead lead never counts.
       row({ id: 'x', status: 'declined', accepted_at: null, sent_at: daysAgo(50), declined_at: daysAgo(49), disposition: 'invalid_lead' }),
-      // Archived rows excluded (converted elsewhere / cleaned up).
+      // Archived ACCEPTED row keeps its historical win — archiving must not
+      // rewrite past cohort rates (codex pre-push P1, survivorship bias).
       row({ id: 'a', sent_at: daysAgo(50), accepted_at: daysAgo(49), archived_at: daysAgo(10) }),
+      // Live sent row archived WITH a classification counts as a loss at its
+      // disposition date; one archived with NO classification has no outcome
+      // and is skipped.
+      row({ id: 'p', status: 'sent', accepted_at: null, sent_at: daysAgo(25), archived_at: daysAgo(20), disposition: 'archived_unresolved', disposition_at: daysAgo(20) }),
+      row({ id: 'q', status: 'sent', accepted_at: null, sent_at: daysAgo(25), archived_at: daysAgo(20) }),
     ];
     mockDbHandler = estimatesTable([], sent);
 
     const { sentCohorts } = await winLossSlices({ days: 30 });
 
-    expect(sentCohorts.sentTotal).toBe(4);
+    expect(sentCohorts.sentTotal).toBe(6);
     expect(sentCohorts.viewedTotal).toBe(2);
-    expect(sentCohorts.viewRatePct).toBe(50);
     expect(sentCohorts.cohorts.map((c) => c.maturityDays)).toEqual([7, 14, 30]); // ≤ window only
     const at = (m) => sentCohorts.cohorts.find((c) => c.maturityDays === m);
-    expect(at(7)).toMatchObject({ sent: 3, won: 1, lost: 1, open: 1, winRatePct: 33.3, lossRatePct: 33.3 });
-    expect(at(14)).toMatchObject({ sent: 2, won: 1, lost: 1, open: 0 });
-    expect(at(30)).toMatchObject({ sent: 1, won: 1, lost: 0, open: 0, winRatePct: 100 });
+    // 7d cohort: w won, a won(1d), l lost, d open, p lost(5d after send)
+    expect(at(7)).toMatchObject({ sent: 5, won: 2, lost: 2, open: 1, winRatePct: 40 });
+    expect(at(14)).toMatchObject({ sent: 4, won: 2, lost: 2, open: 0 });
+    expect(at(30)).toMatchObject({ sent: 2, won: 2, lost: 0, open: 0, winRatePct: 100 });
     expect(sentCohorts.medianHoursToFirstView).toBe(12); // 0.5d for both viewed rows
-    expect(sentCohorts.medianDaysToDecision).toBe(6); // 3d (won) and 9d (declined)
+    expect(sentCohorts.medianDaysToDecision).toBe(3); // 3d (w), 9d (d), 1d (a)
   });
 
   test('no sent rows → empty cohorts with null rates', async () => {
