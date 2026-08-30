@@ -290,12 +290,15 @@ describe('importExistingBacklinks (live)', () => {
       ],
     });
     const r = await importExistingBacklinks(db, { now: NOW });
-    expect(r).toMatchObject({ placementsCreated: 0, placementsExisting: 4, placementsReconciled: 2 });
+    expect(r).toMatchObject({ placementsCreated: 0, placementsExisting: 4, placementsReconciled: 4 }); // 2 promotions + 2 FK-only linkages
     const byId = Object.fromEntries(db._store.seo_link_prospects.map((p) => [p.id, p]));
     expect(byId['pr-prospect']).toMatchObject({ status: 'live', live_url: 'https://dir.example/listing-1', backlink_id: 'b01', outreach_status: 'none', claimed_by: null, claimed_at: null, first_live_at: '2026-06-01' });
     expect(byId['pr-placed']).toMatchObject({ status: 'live', live_url: 'https://placed.example/a', backlink_id: 'b02', is_dofollow: true, first_live_at: '2026-03-01' });
-    expect(byId['pr-mid']).toMatchObject({ status: 'contacted', backlink_id: null });
+    expect(byId['pr-mid']).toMatchObject({ status: 'contacted', backlink_id: null }); // status untouched…
+    expect(byId['pr-mid'].domain_id).toBeTruthy(); // …but the registry FKs are linked
+    expect(byId['pr-mid'].path_id).toBeTruthy();
     expect(byId['pr-done']).toMatchObject({ status: 'live', live_url: 'https://done.example/old', backlink_id: 'b-old' });
+    expect(byId['pr-done'].domain_id).toBeTruthy(); // evidenced rows still get missing FKs, nothing else
     // a live row that never had a representative gets one (backlink_id) without changing status or live_url
     const b = bl();
     const db3 = fakeDb({ seo_backlinks: [b], seo_link_prospects: [seed('pr-live-norep', 'dir.example', { status: 'live', live_url: 'https://dir.example/kept', backlink_id: null })] });

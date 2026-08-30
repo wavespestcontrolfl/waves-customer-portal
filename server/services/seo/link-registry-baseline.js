@@ -155,18 +155,30 @@ function placementRow(host, targetPage, locationKey, representative) {
 // 'placed' / 'lost' rows are promoted; a row mid-outreach (contacted,
 // negotiating, sending …) is left to the send finalizer / operator
 // reconciliation. live/indexed rows only gain a missing live_url/backlink_id.
-const PLACEMENT_COLUMNS = ['id', 'status', 'target_page', 'live_url', 'first_live_at', 'backlink_id'];
-async function reconcilePlacement(q, placement, rep, now) {
+const PLACEMENT_COLUMNS = ['id', 'status', 'target_page', 'live_url', 'first_live_at', 'backlink_id', 'domain_id', 'path_id'];
+async function reconcilePlacement(q, placement, rep, now, { domainId = null, pathId = null } = {}) {
+  // A reused row is LINKED to the registry rows created above (missing FKs
+  // only — a non-null link is never overwritten), whatever its status: the
+  // mapping must never point at a placement the catch-up would re-link later.
+  const fk = {};
+  if (!placement.domain_id && domainId) fk.domain_id = domainId;
+  if (!placement.path_id && pathId) fk.path_id = pathId;
   const isLive = ['live', 'indexed'].includes(placement.status);
-  if (isLive && placement.live_url && placement.backlink_id) return 0; // representative already identified
+  const evidenced = isLive && placement.live_url && placement.backlink_id;
+  const midOutreach = !isLive && !['prospect', 'placed', 'lost'].includes(placement.status);
+  if (evidenced || midOutreach) {
+    // registry wiring only — outreach/status fields stay their lane's to change
+    if (!Object.keys(fk).length) return 0;
+    return (await q('seo_link_prospects').where({ id: placement.id }).update({ ...fk, updated_at: now })) ? 1 : 0;
+  }
   // A row that is already live keeps the live_url it verified; a promoted row takes the scan's.
-  const patch = { live_url: (isLive ? placement.live_url || rep.source_url : rep.source_url || placement.live_url) || null, backlink_id: placement.backlink_id || rep.id, updated_at: now };
+  const patch = { ...fk, live_url: (isLive ? placement.live_url || rep.source_url : rep.source_url || placement.live_url) || null, backlink_id: placement.backlink_id || rep.id, updated_at: now };
   let u = q('seo_link_prospects').where({ id: placement.id, status: placement.status });
   if (!isLive) {
     if (placement.status === 'prospect') {
       u = u.where((b) => b.whereNull('outreach_status').orWhere('outreach_status', 'none').orWhere('outreach_status', 'drafted')).whereNull('outreach_sent_at');
       Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
-    } else if (!['placed', 'lost'].includes(placement.status)) return 0;
+    }
     patch.status = 'live';
     if (typeof rep.is_dofollow === 'boolean') patch.is_dofollow = rep.is_dofollow;
     if (!placement.first_live_at) patch.first_live_at = rep.first_seen || now;
@@ -295,7 +307,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
       for (const g of d.groups.values()) {
         const rep = g.rows[0];
         let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, columns: PLACEMENT_COLUMNS });
-        if (placement) { out.placementsExisting += 1; if (!dryRun) out.placementsReconciled += await reconcilePlacement(q, placement, rep, now); }
+        if (placement) { out.placementsExisting += 1; if (!dryRun) out.placementsReconciled += await reconcilePlacement(q, placement, rep, now, { domainId, pathId }); }
         else if (dryRun) out.placementsCreated += 1;
         else {
           const ins = await q('seo_link_prospects')
@@ -308,7 +320,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
             placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, columns: PLACEMENT_COLUMNS });
             if (!placement) throw new Error(`link-registry-baseline: lost race creating placement ${d.host} → ${g.targetPage}`);
             out.placementsExisting += 1;
-            out.placementsReconciled += await reconcilePlacement(q, placement, rep, now);
+            out.placementsReconciled += await reconcilePlacement(q, placement, rep, now, { domainId, pathId });
           }
         }
 
