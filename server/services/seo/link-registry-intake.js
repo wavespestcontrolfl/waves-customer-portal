@@ -170,9 +170,9 @@ async function upsertItem(q, item) {
   };
   const inserted = await q('seo_link_intake_items').insert(row).onConflict('item_key').ignore().returning(['id']);
   if (inserted && inserted.length) return { id: inserted[0].id, created: true };
-  const existing = await q('seo_link_intake_items').where({ item_key: row.item_key }).first('id');
+  const existing = await q('seo_link_intake_items').where({ item_key: row.item_key }).first('id', 'state', 'resolved_host', 'domain_id');
   await q('seo_link_intake_items').where({ id: existing.id }).update({ last_seen_at: q.fn.now() });
-  return { id: existing.id, created: false };
+  return { id: existing.id, created: false, state: existing.state || null, resolvedHost: existing.resolved_host || null, domainId: existing.domain_id || null };
 }
 
 /**
@@ -226,8 +226,15 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
       // The reference's CSV context rides on the item's source_detail, so the
       // resolver's touch (touchDetail(item.source_detail, finalUrl)) carries it
       // onto the resolved domain exactly like a directly named host's note.
-      const it = await upsertItem(trx, { source, sourceDetail: touchDetail(sourceDetail, null, parsed.unresolvedNotes[raw]), sourceRef, rawUrl: raw, state: 'pending' });
+      const detail = touchDetail(sourceDetail, null, parsed.unresolvedNotes[raw]);
+      const it = await upsertItem(trx, { source, sourceDetail: detail, sourceRef, rawUrl: raw, state: 'pending' });
       base.items[it.created ? 'created' : 'seen'] += 1;
+      // Already resolved by an earlier feed: THIS feed's provenance still lands
+      // on the domain (per-feed attribution), exactly as a named host's would.
+      if (!it.created && it.state === 'resolved' && it.resolvedHost && !isNeverTargetHost(it.resolvedHost) && !isOwnHost(it.resolvedHost)) {
+        const r = await registry.ensureDomain(trx, { domain: it.resolvedHost, source, sourceDetail: detail, sourceRef });
+        if (r && r.touched) base.items.retouched = (base.items.retouched || 0) + 1;
+      }
     }
     for (const d of parsed.dropped) {
       const it = await upsertItem(trx, { source, sourceDetail, sourceRef, rawUrl: d.token, state: 'dropped', dropReason: d.dropReason });
@@ -249,7 +256,9 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
 // Backoff after each failed attempt; past the last step the item is dropped
 // `retry_exhausted` (cap = 7 days, plan §3.4d).
 const BACKOFF_MS = Object.freeze([60 * 60e3, 6 * 60 * 60e3, 24 * 60 * 60e3, 72 * 60 * 60e3, 7 * 24 * 60 * 60e3]);
-const MAX_ATTEMPTS = BACKOFF_MS.length;
+// Every BACKOFF_MS entry is scheduled (the last wait is the 7-day one); the
+// drop happens on the failure AFTER the final wait.
+const MAX_ATTEMPTS = BACKOFF_MS.length + 1;
 // A claimed item is invisible to a parallel tick for this long (fleet overlap
 // during deploys); the final update always rewrites next_retry_at.
 // Lease > worst-case batch: 50 items × up to 3 hops × 8 s ≈ 20 min sequential.
@@ -258,21 +267,39 @@ const MAX_ATTEMPTS = BACKOFF_MS.length;
 // overwrite a reclaiming run's newer result.
 const CLAIM_HOLD_MS = 30 * 60e3;
 const LOST_CLAIM = Symbol('lost_claim');
-// X posts need the X feeder (a later step) to read their outbound link — the
-// hop-follower cannot resolve them. Re-queued a week out without spending an
-// attempt so they neither churn nor exhaust.
-const X_PARK_MS = 7 * 24 * 60 * 60e3;
+
+// An X post names no host by itself: its links do. Resolved through the X API
+// with the same bearer the X feeder uses (backlink-agent/x-poller). Returns the
+// post's expanded URLs; null ⇒ API unavailable (no token, transport, non-2xx)
+// so the caller backs off on the normal schedule — never parks forever.
+const X_API_TWEETS = 'https://api.twitter.com/2/tweets';
+async function defaultFetchTweetUrls(postUrl) {
+  const token = process.env.TWITTER_BEARER_TOKEN;
+  const m = String(postUrl || '').match(/\/status\/(\d+)/);
+  if (!token || !m) return null;
+  try {
+    const res = await fetch(`${X_API_TWEETS}/${m[1]}?tweet.fields=entities`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const urls = (data && data.data && data.data.entities && data.data.entities.urls) || [];
+    return urls.map((u) => u.expanded_url || u.url).filter(Boolean);
+  } catch { return null; }
+}
+const isXHost = (u) => ['x.com', 'twitter.com'].includes(canonicalProspectDomain(u));
 
 /**
  * resolveIntakeItems(db, { limit, now, fetchPage })
- *   → { claimed, resolved, unresolved, dropped, parked, errors: [{ id, error }] }
+ *   → { claimed, resolved, unresolved, dropped, parked, lost, spawned?, errors: [{ id, error }] }
+ *   X posts resolve through the X API (fetchTweetUrls); `parked` is retained for
+ *   the scheduler log and is always 0 now — nothing waits on a feeder.
  * Claims due items FOR UPDATE SKIP LOCKED (fleet-safe without a cron lock),
  * follows each reference through the SSRF-pinned fetchPage in resolveOnly mode,
  * and upserts the resolved host through ensureDomain with the item's own
  * provenance. Network happens outside the claim transaction.
  */
-async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage = null, dryRun = false } = {}) {
+async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage = null, fetchTweetUrls = null, dryRun = false } = {}) {
   const fetcher = fetchPage || require('./contact-finder').fetchPage;
+  const tweetUrls = fetchTweetUrls || defaultFetchTweetUrls;
   const out = { claimed: 0, resolved: 0, unresolved: 0, dropped: 0, parked: 0, errors: [] };
   const due = (q) => q('seo_link_intake_items')
     .whereIn('state', ['pending', 'unresolved'])
@@ -306,15 +333,38 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
     return n;
   };
 
+  const backoffOrExhaust = async (item, attempts, err) => {
+    if (attempts >= MAX_ATTEMPTS) {
+      await finalize(db, item, { state: 'dropped', drop_reason: 'retry_exhausted', attempts, last_error: err, next_retry_at: null });
+      out.dropped += 1;
+    } else {
+      await finalize(db, item, { state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(now.getTime() + BACKOFF_MS[attempts - 1]) });
+      out.unresolved += 1;
+    }
+  };
+
   for (const item of claimed) {
     try {
-      if (X_POST_RE.test(item.raw_url)) {
-        await finalize(db, item, { state: 'unresolved', last_error: 'awaiting_x_feeder', next_retry_at: new Date(now.getTime() + X_PARK_MS) });
-        out.parked += 1;
-        continue;
-      }
       const attempts = (item.attempts || 0) + 1;
-      const page = await fetcher(toUrl(item.raw_url), { resolveOnly: true });
+      let target = toUrl(item.raw_url);
+      if (X_POST_RE.test(item.raw_url)) {
+        const urls = await tweetUrls(target);
+        if (urls === null) { await backoffOrExhaust(item, attempts, 'x_api_unavailable'); continue; }
+        const links = urls.filter((u) => !isXHost(u));
+        if (!links.length) {
+          await finalize(db, item, { state: 'dropped', drop_reason: 'invalid_url', attempts, last_error: 'x_post_no_links', next_retry_at: null });
+          out.dropped += 1;
+          continue;
+        }
+        // The first link is what this item resolves to; every further link in
+        // the post is its own durable reference (same provenance, post as hint).
+        target = toUrl(links[0]);
+        for (const extra of links.slice(1)) {
+          const it = await upsertItem(db, { source: item.source, sourceDetail: touchDetail(item.source_detail, toUrl(item.raw_url), null), sourceRef: item.source_ref, rawUrl: extra, state: 'pending' });
+          if (it.created) out.spawned = (out.spawned || 0) + 1;
+        }
+      }
+      const page = await fetcher(target, { resolveOnly: true });
       const host = page && page.finalUrl ? canonicalProspectDomain(page.finalUrl) : null;
 
       if (page && (page.error === 'invalid_url' || page.error === 'unsupported_protocol' || page.blocked)) {
@@ -338,16 +388,10 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
         continue;
       }
 
-      // No usable host yet (network failure, or the chain ended on a
-      // never-target host): back off, then exhaust.
+      // No usable host yet (network / DNS failure, or the chain ended on a
+      // never-target host): back off on the schedule, then exhaust.
       const err = page && page.error ? page.error : (host ? `resolved_to_never_target:${host}` : `status_${(page && page.status) || 0}`);
-      if (attempts >= MAX_ATTEMPTS) {
-        await finalize(db, item, { state: 'dropped', drop_reason: 'retry_exhausted', attempts, last_error: err, next_retry_at: null });
-        out.dropped += 1;
-      } else {
-        await finalize(db, item, { state: 'unresolved', attempts, last_error: err, next_retry_at: new Date(now.getTime() + BACKOFF_MS[attempts - 1]) });
-        out.unresolved += 1;
-      }
+      await backoffOrExhaust(item, attempts, err);
     } catch (e) {
       if (e === LOST_CLAIM) { out.lost += 1; continue; }
       out.errors.push({ id: item.id, error: (e && e.message) || String(e) });
@@ -359,5 +403,5 @@ async function resolveIntakeItems(db, { limit = 50, now = new Date(), fetchPage 
 
 module.exports = {
   parseOpportunities, parseCsvOpportunities, intake, resolveIntakeItems,
-  _internals: { TOKEN_RE, X_POST_RE, SHORTENER_HOSTS, isShortenerHost, hasPath, touchDetail, URL_HINT_MAX, isReferenceToken, isOwnHost, BACKOFF_MS, MAX_ATTEMPTS, CLAIM_HOLD_MS, X_PARK_MS, upsertItem, toUrl },
+  _internals: { TOKEN_RE, X_POST_RE, SHORTENER_HOSTS, isShortenerHost, hasPath, touchDetail, URL_HINT_MAX, isReferenceToken, isOwnHost, BACKOFF_MS, MAX_ATTEMPTS, CLAIM_HOLD_MS, upsertItem, toUrl, defaultFetchTweetUrls, isXHost },
 };

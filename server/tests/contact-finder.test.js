@@ -170,6 +170,15 @@ describe('fetchPage finalUrl / resolveOnly (step-2 resolver contract)', () => {
     expect(cancelled).toBe(true);
   });
 
+  test('a failed DNS lookup is dns_error (retryable), never the blocked_host private-address verdict', async () => {
+    const fetchFn = jest.fn();
+    const r = await fetchPage('https://flaky-dns.example/', { fetchFn, resolveHostFn: async () => null, resolveOnly: true });
+    expect(r).toEqual(expect.objectContaining({ status: 0, finalUrl: null, blocked: false, error: 'dns_error' }));
+    expect(fetchFn).not.toHaveBeenCalled();
+    const b = await fetchPage('https://intranet.example/', { fetchFn, resolveHostFn: async () => false, resolveOnly: true });
+    expect(b).toEqual(expect.objectContaining({ blocked: true, error: 'blocked_host' }));
+  });
+
   test('resolveOnly: a 404 at the final URL still resolves (finalUrl set, status 404)', async () => {
     const fetchFn = async () => ({ ok: false, status: 404, headers: { get: () => null }, text: async () => { throw new Error('must not read body'); } });
     const r = await fetchPage('https://gone.example.com/old', { fetchFn, resolveHostFn: async () => true, resolveOnly: true });

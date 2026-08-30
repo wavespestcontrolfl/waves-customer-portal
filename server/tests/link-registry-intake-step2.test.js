@@ -136,6 +136,18 @@ describe('intake — persists every reference as an intake item', () => {
     expect(r.touched).toBe(1);
   });
 
+  test('re-feeding a reference that an earlier feed already resolved records THIS feed\'s provenance on the domain', async () => {
+    registry.ensureDomain.mockResolvedValue({ id: 'id-dir.example', created: false, touched: true });
+    const db = makeDb({
+      'seo_link_intake_items.returning': [],
+      'seo_link_intake_items.first': { id: 'item-old', state: 'resolved', resolved_host: 'dir.example', domain_id: 'id-dir.example' },
+      'seo_link_intake_items.update': () => 1,
+    });
+    const r = await intake(db, { text: 'Website,Action\nbit.ly/abc,Claim it', source: 'owner_seed', sourceDetail: 'sheet:aug' });
+    expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), { domain: 'dir.example', source: 'owner_seed', sourceDetail: 'sheet:aug note:Claim it', sourceRef: null });
+    expect(r.items).toEqual({ created: 0, seen: 1, pending: 1, retouched: 1 });
+  });
+
   test('CSV note lands on the touch source_detail', async () => {
     const db = makeDb({ 'seo_link_intake_items.returning': [{ id: 'i' }] });
     await intake(db, { text: 'Website,Primary Action\nacademia.edu,Add website to profile', sourceDetail: 'backlinks_csv_2026_08' });
@@ -256,10 +268,19 @@ describe('resolveIntakeItems — sweep', () => {
     await resolveIntakeItems(db, { now, fetchPage });
     expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', attempts: 1, next_retry_at: new Date(now.getTime() + _internals.BACKOFF_MS[0]) }));
 
+    // every BACKOFF_MS entry is scheduled — the final 7-day wait included — and the drop comes on the failure after it
+    expect(_internals.MAX_ATTEMPTS).toBe(_internals.BACKOFF_MS.length + 1);
+    db = dbWith([{ id: 'i1', raw_url: 'bit.ly/a', source: 'list_import', attempts: _internals.BACKOFF_MS.length - 1 }]);
+    await resolveIntakeItems(db, { now, fetchPage });
+    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', attempts: _internals.BACKOFF_MS.length, next_retry_at: new Date(now.getTime() + _internals.BACKOFF_MS[_internals.BACKOFF_MS.length - 1]) }));
     db = dbWith([{ id: 'i1', raw_url: 'bit.ly/a', source: 'list_import', attempts: _internals.MAX_ATTEMPTS - 1 }]);
     const r = await resolveIntakeItems(db, { now, fetchPage });
     expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'dropped', drop_reason: 'retry_exhausted', attempts: _internals.MAX_ATTEMPTS }));
     expect(r.dropped).toBe(1);
+    // a DNS lookup failure is transient: it takes the schedule, never the invalid_url drop
+    db = dbWith([{ id: 'i1', raw_url: 'bit.ly/dns', source: 'list_import', attempts: 0 }]);
+    await resolveIntakeItems(db, { now, fetchPage: async () => ({ status: 0, finalUrl: null, blocked: false, error: 'dns_error' }) });
+    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', attempts: 1, last_error: 'dns_error' }));
   });
 
   test('a chain that ends on a never-target host is NOT turned into that domain — it stays unresolved', async () => {
@@ -272,11 +293,37 @@ describe('resolveIntakeItems — sweep', () => {
 
   test('X posts are parked for the X feeder without spending an attempt', async () => {
     const db = dbWith([{ id: 'i1', raw_url: 'https://x.com/waves/status/123', source: 'x', attempts: 0 }]);
+    const fetchTweetUrls = jest.fn(async () => null); // API unavailable
     const fetchPage = jest.fn();
-    const r = await resolveIntakeItems(db, { now, fetchPage });
+    const r = await resolveIntakeItems(db, { now, fetchPage, fetchTweetUrls });
     expect(fetchPage).not.toHaveBeenCalled();
-    expect(db.updates[1].set).toEqual({ state: 'unresolved', last_error: 'awaiting_x_feeder', next_retry_at: new Date(now.getTime() + _internals.X_PARK_MS) });
-    expect(r.parked).toBe(1);
+    expect(db.updates[1].set).toEqual(expect.objectContaining({ state: 'unresolved', attempts: 1, last_error: 'x_api_unavailable', next_retry_at: new Date(now.getTime() + _internals.BACKOFF_MS[0]) }));
+    expect(fetchPage).not.toHaveBeenCalled();
+    expect(r.unresolved).toBe(1);
+  });
+
+  test('an X post resolves through the X API: first non-X link → the host; further links become their own pending items; a link-less post is dropped', async () => {
+    const db = dbWith([{ id: 'i1', raw_url: 'https://x.com/waves/status/123', source: 'x', source_detail: 'paste:x', attempts: 0 }], { 'seo_link_intake_items.returning': [{ id: 'new' }] });
+    const fetchTweetUrls = jest.fn(async () => ['https://x.com/other/status/9', 'https://Dir.example/listing', 'https://second.example/p']);
+    const fetchPage = jest.fn(async (url) => ({ status: 200, finalUrl: url, blocked: false, error: null }));
+    const r = await resolveIntakeItems(db, { now, fetchPage, fetchTweetUrls });
+    expect(fetchTweetUrls).toHaveBeenCalledWith('https://x.com/waves/status/123');
+    expect(fetchPage).toHaveBeenCalledWith('https://Dir.example/listing', { resolveOnly: true });
+    expect(registry.ensureDomain).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ domain: 'dir.example', source: 'x', sourceDetail: 'paste:x https://Dir.example/listing' }));
+    const inserts = db.calls.filter((c) => c.table === 'seo_link_intake_items' && c.op === 'insert').map((c) => c.args[0]);
+    expect(inserts).toEqual([expect.objectContaining({ raw_url: 'https://second.example/p', state: 'pending', source: 'x', source_detail: 'paste:x https://x.com/waves/status/123' })]);
+    expect(r).toEqual(expect.objectContaining({ resolved: 1, spawned: 1, parked: 0 }));
+    // a post with no outbound links can never name a host: dropped invalid_url
+    const db2 = dbWith([{ id: 'i1', raw_url: 'https://x.com/waves/status/124', source: 'x', attempts: 0 }]);
+    await resolveIntakeItems(db2, { now, fetchPage, fetchTweetUrls: async () => ['https://x.com/waves/status/1'] });
+    expect(db2.updates[1].set).toEqual(expect.objectContaining({ state: 'dropped', drop_reason: 'invalid_url', last_error: 'x_post_no_links' }));
+  });
+
+  test('defaultFetchTweetUrls: null without a bearer token (never throws, never fetches)', async () => {
+    const saved = process.env.TWITTER_BEARER_TOKEN; delete process.env.TWITTER_BEARER_TOKEN;
+    try { expect(await _internals.defaultFetchTweetUrls('https://x.com/a/status/1')).toBeNull(); } finally { if (saved !== undefined) process.env.TWITTER_BEARER_TOKEN = saved; }
+    expect(_internals.isXHost('https://twitter.com/x/status/1')).toBe(true);
+    expect(_internals.isXHost('https://dir.example/a')).toBe(false);
   });
 
   test('a throwing item is reported and does not stop the sweep', async () => {

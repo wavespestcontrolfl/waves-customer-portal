@@ -66,14 +66,18 @@ function isBlockedHostname(host) {
   return false;
 }
 
-// Resolve the host and reject if it (or any A/AAAA record) is a private address.
+// Resolve the host: true = public, false = private/internal (refuse), null =
+// the lookup itself failed (transient resolver outage / NXDOMAIN) — still
+// refused for this fetch, but reported as `dns_error`, never as a private-
+// address verdict, so callers with a retry schedule keep retrying.
 async function hostResolvesPublic(host) {
   if (net.isIP(host)) return !isPrivateIp(host);
   try {
     const addrs = await dns.promises.lookup(host, { all: true });
-    return addrs.length > 0 && addrs.every((a) => !isPrivateIp(a.address));
+    if (!addrs.length) return null;
+    return addrs.every((a) => !isPrivateIp(a.address));
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -205,7 +209,7 @@ function extractEmails(html, domain) {
 //     absence-of-X in it proves nothing; status 0 on network failure.
 //     finalUrl: the fully validated URL of the LAST hop that produced a
 //     non-redirect response (2xx/4xx/5xx) — null on every early-return failure
-//     (invalid_url, unsupported_protocol, blocked_host, no_response,
+//     (invalid_url, unsupported_protocol, blocked_host, dns_error, no_response,
 //     redirect_without_location, redirect_budget_exhausted, network error).
 //     redirectHops: redirects followed before that response (or before failing).
 //   opts.resolveOnly: true → same per-hop validation, redirect handling,
@@ -223,7 +227,10 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
     let u;
     try { u = new URL(current); } catch { return fail(0, false, 'invalid_url'); }
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return fail(0, true, 'unsupported_protocol');
-    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return fail(0, true, 'blocked_host');
+    if (isBlockedHostname(u.hostname)) return fail(0, true, 'blocked_host');
+    const pub = await resolveHostFn(u.hostname);
+    if (pub === null) return fail(0, false, 'dns_error'); // lookup failed: retryable, not a private-address verdict
+    if (!pub) return fail(0, true, 'blocked_host');
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);

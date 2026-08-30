@@ -175,7 +175,7 @@ describe('importExistingBacklinks (live)', () => {
       bl({ target_url: 'https://www.wavespestcontrol.com/termite-control', is_dofollow: false, link_type: 'forum' }), // b05 other page
     ] });
     const r = await importExistingBacklinks(db, { now: NOW });
-    expect(r).toEqual({ dryRun: false, scanned: 5, domainsCreated: 1, domainsTouched: 1, placementsCreated: 2, placementsExisting: 0, mappingsCreated: 5, pathsCreated: 1, skipped: [] });
+    expect(r).toEqual({ dryRun: false, scanned: 5, domainsCreated: 1, domainsTouched: 1, placementsCreated: 2, placementsExisting: 0, placementsReconciled: 0, mappingsCreated: 5, pathsCreated: 1, skipped: [] });
     expect(db.transaction).toHaveBeenCalledTimes(1);
     // board admission under the shared per-domain advisory lock, inside the transaction
     expect(db._store.raws).toContainEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', [`${LOCK_PREFIX}dir.example`]]);
@@ -240,7 +240,7 @@ describe('importExistingBacklinks (live)', () => {
     expect(r1).toMatchObject({ domainsCreated: 2, pathsCreated: 2, placementsCreated: 2, mappingsCreated: 2 });
     const before = db._writes.length;
     const r2 = await importExistingBacklinks(db, { now: NOW });
-    expect(r2).toEqual({ dryRun: false, scanned: 2, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 2, mappingsCreated: 0, pathsCreated: 0, skipped: [] });
+    expect(r2).toEqual({ dryRun: false, scanned: 2, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 2, placementsReconciled: 0, mappingsCreated: 0, pathsCreated: 0, skipped: [] });
     expect(db._writes.length).toBe(before);
     expect(db._store.seo_link_domains.length).toBe(2);
     expect(db._store.seo_link_domain_sources.length).toBe(2);
@@ -272,6 +272,39 @@ describe('importExistingBacklinks (live)', () => {
     expect(db._store.seo_link_prospects.find((p) => p.id === 'pr-scoped')).toMatchObject({ status: 'live', backlink_id: null });
   });
 
+  test('a reused board row is reconciled to the live evidence: an unsent prospect → live + un-claimed; placed/lost → live; a row mid-outreach is left alone; live rows with a live_url untouched', async () => {
+    const page = 'https://www.wavespestcontrol.com/';
+    const seed = (id, host, extra) => ({ id, target_domain: host, target_page: page, location_key: '-', backlink_id: null, ...extra });
+    const db = fakeDb({
+      seo_backlinks: [
+        bl(), // dir.example
+        bl({ source_domain: 'placed.example', source_url: 'https://placed.example/a', is_dofollow: true, first_seen: '2026-03-01' }),
+        bl({ source_domain: 'mid.example', source_url: 'https://mid.example/a' }),
+        bl({ source_domain: 'done.example', source_url: 'https://done.example/a' }),
+      ],
+      seo_link_prospects: [
+        seed('pr-prospect', 'dir.example', { status: 'prospect', outreach_status: 'drafted', outreach_sent_at: null, claimed_by: 'worker-1', claimed_at: NOW }),
+        seed('pr-placed', 'placed.example', { status: 'placed', first_live_at: null }),
+        seed('pr-mid', 'mid.example', { status: 'contacted' }),
+        seed('pr-done', 'done.example', { status: 'live', live_url: 'https://done.example/old', backlink_id: 'b-old' }),
+      ],
+    });
+    const r = await importExistingBacklinks(db, { now: NOW });
+    expect(r).toMatchObject({ placementsCreated: 0, placementsExisting: 4, placementsReconciled: 2 });
+    const byId = Object.fromEntries(db._store.seo_link_prospects.map((p) => [p.id, p]));
+    expect(byId['pr-prospect']).toMatchObject({ status: 'live', live_url: 'https://dir.example/listing-1', backlink_id: 'b01', outreach_status: 'none', claimed_by: null, claimed_at: null, first_live_at: '2026-06-01' });
+    expect(byId['pr-placed']).toMatchObject({ status: 'live', live_url: 'https://placed.example/a', backlink_id: 'b02', is_dofollow: true, first_live_at: '2026-03-01' });
+    expect(byId['pr-mid']).toMatchObject({ status: 'contacted', backlink_id: null });
+    expect(byId['pr-done']).toMatchObject({ status: 'live', live_url: 'https://done.example/old', backlink_id: 'b-old' });
+    // every backlink is still mapped to its (reused) placement
+    expect(db._store.seo_link_placement_backlinks.map((m) => m.prospect_id).sort()).toEqual(['pr-done', 'pr-mid', 'pr-placed', 'pr-prospect']);
+    // a prospect whose outreach already went out is NOT promoted (the send finalizer owns it)
+    const db2 = fakeDb({ seo_backlinks: [bl()], seo_link_prospects: [seed('pr-sent', 'dir.example', { status: 'prospect', outreach_status: 'sent', outreach_sent_at: NOW })] });
+    const r2 = await importExistingBacklinks(db2, { now: NOW });
+    expect(r2).toMatchObject({ placementsExisting: 1, placementsReconciled: 0 });
+    expect(db2._store.seo_link_prospects[0]).toMatchObject({ status: 'prospect', outreach_status: 'sent', backlink_id: null });
+  });
+
   test('a known domain keeps its agent_state, first-touch source and best_path_id; an existing board row (any spelling) is reused', async () => {
     const db = fakeDb({
       seo_backlinks: [bl(), bl({ source_domain: 'fresh.example', source_url: 'https://fresh.example/a' })],
@@ -284,8 +317,10 @@ describe('importExistingBacklinks (live)', () => {
     const known = db._store.seo_link_domains.find((d) => d.id === 'd-known');
     expect(known).toMatchObject({ source: 'competitor_gap', agent_state: 'investigating', best_path_id: 'p-real' });
     expect(db._store.seo_link_acquisition_paths.filter((p) => p.domain_id === 'd-known').map((p) => p.path_key).sort()).toEqual(['self_service_account:https://dir.example/add', 'unknown:baseline:dir.example']);
-    // the existing board row was reused: no second dir.example placement, mapping points at it, its fields untouched
-    expect(db._store.seo_link_prospects.filter((p) => canon(p.target_domain) === 'dir.example')).toEqual([expect.objectContaining({ id: 'pr-known', status: 'indexed', backlink_id: null })]);
+    // the existing board row was reused: no second dir.example placement, mapping points at it; an indexed row
+    // keeps its status and only gains the live evidence it lacked (live_url / backlink_id)
+    expect(db._store.seo_link_prospects.filter((p) => canon(p.target_domain) === 'dir.example')).toEqual([expect.objectContaining({ id: 'pr-known', status: 'indexed', backlink_id: 'b01', live_url: 'https://dir.example/listing-1' })]);
+    expect(r.placementsReconciled).toBe(1);
     expect(db._store.seo_link_placement_backlinks.find((m) => m.backlink_id === 'b01').prospect_id).toBe('pr-known');
     const fresh = db._store.seo_link_domains.find((d) => d.domain === 'fresh.example');
     expect(fresh.agent_state).toBe('acquired');
@@ -309,7 +344,7 @@ describe('importExistingBacklinks (dryRun)', () => {
   test('reports the same counts with zero writes and no transaction; on a fully imported profile every create count is zero', async () => {
     const db = fakeDb({ seo_backlinks: [bl({ is_dofollow: false }), bl(), bl({ source_domain: 'two.example', source_url: 'https://two.example/x' }), bl({ source_domain: 'x.com' })] });
     const dry = await importExistingBacklinks(db, { dryRun: true, now: NOW });
-    expect(dry).toEqual({ dryRun: true, scanned: 4, domainsCreated: 2, domainsTouched: 2, placementsCreated: 2, placementsExisting: 0, mappingsCreated: 3, pathsCreated: 2, skipped: [{ backlink_id: 'b04', reason: 'never_target' }] });
+    expect(dry).toEqual({ dryRun: true, scanned: 4, domainsCreated: 2, domainsTouched: 2, placementsCreated: 2, placementsExisting: 0, placementsReconciled: 0, mappingsCreated: 3, pathsCreated: 2, skipped: [{ backlink_id: 'b04', reason: 'never_target' }] });
     expect(db._writes).toEqual([]);
     expect(db.transaction).not.toHaveBeenCalled();
     expect(db._store.raws.filter(([s]) => /pg_advisory_xact_lock/.test(String(s)))).toEqual([]); // no lock outside a transaction
@@ -319,12 +354,12 @@ describe('importExistingBacklinks (dryRun)', () => {
     expect(live).toEqual({ ...dry, dryRun: false });
     const after = db._writes.length;
     const dry2 = await importExistingBacklinks(db, { dryRun: true, now: NOW });
-    expect(dry2).toEqual({ dryRun: true, scanned: 4, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 2, mappingsCreated: 0, pathsCreated: 0, skipped: [{ backlink_id: 'b04', reason: 'never_target' }] });
+    expect(dry2).toEqual({ dryRun: true, scanned: 4, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 2, placementsReconciled: 0, mappingsCreated: 0, pathsCreated: 0, skipped: [{ backlink_id: 'b04', reason: 'never_target' }] });
     expect(db._writes.length).toBe(after);
   });
   test('an empty profile returns zero counts without opening a transaction', async () => {
     const db = fakeDb();
-    expect(await importExistingBacklinks(db, { dryRun: false })).toEqual({ dryRun: false, scanned: 0, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 0, mappingsCreated: 0, pathsCreated: 0, skipped: [] });
+    expect(await importExistingBacklinks(db, { dryRun: false })).toEqual({ dryRun: false, scanned: 0, domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 0, placementsReconciled: 0, mappingsCreated: 0, pathsCreated: 0, skipped: [] });
     expect(db.transaction).not.toHaveBeenCalled();
   });
 });

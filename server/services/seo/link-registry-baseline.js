@@ -138,6 +138,32 @@ function placementRow(host, targetPage, locationKey, representative) {
   };
 }
 
+// An active seo_backlinks row from host → page is proof the link is live. A
+// reused board row that does not already say so is brought to the evidence
+// with the verifier's own guard (link-prospect-verifier.markLive): an
+// un-pitched 'prospect' only while its outreach is unsent (none/drafted, never
+// sent) — it is also un-claimed so the worker never pitches a live link;
+// 'placed' / 'lost' rows are promoted; a row mid-outreach (contacted,
+// negotiating, sending …) is left to the send finalizer / operator
+// reconciliation. live/indexed rows only gain a missing live_url/backlink_id.
+const PLACEMENT_COLUMNS = ['id', 'status', 'target_page', 'live_url', 'first_live_at', 'backlink_id'];
+async function reconcilePlacement(q, placement, rep, now) {
+  const isLive = ['live', 'indexed'].includes(placement.status);
+  if (isLive && placement.live_url) return 0;
+  const patch = { live_url: rep.source_url || placement.live_url || null, backlink_id: placement.backlink_id || rep.id, updated_at: now };
+  let u = q('seo_link_prospects').where({ id: placement.id, status: placement.status });
+  if (!isLive) {
+    if (placement.status === 'prospect') {
+      u = u.where((b) => b.whereNull('outreach_status').orWhere('outreach_status', 'none').orWhere('outreach_status', 'drafted')).whereNull('outreach_sent_at');
+      Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
+    } else if (!['placed', 'lost'].includes(placement.status)) return 0;
+    patch.status = 'live';
+    if (typeof rep.is_dofollow === 'boolean') patch.is_dofollow = rep.is_dofollow;
+    if (!placement.first_live_at) patch.first_live_at = rep.first_seen || now;
+  }
+  return (await u.update(patch)) ? 1 : 0;
+}
+
 async function findActivePath(q, domainId, key) {
   return q('seo_link_acquisition_paths').where({ domain_id: domainId, path_key: key }).whereNull('superseded_by').first('id');
 }
@@ -189,7 +215,7 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
   const domains = Number.isFinite(Number(limit)) && Number(limit) > 0 ? allDomains.slice(0, Number(limit)) : allDomains;
   const out = {
     dryRun: !!dryRun, scanned: rows.length,
-    domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 0,
+    domainsCreated: 0, domainsTouched: 0, placementsCreated: 0, placementsExisting: 0, placementsReconciled: 0,
     mappingsCreated: 0, pathsCreated: 0, skipped,
   };
   if (!domains.length) return out;
@@ -249,8 +275,8 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
       if (!dryRun) await lockProspectDomain(q, d.host);
       for (const g of d.groups.values()) {
         const rep = g.rows[0];
-        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true });
-        if (placement) out.placementsExisting += 1;
+        let placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true, columns: PLACEMENT_COLUMNS });
+        if (placement) { out.placementsExisting += 1; if (!dryRun) out.placementsReconciled += await reconcilePlacement(q, placement, rep, now); }
         else if (dryRun) out.placementsCreated += 1;
         else {
           const ins = await q('seo_link_prospects')
@@ -260,9 +286,10 @@ async function importExistingBacklinks(db, { dryRun = false, limit = null, now =
             .onConflict().ignore()
             .returning(['id']);
           if (ins && ins.length) { placement = ins[0]; out.placementsCreated += 1; } else {
-            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true });
+            placement = await findPlacementRow(q, d.host, g.targetPage, { location: g.locationKey, exactLocation: true, columns: PLACEMENT_COLUMNS });
             if (!placement) throw new Error(`link-registry-baseline: lost race creating placement ${d.host} → ${g.targetPage}`);
             out.placementsExisting += 1;
+            out.placementsReconciled += await reconcilePlacement(q, placement, rep, now);
           }
         }
 

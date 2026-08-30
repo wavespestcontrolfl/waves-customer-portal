@@ -385,7 +385,7 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key');
       if (!current) return { missing: true };
       // "In outreach" = active-outreach status AND an outreach-lane link_type:
       // a status flip OR a link_type change out of the signup lane can put a
@@ -403,10 +403,11 @@ router.patch('/prospects/:id', async (req, res, next) => {
       // one would 500 on it.
       if ('target_page' in patch && patch.target_page !== current.target_page) {
         await lockProspectDomain(trx, current.target_domain);
-        // Location-AGNOSTIC through the step-1 expand phase: UNIQUE(target_domain,
-        // target_page) is still live, so a row at ANY location owns the page; step 2
-        // (contract) scopes this probe to the row's own location_key.
-        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id });
+        // Placement identity is (target_domain, target_page, location_key) since
+        // step 2 dropped the legacy 2-column key: the probe is scoped to the row's
+        // OWN location ('-' included), so a Venice row may move onto a page a
+        // Sarasota row already holds.
+        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key, exactLocation: true });
         if (taken) return { taken };
       }
       const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');

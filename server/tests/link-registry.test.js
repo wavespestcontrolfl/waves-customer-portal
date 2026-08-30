@@ -355,6 +355,15 @@ describe('§3.4d intake item identity (step 2)', () => {
     expect(R.normalizeRawUrl('')).toBe('');
     expect(R.normalizeRawUrl(null)).toBe('');
   });
+  test('intakeItemKey: a reference over 512 normalized chars is keyed by sha256 (B-tree entry limit); raw_url keeps the text', () => {
+    const long = `https://example.com/p?q=${'a'.repeat(3000)}`;
+    const k = R.intakeItemKey('list_import', long);
+    expect(k).toMatch(/^list_import:sha256:[0-9a-f]{64}$/);
+    expect(k).toBe(R.intakeItemKey('list_import', `${long}#frag`));
+    expect(k).not.toBe(R.intakeItemKey('list_import', `${long}b`));
+    expect(R.intakeItemKey('list_import', 'https://example.com/short')).toBe('list_import:https://example.com/short');
+  });
+
   test('intakeItemKey = `${source}:${normalized}` — the same reference re-fed in any casing/fragment/slash form maps to one item', () => {
     const key = R.intakeItemKey('x', 'https://x.com/waves/status/1');
     expect(key).toBe('x:https://x.com/waves/status/1');

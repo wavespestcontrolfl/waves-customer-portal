@@ -185,9 +185,16 @@ function normalizeRawUrl(url) {
   }
 }
 
-/** `${source}:${normalizeRawUrl(rawUrl)}` — the UNIQUE seo_link_intake_items.item_key. */
+/**
+ * `${source}:${normalizeRawUrl(rawUrl)}` — the UNIQUE seo_link_intake_items.item_key.
+ * A very long reference (multi-KB query strings) is keyed by its sha256 instead:
+ * the B-tree UNIQUE index has a per-entry limit and raw_url keeps the full text.
+ */
+const ITEM_KEY_MAX = 512;
 function intakeItemKey(source, rawUrl) {
-  return `${source}:${normalizeRawUrl(rawUrl)}`;
+  const n = normalizeRawUrl(rawUrl);
+  if (n.length <= ITEM_KEY_MAX) return `${source}:${n}`;
+  return `${source}:sha256:${crypto.createHash('sha256').update(n).digest('hex')}`;
 }
 
 function pathKey(acquisitionType, submissionUrl) {
