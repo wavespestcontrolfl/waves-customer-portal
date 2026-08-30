@@ -41,6 +41,13 @@ describe('retentionDiscountForInvoice', () => {
     expect(second.exhaustsOffer).toBe(true); // 2nd application is the last
   });
 
+  test('an expired offer never discounts', () => {
+    const expired = offer({ expires_at: new Date(Date.now() - 1000).toISOString() });
+    expect(retentionDiscountForInvoice(expired, 100)).toBeNull();
+    const live = offer({ expires_at: new Date(Date.now() + 86400000).toISOString() });
+    expect(retentionDiscountForInvoice(live, 100)).not.toBeNull();
+  });
+
   test('nothing applies to a non-granted offer, zero subtotal, or spent cap', () => {
     expect(retentionDiscountForInvoice(offer({ status: 'exhausted' }), 100)).toBeNull();
     expect(retentionDiscountForInvoice(offer({ status: 'voided' }), 100)).toBeNull();

@@ -53,8 +53,13 @@ function receiptValues(facts) {
 }
 
 function scopeFamilies(facts, families) {
-  const list = Array.isArray(families) && families.length ? families : (facts.families || []);
-  return list.filter(Boolean);
+  const owned = (facts.families || []).filter(Boolean);
+  if (!Array.isArray(families) || !families.length) return owned;
+  // The requested scope is caller input — only families the account actually
+  // holds count (a customer can't name pest_control into an offer they don't
+  // own). An intersection that comes up empty falls back to account scope.
+  const requested = families.filter((f) => owned.includes(f));
+  return requested.length ? requested : owned;
 }
 
 function resolveCancellation({ facts = {}, reasonCode = null, families = [], context = {}, now = new Date() } = {}) {

@@ -65,25 +65,44 @@ function offerEligibility(facts, { reasonCode, families = [], now = new Date() }
  */
 async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }, dbh = db) {
   if (!customerId || !familyKey) throw new Error('grantRetentionOffer requires customerId and familyKey');
-  if (cancellationCaseId) {
-    const existing = await dbh('retention_offers').where({ cancellation_case_id: cancellationCaseId }).first();
-    if (existing) return existing;
-  }
-  const now = new Date();
-  const [row] = await dbh('retention_offers')
-    .insert({
-      customer_id: customerId,
-      cancellation_case_id: cancellationCaseId || null,
-      family_key: familyKey,
-      percent_off: RETENTION_OFFER.percentOff,
-      max_charges: RETENTION_OFFER.charges,
-      cap_amount: RETENTION_OFFER.capAmount,
-      status: 'granted',
-      granted_at: now,
-      expires_at: new Date(now.getTime() + OFFER_TTL_DAYS * 86400000),
-    })
-    .returning('*');
-  return row;
+  const run = async (trx) => {
+    // Per-customer advisory lock: two concurrent cancel commits for the same
+    // customer serialize here, so the once-per-18-months rule holds even
+    // when both passed the facts-level cooldown check.
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?::text))', [String(customerId)]);
+    if (cancellationCaseId) {
+      const existing = await trx('retention_offers').where({ cancellation_case_id: cancellationCaseId }).first();
+      if (existing) return existing;
+    }
+    const now = new Date();
+    const cooldownFloor = new Date(now.getTime() - COOLDOWN_DAYS * 86400000);
+    const recent = await trx('retention_offers')
+      .where({ customer_id: customerId })
+      .where('granted_at', '>', cooldownFloor)
+      .first('id', 'granted_at');
+    if (recent) {
+      const err = new Error('retention_offer_cooldown');
+      err.code = 'retention_offer_cooldown';
+      err.existingOfferId = recent.id;
+      throw err;
+    }
+    const [row] = await trx('retention_offers')
+      .insert({
+        customer_id: customerId,
+        cancellation_case_id: cancellationCaseId || null,
+        family_key: familyKey,
+        percent_off: RETENTION_OFFER.percentOff,
+        max_charges: RETENTION_OFFER.charges,
+        cap_amount: RETENTION_OFFER.capAmount,
+        status: 'granted',
+        granted_at: now,
+        expires_at: new Date(now.getTime() + OFFER_TTL_DAYS * 86400000),
+      })
+      .returning('*');
+    return row;
+  };
+  // pg_advisory_xact_lock needs a transaction; reuse the caller's when given.
+  return dbh.isTransaction ? run(dbh) : dbh.transaction(run);
 }
 
 /**
@@ -92,8 +111,9 @@ async function grantRetentionOffer({ customerId, cancellationCaseId, familyKey }
  * the ledger delta — or null when nothing applies. The cap is on the TOTAL
  * across the offer's charges, so the last charge may be partial.
  */
-function retentionDiscountForInvoice(offer, eligibleSubtotal) {
+function retentionDiscountForInvoice(offer, eligibleSubtotal, { now = new Date() } = {}) {
   if (!offer || offer.status !== 'granted') return null;
+  if (offer.expires_at && new Date(offer.expires_at).getTime() <= now.getTime()) return null;
   const applied = Number(offer.charges_applied) || 0;
   if (applied >= Number(offer.max_charges)) return null;
   const subtotal = Number(eligibleSubtotal);
@@ -124,6 +144,9 @@ function retentionDiscountForInvoice(offer, eligibleSubtotal) {
 async function consumeRetentionOffer({ offerId, expectedChargesApplied, amount, invoiceId, exhaustsOffer }, dbh = db) {
   const updated = await dbh('retention_offers')
     .where({ id: offerId, status: 'granted', charges_applied: expectedChargesApplied })
+    .where(function notExpired() {
+      this.whereNull('expires_at').orWhere('expires_at', '>', new Date());
+    })
     .update({
       charges_applied: expectedChargesApplied + 1,
       amount_applied: dbh.raw('COALESCE(amount_applied, 0) + ?', [amount]),

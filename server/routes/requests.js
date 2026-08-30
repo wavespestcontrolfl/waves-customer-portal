@@ -565,7 +565,18 @@ const cancelResolutionSchema = Joi.object({
   safety_complaint: Joi.string().valid('true', 'false').optional(),
 });
 
-router.get('/cancel-resolution', authenticate, async (req, res, next) => {
+// Per-customer limiter: the moving branch calls the paid Google Address
+// Validation API, so an authed account must not be able to loop it for free.
+const cancelResolutionLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.customer && req.customer.id) || req.ip,
+  message: { error: 'Too many requests. Please wait a moment and try again.' },
+});
+
+router.get('/cancel-resolution', authenticate, cancelResolutionLimiter, async (req, res, next) => {
   try {
     if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
     const { value, error } = cancelResolutionSchema.validate(req.query, { stripUnknown: true });

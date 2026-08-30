@@ -6,9 +6,10 @@
  * balance, findings, callbacks, prior offers); never a churn/risk score
  * (owner ruling 2026-08-29: that signal is broken and nothing keys on it).
  *
- * Every leg is wrapped: a failed query yields null/0 for that fact and the
- * resolver's slot validators simply drop the cards that needed it. A facts
- * miss can never surface an invented number and can never block a cancel.
+ * Every leg is wrapped, and failures resolve in the SAFE direction: a
+ * card-slot fact miss drops the card (never an invented number), while a
+ * money-critical fact miss BLOCKS the offer (fail closed — see the
+ * moneyFactsDegraded mapping below). A facts miss can never block a cancel.
  */
 
 const db = require('../../models/db');
@@ -84,13 +85,24 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
   const tenureDays = memberSince ? Math.max(0, Math.floor((now.getTime() - new Date(memberSince).getTime()) / DAY_MS)) : 0;
 
   const [
-    visitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
+    visitCounts, paidVisitCounts, visits12mo, callbacks12mo, reschedules12mo, savings12mo, pastDue, failedPayment,
     findings, complaintRequest, lastComplaint, priorOffer, shownCases, termite, properties, prefs, callbackLanes, families,
   ] = await Promise.all([
     leg('visitCounts', () => db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .whereRaw('COALESCE(is_callback, false) = false')
       .count({ n: '*' }).first(), null),
+    // Paid visits for the money gate: completed non-callback visits with a
+    // PAID/PREPAID invoice on the row. Monthly-membership customers pay dues,
+    // not per-visit invoices — for that lane completed visits + the separate
+    // account-current gate are the honest equivalent (see below).
+    leg('paidVisitCounts', () => db('scheduled_services as s')
+      .join('invoices as i', 'i.scheduled_service_id', 's.id')
+      .where('s.customer_id', customerId)
+      .where('s.status', 'completed')
+      .whereRaw('COALESCE(s.is_callback, false) = false')
+      .whereIn('i.status', ['paid', 'prepaid'])
+      .countDistinct({ n: 's.id' }).first(), null),
     leg('visits12mo', () => db('scheduled_services')
       .where({ customer_id: customerId, status: 'completed' })
       .whereRaw('COALESCE(is_callback, false) = false')
@@ -118,11 +130,11 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .whereNotNull('due_date')
       .where('due_date', '<', today)
       .whereRaw('COALESCE(total, 0) - COALESCE(credit_applied, 0) > 0')
-      .first('id'), null),
+      .first('id'), 'error'),
     leg('failedPayment', () => db('payments')
       .where({ customer_id: customerId, status: 'failed' })
       .whereNull('superseded_by_payment_id')
-      .first('id'), null),
+      .first('id'), 'error'),
     leg('findings', () => db('service_findings as f')
       .join('service_records as r', 'r.id', 'f.service_record_id')
       .where('r.customer_id', customerId)
@@ -134,7 +146,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
       .whereIn('category', COMPLAINT_CATEGORIES)
       .whereIn('status', OPEN_REQUEST_STATUSES)
       .where('created_at', '>=', daysAgo(60, now))
-      .first('id'), null),
+      .first('id'), 'error'),
     leg('lastComplaint', () => db('messages as m')
       .join('conversations as c', 'c.id', 'm.conversation_id')
       .where('c.customer_id', customerId)
@@ -147,7 +159,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     leg('priorOffer', () => db('retention_offers')
       .where({ customer_id: customerId })
       .orderBy('granted_at', 'desc')
-      .first('granted_at'), null),
+      .first('granted_at'), 'error'),
     leg('shownCases', () => db('cancellation_cases')
       .where({ customer_id: customerId })
       .whereNotNull('resolution_template_id')
@@ -166,7 +178,7 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
     leg('callbackLanes', async () => {
       const { openReserviceCallbacks } = require('../reservice-scheduler');
       return Object.keys(await openReserviceCallbacks(customerId));
-    }, []),
+    }, 'error'),
     leg('families', () => loadFamilies(customerId, today), []),
   ]);
 
@@ -183,25 +195,45 @@ async function loadCancellationFacts(customerId, { now = new Date() } = {}) {
 
   const prepay = customer.billing_mode === 'annual_prepay';
 
+  // FAIL CLOSED on money-critical facts: a query failure must never widen
+  // eligibility. An errored leg resolves to the value that BLOCKS the offer
+  // (not current / complaint open / callback open / offer just granted);
+  // moneyFactsDegraded records that it happened.
+  const moneyFactsDegraded = [pastDue, failedPayment, complaintRequest, priorOffer, callbackLanes].includes('error');
+  const accountCurrent = (pastDue === 'error' || failedPayment === 'error') ? false : (!pastDue && !failedPayment);
+  const openComplaint = complaintRequest === 'error' ? true : !!complaintRequest;
+  const openLanes = callbackLanes === 'error' ? ['unknown'] : (Array.isArray(callbackLanes) ? callbackLanes : []);
+  const priorOfferAt = priorOffer === 'error'
+    ? now.toISOString()
+    : (priorOffer && priorOffer.granted_at ? new Date(priorOffer.granted_at).toISOString() : null);
+  const completedVisits = num(visitCounts, 'n');
+  // Monthly membership: dues cover visits, so no per-visit paid invoice
+  // exists — completed visits stand in, with accountCurrent as the money
+  // check. Every other lane requires visits actually tied to paid invoices.
+  const completedPaidVisits = customer.billing_mode === 'monthly_membership'
+    ? completedVisits
+    : num(paidVisitCounts, 'n');
+
   return {
     customerId,
     memberSince: dateOnly(memberSince),
     tenureDays,
-    completedVisits: num(visitCounts, 'n'),
-    completedPaidVisits: num(visitCounts, 'n'),
+    completedVisits,
+    completedPaidVisits,
     visits12mo: num(visits12mo, 'n'),
     callbacks12mo: num(callbacks12mo, 'n'),
     reschedules12mo: num(reschedules12mo, 'n'),
     savings12mo: Math.round(num(savings12mo, 'n') * 100) / 100,
-    accountCurrent: !pastDue && !failedPayment,
-    openComplaint: !!complaintRequest,
-    openCallbackLanes: Array.isArray(callbackLanes) ? callbackLanes : [],
+    accountCurrent,
+    openComplaint,
+    openCallbackLanes: openLanes,
+    moneyFactsDegraded,
     lastFinding,
     firstFinding: firstFinding && lastFinding && firstFinding.text === lastFinding.text && findingRows.length === 1 ? lastFinding : firstFinding,
     lastComplaint: complaintMsg
       ? { date: dateOnly(complaintMsg.created_at), quote: String(complaintMsg.body).trim().slice(0, 140) }
       : null,
-    priorRetentionOfferAt: priorOffer && priorOffer.granted_at ? new Date(priorOffer.granted_at).toISOString() : null,
+    priorRetentionOfferAt: priorOfferAt,
     manualPriceOverrideAt: null,
     cardsShown12mo: (Array.isArray(shownCases) ? shownCases : []).map((r) => r.resolution_template_id).filter(Boolean),
     tier: customer.waveguard_tier || null,

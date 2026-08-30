@@ -158,25 +158,24 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       // forever. churn_mrr above already snapshotted the rate for reporting
       // (first churn); on a repeat churn it was stamped the first time.
       // Applied even when the stage was already 'churned' so admin
-      // stage-flip residue self-heals on the next processor run. Dark:
-      // gate off → byte-identical to H0.
+      // stage-flip residue self-heals on the next processor run. The scalar
+      // clear and the per-family ledger reset run in ONE transaction —
+      // fail-closed: with GATE_PLAN_RATE_LEDGER authoritative, a surviving
+      // positive component would resurrect the old rate on a win-back, so a
+      // ledger failure must fail the churn write (→ 'churn' error → office
+      // review alert), never be swallowed. Dark: gate off → byte-identical
+      // to H0.
       if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
         update.waveguard_tier = null;
         update.waveguard_tier_source = null;
         update.monthly_rate = null;
-      }
-      await db('customers').where({ id: customerId }).update(update);
-
-      // Per-family rate components follow the scalar (canonical path:
-      // plan-rate-ledger; hasTable-guarded, no-op when the ledger is absent).
-      if (gateEnvValue('GATE_CANCEL_FLOW_V2')) {
-        try {
-          const { resetLedgerToScalar } = require('./plan-rate-ledger');
-          await resetLedgerToScalar(db, customerId, 0, { source: 'cancellation' });
-        } catch (ledgerErr) {
-          // Advisory store — never let it block the billing wind-down.
-          logger.warn(`[cancellation-processor] plan-rate wind-down failed for ${customerId}: ${ledgerErr.message}`);
-        }
+        const { resetLedgerToScalar } = require('./plan-rate-ledger');
+        await db.transaction(async (trx) => {
+          await trx('customers').where({ id: customerId }).update(update);
+          await resetLedgerToScalar(trx, customerId, 0, { source: 'cancellation' });
+        });
+      } else {
+        await db('customers').where({ id: customerId }).update(update);
       }
 
       // Also disable the saved payment METHODS, mirroring the customer

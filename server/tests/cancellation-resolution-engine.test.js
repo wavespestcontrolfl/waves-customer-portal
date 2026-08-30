@@ -161,6 +161,12 @@ describe('resolver — money rules', () => {
     expect(out.card.templateId).toBe('price_receipt_offer');
   });
 
+  test('a requested family the account does not own cannot mint an offer for it', () => {
+    const out = resolveCancellation({ facts: baseFacts({ families: ['termite_bait'] }), reasonCode: 'price', families: ['pest_control'] });
+    // pest_control is not on the account: scope falls back to what IS owned.
+    expect(out.kind === 'none' || out.card.action.type === 'none').toBe(true);
+  });
+
   test('termite bait alone never gets money', () => {
     const out = resolveCancellation({ facts: baseFacts({ families: ['termite_bait'] }), reasonCode: 'price', families: ['termite_bait'] });
     expect(out.kind === 'none' || out.card.action.type === 'none').toBe(true);

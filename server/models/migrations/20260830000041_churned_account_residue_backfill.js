@@ -42,21 +42,30 @@ exports.up = async function up(knex) {
     .select('id', 'active', 'waveguard_tier', 'monthly_rate', 'churn_mrr');
 
   const hasLedger = await knex.schema.hasTable('customer_plan_rates');
-  const today = new Date().toISOString().slice(0, 10);
 
   for (const customer of candidates) {
-    const [liveSeries, upcoming] = await Promise.all([
+    const [liveSeries, upcoming, inProgress] = await Promise.all([
       knex('scheduled_services')
         .where({ customer_id: customer.id, recurring_ongoing: true })
         .whereNot('status', 'cancelled')
         .first('id'),
+      // ET calendar date, not UTC (AGENTS.md America/New_York rule): after
+      // 8 PM ET a UTC "today" is tomorrow and would skip a same-day visit.
       knex('scheduled_services')
         .where({ customer_id: customer.id })
         .whereIn('status', ['pending', 'confirmed', 'scheduled', 'rescheduled'])
-        .where('scheduled_date', '>=', today)
+        .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+        .first('id'),
+      // A tech actively working the property (any date) is live state too.
+      knex('scheduled_services')
+        .where({ customer_id: customer.id })
+        .where(function liveWork() {
+          this.whereIn('status', ['en_route', 'on_site'])
+            .orWhereIn('track_state', ['en_route', 'on_property']);
+        })
         .first('id'),
     ]);
-    if (liveSeries || upcoming) continue; // possibly a mistaken stage-flip — leave for the audit script
+    if (liveSeries || upcoming || inProgress) continue; // possibly a mistaken stage-flip — leave for the audit script
 
     const update = {
       active: false,

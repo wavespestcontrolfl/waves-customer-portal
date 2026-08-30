@@ -70,6 +70,12 @@ jest.mock('../models/db', () => {
     return q;
   }
   const db = (table) => makeQuery(table);
+  db.transaction = async (fn) => {
+    const trx = (table) => makeQuery(table);
+    trx.isTransaction = true;
+    trx.raw = async () => {};
+    return fn(trx);
+  };
   db.__tables = tables;
   return db;
 });
@@ -126,12 +132,15 @@ test('gate OFF: byte-identical to H0 — tier and rate residue stays', async () 
   expect(mockResetLedgerToScalar).not.toHaveBeenCalled();
 });
 
-test('gate ON: a ledger failure never blocks the wind-down', async () => {
+test('gate ON: a ledger failure FAILS CLOSED — churn errors, request flagged for review', async () => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   mockResetLedgerToScalar.mockRejectedValueOnce(new Error('ledger down'));
   seedCustomer();
   const result = await processCancellationRequest({ customerId: 'cust-1', reason: 'x', requestId: 'req-1' });
-  expect(result.churned).toBe(true);
-  expect(result.errors).not.toContain('churn');
-  expect(db.__tables.customers[0].waveguard_tier).toBeNull();
+  // With GATE_PLAN_RATE_LEDGER authoritative, a surviving positive component
+  // would resurrect the old rate on win-back — so the whole churn write
+  // reports as an error (→ partial-processing review alert) instead of
+  // silently leaving the ledger stale.
+  expect(result.churned).toBe(false);
+  expect(result.errors).toContain('churn');
 });
