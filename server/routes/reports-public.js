@@ -2115,6 +2115,13 @@ router.get('/:token/map.svg', async (req, res, next) => {
     }
 
     const data = await buildReportV1Data(service, req.params.token);
+    // Callback reports suppressed the generated schematic (owner
+    // 2026-08-30) — the standalone map endpoint must not keep serving what
+    // the live page and PDF no longer render (codex P2 r6). Same scoping
+    // as the PDF: only lines whose reservice block composed (rs2-keyed).
+    if (reserviceReportCopyGateOn() && data.isCallback === true && data.reserviceReport) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
     res.type('image/svg+xml');
     return res.send(data.mapSvg || '');
   } catch (err) { next(err); }

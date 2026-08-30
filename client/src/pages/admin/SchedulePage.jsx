@@ -15202,7 +15202,7 @@ export function CompletionPanel({
                     yardMode={isMosquitoTrace}
                   />
                 )}
-                <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
+                <span style={{ fontSize: 14, color: "var(--muted, #667085)", marginLeft: 10 }}>
                   {traceOutlineMode
                     ? (isMosquitoTrace
                       ? "Auto-trace the yard — lawn and landscape beds — on the satellite photo; it renders as the treated-area outline on the customer report."

@@ -41,7 +41,15 @@ async function callbackRecapRetired(scheduledServiceId, knex = db) {
       .where({ scheduled_service_id: scheduledServiceId })
       .orderBy('created_at', 'desc')
       .first('is_callback');
-    return Boolean(rec && rec.is_callback === true);
+    if (rec) return rec.is_callback === true;
+    // Pre-completion (codex P2 r6): no record row yet, but a scheduled
+    // callback must not accept an enqueue/clips only to become permanently
+    // unapprovable the moment completion stamps the record — fall back to
+    // the scheduled row's flag.
+    const sched = await knex('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('is_callback');
+    return Boolean(sched && sched.is_callback === true);
   } catch { return true; }
 }
 

@@ -113,4 +113,21 @@ describe('callbackRecapRetired — approval/delivery enforcement (codex P1 #3631
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     expect(await callbackRecapRetired('ss-err', recordKnex(null, { throws: true }))).toBe(true);
   });
+
+  it('pre-completion: a scheduled callback with no record yet is already retired (codex P2 r6)', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const byTable = (rows) => (table) => ({
+      where: function w() { return this; },
+      orderBy: function o() { return this; },
+      first: async () => rows[table] ?? null,
+    });
+    expect(await callbackRecapRetired('ss-pre', byTable({
+      service_records: null,
+      scheduled_services: { is_callback: true },
+    }))).toBe(true);
+    expect(await callbackRecapRetired('ss-pre-reg', byTable({
+      service_records: null,
+      scheduled_services: { is_callback: false },
+    }))).toBe(false);
+  });
 });
