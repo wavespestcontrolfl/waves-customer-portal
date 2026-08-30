@@ -423,7 +423,7 @@ export default function PipelineAnalytics({
     // One denominator rule with the win/loss and source cards (GH codex
     // P1): rows classified never-winnable (invalid/duplicate lead,
     // converted through another path) leave the close-rate math.
-    const NEVER_WINNABLE = ["invalid_lead", "converted_other_path"];
+    const NEVER_WINNABLE = ["invalid_lead", "converted_other_path", "expired_unsent"];
     const resolvedInRange = activeRows.filter((e) => {
       if (NEVER_WINNABLE.includes(e.disposition)) return false;
       const resolvedAt = resolutionDate(e);

@@ -96,10 +96,13 @@ exports.up = async function up(knex) {
           -- conversion of it (codex pre-push P1).
           EXISTS (SELECT 1 FROM invoices i
             WHERE i.customer_id = e.customer_id AND i.status = 'paid'
-              -- PAYMENT time bounds the positive evidence (GH codex P2): an
-              -- invoice created before archival but paid after proves
-              -- nothing existed when staff archived the courtship.
-              AND COALESCE(i.paid_at, i.created_at) <= e.archived_at)
+              -- PAYMENT time bounds the positive evidence, and a NULL
+              -- paid_at is temporally UNKNOWN — for this positive test it
+              -- fails conservatively toward archived_unresolved (the
+              -- none-before disqualifier keeps its opposite lower-bound
+              -- reading; both asymmetries fail toward not minting a
+              -- conversion) (GH codex P2 + pre-push P1).
+              AND i.paid_at IS NOT NULL AND i.paid_at <= e.archived_at)
           OR EXISTS (SELECT 1 FROM scheduled_services ss
             WHERE ss.customer_id = e.customer_id AND ss.status = 'completed'
               -- Legacy rows carry NULL completed_at; their same-day ordering
