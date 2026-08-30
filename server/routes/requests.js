@@ -491,8 +491,25 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         try {
           const { validateAddress, STATUSES } = require('../services/address-validation');
           const verdict = await validateAddress({ addressLines: [value.newAddress] });
-          if (cancelMoveAddressVerdict(verdict, STATUSES) === false) {
+          const inArea = cancelMoveAddressVerdict(verdict, STATUSES);
+          if (inArea === false) {
             serverResolution = { kind: 'hard_stop', reasonCode: value.reasonCode, scope: serverResolution ? serverResolution.scope : [], reviewType: 'none' };
+          } else if (inArea === true && preChurnFacts) {
+            // Verified in-area: re-run the pure resolver with the verdict so
+            // the case records the transfer card the preview showed (the
+            // pre-churn resolve deliberately ran without the paid verdict).
+            const { resolveCancellation } = require('../services/cancellation-resolution/resolve');
+            serverResolution = resolveCancellation({
+              facts: preChurnFacts,
+              reasonCode: value.reasonCode,
+              families: Array.isArray(value.families) ? value.families : [],
+              context: {
+                newAddressInServiceArea: true,
+                hasCompetitorQuote: value.competitorQuote === true,
+                adverseEvent: value.adverseEvent === true,
+                safetyComplaint: value.safetyComplaint === true,
+              },
+            });
           }
         } catch (addrErr) {
           logger.warn(`Cancellation address validation failed for request ${request.id}: ${addrErr.message}`);

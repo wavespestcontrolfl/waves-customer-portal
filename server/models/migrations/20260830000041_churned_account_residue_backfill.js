@@ -102,21 +102,47 @@ exports.up = async function up(knex) {
     // booking/reactivation committing between check and write can never
     // leave a newly re-won customer wound down.
      
+    let wound = null;
     await knex.transaction(async (trx) => {
-      // LOCK ORDER matches the booking writers (customers row FIRST, then
-      // scheduled_services): a booking transaction updates the customers
-      // row before inserting the visit, so taking the table lock first
-      // while a booking holds the row lock would deadlock. The customer
-      // FOR UPDATE happens inside windDownIfStillResidue before this table
-      // lock is requested — see acquireTableLock there.
-      await windDownIfStillResidue(trx, customer.id, customer);
+      // LOCK ORDER matches the booking writers that lock the customer row
+      // (customers FIRST, then scheduled_services); windDownIfStillResidue
+      // takes the FOR UPDATE before requesting the table lock.
+      wound = await windDownIfStillResidue(trx, customer.id, customer);
     }).catch((err) => {
       // A concurrent booking raced this account mid-wind-down: everything
       // rolled back; the audit script keeps reporting it. Anything else is
       // a real failure and must stop the migration.
-      if (err && err.code === 'BACKFILL_CONCURRENT_LIVE_WORK') return;
+      if (err && err.code === 'BACKFILL_CONCURRENT_LIVE_WORK') { wound = null; return; }
       throw err;
     });
+    // COMPENSATION for writers the locks cannot see: a booking path that
+    // never locks the customer row can queue behind the table lock and
+    // insert right after this commit. Re-check now — if live state
+    // appeared, RESTORE the wound-down billing identity from the snapshot
+    // taken under the lock, so real booked work is never stranded with
+    // destroyed billing state. (The account was churned; nothing else
+    // rewrites these fields concurrently.)
+    if (wound && (await hasLiveState(knex, customer.id))) {
+      await knex.transaction(async (trx) => {
+        await trx('customers').where({ id: customer.id }).update({
+          active: wound.prior.active,
+          waveguard_tier: wound.prior.waveguard_tier,
+          monthly_rate: wound.prior.monthly_rate,
+          billing_mode: wound.prior.billing_mode,
+          ...(hasPerAppFee ? { per_application_fee: wound.prior.per_application_fee } : {}),
+          updated_at: trx.fn.now(),
+        });
+        if (hasLedger && wound.planRates.length) {
+          await trx('customer_plan_rates').insert(wound.planRates.map((r) => ({ ...r })));
+        }
+        await trx('customer_interactions').insert({
+          customer_id: customer.id,
+          interaction_type: 'note',
+          subject: 'Churn residue backfill REVERTED (2026-08-30)',
+          body: 'A booking landed while the residue backfill wound this account down — billing identity restored from the pre-clear snapshot (autopay left off). Office review: reconcile the new booking with the churned stage.',
+        });
+      });
+    }
   }
 
   // Every "leave this account alone" signal in one place, run TWICE per
@@ -170,7 +196,8 @@ exports.up = async function up(knex) {
     const customer = await trx('customers')
       .where({ id: customerId })
       .forUpdate()
-      .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode');
+      .first('id', 'active', 'pipeline_stage', 'waveguard_tier', 'monthly_rate', 'churn_mrr', 'billing_mode',
+        ...(hasPerAppFee ? ['per_application_fee'] : []));
     if (!customer) return;
     if (!(customer.pipeline_stage === 'churned' || customer.active === false)) return; // re-won — leave alone
     // A reprice committed between candidate selection and this lock wins:
@@ -240,7 +267,11 @@ exports.up = async function up(knex) {
       .whereNull('superseded_by_payment_id')
       .whereNotNull('next_retry_at')
       .update({ next_retry_at: null });
-    if (hasLedger) await trx('customer_plan_rates').where({ customer_id: customer.id }).del();
+    let planRates = [];
+    if (hasLedger) {
+      planRates = await trx('customer_plan_rates').where({ customer_id: customer.id }).select('*');
+      await trx('customer_plan_rates').where({ customer_id: customer.id }).del();
+    }
 
     await trx('customer_interactions').insert({
       customer_id: customer.id,
@@ -265,6 +296,7 @@ exports.up = async function up(knex) {
       raceErr.code = 'BACKFILL_CONCURRENT_LIVE_WORK';
       throw raceErr;
     }
+    return { prior: customer, planRates };
   }
 };
 

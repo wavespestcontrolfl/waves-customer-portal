@@ -596,12 +596,15 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
   // is already flagged for review by the in_progress/unresolved errors.
   if (churned && gateEnvValue('GATE_CANCEL_FLOW_V2')) {
     try {
+      let priorFee = null;
       const cleared = await db.transaction(async (trx) => {
-        // LOCK ORDER matches every booking writer (customers row FIRST,
-        // then scheduled_services — migration 41 uses the same order): a
-        // booking holding the customer row while waiting on its visit
-        // insert would deadlock against the reverse order.
-        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+        // LOCK ORDER matches every booking writer that locks the customer
+        // row (customers FIRST, then scheduled_services — migration 41
+        // uses the same order): a booking holding the customer row while
+        // waiting on its visit insert would deadlock against the reverse
+        // order.
+        const lockedRow = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'per_application_fee');
+        priorFee = lockedRow ? lockedRow.per_application_fee : null;
         // Then serialize against service INSERTS: the correlated-subquery
         // UPDATE alone snapshots at READ COMMITTED and a booking committing
         // after that snapshot could strand a new visit priceless. SHARE ROW
@@ -635,6 +638,34 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
       });
       if (cleared === 0) {
         logger.info(`[cancellation-processor] per-application lane left intact for ${customerId} (not per-application, or unsettled work keeps the price)`);
+      } else {
+        // COMPENSATION for the writers the locks cannot see: a booking path
+        // that never locks the customer row can queue behind the table lock
+        // and insert right after this commit. Re-check now — if unsettled
+        // work appeared, RESTORE the lane fields from the pre-clear
+        // snapshot (the account is churned, nothing else rewrites them) and
+        // flag the account for office review.
+        const lateWork = await db('scheduled_services as s')
+          .where('s.customer_id', customerId)
+          .where(function unsettled() {
+            this.whereIn('s.status', ['pending', 'confirmed', 'rescheduled', 'scheduled', 'en_route', 'on_site'])
+              .orWhereIn('s.track_state', LIVE_TRACK_STATES)
+              .orWhere(function completedUninvoiced() {
+                this.where('s.status', 'completed')
+                  .whereNotExists(function invoiced() {
+                    this.select(1).from('invoices').whereRaw('invoices.scheduled_service_id = s.id');
+                  });
+              });
+          })
+          .first('s.id');
+        if (lateWork) {
+          await db('customers')
+            .where({ id: customerId })
+            .whereNull('billing_mode')
+            .update({ billing_mode: 'per_application', per_application_fee: priorFee, updated_at: new Date() });
+          errors.push('per_application_lane');
+          logger.warn(`[cancellation-processor] per-application lane RESTORED for ${customerId} — a booking raced the wind-down; office review required`);
+        }
       }
     } catch (laneErr) {
       errors.push('per_application_lane');
