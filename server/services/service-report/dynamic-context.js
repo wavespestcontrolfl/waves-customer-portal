@@ -348,6 +348,10 @@ async function buildServiceReportDynamicContext({
       record,
       currentPressureIndexOverride,
       knex,
+      // Customer-report path: callbacks are not "since last visit"
+      // baselines while the re-service gate is on (#3623 — the tech
+      // pre-visit brief calls the builder directly without this flag).
+      excludeCallbacks: true,
     }));
   const neighborhoodPromise = omitDecision
     ? Promise.resolve(undefined)

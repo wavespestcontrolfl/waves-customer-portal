@@ -37,10 +37,10 @@ function fakeKnex({ rows = [], firstRow = null } = {}) {
 const record = { id: 'rec-now', customer_id: 'cust-1', status: 'completed', service_type: 'Pest Control', service_line: 'pest', service_date: '2026-08-30' };
 
 describe('since-last-visit callback exclusion', () => {
-  test('gate on: the prior-visit query excludes callback records', async () => {
+  test('gate on + excludeCallbacks (customer-report path): the prior-visit query excludes callback records', async () => {
     process.env.GATE_RESERVICE_REPORT_COPY = 'true';
     const knex = fakeKnex({ firstRow: null });
-    await buildSinceLastVisitContext({ record, knex });
+    await buildSinceLastVisitContext({ record, knex, excludeCallbacks: true });
     expect(knex.applied).toEqual(expect.arrayContaining([
       expect.objectContaining({ method: 'where', args: ['is_callback', false] }),
       expect.objectContaining({ method: 'orWhereNull', args: ['is_callback'] }),
@@ -50,7 +50,14 @@ describe('since-last-visit callback exclusion', () => {
   test('gate dark: no callback constraint (legacy behavior byte-identical)', async () => {
     delete process.env.GATE_RESERVICE_REPORT_COPY;
     const knex = fakeKnex({ firstRow: null });
-    await buildSinceLastVisitContext({ record, knex });
+    await buildSinceLastVisitContext({ record, knex, excludeCallbacks: true });
+    expect(knex.applied.find((entry) => JSON.stringify(entry.args).includes('is_callback'))).toBeUndefined();
+  });
+
+  test('tech pre-visit brief path (no flag): callbacks stay the true prior visit even with the gate on', async () => {
+    process.env.GATE_RESERVICE_REPORT_COPY = 'true';
+    const knex = fakeKnex({ firstRow: null });
+    await buildSinceLastVisitContext({ record, knex, strict: true });
     expect(knex.applied.find((entry) => JSON.stringify(entry.args).includes('is_callback'))).toBeUndefined();
   });
 });
