@@ -181,11 +181,13 @@ describe('lawn callback card fold (owner 2026-08-30)', () => {
         '',
         'WHAT WE FOUND',
         '',
-        'Irrigation caused no runoff for 48 hours after the treatment.',
+        'Irrigation caused no runoff for 48 hours after the treatment. No irrigation occurred for 72 hours before today’s visit.',
       ].join('\n'),
     });
     const data = await buildReportV1Data(svc, 'tok-fold-8', makeKnex());
     expect(data.summarySource).toBe('technician_report');
+    // Neither the pooled-token sentence nor the descriptive "No irrigation
+    // occurred…" history (codex P1 r10) is a directive — the hold stays.
     expect(data.recommendations).toContain('Do not apply irrigation for at least 48 hrs');
   });
 

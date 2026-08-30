@@ -4939,7 +4939,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // never independently pooled tokens: "Irrigation caused no runoff for
   // 48 hours" carries all three tokens but no hold instruction and must
   // cover nothing (codex P1 r9).
-  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?|no)\s+(?:['’\w]+\s+){0,3}?(?:irrigat|water)/i;
+  // No bare "no" alternative (codex P1 r10): "No irrigation occurred for
+  // 72 hours before today's treatment" is a description, not a directive —
+  // only imperative hold verbs qualify, and a "no irrigation for 48 hours"
+  // phrasing simply keeps its card row (the keep-bias direction).
+  const IRRIGATION_HOLD_PHRASE_RE = /\b(?:do\s+not|don['’]?t|avoid|skip|withhold|wait|hold(?:\s+off)?(?:\s+on)?)\s+(?:['’\w]+\s+){0,3}?(?:irrigat|water)/i;
   // An irrigation-hold instruction's duration in hours, or null when the
   // text is not one (no tied hold phrase, or no duration).
   const irrigationHoldHours = (text) => {
