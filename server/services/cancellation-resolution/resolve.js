@@ -128,7 +128,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       break;
 
     case 'service_experience':
-      if (ctx.safetyComplaint) return { kind: 'hard_stop', reasonCode: reason, reviewType: 'incident' };
+      if (ctx.safetyComplaint) return { kind: 'hard_stop', reasonCode: reason, scope, reviewType: 'incident' };
       candidates = [
         facts.lastComplaint
           ? { id: 'service_experience_known', values: { date: facts.lastComplaint.date, quote: facts.lastComplaint.quote } }
@@ -153,7 +153,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       break;
 
     case 'moving_or_property_change':
-      if (ctx.newAddressInServiceArea === false) return { kind: 'hard_stop', reasonCode: reason, reviewType: 'none' };
+      if (ctx.newAddressInServiceArea === false) return { kind: 'hard_stop', reasonCode: reason, scope, reviewType: 'none' };
       // Unverified address → no transfer promise. The card only appears once
       // the new address is confirmed inside the service area.
       if (ctx.newAddressInServiceArea === true) candidates = [{ id: 'moving_transfer' }];
@@ -191,7 +191,7 @@ function resolveCancellation({ facts = {}, reasonCode = null, families = [], con
       break;
 
     case 'health_or_chemicals':
-      if (ctx.adverseEvent) return { kind: 'hard_stop', reasonCode: reason, reviewType: 'incident' };
+      if (ctx.adverseEvent) return { kind: 'hard_stop', reasonCode: reason, scope, reviewType: 'incident' };
       if (hasPest) candidates = [{ id: 'health_exterior_baits' }];
       break;
 
