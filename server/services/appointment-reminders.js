@@ -2383,9 +2383,13 @@ const AppointmentReminders = {
                 .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
                 .where('ss.visit_id', lockedVisit.visit_id)
                 .where('ar.move_hold_until', '>', new Date())
-                .first('ar.move_hold_until');
+                .first('ar.move_hold_until', 'ar.move_hold_token');
               if (heldSibling) {
-                await trx('appointment_reminders').where({ id: rec.id }).update({ move_hold_until: heldSibling.move_hold_until });
+                // The TOKEN travels with the stamp (codex r37): the release
+                // keys on it exclusively, so a healed row inheriting only
+                // the expiry would stay held for the full TTL after the
+                // move succeeds.
+                await trx('appointment_reminders').where({ id: rec.id }).update({ move_hold_until: heldSibling.move_hold_until, move_hold_token: heldSibling.move_hold_token || null });
               }
             };
             if (!lockedVisit || !lockedVisit.customer_id) return { skip: 'vanished' };

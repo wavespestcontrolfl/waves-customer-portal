@@ -13788,7 +13788,7 @@ function rescheduleReminderTime(date, window) {
 // paths) — callers that record completion (applySeriesMoveEffects) stamp
 // only on true/'stale'; single-visit callers keep their fire-and-forget
 // contract.
-async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null, preserveMoveHold = false } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
     const synced = await AppointmentReminders.handleReschedule(
@@ -13800,7 +13800,11 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
       // cron can't fire a duplicate reminder in the gap. A non-notifying move
       // leaves the 24h reminder pending so the cron still reminds the customer.
-      { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
+      { sendNotification: false,
+      // A partial/unverifiable unit move deliberately retains the cohort
+      // hold — this unconditional post-move sync must not release it
+      // (codex #3609 r37).
+      ...(preserveMoveHold ? { preserveMoveHold: true } : {}), coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
     if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
@@ -14250,7 +14254,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       // covered result carries no window, and re-syncing here would fall
       // back to 08:00 (local codex audit). Board refresh only.
       if (!moved.coveredByVisit) {
-        await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true });
+        await syncRescheduleReminder(moved.id, moved.newDate, moved.newWindow, { willNotify: moved.smsSent === true, preserveMoveHold: moved.needsAttention?.code === 'VISIT_MOVE_INCOMPLETE' });
         if (moved.smsSent === true) {
           await markRescheduleReminderNotified(moved.id);
         }
@@ -15068,7 +15072,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     const partialVisitMove = (Array.isArray(result?.visitMove?.failed) && result.visitMove.failed.length > 0)
       || result?.visitMove?.parentRetargetFailed === true; // the parent still describes the old stop (codex r28 P1)
     const willNotify = notifyCustomer !== false && !partialVisitMove;
-    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify });
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {

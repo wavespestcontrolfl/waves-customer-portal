@@ -151,7 +151,12 @@ describe('moveVisitAsUnit', () => {
     const out = await moveVisitAsUnit({ rebooker, serviceId: 'b', service: { id: 'b', visit_id: 'v1' }, newDate: '2026-09-02' });
     expect(out.visitMove).toMatchObject({ moved: [], failed: [], alreadyAtTarget: true });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
-    expect(db.__calls.some((c) => c.table === 'service_visits' && c.op === 'update')).toBe(false);
+    // The no-op REPAIRS a stale parent in place (codex r37): the fixture's
+    // visit record still names the old stop while every member sits at the
+    // target — the re-save retargets it and releases any retained hold.
+    const parentPatch = db.__calls.find((c) => c.table === 'service_visits' && c.op === 'update');
+    expect(parentPatch.values).toMatchObject({ scheduled_date: '2026-09-02' });
+
   });
 
   test('one immovable member refuses the whole move before anything changes', async () => {

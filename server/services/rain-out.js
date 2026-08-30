@@ -1416,6 +1416,11 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     audience: 'customer',
     purpose: 'appointment',
     customerId: customer.id,
+    // Move-hold coverage at the canonical handoffs (codex r37): the notice
+    // quotes the new date/window, and another grouped mover can stamp a
+    // hold while this body renders or awaits Twilio.
+    appointmentId: String(serviceId),
+    enforceMoveHold: true,
     identityTrustLevel: 'phone_matches_customer',
     // Send-window operator marker (validators/send-window.js): a quick-move
     // notice is the direct consequence of an operator's commit click with an

@@ -66,7 +66,11 @@ const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 // never lost.
 const MOVE_HOLD_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
 function appointmentMoveHoldApplies(input) {
-  return !!input.appointmentId && MOVE_HOLD_PURPOSES.includes(input.purpose);
+  // enforceMoveHold: explicit opt-in for appointment-describing sends whose
+  // purpose is outside the reminder set (the rain-out Quick Move notice —
+  // codex r37): the text quotes a date/window, so a hold stamped mid-render
+  // must block it exactly like a reminder.
+  return !!input.appointmentId && (MOVE_HOLD_PURPOSES.includes(input.purpose) || input.enforceMoveHold === true);
 }
 async function appointmentMoveHeld(input) {
   try {

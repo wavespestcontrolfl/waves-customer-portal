@@ -2021,6 +2021,46 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         throw Object.assign(new Error('Cannot move this stop — it changed since it was read (another writer already placed it here)'), { statusCode: 409, code: 'VISIT_EXPECT_STALE', isOperational: true });
       }
     }
+    // Repair pass (codex r37): after a parentRetargetFailed partial, every
+    // child can already sit at the requested slot — the staff re-save the
+    // needsAttention response prescribes lands HERE, and a plain no-op
+    // would leave the stale parent and the retained 24h hold unchanged. A
+    // parent that no longer matches the target is retargeted under the
+    // stop locks and the retained cohort hold on these members released;
+    // a healthy parent keeps the plain no-op. Best-effort — a failed
+    // repair leaves the hold to its TTL, the safe direction.
+    try {
+      await db.transaction(async (t) => {
+        const repairKey = stopBaseKey({ propertyId: plan.propertyId, customerId: plan.customerId, scheduledDate: newDateStr });
+        for (const key of [...new Set([plan.oldKey, repairKey])].sort()) await lockStop(t, key);
+        const visit = await t('service_visits').where({ id: plan.visitId }).first();
+        if (!visit || String(visit.status) !== 'open') return;
+        const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
+          .whereNotIn('status', TERMINAL_ROW_STATUSES).orderBy('id').forUpdate()
+          .select('id', 'scheduled_date', 'window_start', 'window_end');
+        if (!rows.length || !rows.every((r) => dateOnly(r.scheduled_date) === newDateStr)) return;
+        const starts = rows.map((r) => r.window_start).filter(Boolean).sort();
+        const ends = rows.map((r) => r.window_end).filter(Boolean).sort();
+        const hhmm5 = (v) => (v ? String(v).slice(0, 5) : null);
+        const stale = dateOnly(visit.scheduled_date) !== newDateStr
+          || hhmm5(visit.window_start) !== hhmm5(starts[0] || null)
+          || hhmm5(visit.window_end) !== hhmm5(ends.length ? ends[ends.length - 1] : null)
+          || visit.stop_base_key !== repairKey;
+        if (!stale) return;
+        const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
+        if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
+        await t('service_visits').where({ id: plan.visitId }).update(patch);
+        // The stop is whole again — release any retained cohort hold on
+        // these members (a LIVE mover of this stop would be serialized
+        // behind the stop locks held here).
+        await t('appointment_reminders').whereIn('scheduled_service_id', plan.memberIds)
+          .whereNotNull('move_hold_until')
+          .update({ move_hold_until: null, move_hold_token: null });
+        logger.info(`[visit-groups] no-op unit move repaired the stale parent of visit ${plan.visitId} and released its retained hold`);
+      });
+    } catch (repairErr) {
+      logger.warn(`[visit-groups] no-op parent repair for visit ${plan.visitId} failed: ${repairErr.message} — a retained hold (if any) expires on its own`);
+    }
     return { success: true, newDate, visitMove: { visitId: plan.visitId, moved: [], failed: [], alreadyAtTarget: true, unchanged: plan.memberIds.map(String) } };
   }
 
