@@ -187,6 +187,68 @@ function mosquitoCogs(program, addOns = {}) {
   return { serviceTypes, serviceTypeFixedMultipliers };
 }
 
+// Send-time QUOTE provenance (estimator audit 2026-08-29 M4): the audit
+// blob froze derived COGS/margin but not what was actually QUOTED — the
+// per-line tier/cadence/floors, the discount and setup-fee treatment, and
+// the property inputs the price was computed from. Reconstructing those
+// from today's constants after a price change silently rewrites history,
+// which is exactly what this snapshot exists to prevent.
+const QUOTED_LINE_KEYS = [
+  'service', 'tier', 'program', 'visitsPerYear', 'visits', 'perTreatment',
+  'annualAfterDiscount', 'manualFinalAnnual', 'manualFinalOneTime',
+  'priceAfterDiscount', 'recurringCustomerDiscountRate', 'setupCharge',
+  'taxable', 'taxCategory', 'quoteRequired',
+  'floorPa', 'floorAnn', 'floorMo', 'marginFloorMonthly',
+  'discountable', 'discountEligible', 'waveGuardDiscountEligible',
+  'waveGuardTierEligible', 'countsTowardWaveGuardTier',
+];
+
+function quotedFieldsFrom(item) {
+  const quoted = {};
+  for (const key of QUOTED_LINE_KEYS) {
+    if (item?.[key] !== undefined) quoted[key] = item[key];
+  }
+  return Object.keys(quoted).length ? quoted : null;
+}
+
+function quoteProvenanceFrom(estimate, data, result) {
+  const { profileFromEstimateData } = require('./estimate-winloss');
+  const profile = profileFromEstimateData(data) || {};
+  const recurring = result?.recurring || {};
+  const bundle = data?.sendSnapshot?.pricingBundle || null;
+  const number = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  return {
+    renderedAt: data?.sendSnapshot?.renderedAt || null,
+    source: estimate.source || null,
+    leadSource: estimate.lead_source || null,
+    discount: {
+      waveguardTier: estimate.waveguard_tier || recurring.tier || recurring.waveGuardTier || result?.waveGuard?.tier || null,
+      rate: number(recurring.discount) ?? 0,
+      savingsAnnual: number(recurring.savings),
+      manualDiscount: bundle?.manualDiscount ?? null,
+    },
+    setupFee: {
+      membershipFee: number(result?.oneTime?.membershipFee),
+      waived: !!data?.operatorPriceAdjustment?.waiveSetupFee,
+      // The frozen first-visit fee rows (waveguard_setup et al.) as the
+      // customer saw them — already snapshot-priced by buildPricingBundle.
+      firstVisitFees: Array.isArray(bundle?.firstVisitFees) ? bundle.firstVisitFees : null,
+    },
+    operatorAdjustment: data?.operatorPriceAdjustment || null,
+    property: {
+      homeSqFt: number(profile.homeSqFt ?? profile.squareFootage),
+      lotSqFt: number(profile.lotSqFt),
+      measuredTurfSf: number(profile.measuredTurfSf),
+      estimatedTurfSf: number(profile.estimatedTurfSf),
+      stories: number(profile.stories),
+      propertyDataQuality: profile.propertyDataQuality ?? null,
+      dataSources: profile.dataSources ?? null,
+      fieldVerifyFlags: Array.isArray(profile.fieldVerifyFlags) ? profile.fieldVerifyFlags : null,
+    },
+    marginWarnings: result?.marginWarnings || recurring.marginWarnings || null,
+  };
+}
+
 function normalizeRecurringLines(result) {
   const discount = Number(result?.recurring?.discount || 0);
   const lines = [];
@@ -213,6 +275,8 @@ function normalizeRecurringLines(result) {
       line.cogsServiceTypeFixedMultipliers = cogs.serviceTypeFixedMultipliers;
       line.visitsPerYear = Number(selectedMosquito?.v || 0) || undefined;
     }
+    const quoted = quotedFieldsFrom(svc);
+    if (quoted) line.quoted = quoted;
     lines.push(line);
   }
   if (Number(result?.recurring?.rodentBaitMo || 0) > 0) {
@@ -246,7 +310,9 @@ function normalizeOneTimeLines(result) {
   const lines = [];
   for (const item of result?.oneTime?.items || []) {
     const serviceKey = item.service || keyFromName(item.name);
+    const quoted = quotedFieldsFrom(item);
     const line = {
+      ...(quoted ? { quoted } : {}),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
@@ -265,7 +331,9 @@ function normalizeOneTimeLines(result) {
   }
   for (const item of result?.oneTime?.specItems || []) {
     const serviceKey = item.service || keyFromName(item.name);
+    const quoted = quotedFieldsFrom(item);
     lines.push({
+      ...(quoted ? { quoted } : {}),
       serviceKey,
       label: item.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'one_time',
@@ -444,6 +512,10 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
   const estimatedCost = money(lines.reduce((sum, line) => sum + (line.cogs?.estimatedCost || 0), 0));
   const grossProfit = money(revenue - estimatedCost);
   return {
+    // v2 (estimator audit M4): + quote provenance block and per-line
+    // `quoted` passthroughs. v1 blobs (no auditVersion) lack both.
+    auditVersion: 2,
+    quote: quoteProvenanceFrom(estimate, data, result),
     estimate: {
       id: estimate.id,
       customerName: estimate.customer_name,
@@ -558,6 +630,8 @@ async function getLatestEstimatePricingAuditSnapshot(estimateId) {
 }
 
 module.exports = {
+  quoteProvenanceFrom,
+  quotedFieldsFrom,
   buildEstimatePricingAudit,
   buildEstimatePricingRisk,
   buildEstimatePricingRiskBatch,

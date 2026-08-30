@@ -1266,6 +1266,20 @@ router.post('/:token/events', reportEventLimiter, crossSellActionLimiter, async 
           // resolved the fresh row too. The work is booked; paging staff to
           // follow up on it is the exact noise the accept-path resolution
           // exists to prevent.
+          // Send-time pricing snapshot for click-mints (estimator audit
+          // M4): the mint stamps status='sent' inside its transaction but
+          // never wrote an audit snapshot. AFTER commit (the trx above is
+          // closed once outcome exists) and fail-soft — analytics never
+          // unwind a minted offer.
+          if (mintedEstimate?.estimateId && !mintedEstimate.reused) {
+            try {
+              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              const mintedRow = await db('estimates').where({ id: mintedEstimate.estimateId }).first();
+              if (mintedRow) await saveEstimatePricingAuditSnapshot(mintedRow, { trigger: 'cta_mint' });
+            } catch (auditErr) {
+              logger.warn(`[reports-public] click-mint pricing audit snapshot failed (mint ${mintedEstimate.estimateId} stands): ${auditErr.message}`);
+            }
+          }
           if (!outcome.deduped && !mintedEstimate?.acceptedReuse) {
             // Bell AFTER the durable row exists; a bell failure leaves the
             // row actionable in the Customer 360 requests panel either way.

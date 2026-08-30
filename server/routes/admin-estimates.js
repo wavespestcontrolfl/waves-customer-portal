@@ -1631,6 +1631,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           published = true;
           if (!updated) {
             logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+          } else {
+            // Send-time pricing snapshot for the SIBLING too (estimator
+            // audit M4): only the anchor wrote one, so grouped properties
+            // had no frozen quote provenance. Fail-soft like the anchor's —
+            // an audit-snapshot failure never unwinds a delivered send.
+            try {
+              const { saveEstimatePricingAuditSnapshot } = require('../services/estimate-pricing-audit');
+              let siblingData = sibling.estimate_data;
+              if (typeof siblingData === 'string') { try { siblingData = JSON.parse(siblingData); } catch { siblingData = {}; } }
+              await saveEstimatePricingAuditSnapshot(
+                { ...sibling, estimate_data: { ...(siblingData || {}), ...siblingSnapshotPatch } },
+                { trigger: 'group_send' },
+              );
+            } catch (auditErr) {
+              logger.warn(`[admin-estimates] sibling ${sibling.id} pricing audit snapshot failed (send stands): ${auditErr.message}`);
+            }
           }
         } catch (e) {
           logger.error(`[admin-estimates] sibling ${sibling.id} publication attempt ${attempt} failed: ${e.message}`);

@@ -489,6 +489,11 @@ module.exports = {
   // ONE denominator rule (GH codex P1): never-winnable rows leave rates.
   effectiveDisposition,
   excludedFromRates,
+  // Canonical triple-shape resolver for the persisted lookup profile
+  // (engineRequest.profile → enriched → marker-bearing engineInputs) —
+  // shared with estimate-pricing-audit's send-time provenance block so the
+  // two never diverge on which rows count as "looked up".
+  profileFromEstimateData,
   _private: {
     bandFor,
     effectiveDisposition,
