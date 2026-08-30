@@ -1848,7 +1848,7 @@ router.get('/:token', async (req, res, next) => {
       // flip must re-render cached termite bait-station PDFs.
       const termiteV2Signature = termiteReportV2PdfSignature(service);
       // COCKROACH_REPORT_V2 — same contract (cockroach-report-v2.js).
-      const cockroachV2Signature = cockroachReportV2PdfSignature(service);
+      const cockroachV2Signature = await cockroachReportV2PdfSignature(service, db);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);

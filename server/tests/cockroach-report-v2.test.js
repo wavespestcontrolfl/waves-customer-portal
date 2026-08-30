@@ -163,6 +163,18 @@ describe('resolveProgram — honest about what the catalog and calendar say', ()
   });
 });
 
+describe('unknown program position (lineage lookup failed) → no program claims', () => {
+  it('builder: no number, no badge, no next-visit plan; attach: null position field means unknown, absent field means treatment 1', () => {
+    const out = buildCockroachReportV2({ typedSnapshotValues: GERMAN_MODERATE, typedReportType: 'cockroach', serviceKey: 'cockroach_control', treatmentNumber: null, scheduleResolved: true, nextVisit: { scheduledDate: '2999-01-01' } });
+    expect(out.program).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
+    expect(out.whatsNext.title).toBe('Treatment complete');
+    expect(out.whatsNext.badge).toBeNull();
+    expect(out.whatsNext.lines.map((l) => l.label)).toEqual(['Between now and then']);
+    expect(out.whatsNext.nextVisitMissing).toBe(false);
+    expect(resolveProgram({ serviceKey: 'cockroach_control', treatmentNumber: null })).toEqual({ treatmentNumber: null, treatmentsTotal: null, complete: false });
+  });
+});
+
 describe('buildWhatsNext — the next date is a live-view fact', () => {
   const program1 = { treatmentNumber: 1, treatmentsTotal: 2, complete: false };
   it('live view with a booked next treatment references it; live view without one says we will confirm (and flags the exception)', () => {
@@ -252,6 +264,11 @@ describe('attachCockroachReportV2 — the one composer shared by the route and t
     // …and without a position (legacy / lookup failed) the builder falls back to treatment 1, not the gauge
     const noPos = payload(); delete noPos.cockroachProgramPosition; noPos.typedReport.visitSequence = 3;
     expect(attachCockroachReportV2(noPos, service).cockroachReportV2.program.treatmentNumber).toBe(1);
+    // …and an explicit null position (lineage lookup failed) makes NO program claims
+    const failed = attachCockroachReportV2({ ...payload(), cockroachProgramPosition: null }, service);
+    expect(failed.cockroachReportV2.program.treatmentNumber).toBeNull();
+    expect(failed.cockroachReportV2.whatsNext.badge).toBeNull();
+    expect(failed).not.toHaveProperty('cockroachProgramPosition');
   });
 
   it('live view with the field present but null → exception copy; pdf (fields absent) → no date line either way', () => {
@@ -304,14 +321,57 @@ describe('cockroachReportV2PdfSignature / snapshot helpers', () => {
   });
   const roach = { service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: GERMAN_MODERATE } }) };
 
-  it('is empty when the gate is off, keys the dashboard render when on, and ignores other typed types / malformed data', () => {
+  it('is empty when the gate is off, keys the dashboard render + program state when on, and ignores other typed types / malformed data', async () => {
     process.env.COCKROACH_REPORT_V2 = 'false';
-    expect(cockroachReportV2PdfSignature(roach)).toBe('');
+    expect(await cockroachReportV2PdfSignature(roach)).toBe('');
     process.env.COCKROACH_REPORT_V2 = 'true';
-    expect(cockroachReportV2PdfSignature(roach)).toBe('-roachv2a');
-    expect(cockroachReportV2PdfSignature({ service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown', values: {} } }) })).toBe('');
-    expect(cockroachReportV2PdfSignature({ service_data: '{not json' })).toBe('');
-    expect(cockroachReportV2PdfSignature({})).toBe('');
+    // no knex → program state unknown ('x'); the render makes no program claims either
+    expect(await cockroachReportV2PdfSignature(roach)).toBe('-roachv2a-px');
+    expect(await cockroachReportV2PdfSignature({ service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown', values: {} } }) })).toBe('');
+    expect(await cockroachReportV2PdfSignature({ service_data: '{not json' })).toBe('');
+    expect(await cockroachReportV2PdfSignature({})).toBe('');
+  });
+
+  it('keys the calendar-derived program state so a scheduling change re-renders the cached PDF; a lineage failure keys as unknown', async () => {
+    process.env.COCKROACH_REPORT_V2 = 'true';
+    const record = { id: 'rec-2', customer_id: 'c1', scheduled_service_id: 'sch-2', service_date: '2026-05-16', service_type: 'German Roach Cleanout', service_data: JSON.stringify({ completedServiceKey: 'german_roach', typedReportSnapshot: { type: 'cockroach', serviceKey: 'german_roach', values: GERMAN_MODERATE } }) };
+    const tables = {
+      scheduled_services: [
+        { id: 'sch-2', source_estimate_id: 'est-A' },
+        { id: 'sch-1', source_estimate_id: 'est-A' },
+        { id: 'sch-3', customer_id: 'c1', scheduled_date: '2999-01-05', status: 'confirmed', service_type: 'German Roach Cleanout', source_estimate_id: 'est-A', service_key_snapshot: 'german_roach' },
+      ],
+      service_records: [
+        { id: 'rec-1', customer_id: 'c1', status: 'completed', service_date: '2026-05-02', service_type: 'German Roach Cleanout', scheduled_service_id: 'sch-1', service_data: JSON.stringify({ completedServiceKey: 'german_roach' }) },
+      ],
+      service_completion_profiles: [{ service_key: 'german_roach', active: true, completion_mode: 'service_report', project_type: 'cockroach' }],
+      services: [{ id: 'svc-gr', service_key: 'german_roach', name: 'German Roach Cleanout', short_name: 'German Roach' }],
+    };
+    const fake = (fail) => {
+      const knex = (table) => {
+        if (fail && table === 'scheduled_services') throw new Error('db down');
+        let rows = [...(tables[table] || [])];
+        const q = {
+          where(c, v) { if (typeof c === 'object') rows = rows.filter((r) => Object.entries(c).every(([k, x]) => r[k] === x)); else rows = rows.filter((r) => r[c] === v); return q; },
+          andWhere(c, op, v) { if (op === '>=') rows = rows.filter((r) => String(r[c]) >= String(v)); if (op === '<') rows = rows.filter((r) => String(r[c]) < String(v)); return q; },
+          whereIn(c, vs) { rows = rows.filter((r) => vs.includes(r[c])); return q; },
+          whereNot(c, v) { rows = rows.filter((r) => r[c] !== v); return q; },
+          whereRaw() { return q; }, modify(fn) { fn(q); return q; }, limit: () => q, orderBy: () => q, select: () => q, leftJoin: () => q,
+          first: () => Promise.resolve(rows[0] || null),
+          then: (res) => Promise.resolve(rows).then(res), catch: () => Promise.resolve(rows),
+        };
+        return q;
+      };
+      knex.schema = { hasTable: async () => true };
+      return knex;
+    };
+    const sig = await cockroachReportV2PdfSignature(record, fake(false));
+    expect(sig).toBe('-roachv2a-p2u1');
+    // the calendar changes → different key → cache miss → re-render
+    tables.scheduled_services = tables.scheduled_services.filter((r) => r.id !== 'sch-3');
+    expect(await cockroachReportV2PdfSignature(record, fake(false))).toBe('-roachv2a-p2u0');
+    // lineage lookup fails → unknown key, and the resolver reports failure (render fails closed)
+    expect(await cockroachReportV2PdfSignature(record, fake(true))).toBe('-roachv2a-px');
   });
 
   it('frozen key: completedServiceKey first, else the snapshot\'s own serviceKey', () => {

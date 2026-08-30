@@ -199,9 +199,11 @@ export function CockroachProgram({ whatsNext = null, nextVisitLabel = null }) {
           <div style={eyebrow}>Your cockroach treatment program</div>
           <h3 style={{ margin: 0, fontSize: 17, lineHeight: 1.3, color: TEXT }}>{whatsNext.title}</h3>
         </div>
-        <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 13, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto', marginTop: 2 }}>
-          {whatsNext.badge}
-        </span>
+        {whatsNext.badge ? (
+          <span style={{ background: complete ? 'rgba(4, 57, 94, 0.10)' : COLORS.glassNavy, color: complete ? COLORS.glassNavy : '#fff', borderRadius: 999, padding: '4px 12px', fontSize: 13, fontWeight: 700, letterSpacing: '0.04em', flex: '0 0 auto', marginTop: 2 }}>
+            {whatsNext.badge}
+          </span>
+        ) : null}
       </div>
       <div style={{ marginTop: 14, display: 'grid', gap: 12 }}>
         {(whatsNext.lines || []).map((line, i) => {

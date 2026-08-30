@@ -5,7 +5,7 @@ const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
-const { cockroachSnapshotOf, frozenCockroachServiceKey } = require('./cockroach-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -1550,38 +1550,6 @@ function structuredCustomerConcern(structured = {}) {
 // snapshot's nextVisit (lawn + tree & shrub) — the queued PDF renderer
 // (pdf-queue.js) builds its payload outside the route helper, so the strip
 // must be shared, not route-inlined (codex P2 2026-07-18).
-/**
- * Cockroach program lineage for a completed record: the sale its scheduled
- * service came from (scheduled_services.source_estimate_id) and the included
- * follow-up chain (followup_source_service_id). `known` is false when the
- * record's scheduled row carries neither — legacy or hand-booked visits —
- * and the caller falls back to service key + window. Best-effort reads.
- */
-async function cockroachProgramLineage(service = {}, knex) {
-  const selfId = service.scheduled_service_id ? String(service.scheduled_service_id) : null;
-  let estimateId = null;
-  let sourceId = null;
-  if (selfId && knex) {
-    try {
-      const row = await knex('scheduled_services').where('id', selfId).first('source_estimate_id', 'followup_source_service_id');
-      estimateId = row?.source_estimate_id ? String(row.source_estimate_id) : null;
-      sourceId = row?.followup_source_service_id ? String(row.followup_source_service_id) : null;
-    } catch { /* best-effort */ }
-  }
-  const known = Boolean(estimateId || sourceId);
-  const matches = (cand = {}) => {
-    const candId = cand?.id ? String(cand.id) : null;
-    const candEstimate = cand?.source_estimate_id ? String(cand.source_estimate_id) : null;
-    const candSource = cand?.followup_source_service_id ? String(cand.followup_source_service_id) : null;
-    if (estimateId && candEstimate && candEstimate === estimateId) return true;
-    // an included follow-up of THIS visit, or this visit's own source / siblings
-    if (selfId && candSource && candSource === selfId) return true;
-    if (sourceId && (candId === sourceId || candSource === sourceId)) return true;
-    return false;
-  };
-  return { known, estimateId, sourceId, selfId, matches };
-}
-
 function stripLiveOnlyScheduleFields(data) {
   if (!data || typeof data !== 'object') return data;
   delete data.nextAppointment;
@@ -4433,6 +4401,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // not fix the package size. Both consumed by attachCockroachReportV2.
   let cockroachNextTreatmentVisit;
   let cockroachUpcomingRoachVisits;
+  let cockroachProgramPosition;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4606,106 +4575,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // name tokens judge only rows with no resolvable profile; a failed
     // resolution skips the row. Runs only where the value can render
     // (live view, gate on, cockroach typed primary).
-    // Scoped to the SAME PROGRAM. Program identity (codex P2 #3613 r1 — a
-    // service key names the catalog product, not a particular sale): the
-    // sale's lineage first — visits booked from one estimate share
-    // scheduled_services.source_estimate_id, and an included follow-up child links
-    // to its source via followup_source_service_id — and the frozen service
-    // key only for records with no lineage at all (legacy / hand-booked),
-    // where the 120-day window bounds the fallback. Rows must also resolve
-    // to the same service key (a different package sold on the same
-    // estimate is not this program). The upcoming COUNT runs in every mode
-    // (the permanent record carries the program's completion state — codex
-    // P1 #3613 r1); the DATE is live-only and stripped for pdf/static.
+    // Cockroach treatment program (cockroach-report-v2.js resolveCockroachProgram
+    // — the ONE resolver shared with the PDF cache-key component): package
+    // position, same-program visits still ahead, and the next one. The
+    // DATE is live-only (stripped for pdf/static); the position and the
+    // upcoming COUNT ride every mode because the permanent record carries
+    // the program's completion state, keyed into the PDF cache. A failed
+    // resolution → position null → the dashboard makes no program claims.
     if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service)) {
-      const rows = Array.isArray(upcomingRows) ? upcomingRows : [];
-      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
-      const programKey = frozenCockroachServiceKey(service);
-      const programLabel = String(service.service_type || '').trim().toLowerCase();
-      const lineage = await cockroachProgramLineage(service, knex);
-      const verdictByIdentity = new Map();
-      let firstProgramRow = null;
-      let programCount = 0;
-      for (const row of rows) {
-        const identity = `${row?.service_id || ''}|${row?.service_key_snapshot || ''}|${String(row?.service_type || '').trim().toLowerCase()}`;
-        let sameKey = verdictByIdentity.get(identity);
-        if (sameKey === undefined) {
-          let profile = null;
-          let resolutionFailed = false;
-          try { profile = await resolveCompletionProfileForScheduledService(row, knex, { strict: true }); } catch { resolutionFailed = true; }
-          if (resolutionFailed) sameKey = false;
-          else if (programKey) sameKey = String(profile?.serviceKey || '') === programKey;
-          else sameKey = Boolean(programLabel) && String(row?.service_type || '').trim().toLowerCase() === programLabel;
-          verdictByIdentity.set(identity, sameKey);
-        }
-        const sameProgram = sameKey && (lineage.known ? lineage.matches(row) : true);
-        if (sameProgram) {
-          programCount += 1;
-          if (!firstProgramRow) firstProgramRow = row;
-        }
+      const program = await resolveCockroachProgram(service, knex, { upcomingRows: Array.isArray(upcomingRows) ? upcomingRows : [] });
+      if (program && !program.failed) {
+        cockroachProgramPosition = { treatmentNumber: program.treatmentNumber };
+        cockroachUpcomingRoachVisits = program.upcoming;
+        if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(program.nextRow);
+      } else if (program && program.failed) {
+        cockroachProgramPosition = null;
       }
-      if (opts.mode === 'live') cockroachNextTreatmentVisit = toNextAppointment(firstProgramRow);
-      cockroachUpcomingRoachVisits = programCount;
     }
   } catch { /* best-effort */ }
-
-  // Cockroach treatment-program position (cockroach-report-v2.js): 1 + the
-  // customer's EARLIER completed records of the same frozen service key
-  // inside the program window (a package's visits sit weeks apart; 120 days
-  // bounds it so last year's cleanout never counts). Package-scoped by
-  // design (local codex P1) — the customer-wide roach_activity history that
-  // drives the gauge trend spans other roach services. Immutable for a
-  // given record (only earlier records count), so every mode may carry it.
-  // Legacy key-less records match on the exact service label.
-  let cockroachProgramPosition;
-  if (process.env.COCKROACH_REPORT_V2 === 'true' && cockroachSnapshotOf(service) && service.customer_id) {
-    try {
-      const programKey = frozenCockroachServiceKey(service);
-      const serviceDay = service.service_date instanceof Date
-        ? service.service_date.toISOString().slice(0, 10)
-        : String(service.service_date || '').slice(0, 10);
-      if (serviceDay) {
-        const windowStart = new Date(`${serviceDay}T00:00:00Z`);
-        windowStart.setUTCDate(windowStart.getUTCDate() - 120);
-        // Same-program identity as the calendar pick: sale lineage first
-        // (source_estimate_id / follow-up link via the record's scheduled service),
-        // service key + window only for records with no lineage (codex P2
-        // #3613 r1). Earlier records joined to their scheduled row so the
-        // lineage columns are in hand.
-        const lineage = await cockroachProgramLineage(service, knex);
-        // Two plain queries rather than an aliased join: the earlier records
-        // first, then their scheduled rows for the lineage columns.
-        const priorRecords = await knex('service_records')
-          .where('customer_id', service.customer_id)
-          .whereIn('status', ['completed', 'complete'])
-          .andWhere('service_date', '<', serviceDay)
-          .modify((qb) => {
-            if (!lineage.known) qb.andWhere('service_date', '>=', windowStart.toISOString().slice(0, 10));
-            if (service.id) qb.whereNot('id', service.id);
-          })
-          .select('id', 'service_type', 'service_data', 'scheduled_service_id');
-        const priorList = Array.isArray(priorRecords) ? priorRecords : [];
-        const scheduledIds = priorList.map((row) => row?.scheduled_service_id).filter(Boolean);
-        const scheduledById = new Map();
-        if (lineage.known && scheduledIds.length) {
-          const scheduledRows = await knex('scheduled_services')
-            .whereIn('id', scheduledIds)
-            .select('id', 'source_estimate_id', 'followup_source_service_id');
-          for (const row of (Array.isArray(scheduledRows) ? scheduledRows : [])) scheduledById.set(String(row.id), row);
-        }
-        const prior = priorList.filter((row) => {
-          const sameKey = programKey
-            ? frozenCockroachServiceKey(row) === programKey
-            : String(row?.service_type || '').trim().toLowerCase() === String(service.service_type || '').trim().toLowerCase();
-          if (!sameKey) return false;
-          if (!lineage.known) return true;
-          const sched = row?.scheduled_service_id ? scheduledById.get(String(row.scheduled_service_id)) : null;
-          return sched ? lineage.matches(sched) : false;
-        }).length;
-        cockroachProgramPosition = { treatmentNumber: prior + 1 };
-      }
-    } catch { /* best-effort — the builder falls back to treatment 1 */ }
-  }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
   // links the customer to their active bond on the portal My Plan tab with
