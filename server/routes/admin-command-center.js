@@ -23,8 +23,9 @@ async function memoisedCloseoutStatus(serviceId, now = Date.now()) {
   const hit = closeoutMemo.get(serviceId);
   if (hit && now - hit.at < CLOSEOUT_MEMO_TTL_MS) return hit.value;
   const value = await getCloseoutStatus(serviceId).catch(() => null);
-  // Never memoise an outage — the next refresh must retry.
-  if (value && value.found) {
+  // Never memoise an outage — full OR partial (found:true with unavailable
+  // probes) — the next refresh must retry those lookups.
+  if (value && value.found && !(value.unavailable && value.unavailable.length)) {
     if (closeoutMemo.size >= CLOSEOUT_MEMO_MAX) closeoutMemo.delete(closeoutMemo.keys().next().value);
     closeoutMemo.set(serviceId, { at: now, value });
   }

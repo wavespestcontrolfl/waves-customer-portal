@@ -196,6 +196,12 @@ test('closeout loads are memoised for 90s per visit; outages are never memoised 
   getCloseoutStatus.mockRejectedValueOnce(new Error('down')).mockResolvedValue(closeout());
   await run(); await run();
   expect(getCloseoutStatus).toHaveBeenCalledTimes(3);
+  // A PARTIAL outage (found:true, unavailable populated) is never memoised either (codex r3).
+  __private.closeoutMemo.clear();
+  getCloseoutStatus.mockReset();
+  getCloseoutStatus.mockResolvedValue(closeout({ unavailable: [{ lookup: 'service_photos', error: 'timeout' }] }));
+  await run(); await run();
+  expect(getCloseoutStatus).toHaveBeenCalledTimes(2);
 });
 
 test('closeout loads are bounded to 4 concurrent (codex r1)', async () => {
