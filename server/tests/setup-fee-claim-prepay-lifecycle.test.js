@@ -421,9 +421,22 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
 describe('source contracts — where the lifecycle is wired', () => {
   const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
 
-  test('the admin booking stamp is gated to TRULY DIRECT series — an accept-on-book (deferred source_estimate_id) never stamps a setup the acceptance also bills (codex #3591 r61 P1)', () => {
+  test('the admin booking stamp covers accept-on-book failure paths and is RETIRED when acceptance lands (codex #3591 r61+r62 P1)', () => {
     const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
-    expect(adminSchedule).toMatch(/if \(isRecurring && !linkedEstimateId\) \{\s+const \{ resolveDirectRodentSetupObligation \} = require\('\.\.\/services\/secure-appointment-plans'\);/);
+    // r61 exempted every linkedEstimateId from the transaction-time stamp; r62
+    // showed the acceptance runs post-commit and deliberately leaves the
+    // appointment standing when the attach loses a race or accept throws — so
+    // accept-on-book series stamp too, and only an ALREADY-ACCEPTED linked
+    // estimate (its accept billed the setup decision) skips.
+    expect(adminSchedule).toMatch(/if \(isRecurring && \(!linkedEstimateId \|\| acceptEstimateOnBook\)\) \{\s+const \{ resolveDirectRodentSetupObligation \} = require\('\.\.\/services\/secure-appointment-plans'\);/);
+    // The stamp is recorded for the post-commit acceptance to retire…
+    expect(adminSchedule).toMatch(/directRodentSetupStamp = owedSetup;/);
+    // …and BOTH acceptance-success paths (main accept and the overlap-race
+    // standard downgrade) retire it, CAS'd on the exact stamped amount.
+    expect((adminSchedule.match(/await retireRodentSetupStampAfterAcceptance\(\);/g) || []).length).toBe(2);
+    expect(adminSchedule).toMatch(/\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
+    // A retire failure must warn about the double-bill hazard, never fail silently.
+    expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
   });
 
   const converter = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-converter.js'), 'utf8');

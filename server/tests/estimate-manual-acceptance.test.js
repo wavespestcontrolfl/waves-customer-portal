@@ -1556,6 +1556,33 @@ describe('prepayBookingEligibility (one-step prepay gate)', () => {
     }
   });
 
+  test('the COMMERCIAL preview passes the frozen setup into the tax-rate blend (codex #3591 r62 P1)', async () => {
+    // The converter blends taxableOneTimeAmount into prepayTaxRate (r55 P1);
+    // a preview that omits it taxes the setup at only the recurring blended
+    // rate for a taxable-bait + non-taxable-lawn commercial mix, so the
+    // minted invoice exceeds the operator's quoted preview.
+    const EstimateConverter = require('../services/estimate-converter');
+    mockFrozenRodentSetup = 99;
+    try {
+      const base = recurring([{ service: 'commercial_rodent_bait', name: 'Commercial Rodent Bait Stations', frequency: 'quarterly', perApplicationBilled: true }]);
+      const r = await prepayBookingEligibility({
+        ...base,
+        onetime_total: '99.00',
+        estimate_data: {
+          ...base.estimate_data,
+          oneTime: { items: [{ service: 'rodent_bait_setup', name: 'Bait Station Setup', price: 99 }] },
+        },
+      });
+      expect(r.eligible).toBe(true);
+      // amount = 627 + 99 = 726; tax = round(726 * 0.07 * 100)/100 = 50.82
+      expect(r.invoiceTotal).toBe(776.82);
+      const lastRateCall = EstimateConverter.resolveCommercialPrepayTaxRate.mock.calls.at(-1);
+      expect(lastRateCall[1]).toMatchObject({ taxableOneTimeAmount: 99 });
+    } finally {
+      mockFrozenRodentSetup = 0;
+    }
+  });
+
   test('a POSITIVE one_time_adjustment row blocks (residual charge, not a discount)', async () => {
     // isBillableOneTimeInvoiceItem exempts one_time_adjustment by service key;
     // the eligibility gate must use the isNonBillableOneTimeRow predicate so a

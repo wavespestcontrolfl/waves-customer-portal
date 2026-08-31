@@ -746,12 +746,18 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(body).not.toContain('setExistingCustomerMatch(null);');
   });
 
-  test('legacy admin page clears the stale customer binding BEFORE each address lookup (codex #3591 r61 P1)', () => {
-    // A changed address whose lookup fails/non-2xx must not leave the prior
-    // customer's match standing — the binding is cleared up front (with a
-    // version bump so a racing generate cannot mount a result priced with
-    // the stale account) and only THIS lookup's success rebinds.
-    expect(legacyAdminSource).toMatch(/bindMatchedCustomer\(null\);\s+estimateVersionRef\.current \+= 1;\s+try \{\s+const addrSearch = address\.split\(","\)\[0\]\.trim\(\);/);
+  test('legacy admin page clears the stale customer binding at the TOP of doLookup (codex #3591 r62 P1)', () => {
+    // r61 cleared the binding only after the property request succeeded with
+    // usable enrichment — a changed address whose lookup returned non-2xx or
+    // the no-enrichment error exited before the clear and left the prior
+    // customer matched (priced with their services / setup waiver, attached
+    // to them). The clear + version bump must precede the property fetch so
+    // EVERY lookup outcome — success, error, abort — starts unbound.
+    const at = legacyAdminSource.indexOf('async function doLookup() {');
+    expect(at).toBeGreaterThan(0);
+    const fetchAt = legacyAdminSource.indexOf('"/api/admin/estimator/property-lookup"', at);
+    expect(fetchAt).toBeGreaterThan(at);
+    expect(legacyAdminSource.slice(at, fetchAt)).toMatch(/bindMatchedCustomer\(null\);\s+estimateVersionRef\.current \+= 1;/);
   });
 
   test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {

@@ -1555,6 +1555,18 @@ function EstimateToolView() {
     if (lookupAbortRef.current) lookupAbortRef.current.abort();
     const lookupController = new AbortController();
     lookupAbortRef.current = lookupController;
+    // Clear the PREVIOUS customer binding before anything can fail (codex
+    // #3591 r62 P1): the r61 clear ran only after the property request
+    // succeeded with usable enrichment, so a changed address whose lookup
+    // returned non-2xx or a no-enrichment error exited above it and left the
+    // prior customer matched — generation/persistence would then price the
+    // new property with that customer's qualifying services / setup waiver
+    // and attach the estimate to them. Clearing up front means every lookup
+    // outcome (success, error, abort) starts unbound; only THIS lookup's
+    // customer-match success rebinds. The version bump keeps a generate
+    // racing the unbind from mounting a result priced with the stale account.
+    bindMatchedCustomer(null);
+    estimateVersionRef.current += 1;
     // Supersession gate for everything this lookup applies. A NEWER lookup
     // owns the status UI (plain return); an address edit with NO new lookup
     // leaves nobody to clear the "loading" status this lookup set — clear it
@@ -1657,16 +1669,10 @@ function EstimateToolView() {
         return next;
       });
 
-      // Auto-detect existing customer by address. Clear the PREVIOUS
-      // binding first (codex #3591 r61 P1): a changed address whose lookup
-      // fails or returns non-2xx must not leave the prior customer's match
-      // standing — the persisted customerId would price the new property
-      // with that customer's qualifying services / setup waiver and attach
-      // the estimate to them. Only THIS lookup's success rebinds; the
-      // version bump keeps a generate racing the unbind from mounting a
-      // result priced with the stale account.
-      bindMatchedCustomer(null);
-      estimateVersionRef.current += 1;
+      // Auto-detect existing customer by address. The previous binding was
+      // already cleared at the top of doLookup (codex #3591 r62 P1 — the
+      // clear must precede every failure exit, not just this success path),
+      // so this block only ever REBINDS on a fresh match.
       try {
         const addrSearch = address.split(",")[0].trim();
         const custR = await fetch(

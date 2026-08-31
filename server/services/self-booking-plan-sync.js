@@ -1100,7 +1100,20 @@ function isNonBaitRodentServiceRow(row = {}) {
   return !rodentRowTextFields(row).some(textHasRodentBaitToken);
 }
 
+// One-time / non-plan catalog identities must never anchor the override
+// (codex #3591 r62 P1): the family resolvers are lenient about cadence —
+// resolveLawnCareRecurringPlan happily maps `lawn_care_one_time` to a
+// recurring lawn plan — so a recurring-flagged row repointed to a one-time
+// catalog entry (stale rodent label or not) would otherwise count as
+// qualifying coverage, promote the tier, and waive a later rodent setup off
+// one-time work. The pest resolver inlines this rejection; mirror it here
+// for every family before any resolver runs.
+const ONE_TIME_CATALOG_IDENTITY_RE = /\b(one[-\s]?time|onetime|clean[-\s]?out|initial[-\s]?only|inspection)\b/;
+
 function catalogResolvesNonRodentQualifyingFamily(catalogText) {
+  const text = normalizeServiceText(catalogText);
+  if (ONE_TIME_CATALOG_IDENTITY_RE.test(text)) return false;
+  if (isNonPlanRecurringServiceText(catalogText)) return false;
   return [
     resolveTermiteBaitRecurringPlan,
     resolveMosquitoRecurringPlan,

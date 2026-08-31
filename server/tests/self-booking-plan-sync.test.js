@@ -416,6 +416,16 @@ describe('self-booking plan sync helpers', () => {
     // A non-rodent catalog identity that resolves NO qualifying family
     // (one-time/cleanout) still classifies from the label as before.
     expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'pest_cleanout_one_time', service_name: 'One-Time Pest Cleanout' })).toBe(true);
+    // ONE-TIME catalog identities never anchor the override (codex #3591
+    // r62 P1): the lawn resolver is cadence-lenient and would map
+    // lawn_care_one_time to a recurring plan — a recurring-flagged row
+    // repointed to one-time lawn work with a stale rodent label must stay
+    // excluded, not promote the tier / waive a later rodent setup.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_one_time', service_name: 'One-Time Lawn Treatment' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'tree_shrub_one_time' })).toBe(true);
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_inspection', service_name: 'Lawn Inspection' })).toBe(true);
+    // …while genuinely recurring catalog identities still win the override.
+    expect(isNonBaitRodentServiceRow({ service_type: 'Rodent Trapping', service_key: 'lawn_care_quarterly' })).toBe(false);
   });
 
   test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {

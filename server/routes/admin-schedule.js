@@ -4971,6 +4971,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
 
     let waveguardPlanSync = null;
+    // Rodent-bait setup stamped inside the booking transaction; an
+    // accept-on-book success retires it (the acceptance bills the setup from
+    // the estimate's frozen disclosure), a failed attach/accept leaves it so
+    // the first completion still collects (codex #3591 r62 P1).
+    let directRodentSetupStamp = 0;
     await db.transaction(async (trx) => {
       // Rung 1 (scheduling/occupancy.js ORDERING CONTRACT) — the date-wide
       // occupancy lock, FIRST statement of the trx, before the comms lock
@@ -5341,15 +5346,19 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // failure rolls the booking back (retryable) rather than committing a
       // series whose first completion under-bills; the /secure page, if a
       // link is later sent, freezes/consumes this same stamp.
-      // ESTIMATE-ORIGIN bookings never stamp here (codex #3591 r61 P1): an
-      // accept-on-book series has its source_estimate_id deliberately
-      // deferred out of this transaction, so the resolver would misread it
-      // as a direct booking and stamp a setup the acceptance path (standard
-      // or annual-prepay) bills itself from the estimate's frozen
-      // disclosure — leaving a live stamp a post-coverage completion would
-      // collect AGAIN. The estimate made the setup decision at accept;
-      // only a truly direct series (no linked estimate) prices here.
-      if (isRecurring && !linkedEstimateId) {
+      // A booking linked to an ALREADY-ACCEPTED estimate never stamps here
+      // (codex #3591 r61 P1): that acceptance already made and billed the
+      // setup decision from the estimate's frozen disclosure — a stamp would
+      // be collected AGAIN at a post-coverage completion. An ACCEPT-ON-BOOK
+      // series, however, DOES stamp (codex #3591 r62 P1): the acceptance it
+      // depends on runs post-commit and explicitly leaves the appointment
+      // standing when the estimate attach loses a race or
+      // markEstimateManuallyAccepted throws — without a stamp those paths
+      // commit a series whose first completion permanently under-bills. The
+      // stamp is retired below the moment acceptance succeeds (the accept
+      // bills the setup itself), so the exemption is deferred until the
+      // acceptance actually lands instead of assumed up front.
+      if (isRecurring && (!linkedEstimateId || acceptEstimateOnBook)) {
         const { resolveDirectRodentSetupObligation } = require('../services/secure-appointment-plans');
         const owedSetup = await resolveDirectRodentSetupObligation(trx, { id: svc.id });
         if (owedSetup > 0) {
@@ -5357,7 +5366,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
             .where({ id: svc.id })
             .whereNull('pending_setup_fee')
             .update({ pending_setup_fee: owedSetup, updated_at: new Date() });
-          logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on direct booking ${svc.id} — billed at first completion`);
+          directRodentSetupStamp = owedSetup;
+          logger.info(`[schedule] rodent bait setup ($${owedSetup}) stamped on booking ${svc.id} — billed at first completion unless estimate acceptance bills it`);
         }
       }
 
@@ -5424,6 +5434,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
           logger.warn(`[schedule] estimate ${linkedEstimateId} accepted but linking the appointment failed: ${e.message}`);
         }
       };
+      // Acceptance landed → the accept path billed (or deliberately waived)
+      // the setup from the estimate's frozen disclosure, so the booking-time
+      // stamp must not ALSO bill at first completion (codex #3591 r62 P1 —
+      // the stamp exists precisely for the failure paths below, where the
+      // appointment stands but no acceptance ever bills the setup).
+      // Best-effort: booking and acceptance stand either way, but a retire
+      // failure is a live double-bill hazard, so it warns the operator
+      // instead of failing silently. CAS on the exact stamped amount so a
+      // concurrently frozen/consumed stamp is never clobbered.
+      const retireRodentSetupStampAfterAcceptance = async () => {
+        if (!(directRodentSetupStamp > 0)) return;
+        try {
+          await db('scheduled_services')
+            .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
+            .update({ pending_setup_fee: null, updated_at: new Date() });
+          directRodentSetupStamp = 0;
+        } catch (e) {
+          logger.error(`[schedule] FIX: could not retire the rodent setup stamp on ${svc.id} after estimate acceptance — first completion would bill a setup the acceptance already covered: ${e.message}`);
+          bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp could not be cleared — clear the pending setup fee on the new series to avoid double-billing.');
+        }
+      };
       try {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
@@ -5466,6 +5497,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (acceptResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
         // Link the just-created rows now that the estimate is a recorded win.
         await linkCreatedRowsToEstimate();
+        await retireRodentSetupStampAfterAcceptance();
       } catch (err) {
         logger.warn(`[schedule] could not auto-accept estimate ${linkedEstimateId} on booking: ${err.message}`);
         // An overlap that RACED in between the preflight check and the atomic
@@ -5489,6 +5521,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             downgradedAfterOverlapRace = true;
             if (retryResult?.conversion?.welcomeSms) shouldSendNewRecurringWelcome = false;
             await linkCreatedRowsToEstimate();
+            await retireRodentSetupStampAfterAcceptance();
             bookingWarnings.push('Appointment booked and the estimate was marked accepted as standard — an annual prepay term covering this date already exists (it landed during booking), so no new prepay invoice/term was created. Manage prepay from Customer 360.');
           } catch (retryErr) {
             logger.warn(`[schedule] standard-accept fallback after prepay overlap failed for estimate ${linkedEstimateId}: ${retryErr.message}`);

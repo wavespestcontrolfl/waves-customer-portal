@@ -106,7 +106,8 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
   // The frozen bait-station setup rides the prepay invoice as its own
   // (taxed) line — the operator preview must equal the minted invoice
   // (codex #3591 r24 P1).
-  const amount = Math.round((Number(resolved.amount) + (Number(EstimateConverter.frozenRodentBaitSetupAmount(data)) || 0)) * 100) / 100;
+  const frozenSetupForPreview = Number(EstimateConverter.frozenRodentBaitSetupAmount(data)) || 0;
+  const amount = Math.round((Number(resolved.amount) + frozenSetupForPreview) * 100) / 100;
   // Same commercial detection as the converter (recurringServiceKey prefix) —
   // non-commercial prepay stays residential-exempt, so no tax leg at all.
   const hasCommercialRecurring = (recurringSvcList || []).some(
@@ -125,6 +126,12 @@ async function annualPrepayInvoiceTotalForEstimate(estimate = {}) {
     const taxRate = EstimateConverter.resolveCommercialPrepayTaxRate(recurringSvcList, {
       prepayDiscountApplied: Number(resolved.discount) > 0,
       baseRate,
+      // The taxable setup joins BOTH sides of the converter's blend
+      // (estimate-converter prepayTaxRate, r55 P1) — omitting it here taxed
+      // the setup at only the recurring blended rate for a commercial mix of
+      // taxable bait + non-taxable lawn/tree, so the minted invoice exceeded
+      // this preview (codex #3591 r62 P1).
+      taxableOneTimeAmount: frozenSetupForPreview,
     });
     const taxDollars = Math.round(amount * taxRate * 100) / 100;
     total = Math.round((amount + taxDollars) * 100) / 100;
