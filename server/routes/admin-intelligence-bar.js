@@ -1837,7 +1837,13 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;
       } catch (err) {
-        logger.error('[intelligence-bar] thread persistence failed:', err);
+        // Never log the full error: knex enriches it with the SQL bindings,
+        // which here are the complete user/assistant turn text (customer
+        // PII). Code + constraint name are enough to diagnose.
+        logger.error(
+          `[intelligence-bar] thread persistence failed (code=${err?.code || 'unknown'}`
+          + `${err?.constraint ? `, constraint=${err.constraint}` : ''})`,
+        );
       }
     }
 
