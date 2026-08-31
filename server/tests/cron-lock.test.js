@@ -105,6 +105,28 @@ describe('cron-lock runExclusive', () => {
     expect(db.client.releaseConnection).toHaveBeenCalledWith(conn);
   });
 
+  test('caps concurrent lock holders and frees the slots when jobs finish', async () => {
+    const conn = mockConnection(true);
+    db.client.acquireConnection.mockResolvedValue(conn);
+
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const herd = Array.from({ length: 10 }, (_, i) =>
+      runExclusive(`herd-${i}`, () => gate, { recordHealth: false }));
+
+    // 11th distinct job while 10 lock connections are pinned: skip, don't
+    // queue — queuing is what let a cron herd starve the pool.
+    const overflow = await runExclusive('herd-overflow', jest.fn(), { recordHealth: false });
+    expect(overflow).toEqual({ skipped: true, reason: 'lock_capacity' });
+
+    release('swept');
+    await expect(Promise.all(herd)).resolves.toEqual(Array(10).fill('swept'));
+
+    // Slots are returned: the next tick runs normally.
+    const after = await runExclusive('after-herd', async () => 'ran', { recordHealth: false });
+    expect(after).toBe('ran');
+  });
+
   test('skips (without throwing) when no DB connection is available', async () => {
     db.client.acquireConnection.mockRejectedValue(new Error('pool exhausted'));
 

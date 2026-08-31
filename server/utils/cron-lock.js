@@ -135,8 +135,31 @@ async function recordJobEnd(jobName, startedAtMs, error, conn) {
 // job_health by one row per customer/run and leave one-off failures listed
 // as "failing" forever. Bounded-enum names (per-conversion-type upload
 // syncs) stay recorded — they ARE the scheduled jobs.
+// Hard cap on concurrently HELD lock connections. A job's body still runs
+// its queries through the shared pool while its lock connection is pinned,
+// so without a ceiling a big-enough herd of distinct jobs could pin every
+// pool connection and leave their own callbacks (and web routes) nothing to
+// run on. Ten of prod's 20 guarantees headroom; jobs over the cap skip the
+// tick exactly like a lease_held skip — every wrapped job is sweep-style,
+// so the next tick picks the work up.
+const MAX_LOCK_HOLDERS = 10;
+let activeLockHolders = 0;
+
 async function runExclusive(jobName, fn, { recordHealth = true } = {}) {
   const lockKey = `cron:${jobName}`;
+  if (activeLockHolders >= MAX_LOCK_HOLDERS) {
+    logger.warn(`[cron-lock] ${jobName}: ${activeLockHolders} lock holders active (cap ${MAX_LOCK_HOLDERS}) — skipping tick to keep pool headroom`);
+    return { skipped: true, reason: 'lock_capacity' };
+  }
+  activeLockHolders += 1;
+  try {
+    return await runExclusiveLocked(jobName, lockKey, fn, recordHealth);
+  } finally {
+    activeLockHolders -= 1;
+  }
+}
+
+async function runExclusiveLocked(jobName, lockKey, fn, recordHealth) {
   let conn;
   try {
     conn = await db.client.acquireConnection();
