@@ -415,6 +415,21 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
       },
     });
     expect(audit.lines.filter((l) => /flea/i.test(l.label))).toHaveLength(1);
+    // The RETAINED structured row costs as the verified family, not as an
+    // unmapped `flea_package`.
+    expect(audit.lines.find((l) => /flea/i.test(l.label)).serviceKey).toBe('flea');
+  });
+
+  test('mapped specialty packages carry their visit count into costing', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-spec-visits', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '450.00',
+      estimate_data: {
+        result: { oneTime: { specItems: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 450, visits: 3 }] } },
+      },
+    });
+    const roach = audit.lines.find((l) => l.serviceKey === 'german_roach');
+    expect(roach.quoted).toMatchObject({ visits: 3 });
+    expect(roach.cogs.visitsPerYear).toBe(3);
   });
 
   test('a revised priced profile outranks stale automation input in BOTH provenance and dimensions', async () => {

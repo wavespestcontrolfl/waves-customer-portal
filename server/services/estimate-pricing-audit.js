@@ -233,6 +233,22 @@ const ENGINE_ID_ALIASES = {
   rodent_exclusion: 'exclusion',
 };
 
+// The COGS identity of an engine row: a SERVICE_MAP key as-is, a verified
+// alias to its family, else the raw id (honest unmapped) or a name
+// mapping. Shared by the mapped AND raw normalizers so a retained
+// structured `flea_package` row costs as `flea` (GH codex P1).
+function engineServiceKey(item) {
+  if (SERVICE_MAP[item?.service]) return item.service;
+  return ENGINE_ID_ALIASES[item?.service] || item?.service || keyFromName(item?.name);
+}
+
+// Positive structured visit count on a persisted row, if any.
+function structuredVisits(item) {
+  return [item?.visitsPerYear, item?.visits, item?.appsPerYear]
+    .map(Number)
+    .find((v) => Number.isFinite(v) && v > 0);
+}
+
 // Honest unmapped key: a plain slug with NO pattern matching, for
 // operator-authored text that must never pick a COGS family (GH codex P1:
 // "Termite Foam Renewal" is not bait).
@@ -482,7 +498,11 @@ function normalizeRecurringLines(result) {
 function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverride = null } = {}) {
   const lines = [];
   for (const item of result?.oneTime?.items || []) {
-    const serviceKey = item.service || keyFromName(item.name);
+    const serviceKey = engineServiceKey(item);
+    // Mapped specialty packages persist their treatment count on the row
+    // (3-visit flea/roach) — visitsFor reads top-level visitsPerYear, so
+    // a count left only inside `quoted` costed one treatment (GH codex P1).
+    const packageVisits = structuredVisits(item);
     const quoted = quotedFieldsFrom(item);
     // Net witnesses first (manual/discounted one-time amounts) — gross
     // survives as priceBeforeDiscount (GH codex P1).
@@ -498,6 +518,7 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
       priceBeforeDiscount: money(gross),
       discount: gross > 0 && gross > net ? Math.round((1 - net / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.items',
+      ...(packageVisits ? { visitsPerYear: packageVisits } : {}),
     };
     if (serviceKey === 'one_time_mosquito') {
       const cogs = mosquitoCogs('monthly', item.addOns || {});
@@ -507,7 +528,11 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
     lines.push(line);
   }
   for (const item of result?.oneTime?.specItems || []) {
-    const serviceKey = item.service || keyFromName(item.name);
+    const serviceKey = engineServiceKey(item);
+    // Mapped specialty packages persist their treatment count on the row
+    // (3-visit flea/roach) — visitsFor reads top-level visitsPerYear, so
+    // a count left only inside `quoted` costed one treatment (GH codex P1).
+    const packageVisits = structuredVisits(item);
     const quoted = quotedFieldsFrom(item);
     const net = pickNum(item.manualFinalOneTime, item.priceAfterDiscount, item.price) ?? 0;
     const gross = pickNum(item.priceBeforeDiscount, item.price) ?? net;
@@ -521,6 +546,7 @@ function normalizeOneTimeLines(result, { emitInitialFee = true, initialFeeOverri
       priceBeforeDiscount: money(gross),
       discount: gross > 0 && gross > net ? Math.round((1 - net / gross) * 1000) / 1000 : 0,
       priceSource: 'saved_estimate.result.oneTime.specItems',
+      ...(packageVisits ? { visitsPerYear: packageVisits } : {}),
     });
   }
   // The frozen setup-fee decision governs the MAPPED membership row too —
@@ -691,9 +717,7 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // honest unmapped warning beats keyFromName's broad label patterns,
     // which would cost termite specialties (foam/bond/station rental) as
     // bait treatments (codex pre-push P1 x2).
-    const serviceKey = SERVICE_MAP[item.service]
-      ? item.service
-      : (ENGINE_ID_ALIASES[item.service] || item.service || keyFromName(item.name));
+    const serviceKey = engineServiceKey(item);
     const quoted = quotedFieldsFrom(item);
     const num = numOrNaN;
     // TWO persisted shapes reach this normalizer (GH codex P1):
