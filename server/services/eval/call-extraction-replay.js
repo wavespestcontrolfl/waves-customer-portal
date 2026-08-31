@@ -44,13 +44,16 @@ function compactGoldAccuracy(gold) {
   };
 }
 
+// Renders per-field misses WITH case ids. Used in the failure email AND in the
+// every-run done log: medium/low misses keep a green run green, so the weekly
+// log line is the only always-on channel that says which field/case regressed.
 function goldAccuracyLine(gold) {
   const compact = compactGoldAccuracy(gold);
   if (!compact.labeled && !compact.unscored) return 'Answer-key accuracy: no gold labels scored';
   const pct = compact.accuracy === null ? 'n/a' : `${(compact.accuracy * 100).toFixed(1)}%`;
   const misses = Object.entries(compact.byField)
     .filter(([, row]) => row.labeled > row.correct)
-    .map(([field, row]) => `${field} ${row.correct}/${row.labeled}`);
+    .map(([field, row]) => `${field} ${row.correct}/${row.labeled}${row.missCaseIds?.length ? ` [${row.missCaseIds.join(', ')}]` : ''}`);
   return `Answer-key accuracy: ${pct} (${compact.correct}/${compact.labeled} fields${compact.unscored ? `, ${compact.unscored} unscored` : ''})`
     + (misses.length ? ` — misses: ${misses.join(', ')}` : '');
 }
@@ -282,12 +285,13 @@ async function runCallExtractionReplayEval(opts = {}) {
     results: finalAttempt.run?.results || [],
   };
 
-  logger.info(`[call-replay-eval] done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} goldAccuracy=${result.goldAccuracy.accuracy ?? 'n/a'} (${result.goldAccuracy.correct}/${result.goldAccuracy.labeled})`);
+  logger.info(`[call-replay-eval] done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} | ${goldAccuracyLine(result.goldAccuracy)}`);
   return result;
 }
 
 module.exports = {
   runCallExtractionReplayEval,
+  goldAccuracyLine,
   _internals: {
     DEFAULT_FIXTURE_PATH,
     MANUAL_RERUN,

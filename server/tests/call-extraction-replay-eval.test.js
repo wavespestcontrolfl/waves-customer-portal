@@ -107,6 +107,14 @@ describe('call extraction replay scheduled eval', () => {
     });
     expect(green.status).toBe('pass');
     expect(green.goldAccuracy).toEqual(goldAccuracy);
+    // Medium/low misses don't notify, so the done log must name the field
+    // AND the fixture cases that missed — otherwise a green run discards them.
+    const logger = require('../services/logger');
+    const doneLines = logger.info.mock.calls.map(([line]) => line).filter((line) => String(line).includes('[call-replay-eval] done'));
+    const doneLine = doneLines[doneLines.length - 1]; // the green run above (the mock accumulates across tests)
+    expect(doneLine).toContain('Answer-key accuracy: 92.5% (37/40 fields, 2 unscored)');
+    expect(doneLine).toContain('call_nature 10/12 [termite-lead-apr22, oosa-guard-stays]');
+    expect(doneLine).toContain('urgency 7/8 [voicemail-urgency-callback-missed]');
 
     const notifications = [];
     const red = await runCallExtractionReplayEval({
@@ -120,7 +128,7 @@ describe('call extraction replay scheduled eval', () => {
     });
     expect(red.status).toBe('fail');
     expect(notifications).toHaveLength(1);
-    expect(notifications[0].body).toContain('Answer-key accuracy: 92.5% (37/40 fields, 2 unscored) — misses: call_nature 10/12, urgency 7/8');
+    expect(notifications[0].body).toContain('Answer-key accuracy: 92.5% (37/40 fields, 2 unscored) — misses: call_nature 10/12 [termite-lead-apr22, oosa-guard-stays], urgency 7/8 [voicemail-urgency-callback-missed]');
     expect(JSON.parse(notifications[0].metadata).summary.goldAccuracy.byField.call_nature.missCaseIds).toEqual(['termite-lead-apr22', 'oosa-guard-stays']);
 
     // Older/mocked runs without gold data report an empty key, never a crash.
