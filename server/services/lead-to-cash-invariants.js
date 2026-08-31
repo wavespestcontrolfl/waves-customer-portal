@@ -32,6 +32,7 @@ const sendgrid = require('./sendgrid-mail');
 const { isEnabled } = require('../config/feature-gates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
+const { scrubSentryText, safeErrorToken } = require('../utils/sentry-scrub');
 
 const SEND_MARKER_KEY = 'lead-to-cash-invariants';
 const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
@@ -151,6 +152,13 @@ const DETECTORS = Object.freeze([
       const truncated = visits.length > CLOSEOUT_VISIT_CAP;
       const ids = [];
       let unevaluable = 0;
+      // FAIL CLOSED on the cap: visits beyond it were NOT evaluated, so the
+      // day cannot read clean — the overflow is a finding of its own.
+      if (truncated) {
+        const overflow = await db('scheduled_services').where({ status: 'completed', scheduled_date: yesterday }).count({ n: 'id' }).first();
+        const notEvaluated = Math.max(1, (Number(overflow?.n) || 0) - CLOSEOUT_VISIT_CAP);
+        ids.push(`[truncated: ${notEvaluated} completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`);
+      }
       for (const v of visits.slice(0, CLOSEOUT_VISIT_CAP)) {
         const status = await getCloseoutStatus(v.id, { knex: db, now });
         // FAIL CLOSED: a visit whose facts could not all be loaded is not a
@@ -185,10 +193,15 @@ async function runDetectors({ now = new Date(), detectors = DETECTORS } = {}) {
         detail: out.detail || null, ms: Date.now() - started,
       });
     } catch (err) {
-      logger.error(`[l2c-invariants] ${d.key} unavailable: ${err.message}`);
+      // Egress discipline (sentry-scrub header): the emailed `error` is a
+      // FIXED allowlisted token (err.code / err.name), never prose — provider
+      // and Knex messages can embed phone numbers, emails, or SQL literals.
+      // The log line carries the scrubbed message for triage.
+      logger.error(`[l2c-invariants] ${d.key} unavailable: ${scrubSentryText(err?.message || err)}`);
       results.push({
         key: d.key, label: d.label, href: d.href, ok: false, unavailable: true,
-        count: 0, sample: [], truncated: false, detail: null, error: String(err.message || err).slice(0, 200), ms: Date.now() - started,
+        count: 0, sample: [], truncated: false, detail: null,
+        error: safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error', ms: Date.now() - started,
       });
     }
   }
@@ -207,7 +220,7 @@ function composeReport(results, { now = new Date() } = {}) {
   const lines = [];
   for (const r of results) {
     if (r.ok) { lines.push(`OK   ${r.key}`); continue; }
-    if (r.unavailable) { lines.push(`??   ${r.key} — could not run: ${r.error}`); continue; }
+    if (r.unavailable) { lines.push(`??   ${r.key} — could not run (${r.error}); see server log`); continue; }
     lines.push(`FAIL ${r.key} — ${r.count}: ${r.label}`);
     if (r.detail) lines.push(`     ${Object.entries(r.detail).map(([k, v]) => `${k}=${v}`).join(' ')}`);
     if (r.sample.length) lines.push(`     ${r.sample.join(', ')}${r.truncated ? ` … +${r.count - r.sample.length} more` : ''}`);
@@ -270,7 +283,7 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
       categories: ['ops', 'lead-to-cash-invariants'], suppressErrorLog: true,
     });
   } catch (err) {
-    logger.error(`[l2c-invariants] send failed: ${err.message}`);
+    logger.error(`[l2c-invariants] send failed: ${scrubSentryText(err?.message || err)}`);
     return { error: 'send_failed', results: summary };
   }
   await stampSendMarker();

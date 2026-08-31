@@ -10,7 +10,7 @@ const mockTables = {};
 function mockChain(cfg = {}) {
   const b = {};
   for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'whereRaw', 'orWhereRaw',
-    'whereExists', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update']) {
+    'whereExists', 'whereNotExists', 'leftJoin', 'join', 'orderBy', 'orderByRaw', 'limit', 'modify', 'forUpdate', 'insert', 'onConflict', 'update', 'count']) {
     b[m] = jest.fn(() => b);
   }
   b.select = jest.fn(async () => cfg.select ?? []);
@@ -107,7 +107,10 @@ describe('runDetectors', () => {
       ],
     });
     expect(results.map((r) => [r.key, r.ok, r.unavailable])).toEqual([['boom', false, true], ['big', false, false], ['fine', true, false]]);
-    expect(results[0].error).toContain('pg down');
+    expect(results[0].error).toBe('Error'); // allowlisted token only — the phone number never reaches the report
+    expect(JSON.stringify(results)).not.toContain('941');
+    const logger = require('../services/logger');
+    expect(logger.error.mock.calls[0][0]).toContain('[redacted-number]');
     expect(results[1].sample).toHaveLength(SAMPLE_IDS);
     expect(results[1].truncated).toBe(true);
     expect(results[1].count).toBe(SAMPLE_IDS + 5);
@@ -122,7 +125,7 @@ describe('composeReport', () => {
       detectors: [
         det('a', async () => ({ count: 2, ids: ['x1', 'x<2>'], detail: { tier: 2 } })),
         det('b', async () => ({ count: 1, ids: ['y1'] })),
-        det('c', async () => { throw new Error('nope'); }),
+        det('c', async () => { const e = new Error('nope'); e.code = 'ECONNRESET'; throw e; }),
         ok('d'),
       ],
     });
@@ -131,7 +134,8 @@ describe('composeReport', () => {
     expect(r.text).toContain('FAIL a — 2: L a');
     expect(r.text).toContain('tier=2');
     expect(r.text).toContain('x1, x<2>');
-    expect(r.text).toContain('??   c — could not run: nope');
+    expect(r.text).toContain('??   c — could not run (ECONNRESET); see server log');
+    expect(r.text).not.toContain('nope');
     expect(r.text).toContain('OK   d');
     expect(r.text).toContain('nothing was changed');
     expect(r.html).toContain('x&lt;2&gt;');
@@ -289,5 +293,16 @@ describe('detector adapters', () => {
     expect(out.count).toBe(3);
     expect(out.ids).toEqual(['v2 [invoice,invoice_on_non_performed_visit]', 'v3 [unevaluable:service_records]', 'v4 [unevaluable:not_found]']);
     expect(out.detail).toMatchObject({ checked: 4, unevaluable: 2, truncated: false });
+  });
+
+  test('closeout_failed_facts: visits beyond the cap make the day a finding, never a silent pass', async () => {
+    const rows = Array.from({ length: CLOSEOUT_VISIT_CAP + 1 }, (_, i) => ({ id: `v${i}` }));
+    mockTables.scheduled_services = mockChain({ select: rows, first: { n: String(CLOSEOUT_VISIT_CAP + 7) } });
+    getCloseoutStatus.mockResolvedValue({ found: true, unavailable: [], summary: { failed: [], contradictions: [] } });
+    const out = await byKey('closeout_failed_facts').run({ now: NOW });
+    expect(getCloseoutStatus).toHaveBeenCalledTimes(CLOSEOUT_VISIT_CAP);
+    expect(out.count).toBe(1);
+    expect(out.ids).toEqual([`[truncated: 7 completed visit(s) beyond the ${CLOSEOUT_VISIT_CAP}-visit cap were not evaluated]`]);
+    expect(out.detail).toMatchObject({ checked: CLOSEOUT_VISIT_CAP, truncated: true });
   });
 });
