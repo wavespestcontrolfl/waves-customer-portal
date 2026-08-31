@@ -45,6 +45,7 @@ const REVIEW_GATE_REASONS = {
   at_cap: 'Customer has already received 3 review requests in the last 6 months',
   cooldown: 'Customer received a review request in the last 30 days',
   already_queued: 'A review request to this customer is already queued and will send automatically.',
+  in_flight: 'A review request to this customer is being sent right now.',
 };
 
 async function buildReviewRequestLink(customerId) {

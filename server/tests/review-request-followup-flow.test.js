@@ -498,7 +498,9 @@ describe('review request follow-up flow', () => {
         orderByRaw: jest.fn(function () { return this; }),
         limit: jest.fn().mockResolvedValue([]),
       }),
-      // 3. queued-ask check — returns THIS pending row, so the resend is the
+      // 3. in-flight composer claim check — none.
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      // 4. queued-ask check — returns THIS pending row, so the resend is the
       //    one already_queued outcome allowed through (queuedId match).
       chain({
         whereRaw: jest.fn(function () { return this; }),
@@ -730,6 +732,25 @@ describe('review request follow-up flow', () => {
     expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(false);
     rrQuery.first.mockResolvedValueOnce({ claimed_at: mine });
     expect(await ReviewService.inlineClaimStillHeld('rr-inline', mine)).toBe(true);
+  });
+
+  test('a live composer claim blocks every canonical one-off ask path via the gates', async () => {
+    // The composer's row is 'sending' + unscheduled: invisible to the queued
+    // arm and the delivered stats, yet about to text — the in-flight arm
+    // must refuse a concurrent /trigger or satisfaction ask.
+    const statsSpy = jest.spyOn(ReviewService, 'getDeliveredAskStats').mockResolvedValue({ count: 0, lastAt: null });
+    const rrQuery = chain();
+    rrQuery.first.mockResolvedValueOnce({ id: 'rr-in-flight' });
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return rrQuery;
+      if (table === 'review_sequences') return chain({ first: jest.fn().mockResolvedValue(null) });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    expect(await ReviewService.checkUnscheduledAskGates('cust-1')).toEqual({ allowed: false, outcome: 'in_flight' });
+    expect(rrQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1', status: 'sending' });
+    expect(rrQuery.where).toHaveBeenCalledWith('claimed_at', '>=', expect.any(Date));
+    statsSpy.mockRestore();
   });
 
   test('releaseInlineClaim hands a claimed row back to pending', async () => {

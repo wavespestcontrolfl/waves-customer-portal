@@ -8,6 +8,12 @@ const {
   etDateString,
 } = require("../utils/datetime-et");
 const { shortenOrPassthrough, existingShortUrlFor } = require("./short-url");
+
+// How long a composer's pre-provider claim ('sending' + claimed_at) counts
+// as live: the ask gates block every canonical one-off path for this long,
+// and claimInlineForSend reconciles (never blindly reclaims) a claim older
+// than this. Comfortably past any provider HTTP timeout.
+const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
@@ -1835,7 +1841,7 @@ const ReviewService = {
 
     // Not pending — a stale abandoned claim is the only other claimable
     // state, and only after reconciling it against the outbound log.
-    const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+    const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
     const row = await db("review_requests")
       .where({ id: requestId, triggered_by: "auto_inline", status: "sending" })
       .whereNull("sms_sent_at")
@@ -3151,6 +3157,18 @@ const ReviewService = {
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
       return { allowed: false, outcome: "cooldown" };
     }
+
+    // A composer send mid-flight: its row is claimed ('sending', fresh
+    // claimed_at) and unscheduled, so neither the queued arm below nor the
+    // delivered stats see it — yet the ask is about to text. Block every
+    // canonical one-off path for the claim's lifetime (a claim older than
+    // the stale window is reconciled by claimInlineForSend, not blocking).
+    const inFlight = await db("review_requests")
+      .where({ customer_id: customerId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", ">=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
+      .first("id");
+    if (inFlight) return { allowed: false, outcome: "in_flight" };
 
     const queued = await db("review_requests")
       .where({ customer_id: customerId, status: "pending" })
