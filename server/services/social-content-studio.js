@@ -278,6 +278,11 @@ const PEST_VERSUS_PAIRS = [
   {
     key: 'termite_swarmer_vs_winged_ant',
     service: 'termite',
+    // Swarm-season only (ET months): FL swarms run late winter through early
+    // summer — subterranean Feb–Apr, Formosan Apr–Jun, drywood tailing into
+    // June. "Wings on the windowsill" out of season reads stale; the other
+    // termite pair (mud tubes/pellets) is year-round evidence and stays ungated.
+    months: [2, 3, 4, 5, 6],
     left: { name: 'Termite Swarmer', points: ['Straight antennae', 'Both wing pairs equal length', 'Thick, straight waist'] },
     right: { name: 'Winged Ant', points: ['Bent antennae', 'Front wings longer than back', 'Pinched waist'] },
     verdict: 'Wings on the windowsill? Check the waist first.',
@@ -1203,11 +1208,22 @@ function buildVersusDrafts(pair, city) {
 // Pure — no DB — so a selection failure can never block the campaign fallback.
 function selectAutonomousVersusPlan(now = new Date()) {
   if (!AUTONOMOUS_FLAGS.includeVersus) return null;
-  const { month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
+  const { year, month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
   if (day % 4 !== 2) return null;
 
-  const pair = PEST_VERSUS_PAIRS[(month * 7 + day) % PEST_VERSUS_PAIRS.length];
-  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  // Both rotations advance from a +1-per-fire sequence number, never from the
+  // raw day: the lane only fires when day % 4 === 2, so indexing by day pinned
+  // the city to WAVES_LOCATIONS[2] (Sarasota) forever, and the day's stride of
+  // 4 against a 6-pair bank (gcd 2) made only half the pairs reachable in a
+  // given month — the same card published up to 3x/month. Eight fixed slots
+  // per month keeps this pure arithmetic; short months skip a slot, which
+  // only nudges the cycle, never repeats it.
+  const seq = (year * 12 + month) * 8 + Math.floor((day - 2) / 4);
+
+  const eligible = PEST_VERSUS_PAIRS.filter((p) => !p.months || p.months.includes(month));
+  if (!eligible.length) return null;
+  const pair = eligible[seq % eligible.length];
+  const city = WAVES_LOCATIONS[seq % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   const topic = `${pair.left.name} vs ${pair.right.name}`;
   const drafts = buildVersusDrafts(pair, city);
   const channels = AUTONOMOUS_FLAGS.channels;

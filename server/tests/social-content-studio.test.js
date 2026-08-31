@@ -460,6 +460,38 @@ describe('autonomous versus lane (pest showdown)', () => {
     expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
   });
 
+  // Every ET fire day (day % 4 === 2) of the given month.
+  const fireDays = (yearMonth) =>
+    [2, 6, 10, 14, 18, 22, 26, 30].map((d) => etNoon(`${yearMonth}-${String(d).padStart(2, '0')}`));
+
+  test('the same card never publishes twice in one month (pair AND city both rotate)', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Aug 2026 was the regression: day % 4 aliased city to Sarasota on every
+    // fire and hid half the pair bank, publishing the identical termite-swarmer
+    // card on Aug 6, 18, and 30. June exercises the ungated (6-pair) bank.
+    for (const yearMonth of ['2026-08', '2026-06']) {
+      const plans = fireDays(yearMonth).map((d) => Studio.selectAutonomousVersusPlan(d));
+      const cards = plans.map((p) => `${p.versusPair.key}|${p.city}`);
+      expect(new Set(cards).size).toBe(cards.length);
+      expect(new Set(plans.map((p) => p.city)).size).toBeGreaterThan(1);
+      // All eligible pairs surface before any repeats — no half-hidden bank.
+      const eligibleCount = Studio.PEST_VERSUS_PAIRS
+        .filter((p) => !p.months || p.months.includes(Number(yearMonth.slice(5)))).length;
+      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(eligibleCount);
+    }
+  });
+
+  test('season-gated pairs stay out of off-season months', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Termite swarmer cards are swarm-season content (Feb–Jun) — never August.
+    for (const plan of fireDays('2026-08').map((d) => Studio.selectAutonomousVersusPlan(d))) {
+      expect(plan.versusPair.key).not.toBe('termite_swarmer_vs_winged_ant');
+    }
+    // In season the pair is still reachable.
+    const marchKeys = fireDays('2026-03').map((d) => Studio.selectAutonomousVersusPlan(d).versusPair.key);
+    expect(marchKeys).toContain('termite_swarmer_vs_winged_ant');
+  });
+
   test('every pair in the bank produces drafts that pass the compliance validators', () => {
     for (const pair of Studio.PEST_VERSUS_PAIRS) {
       const drafts = Studio.buildVersusDrafts(pair, 'Sarasota');
