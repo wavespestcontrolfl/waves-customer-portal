@@ -852,6 +852,22 @@ function reservedRowComboKeys(row, idMap) {
 // the zero-match promotion, so the two classifications can never disagree
 // and a combo is always either rewritten, promoted, or two-halves-covered).
 // The pre-gate path keeps label-only reservedRowComboRewrites byte-for-byte.
+// Seed-binding family for a reserved row's durable identity (catalog-first
+// binding under GATE_SEPARATE_COMBO_VISITS). A RETIRED combined identity
+// binds to its PRIMARY family's line — the legacy combined row classified
+// as pest (lawn) and seeded that series, and pest seeding tolerates a
+// count-less companion where standalone termite seeding would decline
+// (audit P0: falling back to a stale bait label + count-less bait line
+// seeded nothing while retiredComboCover suppressed every promotion).
+// An ordinary identity binds to its single family; unknown → null (label
+// fallback).
+function seedFamilyForReservedIdentity(identity) {
+  if (identity === 'pest_termite_bait_quarterly') return 'pest_control';
+  if (identity === 'lawn_tree_shrub_combo') return 'lawn_care';
+  const fams = comboRouteFamiliesFromCatalogKey(identity);
+  return fams.length === 1 ? fams[0] : null;
+}
+
 function identityAwareComboMatches(reservedRows, combo, idMap) {
   return (reservedRows || []).filter((row) => {
     const keys = reservedRowComboKeys(row, idMap);
@@ -5234,12 +5250,10 @@ const EstimateConverter = {
         // labeled bait would otherwise bind the bait line, termite seeding
         // declines, and the sold pest series stops after one visit.
         const reservedIdentityFamily = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
-          ? (() => {
-            const identity = reservedServiceKeyById.get(reservedStart.service_id)
-              || String(reservedStart.service_key_snapshot || '') || null;
-            const fams = comboRouteFamiliesFromCatalogKey(identity);
-            return fams.length === 1 ? fams[0] : null;
-          })()
+          ? seedFamilyForReservedIdentity(
+            reservedServiceKeyById.get(reservedStart.service_id)
+              || String(reservedStart.service_key_snapshot || '') || null,
+          )
           : null;
         let reservedGuardSvc = reservedSeedSvc
           || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart, reservedIdentityFamily);
@@ -6744,7 +6758,7 @@ module.exports.identityAwareComboMatches = identityAwareComboMatches;
 module.exports.comboRouteFamiliesFromCatalogKey = comboRouteFamiliesFromCatalogKey;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
-module.exports.recurringServiceForScheduledRow = recurringServiceForScheduledRow;
+module.exports.seedFamilyForReservedIdentity = seedFamilyForReservedIdentity;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;

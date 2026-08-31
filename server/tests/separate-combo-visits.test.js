@@ -175,6 +175,24 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(recurringServiceForScheduledRow(lines, adoptedRow, 'pest_control').name).toBe('Quarterly Pest Control');
   });
 
+  test('a RETIRED combined identity binds the reserved seed to its PRIMARY family (audit P0)', () => {
+    const { seedFamilyForReservedIdentity, recurringServiceForScheduledRow } = require('../services/estimate-converter');
+    expect(seedFamilyForReservedIdentity('pest_termite_bait_quarterly')).toBe('pest_control');
+    expect(seedFamilyForReservedIdentity('lawn_tree_shrub_combo')).toBe('lawn_care');
+    expect(seedFamilyForReservedIdentity('pest_general_monthly')).toBe('pest_control');
+    expect(seedFamilyForReservedIdentity('mosquito_monthly')).toBeNull(); // label fallback
+    // Adopted legacy combined row with a stale bait label + a count-less
+    // bait line: binding to pest seeds the quarterly series (pest seeding
+    // tolerates the missing count; standalone termite seeding would not).
+    const lines = [
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System' },
+    ];
+    const adopted = { service_type: 'Termite Bait Station Service' };
+    expect(recurringServiceForScheduledRow(lines, adopted, seedFamilyForReservedIdentity('pest_termite_bait_quarterly')).name)
+      .toBe('Quarterly Pest Control');
+  });
+
   test('a declined rewrite leaves the pest line COMPLETELY untouched (audit P0)', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     const { remaining, standalone } = combineRecurringServicesForScheduling([
