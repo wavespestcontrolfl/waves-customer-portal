@@ -190,7 +190,7 @@ function getZone(city) {
 // any miss (row moved or reassigned since) aborts the whole rewrite
 // untouched, and an approved id missing from the fresh day set refuses with
 // preview_changed.
-async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor }) {
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds }) {
   const byId = new Map(services.map((s) => [String(s.id), s]));
   if (approvedIds.some((id) => !byId.has(id))) {
     return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
@@ -199,6 +199,16 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   try {
     await db.transaction(async (trx) => {
       await lockTechDays(trx, lockKeys);
+      // Newly ADDED stops refuse too (pre-push r15 P1): the approved plan
+      // covers the complete eligible set the card showed — a geocoded stop
+      // added since the confirm preflight would sit ungoverned beside (or
+      // collide with) the approved 1..N sequence, so the eligible set must
+      // match the approved set exactly under the locks.
+      const eligible = (await loadEligibleIds(trx)).map(String);
+      const approvedSet = new Set(approvedIds);
+      if (eligible.length !== approvedIds.length || eligible.some((id) => !approvedSet.has(id))) {
+        throw Object.assign(new Error('stop set changed'), { code: 'STALE_OPTIMIZE_SET' });
+      }
       for (let i = 0; i < approvedIds.length; i++) {
         const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
         const updated = await trx('scheduled_services')
@@ -212,6 +222,9 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
       }
     });
   } catch (e) {
+    if (e.code === 'STALE_OPTIMIZE_SET') {
+      return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+    }
     if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
     throw e;
   }
@@ -263,6 +276,11 @@ async function optimizeAllRoutes(input) {
       services,
       lockKeys: services.map((s) => ({ techId: s.technician_id, date })),
       expectTechFor: (s) => s.technician_id || null,
+      loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
+        dateStr: date,
+        excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng).map((s) => s.id),
     });
   }
 
@@ -385,6 +403,12 @@ async function optimizeTechRoute(input) {
       services,
       lockKeys: [{ techId: tech.id, date }],
       expectTechFor: () => tech.id,
+      loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
+        dateStr: date,
+        technicianId: tech.id,
+        excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
+        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng).map((s) => s.id),
     });
     return applied.success ? { ...applied, tech: tech.name } : applied;
   }

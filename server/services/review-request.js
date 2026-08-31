@@ -544,7 +544,7 @@ const ReviewService = {
         throw gateError(gate);
       }
       const resendOutcome = await this.sendSMS(existing.id, { expectedPhone });
-      if (resendOutcome && resendOutcome.suppressed === "approved_phone_drift") {
+      if (resendOutcome && resendOutcome.refused === "approved_phone_drift") {
         throw Object.assign(
           new Error("The review-request recipient changed after the card was shown — nothing was sent."),
           { statusCode: 409, code: "approved_phone_drift" },
@@ -648,7 +648,12 @@ const ReviewService = {
 
     if (shouldSendImmediately) {
       const outcome = await this.sendSMS(request.id, { expectedPhone });
-      if (outcome && outcome.suppressed === "approved_phone_drift") {
+      if (outcome && outcome.refused === "approved_phone_drift") {
+        // Remove the row this very call created (pre-push r15 P1): left in
+        // place it would later be sent by the scheduler to the unapproved
+        // number, and hasRecentReviewRequest / the 30-day cooldown would
+        // count a request that never happened.
+        await db("review_requests").where({ id: request.id }).del().catch(() => {});
         throw Object.assign(
           new Error("The review-request recipient changed after the card was shown — nothing was sent."),
           { statusCode: 409, code: "approved_phone_drift" },
@@ -1428,9 +1433,14 @@ const ReviewService = {
     // a number the operator did not approve. Only in-process confirmed
     // sends pass expectedPhone; the scheduler's deferred batch does not.
     if (expectedPhone && contact.phone && String(contact.phone) !== String(expectedPhone)) {
-      await db("review_requests").where({ id: requestId }).update({ status: "suppressed" }).catch(() => {});
-      logger.info(`[review] Suppressed request (requestId=${requestId} reason=approved-phone-drift)`);
-      return { suppressed: "approved_phone_drift" };
+      // No row mutation here (pre-push r15 P1): the caller decides — the
+      // fresh-create path DELETES its just-created row (so the scheduler
+      // can never later send it to the unapproved number and the 30-day
+      // cooldown reads never count a request that never happened); the
+      // pending-unsent resend path leaves the pre-existing row exactly as
+      // it was.
+      logger.info(`[review] Refused send (requestId=${requestId} reason=approved-phone-drift)`);
+      return { refused: "approved_phone_drift" };
     }
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
