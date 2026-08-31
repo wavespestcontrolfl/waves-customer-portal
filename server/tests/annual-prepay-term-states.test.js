@@ -129,6 +129,12 @@ function statusWriteSites(src) {
   // Value runs to the next `, key:` or the end of the object body — a ternary
   // (`a ? 'x' : b`) has no comma, so it survives whole.
   const objectStatuses = (body, guards) => {
+    // Fail closed on write-object shapes the scanner cannot classify:
+    // shorthand `{ status }`, computed `['status']:`, and spreads (which can
+    // smuggle a status from anywhere).
+    if (/\.\.\./.test(body)) out.push({ expr: '<spread in write object>', guards });
+    if (/\[\s*['"]status['"]\s*\]\s*:/.test(body)) out.push({ expr: '<computed status key>', guards });
+    if (/(?:^|,|\{)\s*status\s*(?:,|$)/.test(body.trim())) out.push({ expr: '<shorthand status key>', guards });
     for (const s of body.matchAll(/\bstatus:\s*((?:[^,\n]|,(?!\s*[\w[\]]+\s*:))+)/g)) {
       out.push({ expr: s[1].replace(/,\s*$/, '').trim(), guards });
     }
@@ -212,6 +218,18 @@ describe('the write scanner itself (negative fixtures — alternate write forms 
     expect(resolveStatusExpression("cond ? 'active' : mysteryVar")).toBeNull();
     expect(statusWriteExpressions("await db('annual_prepay_terms').update(mystery);"))
       .toEqual(['<unresolved object mystery>']);
+  });
+
+  test('shorthand, computed-key, and spread write objects fail closed instead of slipping through', () => {
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ status });"))
+      .toEqual(['<shorthand status key>']);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ ['status']: 'refunded' });"))
+      .toEqual(['<computed status key>']);
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ ...payload, updated_at: now });"))
+      .toEqual(['<spread in write object>']);
+    // But a plain object with other keys and no status stays silent.
+    expect(statusWriteExpressions("await db('annual_prepay_terms').update({ updated_at: now });"))
+      .toEqual([]);
   });
 });
 
