@@ -77,6 +77,38 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining).toHaveLength(2);
   });
 
+  test('accepted MONTHLY beside a stale quarterly pest line declines the rewrite (parity with the combine)', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ], { acceptFrequency: 'monthly' });
+    expect(combos).toEqual([]);
+    expect(standalone).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
+  test('the ACCEPTED quarterly cadence is stamped onto a stale monthly pest line when separating', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control Plan', frequency: 'monthly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ], { acceptFrequency: 'quarterly' });
+    expect(standalone).toHaveLength(1);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].frequency).toBe('quarterly'); // accept wins over the stale line
+  });
+
+  test('a cadence-less pest line with no accepted selection never separates-with-rewrite', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Pest Control Plan' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+    ]);
+    expect(standalone).toEqual([]);
+    expect(remaining).toHaveLength(2);
+  });
+
   test('an INELIGIBLE bond (mismatched cadence) no longer suppresses the bait rewrite', () => {
     // audit P0: pest + count-less bait + monthly bond — the bond cannot
     // combine, so the bait must still reach the standalone pipeline.

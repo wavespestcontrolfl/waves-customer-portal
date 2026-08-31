@@ -669,8 +669,25 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     for (const route of COMBINED_SERVICE_ROUTES) {
       if (!route.retiredBySeparateVisits || route.companionKey !== 'termite_bait') continue;
       const companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
-      const hasPrimary = remaining.some((svc) => recurringServiceKey(svc) === route.primaryKey);
-      if (companionIdx === -1 || !hasPrimary) continue;
+      const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
+      if (companionIdx === -1 || primaryIdx === -1) continue;
+      // Cadence rules mirror the route it replaces (audit P0): for PEST the
+      // ACCEPTED plan cadence beats a stale quote-time line cadence, and a
+      // real mismatch (accepted monthly beside the quarterly bait) declines
+      // exactly as the combine always did — both lines keep their
+      // pre-existing per-line semantics. Cadence-less pest with no accepted
+      // selection never combined, so it never separates-with-rewrite either.
+      const primary = remaining[primaryIdx];
+      const primaryPattern = (route.primaryUsesAcceptFrequency && acceptPattern)
+        || explicitServiceCadence(primary) || null;
+      if (primaryPattern !== route.companionDefaultPattern) continue;
+      // Stamp the accept-resolved cadence onto the separated primary so the
+      // per-line scheduler and the reserved pest promotion derive the SAME
+      // cadence the customer accepted, not the stale quote line's.
+      if (route.primaryUsesAcceptFrequency && acceptPattern
+        && explicitServiceCadence(primary) !== acceptPattern) {
+        remaining[primaryIdx] = { ...primary, frequency: acceptPattern };
+      }
       const companion = remaining[companionIdx];
       const visits = visitsPerYearForRecurringService(companion);
       const cadence = explicitServiceCadence(companion);
