@@ -545,17 +545,15 @@ const ReviewService = {
       }
       const resendOutcome = await this.sendSMS(existing.id, { expectedPhone });
       if (resendOutcome && resendOutcome.refused === "approved_phone_drift") {
-        // Park the queued row too (pre-push r17 P1): left pending, the
+        // Park the queued row too (pre-push r17/r18 P1): left pending, the
         // scheduler would later send it WITHOUT the pin — to the very
-        // number the operator just saw refused. Suppressed rows are never
-        // sent; the thrown message discloses the parking.
-        try {
-          await db("review_requests").where({ id: existing.id }).update({ status: "suppressed" });
-        } catch (supErr) {
-          logger.error(`[review] drift parking failed (requestId=${existing.id}) — manual check needed before the next scheduler run: ${supErr.message}`);
-        }
+        // number the operator just saw refused. Fail closed: the message
+        // claims the parking only when it VERIFIABLY happened.
+        const parked = await this._parkRequestVerified(existing.id);
         throw Object.assign(
-          new Error("The review-request recipient changed after the card was shown — nothing was sent, and the queued ask was parked so it cannot auto-send to the new number."),
+          new Error(parked
+            ? "The review-request recipient changed after the card was shown — nothing was sent, and the queued ask was parked so it cannot auto-send to the new number."
+            : "The review-request recipient changed after the card was shown — nothing was sent, BUT parking the queued ask FAILED: it may still auto-send to the new number. Check the review queue now."),
           { statusCode: 409, code: "approved_phone_drift" },
         );
       }
@@ -661,21 +659,14 @@ const ReviewService = {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
         // number, and the 30-day cooldown would count a request that never
-        // happened. The cleanup must not be swallowed (pre-push r17 P1): if
-        // the delete fails, durably suppress the row instead — suppressed
-        // rows are never sent — and log loudly if even that fails.
-        try {
-          await db("review_requests").where({ id: request.id }).del();
-        } catch (delErr) {
-          logger.error(`[review] drift-cleanup delete failed (requestId=${request.id}) — suppressing instead: ${delErr.message}`);
-          try {
-            await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
-          } catch (supErr) {
-            logger.error(`[review] drift-cleanup suppress ALSO failed (requestId=${request.id}) — manual check needed before the next scheduler run: ${supErr.message}`);
-          }
-        }
+        // happened. Fail closed (pre-push r17/r18 P1): delete, else durably
+        // suppress, else verify by re-read — and the thrown message claims
+        // the cleanup only when it VERIFIABLY happened.
+        const parked = await this._parkRequestVerified(request.id, { preferDelete: true });
         throw Object.assign(
-          new Error("The review-request recipient changed after the card was shown — nothing was sent."),
+          new Error(parked
+            ? "The review-request recipient changed after the card was shown — nothing was sent."
+            : "The review-request recipient changed after the card was shown — nothing was sent, BUT cleaning up the created request FAILED: it may still auto-send to the new number. Check the review queue now."),
           { statusCode: 409, code: "approved_phone_drift" },
         );
       }
@@ -1399,6 +1390,39 @@ const ReviewService = {
     } catch (err) {
       logger.error(`[review] Paid-invoice enrollment failed (invoiceId=${invoice?.id} source=${source}): ${err.message}`);
       return { enrolled: false, reason: "error" };
+    }
+  },
+
+  /**
+   * Verified non-sendable parking for approved-phone-drift refusals
+   * (pre-push r17/r18 P1). Returns true ONLY when the row is CONFIRMED
+   * unable to send: deleted, or re-read in a status sendSMS refuses.
+   * Callers word their refusal by this verdict — never claiming a parking
+   * that did not verifiably happen.
+   */
+  async _parkRequestVerified(requestId, { preferDelete = false } = {}) {
+    if (preferDelete) {
+      try {
+        const n = await db("review_requests").where({ id: requestId }).del();
+        if (n > 0) return true;
+      } catch (delErr) {
+        logger.error(`[review] drift-cleanup delete failed (requestId=${requestId}) — suppressing instead: ${delErr.message}`);
+      }
+    }
+    try {
+      const n = await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
+      if (n > 0) return true;
+    } catch (supErr) {
+      logger.error(`[review] drift-cleanup suppress failed (requestId=${requestId}): ${supErr.message}`);
+    }
+    // Last resort: verify by re-read — a missing row, or one already in a
+    // status sendSMS refuses, is non-sendable even though our writes missed.
+    try {
+      const row = await db("review_requests").where({ id: requestId }).first("id", "status");
+      return !row || ["suppressed", "failed", "deferred"].includes(String(row.status));
+    } catch (readErr) {
+      logger.error(`[review] drift-cleanup verification read failed (requestId=${requestId}) — treating as NOT parked: ${readErr.message}`);
+      return false;
     }
   },
 

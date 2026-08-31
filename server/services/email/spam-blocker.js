@@ -203,6 +203,13 @@ async function blockSpamSender(email) {
         logger.warn(`[spam-blocker] filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
       }
     }
+    // Unique-scope race lost (pre-push r18 P1): count the hit on the row
+    // that won, exactly as the existing-row branch above would have.
+    if (insertErr && insertErr.code === '23505') {
+      await db('blocked_email_senders').where('email_address', fromAddress)
+        .increment('blocked_count', 1).catch(() => {});
+      return;
+    }
     throw insertErr;
   }
 
@@ -278,10 +285,7 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
     // to every unblock path, and a retry would stack another.
     let entry = existing;
     if (filterId) {
-      try {
-        [entry] = await db('blocked_email_senders').where({ id: existing.id })
-          .update({ gmail_filter_id: filterId }).returning('*');
-      } catch (updateErr) {
+      const rollbackFilter = async (reason) => {
         try {
           const gmailClient = require('./gmail-client');
           const auth = await gmailClient.getAuthClient();
@@ -290,9 +294,24 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
             await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
           }
         } catch (rollbackErr) {
-          logger.warn(`[spam-blocker] repair filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+          logger.warn(`[spam-blocker] repair filter rollback (${reason}) failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
         }
+      };
+      try {
+        // CAS: only the FIRST repair records its filter (pre-push r18 P1) —
+        // a concurrent repair that already recorded one makes this update
+        // match zero rows, and OUR fresh filter rolls back instead of
+        // living untracked where no unblock can ever find it.
+        [entry] = await db('blocked_email_senders').where({ id: existing.id })
+          .whereNull('gmail_filter_id')
+          .update({ gmail_filter_id: filterId }).returning('*');
+      } catch (updateErr) {
+        await rollbackFilter('update-failed');
         throw updateErr;
+      }
+      if (!entry) {
+        await rollbackFilter('cas-lost');
+        entry = await db('blocked_email_senders').where({ id: existing.id }).first() || existing;
       }
     }
     logger.info(`[spam-blocker] Manual re-block ${filterId ? 'repaired the missing Gmail filter for' : 'found no Gmail filter and could not create one for'} ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`}`);
@@ -301,7 +320,7 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
       entry,
       already_blocked: true,
       ...(blockEmail ? { blocked_address: blockEmail } : { blocked_domain: blockDomain }),
-      ...(filterId ? {} : {
+      ...(entry && entry.gmail_filter_id ? {} : {
         warning: 'Blocklist row recorded, but the Gmail auto-trash filter could NOT be created (Gmail unavailable) — messages may stay visible in Gmail until the block is re-applied.',
       }),
     };
@@ -329,6 +348,25 @@ async function manualBlockSender({ email_address, domain, reason } = {}) {
         }
       } catch (rollbackErr) {
         logger.warn(`[spam-blocker] manual filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+      }
+    }
+    // Unique-scope race lost (pre-push r18 P1): a concurrent block landed
+    // first — that IS the block; return it as already_blocked.
+    if (insertErr && insertErr.code === '23505') {
+      const winner = blockEmail
+        ? await db('blocked_email_senders').where('email_address', blockEmail).first()
+        : await db('blocked_email_senders').where('domain', blockDomain).first();
+      if (winner) {
+        logger.info(`[spam-blocker] concurrent manual block won for ${blockEmail ? `sender ${redactEmail(blockEmail)}` : `domain @${blockDomain}`} — reusing it`);
+        return {
+          success: true,
+          entry: winner,
+          already_blocked: true,
+          ...(blockEmail ? { blocked_address: blockEmail } : { blocked_domain: blockDomain }),
+          ...(winner.gmail_filter_id ? {} : {
+            warning: 'Blocklist row recorded, but the Gmail auto-trash filter could NOT be created (Gmail unavailable) — messages may stay visible in Gmail until the block is re-applied.',
+          }),
+        };
       }
     }
     throw insertErr;
