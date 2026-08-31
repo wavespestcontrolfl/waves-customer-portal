@@ -492,11 +492,13 @@ describe('closeout-status: comms + follow-up', () => {
     expect(facts.completion.recapLane).toBe(true);
   });
 
-  test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending', () => {
+  test('no comms marker: delivered report email counts; otherwise UNKNOWN, never pending; explicit catalog no-notice → not_required', () => {
     const bare = { ...closedOutInputs().record, structured_notes: {} };
     expect(deriveCloseoutFacts(closedOutInputs({ record: bare })).facts.comms).toMatchObject({ state: 'done', reason: 'report_email_delivered' });
     expect(deriveCloseoutFacts(closedOutInputs({ record: bare, delivery: null })).facts.comms)
       .toMatchObject({ state: 'unknown', reason: 'no_comms_marker_on_record' });
+    expect(deriveCloseoutFacts(closedOutInputs({ record: bare, delivery: null, requirements: baseRequirements({ requiresCustomerNotice: false }) })).facts.comms)
+      .toMatchObject({ state: 'not_required', reason: 'catalog_no_customer_notice', ruleSource: 'catalog' });
   });
 
   test('backfill completion: invoice, comms, report (when absent) are not_required, sourced from the frozen record', () => {
@@ -664,6 +666,12 @@ describe('closeout-status: Agent D findings', () => {
     expect(run({})).toMatchObject({ state: 'done', reason: 'technician_licensed', asOf: 'current_technician_row' });
     expect(run({ technician: tech({ license_expiry: '2026-08-01' }) })).toMatchObject({ state: 'failed', reason: 'technician_license_expired_at_visit' });
     expect(run({ technician: tech({ license_categories: '["Termite"]' }) })).toMatchObject({ state: 'failed', reason: 'technician_license_category_mismatch' });
+    // Catalog codes vs technician labels canonicalize to the same category (codex r14).
+    const ghpReq = baseRequirements({ requiresLicense: true, licenseCategory: 'GHP' });
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: ghpReq, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech({ license_categories: ['General Household Pest'] }) })).facts.license.state).toBe('done');
+    const loReq = baseRequirements({ requiresLicense: true, licenseCategory: 'L&O' });
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: loReq, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech({ license_categories: ['Lawn and Ornamental'] }) })).facts.license.state).toBe('done');
+    expect(deriveCloseoutFacts(closedOutInputs({ requirements: loReq, visit: { ...closedOutInputs().visit, technician_id: 'tech-1' }, technician: tech({ license_categories: ['GHP'] }) })).facts.license.state).toBe('failed');
     expect(run({ technician: tech({ license_categories: null }) })).toMatchObject({ state: 'unknown', reason: 'technician_license_categories_unrecorded' });
     expect(run({ technician: tech({ fl_applicator_license: null }) })).toMatchObject({ state: 'pending', reason: 'technician_license_missing' });
     expect(run({ technician: null, technicianLookupFailed: true })).toMatchObject({ state: 'unknown', reason: 'technicians_lookup_failed' });

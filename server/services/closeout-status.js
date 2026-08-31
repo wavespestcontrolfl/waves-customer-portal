@@ -164,6 +164,20 @@ function classifyReceiptLegs(smsResult, emailResult) {
   };
 }
 
+// FDACS applicator categories: the catalog stores CODES (license_category
+// 'GHP' / 'L&O'), technicians.license_categories is free-form text. Both
+// sides canonicalize through this map before comparison.
+const LICENSE_CATEGORY_ALIASES = {
+  ghp: 'ghp', generalhouseholdpest: 'ghp', generalhouseholdpestcontrol: 'ghp', householdpest: 'ghp',
+  lo: 'lo', lawnornamental: 'lo', lawnandornamental: 'lo', lawnornamentalpest: 'lo',
+  termite: 'termite', wdo: 'termite', termiteandotherwdo: 'termite', termiteotherwdo: 'termite', termiteandotherwooddestroyingorganisms: 'termite',
+};
+function canonicalLicenseCategory(value) {
+  const key = String(value || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '').replace(/^lawnand/, 'lawn').replace(/^lawnornamental$/, 'lawnornamental');
+  if (!key) return null;
+  return LICENSE_CATEGORY_ALIASES[key] || LICENSE_CATEGORY_ALIASES[key.replace(/and/g, '')] || key;
+}
+
 function fact(state, reason, extra = {}) {
   if (!FACT_STATES.includes(state)) throw new Error(`closeout-status: bad fact state ${state}`);
   return { state, reason, ...extra };
@@ -824,6 +838,9 @@ function deriveCloseoutFacts(inputs) {
   else if (smsStatus === 'failed') comms = fact('failed', 'completion_sms_failed', { completionSmsStatus: smsStatus });
   else if (smsStatus === 'blocked') comms = fact('not_required', 'completion_sms_blocked_consent', { ruleSource: 'consent', completionSmsStatus: smsStatus });
   else if (reportDelivery.state === 'done') comms = fact('done', projectBacked ? 'project_report_delivered' : 'report_email_delivered', { channel: projectBacked ? null : 'email' });
+  // Explicit catalog rule: this service owes no customer notice (evidence
+  // above still wins when it exists).
+  else if (requirements && requirements.requiresCustomerNotice === false) comms = fact('not_required', 'catalog_no_customer_notice', { ruleSource: 'catalog', requirementsSource: requirements.source, completionSmsStatus: smsStatus });
   else comms = fact('unknown', 'no_comms_marker_on_record', { completionSmsStatus: smsStatus, hint: 'legacy or recap-lane record without a completionSmsStatus stamp' });
   if (requirements && completed) {
     // The catalog's requiresCustomerNotice is satisfied by the completion
@@ -865,8 +882,8 @@ function deriveCloseoutFacts(inputs) {
   else {
     let cats = tech.license_categories;
     if (typeof cats === 'string') { try { cats = JSON.parse(cats); } catch { cats = null; } }
-    const categories = Array.isArray(cats) ? cats.map((c) => String(c).trim().toLowerCase()).filter(Boolean) : [];
-    const required = requirements.licenseCategory ? String(requirements.licenseCategory).trim().toLowerCase() : null;
+    const categories = Array.isArray(cats) ? cats.map(canonicalLicenseCategory).filter(Boolean) : [];
+    const required = canonicalLicenseCategory(requirements.licenseCategory);
     // Judge expiry at the day the work was RECORDED (service_records.service_date);
     // the scheduled day is only a fallback for records without one.
     const visitDay = (record?.service_date ? String(record.service_date).slice(0, 10) : null)
