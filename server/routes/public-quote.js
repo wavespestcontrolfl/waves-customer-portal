@@ -1465,11 +1465,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // a legacy direct-API request must price identically whether or not an
     // unrelated prior lookup cached a lot-evidence flag (same contract rule
     // as the fallback-lot fix above). The deliberate CONDO-SCOPE protection
-    // applies on every channel. Commercial rodent bait is exempt: it prices
-    // from the building footprint and never reads the lot (GH codex P2 r8).
-    const lotPricedRequested = !!(services.mosquito
-      || (services.rodentBait && !commercialDetected)
-      || services.treeShrub);
+    // applies on every channel. Rodent bait is exempt on BOTH channels
+    // (codex #3591 r76 P2): the footprint-bracket pricer reads only
+    // property.footprint — residential and commercial alike — so weak or
+    // conflicting LOT evidence cannot change its result and must not force
+    // lot_size_requires_verification over an instant quote.
+    const lotPricedRequested = !!(services.mosquito || services.treeShrub);
     const lotFlagForcesSiteQuote = !lotSizeMeasured && (
       ((condoScopeLotFlag || (wizardShaped && lotVerifyFlagged)) && lotPricedRequested)
       || (condoScopeLotFlag && !!(services.lawn || services.oneTimeLawn || services.lawnPestControl

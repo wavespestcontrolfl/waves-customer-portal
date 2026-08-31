@@ -5595,23 +5595,45 @@ router.post('/', requireAdmin, async (req, res, next) => {
             }
             return;
           }
-          const retired = await db('scheduled_services')
-            .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
-            .update({ pending_setup_fee: null, updated_at: new Date() });
-          if (Number(retired) !== 1) {
-            const live = await db('scheduled_services').where({ id: svc.id }).first('pending_setup_fee');
-            logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} was ${live?.pending_setup_fee ?? 'null'} (expected ${directRodentSetupStamp}) when estimate acceptance tried to retire it — the stamp was consumed or refrozen while the acceptance billed the setup; reconcile the two setup charges`);
-            bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed — check the customer for a second setup charge and clear or refund it.');
-            return;
-          }
-          directRodentSetupStamp = 0;
-          // The prepay mint ledgered its claim before this series existed
-          // (anchor-less); anchor it now so a later refund of that prepay
-          // restores the stamp onto THIS series instead of paging.
-          if (settled.claim && !settled.claim.scheduled_service_id) {
-            const { anchorSetupFeeClaim } = require('../services/secure-appointment-plans');
-            await anchorSetupFeeClaim(db, { claimId: settled.claim.id, anchorId: svc.id });
-          }
+          // ONE transaction for the retire + anchor (codex #3591 r76 P1):
+          // the settlement read above is unlocked, and the old path cleared
+          // the stamp and anchored the claim in separate autocommitted
+          // statements — a void/refund of the acceptance's setup invoice in
+          // that gap would clear the stamp beside a now-terminal claim,
+          // leaving the series with no carrier at all. Lock the claim's
+          // INVOICE row (the reversal transaction updates it, so the loser
+          // waits), re-verify liveness under the lock, and KEEP the stamp
+          // when the reversal won — the first completion collects it.
+          await db.transaction(async (trx) => {
+            let liveClaim = null;
+            if (settled.claim) {
+              const { settledSetupClaimForInvoice } = require('../services/secure-appointment-plans');
+              await trx('invoices').where({ id: settled.claim.invoice_id }).forUpdate().first('id');
+              liveClaim = await settledSetupClaimForInvoice(trx, settled.claim.invoice_id);
+              if (!liveClaim) {
+                logger.info(`[schedule] rodent setup stamp ($${directRodentSetupStamp}) kept on ${svc.id}: the acceptance's setup invoice was reversed before the retire — first completion collects it`);
+                return;
+              }
+            }
+            const retired = await trx('scheduled_services')
+              .where({ id: svc.id, pending_setup_fee: directRodentSetupStamp })
+              .update({ pending_setup_fee: null, updated_at: new Date() });
+            if (Number(retired) !== 1) {
+              const live = await trx('scheduled_services').where({ id: svc.id }).first('pending_setup_fee');
+              logger.error(`[schedule] FIX: rodent setup stamp on ${svc.id} was ${live?.pending_setup_fee ?? 'null'} (expected ${directRodentSetupStamp}) when estimate acceptance tried to retire it — the stamp was consumed or refrozen while the acceptance billed the setup; reconcile the two setup charges`);
+              bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp had already been consumed or changed — check the customer for a second setup charge and clear or refund it.');
+              return;
+            }
+            directRodentSetupStamp = 0;
+            // The prepay mint ledgered its claim before this series existed
+            // (anchor-less); anchor it now — in the SAME transaction as the
+            // retire — so a later refund of that prepay restores the stamp
+            // onto THIS series instead of paging.
+            if (liveClaim && !liveClaim.scheduled_service_id) {
+              const { anchorSetupFeeClaim } = require('../services/secure-appointment-plans');
+              await anchorSetupFeeClaim(trx, { claimId: liveClaim.id, anchorId: svc.id });
+            }
+          });
         } catch (e) {
           logger.error(`[schedule] FIX: could not retire the rodent setup stamp on ${svc.id} after estimate acceptance — first completion would bill a setup the acceptance already covered: ${e.message}`);
           bookingWarnings.push('The estimate acceptance covered the bait-station setup, but the booking-time setup stamp could not be cleared — clear the pending setup fee on the new series to avoid double-billing.');

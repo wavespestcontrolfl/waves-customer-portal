@@ -190,7 +190,14 @@ exports.up = async function up(knex) {
   // rodent_per_station_overage joins them (codex #3591 r2 P2): the bracket
   // ladder's station allowance replaced per-station overage billing and no
   // code path reads the value — an editable knob with zero effect.
-  for (const configKey of ['rodent_monthly', 'rodent_post_exclusion', 'rodent_per_station_overage']) {
+  // rodent_rules and rodent_score_factors join too (codex #3591 r76 P1):
+  // the 20260414000026 seed left them in prod — db-bridge prefers
+  // rodent_waveguard over rodent_rules (edits to the old card are ignored)
+  // and the footprint pricer never reads score factors, so both are
+  // editable knobs with zero effect beside the live cards. The
+  // rodent_rules fallback read in db-bridge stays: it is the rollback
+  // path when down() restores the row.
+  for (const configKey of ['rodent_monthly', 'rodent_post_exclusion', 'rodent_per_station_overage', 'rodent_rules', 'rodent_score_factors']) {
     const row = await knex('pricing_config').where({ config_key: configKey }).first();
     if (!row) continue;
     await audit(knex, configKey, parseData(row), null, UP_REASON);
@@ -254,6 +261,9 @@ exports.down = async function down(knex) {
     rodent_monthly: ['Rodent Bait Monthly Tiers (quarterly visits, billed monthly)', 1],
     rodent_post_exclusion: ['Rodent Bait Post-Exclusion Modifier', 3],
     rodent_per_station_overage: ['Rodent Per-Station Overage', 4],
+    // Names/sort orders from the 20260414000026 seed (codex #3591 r76 P1).
+    rodent_score_factors: ['Rodent Score Factors', 3],
+    rodent_rules: ['Rodent WaveGuard Rules', 4],
   };
   for (const configKey of Object.keys(RETIRED_ROW_NAMES)) {
     // Current-cycle ownership (codex #3591 r54 P2): the LATEST audit entry

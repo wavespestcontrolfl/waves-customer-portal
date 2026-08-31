@@ -612,10 +612,13 @@ describe('source contracts — where the lifecycle is wired', () => {
     // (codex #3591 r65 P1). A disclosed-but-unbilled setup keeps the stamp,
     // aligned to the disclosed figure.
     expect(adminSchedule).toMatch(/const rodentSetupSettledByAcceptance = async \(acceptResult\) => \{[\s\S]*?acceptResult\?\.alreadyAccepted\s+\? await settledSetupClaimForEstimate\(db, linkedEstimateId\)\s+: await settledSetupClaimForInvoice\(db, acceptResult\?\.conversion\?\.draftInvoiceId \|\| null\);[\s\S]*?const disclosed = frozenRodentBaitSetupAmount\(linkedEstimate\?\.estimate_data \|\| \{\}\);\s+return disclosed > 0 \? \{ disclosed \} : \{ waived: 'estimate_disclosed_no_setup' \};/);
-    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}\s+const retired = await db\('scheduled_services'\)/);
-    expect(adminSchedule).toMatch(/if \(settled\.claim && !settled\.claim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(db, \{ claimId: settled\.claim\.id, anchorId: svc\.id \}\);/);
+    // r76: the retire + anchor run in ONE transaction, with the claim's
+    // invoice row locked and liveness re-verified under the lock; a
+    // reversal that won keeps the stamp for the first completion.
+    expect(adminSchedule).toMatch(/const settled = await rodentSetupSettledByAcceptance\(acceptResult\);\s+if \(settled\.disclosed\) \{[\s\S]*?\.update\(\{ pending_setup_fee: settled\.disclosed, updated_at: new Date\(\) \}\);[\s\S]*?return;\s+\}[\s\S]*?await db\.transaction\(async \(trx\) => \{\s+let liveClaim = null;\s+if \(settled\.claim\) \{[\s\S]*?await trx\('invoices'\)\.where\(\{ id: settled\.claim\.invoice_id \}\)\.forUpdate\(\)\.first\('id'\);\s+liveClaim = await settledSetupClaimForInvoice\(trx, settled\.claim\.invoice_id\);\s+if \(!liveClaim\) \{[\s\S]*?return;\s+\}\s+\}\s+const retired = await trx\('scheduled_services'\)/);
+    expect(adminSchedule).toMatch(/if \(liveClaim && !liveClaim\.scheduled_service_id\) \{[\s\S]*?await anchorSetupFeeClaim\(trx, \{ claimId: liveClaim\.id, anchorId: svc\.id \}\);/);
     expect(adminSchedule.includes("('setup_fee_claims')")).toBe(false);
-    expect(adminSchedule).toMatch(/const retired = await db\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
+    expect(adminSchedule).toMatch(/const retired = await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id, pending_setup_fee: directRodentSetupStamp \}\)\s+\.update\(\{ pending_setup_fee: null/);
     // A retire failure must warn about the double-bill hazard, never fail silently.
     expect(adminSchedule).toMatch(/retireRodentSetupStampAfterAcceptance = async \(acceptResult\) => \{[\s\S]*?bookingWarnings\.push\('The estimate acceptance covered the bait-station setup/);
     // A ZERO-row CAS is the consumed/refrozen-stamp race, not success (codex
@@ -640,6 +643,27 @@ describe('source contracts — where the lifecycle is wired', () => {
     const migrationSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260829000040_rodent_bait_bracket_realignment.js'), 'utf8');
     expect(migrationSrc).toMatch(/whereIn\('config_key', \['service_discount_rules\.rodent_bait', 'discount_rules:rodent_bait'\]\)/);
     expect(migrationSrc).toMatch(/if \(migrationOwnsRuleCycle && ruleAudit\?\.old_value && rule && rule\.tier_qualifier === true && rule\.exclude_from_pct_discount === false\) \{/);
+  });
+
+  test('legacy rodent config rows retired · tierless verified waivers survive the lapsed-member sanitizer · rodent never lot-gated (codex #3591 r76)', () => {
+    const migrationSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260829000040_rodent_bait_bracket_realignment.js'), 'utf8');
+    // The 20260414000026 seed rows join the audited retirement set — dead
+    // knobs must not sit beside the live cards accepting no-op edits.
+    expect(migrationSrc).toMatch(/for \(const configKey of \['rodent_monthly', 'rodent_post_exclusion', 'rodent_per_station_overage', 'rodent_rules', 'rodent_score_factors'\]\)/);
+    expect(migrationSrc).toMatch(/rodent_score_factors: \['Rodent Score Factors', 3\],\s+rodent_rules: \['Rodent WaveGuard Rules', 4\],/);
+    // The lapsed-member sanitizer deletes the waiver ONLY on the strict
+    // probe's staleness verdict — never on the missing membership stamp
+    // (planGate: false policy).
+    const estimatePublicSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+    const dropAt = estimatePublicSrc.indexOf('delete estData.membershipSnapshot;');
+    expect(dropAt).toBeGreaterThan(-1);
+    const dropBlock = estimatePublicSrc.slice(dropAt, estimatePublicSrc.indexOf('// Clearing the flags alone is not enough', dropAt));
+    expect(dropBlock).toContain('delete estData.priorQualifyingServices;');
+    expect(dropBlock).not.toContain('setupWaiverPriorQualifyingServices');
+    // Rodent bait prices from the footprint on both channels — the lot
+    // verification guard must not park it.
+    const publicQuoteSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuoteSrc).toMatch(/const lotPricedRequested = !!\(services\.mosquito \|\| services\.treeShrub\);/);
   });
 
   test('booking waiver read strict · Auto Pay page-load keeps the disclosure page · renewal defaults are coverage-only (codex #3591 r72 P1)', () => {

@@ -8320,13 +8320,16 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
       // undercharge even after the snapshot is gone.
       delete estData.membershipSnapshot;
       delete estData.priorQualifyingServices;
-      // The account-wide setup-waiver list is member evidence too — a lapsed
-      // member's replay must re-add the rodent setup (codex #3591 r34 P1).
-      delete estData.setupWaiverPriorQualifyingServices;
+      // The setup-waiver list is NOT deleted here (codex #3591 r76 P1): its
+      // validity is decided by the strict family probe above (planGate:
+      // false policy — the waiver is qualifying families, never the
+      // membership stamp), so a tierless customer whose qualifying row the
+      // probe just verified keeps the waiver; only setupWaiverStale removes
+      // it (handled before this block). Deleting it on the stamp alone made
+      // the recompute add a $99 the rule waives.
       for (const shape of replayShapes) {
         delete shape.recurringCustomer;
         delete shape.isRecurringCustomer;
-        delete shape.setupWaiverPriorQualifyingServices;
         // A prior-service list NESTED in a replay shape (legacy rows predate
         // the save-time sanitizer) replays straight through extractEngineInputs
         // and restores the combined-tier discount the top-level delete just
