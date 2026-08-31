@@ -898,6 +898,36 @@ router.post('/cancel-resolution', authenticate, cancelResolutionLimiter, async (
   }
 });
 
+// POST /api/requests/restart-plan (C4, GATE_CANCEL_FLOW_V2) — a CANCELLED
+// customer asks to restart. Mints (or reuses) a normal server-priced
+// estimate for the families they cancelled and hands back its /estimate
+// path; the customer reviews and accepts it through the existing public
+// accept flow (card-first, unchanged). Customer-initiated only — nothing is
+// sent. 404 dark; 409 for an account that is not cancelled or that has no
+// plan to restart / cannot be priced online. `authenticate` admits the
+// cancelled customer here through CANCELLED_READ_ROUTES (middleware/auth).
+router.post('/restart-plan', authenticate, cancelResolutionLimiter, async (req, res, next) => {
+  try {
+    if (!CancellationResolution.cancelFlowV2Enabled()) return res.status(404).json({ error: 'Not found' });
+    if (req.customerInactive !== true) {
+      return res.status(409).json({ error: 'This plan is not cancelled.', code: 'not_cancelled' });
+    }
+    const { mintRestartEstimate } = require('../services/cancellation-resolution/restart');
+    let minted;
+    try {
+      minted = await mintRestartEstimate({ customer: req.customer });
+    } catch (err) {
+      if (err && err.restartUnavailable) {
+        return res.status(409).json({ error: err.message, code: err.code });
+      }
+      throw err;
+    }
+    res.json({ ok: true, url: minted.url, estimateId: minted.estimateId, reused: minted.reused === true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 const cancelResolutionAcceptSchema = Joi.object({
   reasonCode: Joi.string().valid(...REASON_CODE_VALUES).required(),
   families: Joi.array().items(Joi.string().trim().max(64)).max(8).optional(),

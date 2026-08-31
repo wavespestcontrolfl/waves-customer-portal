@@ -36,6 +36,15 @@ const addDays = (n) => {
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const day = (n) => iso(addDays(n));
 
+// ── personas ───────────────────────────────────────────────────────────────
+// ?persona=cancelled renders the C4 read-only cancelled state (churned
+// account: cancelled banner, cancelled plan page + restart hand-off, no
+// upcoming visits, history + billing still readable). ?restart=unavailable
+// makes the restart stub answer the 409 "priced by hand" state.
+const PERSONA = new URLSearchParams(window.location.search).get('persona') || 'active';
+const CANCELLED = PERSONA === 'cancelled';
+const RESTART_MODE = new URLSearchParams(window.location.search).get('restart') || 'ready';
+
 // ── demo persona: Jordan Rivera (fictional) ────────────────────────────────
 const CUSTOMER = {
   id: 'cust-demo-1',
@@ -48,9 +57,12 @@ const CUSTOMER = {
   phone: '9415550190',
   address: { line1: '1200 Palm Row Ct', line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
   property: { lawnType: 'St. Augustine Full Sun', propertySqFt: 4800, lotSqFt: 9800, bedSqFt: 650, palmCount: 4, canopyType: null },
-  tier: 'Silver', // Silver = Quarterly Pest Control + Lawn Care Program
+  tier: CANCELLED ? null : 'Silver', // Silver = Quarterly Pest Control + Lawn Care Program
   monthlyRate: null, // per-application billing — no monthly subscription rate
   memberSince: '2024-03-14',
+  // C4 cancelled state (server: customers.active=false + churned_at)
+  cancelled: CANCELLED,
+  cancelledAt: CANCELLED ? day(-9) : null,
   referralCode: 'JORDAN941',
   accountCredit: 45,
   // portal slider (owner ruling 2026-08-28) — starts OFF; the stub below flips it
@@ -288,13 +300,35 @@ Object.assign(api, {
   // schedule — reservice/overlayHandoff mirror the streamline payload
   // (GATE_RESERVICE_STREAMLINE) so the Request Service overlay's picker
   // handoff and reschedule-online list render in the preview.
-  getSchedule: async () => ({
-    hasCancellableWork: true,
-    upcoming: UPCOMING,
-    reservice: { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
-    overlayHandoff: true,
-  }),
-  getNextService: async () => ({ next: UPCOMING[0] }),
+  getSchedule: async () => (CANCELLED
+    ? { hasCancellableWork: false, upcoming: [], reservice: null, overlayHandoff: false }
+    : {
+      hasCancellableWork: true,
+      upcoming: UPCOMING,
+      reservice: { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
+      overlayHandoff: true,
+    }),
+  getNextService: async () => ({ next: CANCELLED ? null : UPCOMING[0] }),
+  // C4 restart hand-off: the real route mints a normal estimate and answers
+  // its /estimate path. The demo path lands back on this harness so the
+  // eyeball loop never leaves the preview.
+  restartPlan: async () => {
+    await new Promise((r) => setTimeout(r, 600));
+    if (RESTART_MODE === 'unavailable') {
+      const err = new Error('We need a property measurement on file before we can price this online.');
+      err.status = 409;
+      err.code = 'pricing_unavailable';
+      throw err;
+    }
+    // ?restart=hold answers a hash URL so the "ready" hand-off state stays
+    // on screen for an eyeball instead of navigating away.
+    return {
+      ok: true,
+      url: RESTART_MODE === 'hold' ? '#restart-estimate' : '/preview-portal.html?persona=cancelled&tab=plan&opened=estimate',
+      estimateId: 'est-demo-restart',
+      reused: false,
+    };
+  },
   confirmAppointment: async () => ({ success: true }),
   rescheduleAppointment: async () => ({ success: true }),
 
@@ -332,7 +366,9 @@ Object.assign(api, {
     processor: 'stripe', nextCharge: null, lastPaymentFailed: false,
   }),
   getCards: async () => ({ cards: [CARD, SPARE_CARD] }),
-  getAutopay: async () => AUTOPAY,
+  getAutopay: async () => (CANCELLED
+    ? { ...AUTOPAY, state: 'disabled', autopay_enabled: false, waveguard_tier: null, autopay_selected_method_ids: [] }
+    : AUTOPAY),
   updateAutopay: async () => ({ success: true, updated: true, changes: [] }),
   pauseAutopay: async () => ({ success: true }),
   resumeAutopay: async () => ({ success: true }),

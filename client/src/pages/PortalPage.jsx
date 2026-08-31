@@ -17,6 +17,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
+import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -9924,14 +9925,18 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     });
   }, []);
 
+  // C4: a cancelled account renders the cancelled panel below — none of the
+  // live-plan reads are needed (and the station map is not a cancelled read).
+  const cancelledAccount = customer?.cancelled === true;
   useEffect(() => {
+    if (cancelledAccount) return;
     loadPlan();
     api.getAutopay().then(d => {
       setBillingMode(d?.billing_mode || null);
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
-  }, [loadPlan]);
+  }, [loadPlan, cancelledAccount]);
 
   const serviceMatches = (svcId, service = {}) => {
     const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
@@ -10257,6 +10262,18 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
     minHeight: 36,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
+
+  // C4: the cancelled state replaces every live plan card (and the cancel
+  // flow) — one "Restart my plan" action that lands on a fresh estimate.
+  if (cancelledAccount) {
+    return (
+      <CancelledPlanPanel
+        customer={customer}
+        compact={compact}
+        styles={{ card, muted, subtle, sectionTitle, primaryButton, secondaryButton }}
+      />
+    );
+  }
 
   if (planStatus !== 'ready') {
     return (
@@ -10726,7 +10743,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest }) {
             </section>
           )}
 
-          {hasCancellableAccount && (
+          {hasCancellableAccount && !cancelledAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
             {/* C1 three-screen cancel flow (GATE_CANCEL_FLOW_V2); falls back to
@@ -14387,9 +14404,13 @@ const MORE_TABS = [
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
+// C4: the read-only surfaces a cancelled customer keeps — plan (cancelled
+// state + restart), visit history, billing (pay what is owed), documents.
+// Everything else needs an active plan and its reads are not widened.
+const CANCELLED_TABS = ['plan', 'visits', 'billing', 'documents'];
 // The sub-tabs on Visits surface their own IDs, so "Visits" stays lit
 // whether the customer is on Upcoming or Completed.
-function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
+function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY_TABS, moreTabs = MORE_TABS }) {
   const button = (t, onClick, isActive) => (
     <button
       key={t.id}
@@ -14428,17 +14449,17 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
       padding: '4px 8px max(6px, env(safe-area-inset-bottom))',
       boxSizing: 'border-box',
     }}>
-      {PRIMARY_TABS.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
+      {tabs.map(t => button(t, () => onSelect(t.id), activeTab === t.id))}
       {button(
         { id: 'more', label: 'More', icon: 'more' },
         onOpenMore,
-        moreActive || MORE_TABS.some(m => m.id === activeTab),
+        moreActive || moreTabs.some(m => m.id === activeTab),
       )}
     </nav>
   );
 }
 
-function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
+function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MORE_TABS }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
@@ -14520,7 +14541,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         </div>
 
         <section data-glass="soft" style={{ ...card, padding: 8, marginBottom: 10 }}>
-          {MORE_TABS.map(t => {
+          {tabs.map(t => {
             const isActive = activeTab === t.id;
             return (
               <button key={t.id} onClick={() => onSelect(t.id)} style={{
@@ -14566,12 +14587,18 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
           }}>
             <a data-glass-accent="" href="tel:+19412975749" onClick={onClose} style={supportActionStyle}>Call</a>
             <a data-glass-accent="" href="sms:+19412975749" onClick={onClose} style={supportActionStyle}>Text</a>
-            <button data-glass-accent="" type="button" onClick={() => { onRequest?.(); onClose(); }} style={supportActionStyle}>
-              Request
-            </button>
-            <button data-glass-accent="" type="button" onClick={() => { onChat?.(); onClose(); }} style={supportActionStyle}>
-              Chat
-            </button>
+            {/* Request + Chat create work / need an active plan — a cancelled
+                account (C4) passes neither, so only Call / Text remain. */}
+            {onRequest && (
+              <button data-glass-accent="" type="button" onClick={() => { onRequest(); onClose(); }} style={supportActionStyle}>
+                Request
+              </button>
+            )}
+            {onChat && (
+              <button data-glass-accent="" type="button" onClick={() => { onChat(); onClose(); }} style={supportActionStyle}>
+                Chat
+              </button>
+            )}
           </div>
         </section>
       </div>
@@ -14932,6 +14959,10 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 export default function PortalPage() {
   const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
+  // C4: /auth/me reports `cancelled` for a churned account admitted under
+  // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
+  // cancelled banner, and hides every action that creates work.
+  const cancelledAccount = customer?.cancelled === true;
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
@@ -15035,7 +15066,18 @@ export default function PortalPage() {
     const target = SERVICE_CATALOG.some(s => s.id === svcId) ? `/?tab=plan&service=${svcId}` : '/?tab=plan';
     if (window.location.pathname + window.location.search !== target) navigate(target);
   };
-  const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
+  const cancelledPrimaryTabs = PRIMARY_TABS.filter(t => CANCELLED_TABS.includes(t.id));
+  const cancelledMoreTabs = MORE_TABS.filter(t => CANCELLED_TABS.includes(t.id));
+  const headerNavItems = cancelledAccount
+    ? [...cancelledPrimaryTabs, ...cancelledMoreTabs]
+    : [...PRIMARY_TABS, ...MORE_TABS];
+  // A cancelled account never lands on a tab it cannot read — Home (and any
+  // deep link outside CANCELLED_TABS) redirects to the cancelled plan page.
+  useEffect(() => {
+    if (!cancelledAccount || CANCELLED_TABS.includes(activeTab)) return;
+    setActiveTab('plan');
+    syncTabUrl('plan');
+  }, [cancelledAccount, activeTab]);
   const headerNavButton = (tab) => {
     const isActive = activeTab === tab.id;
     return (
@@ -15152,7 +15194,7 @@ export default function PortalPage() {
     }
   };
   const activePropertyAddress = formatPropertyAddress(customer);
-  const accountMenuItems = [
+  const accountMenuItems = (cancelledAccount ? (items) => items.filter(i => CANCELLED_TABS.includes(i.tab)) : (items) => items)([
     { icon: 'home', label: 'Home', sub: 'Portal overview', tab: 'dashboard', action: () => switchTab('dashboard') },
     { icon: 'plan', label: 'My Plan', sub: 'Services and bundle savings', tab: 'plan', action: () => switchTab('plan') },
     { icon: 'calendar', label: 'Visits', sub: 'Upcoming and completed service', tab: 'visits', action: () => switchTab('visits') },
@@ -15161,12 +15203,16 @@ export default function PortalPage() {
     { icon: 'document', label: 'Documents', sub: 'Reports and agreements', tab: 'documents', action: () => switchTab('documents') },
     { icon: 'house', label: 'My Property', sub: 'Property profile and notes', tab: 'property', action: () => switchTab('property') },
     { icon: 'bulb', label: 'Learn', sub: 'Tips, local alerts, and FAQ', tab: 'learn', action: () => switchTab('learn') },
-  ];
+  ]);
   const accountSupportActions = [
     { icon: 'phone', label: 'Call', href: 'tel:+19412975749' },
     { icon: 'chat', label: 'Text', href: 'sms:+19412975749' },
-    { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
-    { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+    // Request + Chat need an active plan (C4): a cancelled account keeps
+    // Call / Text only.
+    ...(cancelledAccount ? [] : [
+      { icon: 'wrench', label: 'Request', action: () => setShowReportIssue(true) },
+      { icon: 'bot', label: 'Chat', action: () => setShowChat(true) },
+    ]),
   ];
   // Rate-the-app: inside the native shell an https store URL is a webview
   // navigation that strands the SPA (same trap as window.open — F-017), so
@@ -15226,7 +15272,9 @@ export default function PortalPage() {
             renders as a glass card above the Waves AI bar in the content
             column. Mobile keeps the bottom nav untouched. */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
-          {!isMobileShell && (
+          {/* The header Request button creates work — hidden for a cancelled
+              account (C4), which keeps Call / Text in the account menu. */}
+          {!isMobileShell && !cancelledAccount && (
             <button
               type="button"
               onClick={() => setShowReportIssue(true)}
@@ -15657,6 +15705,9 @@ export default function PortalPage() {
             Learn — renders as a glass card right above the Waves AI bar
             instead of inside the sticky top bar. Desktop only; the mobile
             shell keeps its bottom nav. data-glass is inert without glass. */}
+        {cancelledAccount && (
+          <CancelledBanner cancelledAt={customer.cancelledAt} onOpenBilling={() => switchTab('billing')} />
+        )}
         {!isMobileShell && (
           <nav aria-label="Customer portal" data-glass="card" style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -15676,7 +15727,7 @@ export default function PortalPage() {
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
-        <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
+        {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
         {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
@@ -15700,6 +15751,8 @@ export default function PortalPage() {
           onSelect={switchTab}
           onOpenMore={() => setShowMoreSheet(true)}
           moreActive={showMoreSheet}
+          tabs={cancelledAccount ? cancelledPrimaryTabs : PRIMARY_TABS}
+          moreTabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
       {isMobileShell && showMoreSheet && (
@@ -15707,8 +15760,9 @@ export default function PortalPage() {
           activeTab={activeTab}
           onSelect={(id) => { switchTab(id); setShowMoreSheet(false); }}
           onClose={() => setShowMoreSheet(false)}
-          onRequest={() => setShowReportIssue(true)}
-          onChat={() => setShowChat(true)}
+          onRequest={cancelledAccount ? null : () => setShowReportIssue(true)}
+          onChat={cancelledAccount ? null : () => setShowChat(true)}
+          tabs={cancelledAccount ? cancelledMoreTabs : MORE_TABS}
         />
       )}
 
