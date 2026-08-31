@@ -130,7 +130,7 @@ function statusWriteExpressions(src) {
 function statusWriteSites(src) {
   const out = [];
   // Matches aliased builders too: ('annual_prepay_terms as t').
-  const chainRe = new RegExp(`\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
+  const chainRe = new RegExp(`\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
   // Value runs to the next `, key:` or the end of the object body — a ternary
   // (`a ? 'x' : b`) has no comma, so it survives whole.
   const objectStatuses = (body, guards) => {
@@ -202,7 +202,7 @@ function statusWriteSites(src) {
     scanChain(chainAfter(src, m.index + m[0].length), m.index);
   }
   // Split builders: `const q = db('annual_prepay_terms'); … q.update({...});`
-  const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]\\)`, 'g');
+  const splitRe = new RegExp(`(?:const|let|var)\\s+([\\w$]+)\\s*=\\s*(?:await\\s+)?[\\w$.]+\\(['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]\\)`, 'g');
   for (const m of src.matchAll(splitRe)) {
     const rest = src.slice(m.index + m[0].length);
     for (const w of rest.matchAll(new RegExp(`\\b${m[1]}\\s*\\.\\s*(?:[\\w$]+\\([^()]*\\)\\s*\\.\\s*)*(?:update|insert|merge)\\s*\\(`, 'g'))) {
@@ -234,6 +234,13 @@ function resolveStatusExpression(expr) {
 describe('the write scanner itself (negative fixtures — alternate write forms cannot escape)', () => {
   test('catches a plain literal write', () => {
     expect(statusWriteExpressions("await db('annual_prepay_terms').where({ id }).update({ status: 'canceled', updated_at: now });"))
+      .toEqual(["'canceled'"]);
+  });
+
+  test('catches .from(…) and template-literal table names (the chain match keys on the call, not the method)', () => {
+    expect(statusWriteExpressions("await db.from('annual_prepay_terms').update({ status: 'refunded' });"))
+      .toEqual(["'refunded'"]);
+    expect(statusWriteExpressions('await db(`annual_prepay_terms`).update({ status: \'canceled\' });'))
       .toEqual(["'canceled'"]);
   });
 
@@ -339,7 +346,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       if (new RegExp(`\\.table\\(\\s*['"]${TABLE}`).test(src)) {
         unscannable.push(`${rel}: .table('${TABLE}') builder form`);
       }
-      if (new RegExp(`(?:const|let|var)\\s+[\\w$]+\\s*=\\s*['"]${TABLE}(?:\\s+as\\s+\\w+)?['"]`).test(src)) {
+      if (new RegExp(`(?:const|let|var)\\s+[\\w$]+\\s*=\\s*['"\`]${TABLE}(?:\\s+as\\s+\\w+)?['"\`]`).test(src)) {
         // db(SOME_CONST) indirection would make every chain invisible.
         unscannable.push(`${rel}: table name behind a constant`);
       }
