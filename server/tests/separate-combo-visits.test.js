@@ -77,6 +77,19 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining).toHaveLength(2);
   });
 
+  test('pest + bait + BOND: pest separates, and the bond RIDES the bait visit (v1 never could)', () => {
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
+      { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
+      { name: 'Termite Bond (5-Year Term)', service: 'termite_bond_5yr', frequency: 'quarterly' },
+    ]);
+    expect(standalone).toEqual([]); // bait NOT spliced — the rider route claims it
+    expect(combos).toHaveLength(1);
+    expect(combos[0].service.name).toBe('Quarterly Termite Bait Station + Termite Bond Service (5-Year Term)');
+    expect(remaining.map((l) => recurringServiceKey(l))).toEqual(['pest_control']);
+  });
+
   test('termite bait + BOND still combines — the bond is a rider, not a second program', () => {
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
     const { combos, remaining } = combineRecurringServicesForScheduling([

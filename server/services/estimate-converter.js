@@ -551,7 +551,17 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       // line seeds per-line via the allowlist (explicit visits), and the
       // reserved branch promotes it like lawn/palm below.
       if (route.companionKey === 'termite_bait') {
-        const companionIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
+        // With a BOND line beside it, the bait must stay in `remaining` so
+        // the (kept) bait+bond rider routes below can claim it — under the
+        // retired pest route the bond now rides the bait visit, which v1
+        // never managed (pest used to consume the bait first and the bond
+        // scheduled standalone, the documented limitation).
+        const hasBondLine = remaining.some(
+          (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'),
+        );
+        const companionIdx = hasBondLine
+          ? -1
+          : remaining.findIndex((svc) => recurringServiceKey(svc) === route.companionKey);
         const hasPrimary = remaining.some((svc) => recurringServiceKey(svc) === route.primaryKey);
         if (companionIdx !== -1 && hasPrimary) {
           const companion = remaining[companionIdx];
